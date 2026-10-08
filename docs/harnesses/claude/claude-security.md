@@ -8,7 +8,7 @@
 
 The Claude Security plugin runs a multi-agent vulnerability scan of your codebase inside a Claude Code session. A team of Claude agents maps your architecture, builds a threat model, hunts for vulnerabilities, and independently reviews every finding before writing the report. Use the plugin to scan a whole repository or [only a set of changes](#scan-only-your-changes), such as a branch's diff, a pull request's diff, or a single commit, then turn the findings you choose into patches that you review and apply yourself.
 
-The plugin runs locally in your session, uses whichever models you have access to in Claude Code, and each scan counts against your plan's usage limits. If you want a managed service that monitors your repositories, or want to run scans on [Claude Mythos 5](https://platform.claude.com/docs/en/about-claude/models/introducing-claude-fable-5-and-claude-mythos-5), see the [Claude Security](https://claude.com/product/claude-security) product, available on the Enterprise plan. The plugin reaches code the managed product can't reach, such as repositories hosted on GitLab or Bitbucket, or on networks that don't allow inbound connections.
+The plugin runs locally in your session, uses [whichever models you have access to in Claude Code](#models-and-providers), and each scan counts toward your [usage](/docs/en/costs). If you want a managed service that monitors your repositories, or want to run scans on [Claude Mythos](https://platform.claude.com/docs/en/about-claude/models/introducing-claude-fable-5-and-claude-mythos-5), see the [Claude Security](https://claude.com/product/claude-security) product, available on the Enterprise plan. The plugin reaches code the managed product can't reach, such as repositories hosted on GitLab or Bitbucket, or on networks that don't allow inbound connections.
 
 The plugin is also distinct from the review tools already in Claude Code: the [security guidance plugin](/docs/en/security-guidance) reviews code as Claude writes it, [`/security-review`](/docs/en/commands#all-commands) runs a single pass over your branch, and [Code Review](/docs/en/code-review) reviews pull requests. For how the layers stack, see [How the plugin fits with other security tools](#how-the-plugin-fits-with-other-security-tools).
 
@@ -16,29 +16,38 @@ The plugin is also distinct from the review tools already in Claude Code: the [s
 
 To run the plugin, you need:
 
-* Claude Code v2.1.154 or later on a paid plan, for the [dynamic workflows](/docs/en/workflows) the scan uses to orchestrate its agents. On Pro, turn them on from the Dynamic workflows row in `/config`.
-* Python 3.9.6 or later available on your `PATH` as `python3`. Check with `python3 --version`. The plugin's tooling uses only the Python standard library, so nothing is installed.
+* A paid plan, Anthropic API access, or a [third-party provider](#models-and-providers), for the [dynamic workflows](/docs/en/workflows) the scan uses to orchestrate its agents. On Pro, turn them on from the Dynamic workflows row in `/config`.
+* Python 3.9 or later available on your `PATH` as `python3`. Check with `python3 --version`. The plugin's tooling uses only the Python standard library, so nothing is installed.
 * Linux, macOS, or Windows.
 * Git, for change scans and for turning findings into patches; those jobs don't support other version control systems. A full scan works in any directory, with or without version control.
 
+## Models and providers
+
+A scan runs inside your Claude Code session. The plugin makes no model calls of its own, so there's no separate API key or provider setting to configure.
+
+* **Model**: the agents that hunt for vulnerabilities, verify findings, and write and review patches run on [your session's model](/docs/en/sub-agents#choose-a-model). To change it, run [`/model`](/docs/en/model-config#setting-your-model) in your session before you start a scan. A few supporting steps, such as mapping the repository, use the [`sonnet` alias](/docs/en/model-config#model-aliases) instead.
+* **Provider**: scans run on a paid plan, with Anthropic API access, or on a [third-party provider](/docs/en/third-party-integrations) such as [Amazon Bedrock](/docs/en/amazon-bedrock), [Google Cloud's Agent Platform](/docs/en/google-vertex-ai), or [Microsoft Foundry](/docs/en/microsoft-foundry).
+
+On a third-party provider, the `sonnet` alias can resolve to a different version than it does on the Anthropic API. If your account can't use that version, [pin your model versions](/docs/en/model-config#pin-models-for-third-party-deployments), including `ANTHROPIC_DEFAULT_SONNET_MODEL`.
+
+[Automatic model fallback](/docs/en/model-config#automatic-model-fallback) re-runs a request that a model's safeguards flag. On Amazon Bedrock, Google Cloud's Agent Platform, and Microsoft Foundry, the request can end with a refusal message instead, depending on [how your deployment is set up](/docs/en/model-config#enable-fallback-on-bedrock-agent-platform-and-foundry).
+
 ## Install the plugin
 
-In a Claude Code session, install from the [official Anthropic marketplace](/docs/en/discover-plugins#official-anthropic-marketplace):
+In the VS Code extension or the desktop app, install it by following [Install a plugin](/docs/en/plugins/install#install-a-plugin). In a terminal, start Claude Code by running `claude`, then enter this at its prompt to install from the [official Anthropic marketplace](/docs/en/plugins/anthropic-marketplaces):
 
 ```text theme={null}
 /plugin install claude-security@claude-plugins-official
 ```
 
+The command opens the plugin's details, where you choose an [installation scope](/docs/en/plugins/install#install-a-plugin) to start the install.
+
 If the install fails, the fix depends on which message Claude Code reports:
 
 * If it reports `Marketplace "claude-plugins-official" not found`, add the marketplace with `/plugin marketplace add anthropics/claude-plugins-official`, then retry the install.
-* If it reports that it [can't find the plugin in the marketplace](/docs/en/discover-plugins#install-plugins), check the plugin name for a typo.
+* If it reports that it [can't find the plugin in the marketplace](/docs/en/plugins/install#install-a-plugin), check the plugin name for a typo.
 
-Check the install summary. If it reports `Run /reload-plugins to activate.`, apply the pending change without a restart:
-
-```text theme={null}
-/reload-plugins
-```
+Check the install summary. If it reports `Run /reload-plugins to apply.`, see [Apply plugin changes without restarting](/docs/en/plugins/cli-reference#reload-plugins) to activate the plugin in your current session.
 
 Once the plugin is active, you're ready to [scan and fix your codebase](#scan-and-fix-your-codebase).
 
@@ -64,11 +73,11 @@ The plugin adds one command, `/claude-security`, which opens a menu of its three
   </Step>
 
   <Step title="Read the report">
-    While the scan runs, it reports each stage as it starts, with the detail available under [`/workflows`](/docs/en/workflows). Results land in a timestamped directory in your repository, described in [Read the scan results](#read-the-scan-results).
+    While the scan runs, it reports each stage as it starts, with the detail available under [`/workflows`](/docs/en/workflows). Results are written to a timestamped directory in your repository, described in [Read the scan results](#read-the-scan-results).
   </Step>
 
   <Step title="Turn findings into patches">
-    Run `/claude-security` again and pick **Suggest patches**, then choose which findings to address. Reviewed patches land in the report's `patches/` folder; [Fix findings](#fix-findings) covers how each patch is built and reviewed.
+    Run `/claude-security` again and pick **Suggest patches**, then choose which findings to address. Reviewed patches are written to the report's `patches/` folder; [Fix findings](#fix-findings) covers how each patch is built and reviewed.
   </Step>
 
   <Step title="Apply the patches you accept">
@@ -94,6 +103,7 @@ Every scan writes its results into a timestamped `CLAUDE-SECURITY-<timestamp>/` 
 
 * **`CLAUDE-SECURITY-RESULTS.md`**: the report, with each finding's ID, such as `F1`, plus its impact, exploit scenario, severity, confidence, and recommendation
 * **`CLAUDE-SECURITY-RESULTS.jsonl`**: the same findings in machine-readable form, one JSON object per line
+* **`CLAUDE-SECURITY-RESULTS.sarif`**: the same findings as a [SARIF 2.1.0](https://docs.oasis-open.org/sarif/sarif/v2.1.0/sarif-v2.1.0.html) log for GitHub code scanning and any other tool that reads the standard. The scan classifies findings under their [CWE](https://cwe.mitre.org/) weakness categories
 * **`CLAUDE-SECURITY-REVISION-<commit>.json`**: the revision stamp, recording which commit was scanned, at what effort, whether uncommitted changes were part of the scanned tree, and how thoroughly the run was verified, so a report is always tied to the code it describes. A scan outside version control stamps `UNVERSIONED` in place of the commit
 
 That directory is the only change a scan makes to your checkout, and it carries its own `.gitignore`, so a stray `git add` never sweeps a report into a commit. To keep a report in history for an audit trail, delete that one `.gitignore` file and commit the directory like any other.
@@ -108,7 +118,7 @@ Before delivery, each patch is reviewed by an agent independent of the one that 
 
 ### Patches are never applied automatically
 
-Applying a patch is always your decision. Patches land in the report's `patches/` folder, one `F<n>.patch` per finding with a note beside it explaining the change. Apply one from your shell, or ask Claude to apply it and open a pull request:
+Applying a patch is always your decision. Patches are written to the report's `patches/` folder, one `F<n>.patch` per finding with a note beside it explaining the change. Apply one from your shell, or ask Claude to apply it and open a pull request:
 
 ```bash theme={null}
 git apply CLAUDE-SECURITY-<timestamp>/patches/F1.patch
@@ -120,22 +130,22 @@ When the patched code has no tests, the patch's note says so, so you know its re
 
 The Claude Security plugin is the on-demand deep-scan layer in a defense-in-depth stack, alongside the [security guidance plugin](/docs/en/security-guidance), [`/security-review`](/docs/en/commands#all-commands), [Code Review](/docs/en/code-review), the managed [Claude Security](https://claude.com/product/claude-security) product, and your existing scanners:
 
-| Stage                  | Tool                                                                           | What it covers                                                                             |
-| :--------------------- | :----------------------------------------------------------------------------- | :----------------------------------------------------------------------------------------- |
-| In session             | [Security guidance plugin](/docs/en/security-guidance)                              | Common vulnerabilities in code Claude writes, fixed in the same session                    |
-| On demand, single pass | [`/security-review`](/docs/en/commands#all-commands)                                | One-time security pass on the current branch                                               |
-| On demand, deep scan   | Claude Security plugin                                                         | Multi-agent scan of a repository or diff, with independently reviewed findings and patches |
-| On pull request        | [Code Review](/docs/en/code-review), Team and Enterprise plans                      | Multi-agent correctness and security review with full codebase context                     |
-| Managed                | [Claude Security](https://claude.com/product/claude-security), Enterprise plan | Hosted scanning that monitors connected repositories                                       |
-| In CI                  | Your existing static analysis and dependency scanners                          | Language-specific rules, supply-chain checks, and policy enforcement                       |
+| Stage | Tool | What it covers |
+| :- | :- | :- |
+| In session | [Security guidance plugin](/docs/en/security-guidance) | Common vulnerabilities in code Claude writes, fixed in the same session |
+| On demand, single pass | [`/security-review`](/docs/en/commands#all-commands) | One-time security pass on the current branch |
+| On demand, deep scan | Claude Security plugin | Multi-agent scan of a repository or diff, with independently reviewed findings and patches |
+| On pull request | [Code Review](/docs/en/code-review), Team and Enterprise plans | Multi-agent correctness and security review with full codebase context |
+| Managed | [Claude Security](https://claude.com/product/claude-security), Enterprise plan | Hosted scanning that monitors connected repositories |
+| In CI | Your existing static analysis and dependency scanners | Language-specific rules, supply-chain checks, and policy enforcement |
 
 The plugin doesn't replace your existing source-code security tools. Run it alongside static analysis, dependency scanning, and code review: it reasons about your code the way a human security researcher would, which complements the deterministic checks those tools provide.
 
 ## Troubleshooting
 
-**The `/claude-security` menu opens with a Python warning.** The plugin needs `python3` 3.9.6 or later on your `PATH`. When it can't find `python3` at all, the menu warns that Claude Security won't work until one is installed; when the first `python3` on your `PATH` is older, the warning names the version it found. Install Python 3, or put a newer `python3` first on your `PATH`, then start a new session.
+**The `/claude-security` menu opens with a Python warning.** The plugin needs `python3` 3.9 or later on your `PATH`. When it can't find `python3` at all, the menu warns that Claude Security won't work until one is installed; when the first `python3` on your `PATH` is older, the warning names the version it found. Install Python 3, or put a newer `python3` first on your `PATH`, then start a new session.
 
-**You may see "Fable 5's safeguards flagged this message" when using Fable 5.** Due to Fable 5's cybersecurity safety classifiers, certain model activities will be blocked and automatically downgraded to Opus.  This is expected, and the scan should still complete successfully.
+**You may see a "safeguards flagged this message" notice when scanning on a Fable model.** The message names the model you're running. Fable's cybersecurity safety classifiers flag certain requests, and Claude Code re-runs a flagged request on an Opus model through [automatic model fallback](/docs/en/model-config#automatic-model-fallback). This is expected. When the request re-runs, the scan should still complete successfully.
 
 ## Related resources
 
@@ -145,4 +155,4 @@ To go deeper on the pieces this page touches:
 * [Code Review](/docs/en/code-review): set up the PR-time multi-agent review
 * [Claude Security](https://claude.com/product/claude-security): the managed service that monitors connected repositories
 * [Claude Code security](/docs/en/security): how Claude Code approaches trust, permissions, and safeguards
-* [Discover and install plugins](/docs/en/discover-plugins#official-anthropic-marketplace): browse other official plugins
+* [Install and manage plugins](/docs/en/plugins/install): find and install other plugins from the official marketplace

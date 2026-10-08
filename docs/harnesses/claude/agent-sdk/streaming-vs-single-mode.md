@@ -19,44 +19,6 @@ Streaming input mode is the **preferred** way to use the Claude Agent SDK. It pr
 
 It allows the agent to operate as a long lived process that takes in user input, handles interruptions, surfaces permission requests, and handles session management.
 
-### How It Works
-
-```mermaid theme={null}
-sequenceDiagram
-    participant App as Your Application
-    participant Agent as Claude Agent
-    participant Tools as Tools/Hooks
-    participant FS as Environment/<br/>File System
-
-    App->>Agent: Initialize with AsyncGenerator
-    activate Agent
-
-    App->>Agent: Yield Message 1
-    Agent->>Tools: Execute tools
-    Tools->>FS: Read files
-    FS-->>Tools: File contents
-    Tools->>FS: Write/Edit files
-    FS-->>Tools: Success/Error
-    Agent-->>App: Stream partial response
-    Agent-->>App: Stream more content...
-    Agent->>App: Complete Message 1
-
-    App->>Agent: Yield Message 2 + Image
-    Agent->>Tools: Process image & execute
-    Tools->>FS: Access filesystem
-    FS-->>Tools: Operation results
-    Agent-->>App: Stream response 2
-
-    App->>Agent: Queue Message 3
-    App->>Agent: Interrupt/Cancel
-    Agent->>App: Handle interruption
-
-    Note over App,Agent: Session stays alive
-    Note over Tools,FS: Persistent file system<br/>state maintained
-
-    deactivate Agent
-```
-
 ### Benefits
 
 In streaming input mode, you work in a persistent session with these capabilities:
@@ -196,6 +158,8 @@ These examples read an image named `diagram.png` from the working directory. Cre
 
 When you run the example, the TypeScript version prints each response as it completes. The Python version's `receive_response()` loop ends at the first result message, so it prints the security analysis; to read both responses, use one `query()` and `receive_response()` pair per message as shown in the [Python reference's example of continuing a conversation](/docs/en/agent-sdk/python#example-continuing-a-conversation).
 
+If an image block's `source` is missing or isn't an object, the SDK doesn't report an error. Claude Code sends Claude a text note in place of the image, such as `[Image could not be processed: image block has no source object]`, and the session continues.
+
 <Note>
   In the TypeScript SDK, if your message generator throws, for example when a file it reads is missing, the stream ends with an error that reads `Claude Code process aborted by user` instead of the original error, so check the code inside your generator first when you see that message. The error may also be preceded by a long minified line of bundled SDK source, so read to the end of the output for the error text.
 
@@ -276,7 +240,7 @@ If a query ends with an error result, such as `error_max_turns`, a single messag
 
   async def single_message_example():
       # Simple one-shot query using query() function
-      # query() raises after an error result, such as error_max_turns
+      # query() raises ResultError after an error result, such as error_max_turns
       try:
           async for message in query(
               prompt="Explain the authentication flow",
@@ -284,7 +248,6 @@ If a query ends with an error result, such as `error_max_turns`, a single messag
           ):
               if isinstance(message, ResultMessage) and message.subtype == "success":
                   print(message.result)
-      # The SDK raises a plain Exception for error results, so match Exception here
       except Exception as e:
           print(f"Query failed: {e}")
 

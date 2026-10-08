@@ -8,7 +8,7 @@
 
 Structured outputs let you define the exact shape of data you want back from an agent. The agent can use any tools it needs to complete the task, and you still get validated JSON matching your schema at the end. Define a [JSON Schema](https://json-schema.org/understanding-json-schema/about) for the structure you need, and the SDK validates the output against it, re-prompting on mismatch. If validation does not succeed within the retry limit, the result is an error instead of structured data; see [Error handling](#error-handling).
 
-For full type safety, use [Zod](#type-safe-schemas-with-zod-and-pydantic) (TypeScript) or [Pydantic](#type-safe-schemas-with-zod-and-pydantic) (Python) to define your schema and get strongly-typed objects back.
+For full type safety, use [Zod](#type-safe-schemas-with-zod-and-pydantic) (TypeScript) or [Pydantic](#type-safe-schemas-with-zod-and-pydantic) (Python) to define your schema and get strongly typed objects back.
 
 ## Why structured outputs?
 
@@ -34,7 +34,7 @@ Consider a recipe app where an agent searches the web and brings back recipes. W
   </Accordion>
 
   <Accordion title="With structured outputs">
-    ```json theme={null}
+    ```jsonc theme={null}
     {
       "name": "Chocolate Chip Cookies",
       "prep_time_minutes": 15,
@@ -56,7 +56,7 @@ Consider a recipe app where an agent searches the web and brings back recipes. W
 
 To use structured outputs, define a [JSON Schema](https://json-schema.org/understanding-json-schema/about) describing the shape of data you want, then pass it to `query()` via the `outputFormat` option (TypeScript) or `output_format` option (Python). When the agent finishes, the result message includes a `structured_output` field with validated data matching your schema.
 
-The example below asks the agent to research Anthropic and return the company name, year founded, and headquarters as structured output.
+Before running the examples on this page, install the Claude Agent SDK by following the [quickstart](/docs/en/agent-sdk/quickstart#setup). The example below asks the agent to research Anthropic and return the company name, year founded, and headquarters as structured output.
 
 <CodeGroup>
   ```typescript TypeScript theme={null}
@@ -247,13 +247,6 @@ The SDK validates schemas with JSON Schema draft-07, so schemas that declare a n
   ```
 </CodeGroup>
 
-**Benefits:**
-
-* Full type inference (TypeScript) and type hints (Python)
-* Runtime validation with `safeParse()` or `model_validate()`
-* Better error messages
-* Composable, reusable schemas
-
 ## Output format configuration
 
 The `outputFormat` (TypeScript) or `output_format` (Python) option accepts an object with:
@@ -385,16 +378,16 @@ The schema includes optional fields (`author` and `date`) since git blame inform
 
 ## Error handling
 
-Structured output generation can fail when the agent cannot produce valid JSON matching your schema. This typically happens when the schema is too complex for the task, the task itself is ambiguous, or the agent hits its retry limit trying to fix validation errors. It can also happen without any validation failure: a [model fallback](/docs/en/model-config#automatic-model-fallback) can retract an already-completed output mid-stream, and if no retry replaces it the run ends with the same error. Check the `errors` list on the result message to tell the two causes apart before debugging your schema.
+Structured output generation can fail when the agent cannot produce valid JSON matching your schema. This typically happens when the schema is too complex for the task, the task itself is ambiguous, or the agent hits its retry limit trying to fix validation errors. It can also happen without any validation failure: a [model fallback](/docs/en/model-config#automatic-model-fallback) can retract an already-completed output mid-stream, and if no retry replaces it the run ends with the same error. Check the `errors` list on the error result message to tell the two causes apart before debugging your schema.
 
 When an error occurs, the result message has a `subtype` indicating what went wrong:
 
-| Subtype                               | Meaning                                                                                                                         |
-| ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
-| `success`                             | Output was generated and validated successfully                                                                                 |
+| Subtype | Meaning |
+| - | - |
+| `success` | Output was generated and validated successfully |
 | `error_max_structured_output_retries` | No valid output remained after multiple attempts (validation failures, or a model-fallback retraction with no successful retry) |
 
-A result can also end with subtype `success` but no `structured_output` value, for example when the run completes without the agent producing a structured output. Treat that case as a failure as well. The example below treats a result as successful only when the `subtype` is `success` and `structured_output` is present, and handles every other result as a failure:
+A result can also end with subtype `success` but no `structured_output` value, for example when the run completes without the agent producing a structured output. Treat that case as a failure as well. The troubleshooting entry [structured\_output is None but the result says success](/docs/en/agent-sdk/troubleshooting#structured_output-is-none-but-the-result-says-success) covers this case. The example below treats a result as successful only when the `subtype` is `success` and `structured_output` is present, and handles every other result as a failure:
 
 <CodeGroup>
   ```typescript TypeScript theme={null}

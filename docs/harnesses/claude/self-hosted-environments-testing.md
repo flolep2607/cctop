@@ -68,7 +68,7 @@ exit 0
 
 ### Before you start the runner
 
-Two things the hook depends on:
+The hook has these requirements:
 
 * Install it before you start the runner. The runner snapshots `~/.claude/` once at startup, so a hook added to a running runner takes effect only after a restart.
 * Export `E2E_REPLY_DIR` to the runner process. The hook is a no-op when the variable is unset or the directory doesn't exist, so set it wherever you start the runner, such as the systemd unit, pod spec, or CI step. The test script below requires it too.
@@ -86,13 +86,13 @@ The `--environment` and `--ref` dispatch flags require Claude Code v2.1.224 or l
 
 ### `--environment` dispatch behavior
 
-In a non-interactive run, with `-p` or a piped prompt, Claude Code creates the session, prints the session ID and a link to it, and exits. From a terminal, `claude --environment <id> "task"` starts an attached interactive cloud session on the environment instead.
+Claude Code creates the session, prints the session ID and a link to it, and exits.
 
 The flag takes precedence over the [`remote.defaultEnvironmentId`](/docs/en/settings-reference#remote-defaultenvironmentid) setting. It doesn't support `--output-format stream-json`, and can't be combined with flags that resume, attach to, or preconfigure a session, such as `--resume`, `--continue`, `--teleport`, `--session-id`, or `--init-only`. `--cloud` is rejected with a session ID or URL, and in non-interactive runs when it carries a description. A bare `--cloud` is treated as absent. From a terminal, you can pass the task as the `--cloud` description instead of a positional prompt.
 
 ## Example script
 
-The script below runs the full loop against `$CLAUDE_TEST_ENVIRONMENT_ID`, your test environment's `ccpool_...` ID, shown in the environment's detail dialog on the admin page or returned by the [create-environment call](#create-a-dedicated-test-environment), and asserts on a sentinel phrase in each reply. Run it from a git checkout of the repository you want the session to work in, after starting a runner on this host with the capture hook installed and `E2E_REPLY_DIR` exported.
+The script below runs the full loop against `$CLAUDE_TEST_ENVIRONMENT_ID`, your test environment's `ccpool_...` ID, shown in the environment's detail dialog on the admin page or returned by the [create-environment call](#create-a-dedicated-test-environment), and asserts on a sentinel phrase in each reply. Run it from a git checkout of the repository you want the session to work in, after starting a runner on this host with the capture hook installed and `E2E_REPLY_DIR` exported. First sign in with a claude.ai account on the machine that runs the script, as [Authenticate from CI](#authenticate-from-ci) describes. Without that sign-in, the first dispatch fails with an error such as `Unable to get organization UUID for cloud session creation`.
 
 ```bash theme={null}
 #!/usr/bin/env bash
@@ -188,11 +188,13 @@ Both `claude -p ... --environment` and `claude -p ... --cloud` authenticate with
 
 ### Long-lived CI host
 
-Run `claude auth login` once interactively on the machine that executes the script, using a dedicated user account for automation. The token lives in the OS keychain on macOS, or in `~/.claude/.credentials.json` on Linux and Windows. The CLI refreshes the short-lived access token automatically on each invocation, but the underlying refresh-token grant is capped at 30 days from the initial login, so re-run `claude auth login` interactively on that host every 30 days.
+Run `claude auth login` once interactively on the machine that executes the script, using a dedicated user account for automation. Claude Code stores the token in the OS keychain on macOS, or in `~/.claude/.credentials.json` on Linux and Windows. On a macOS host whose Keychain can't be written, as is typical in an SSH session where the login Keychain stays locked, Claude Code stores the token in `~/.claude/.credentials.json` there too. See [Credential management](/docs/en/authentication#credential-management).
+
+The CLI refreshes the short-lived access token automatically on each invocation, but the underlying refresh-token grant is capped at 30 days from the initial login, so re-run `claude auth login` interactively on that host every 30 days.
 
 ### Ephemeral CI runners
 
-There is no long-lived CI token for this today. The scope that grants remote-session control, `user:sessions:claude_code`, is capped server-side at 30 days, so `claude setup-token`, which mints a one-year inference-only token, doesn't cover it. The [environment secret](/docs/en/self-hosted-environments-quickstart#set-up-an-environment-and-runner) isn't accepted either, since it only authorizes a runner to register with the environment, not to create sessions.
+There is no long-lived CI token for this today. The scope that grants cloud-session control, `user:sessions:claude_code`, is capped server-side at 30 days, so `claude setup-token`, which mints a one-year inference-only token, doesn't cover it. The [environment secret](/docs/en/self-hosted-environments-quickstart#set-up-an-environment-and-runner) isn't accepted either, since it only authorizes a runner to register with the environment, not to create sessions.
 
 To provision a stored login onto an ephemeral runner, set [`CLAUDE_CODE_OAUTH_REFRESH_TOKEN` and `CLAUDE_CODE_OAUTH_SCOPES`](/docs/en/env-vars#variables) so `claude auth login` exchanges the token without a browser; the same 30-day cap applies to the refresh grant. Contact your Anthropic account team if you need a machine-identity path that isn't bound to a human account.
 
@@ -204,7 +206,7 @@ Create and delete environments programmatically so each CI run gets a clean one;
 
 `$ADMIN_TOKEN` is a claude.ai OAuth access token for an account that holds an Owner role, minted the same way as [Authenticate from CI](#authenticate-from-ci):
 
-* **Mint it**: run `claude auth login` with an account that holds an Owner role, then read the current access token from the OS keychain on macOS or `~/.claude/.credentials.json` on Linux and Windows.
+* **Mint it**: run `claude auth login` with an account that holds an Owner role, then read the current access token from wherever [Long-lived CI host](#long-lived-ci-host) says Claude Code stored it.
 * **Read it fresh each run**: the CLI rotates the access token, and the same 30-day refresh-grant cap applies, so don't store a copy.
 * **Pass it via stdin**: as the example does, so the token never lands in curl's argument list or your build log.
 

@@ -12,6 +12,8 @@ Zero Data Retention (ZDR) for Claude Code is available to qualified accounts on 
   ZDR is not included in the standard Claude for Enterprise plan and cannot be enabled from your admin settings. It is available to qualified accounts and requires separate enablement by Anthropic. If your organization requires ZDR, [contact sales](https://www.anthropic.com/contact-sales?utm_source=claude_code\&utm_medium=docs\&utm_content=zero_data_retention_request) or your Anthropic account team to confirm eligibility.
 </Note>
 
+Claude for Enterprise organizations that have enabled HIPAA can bring the Claude Code CLI and the Code tab in Claude Desktop under their Business Associate Agreement (BAA) without ZDR once the HIPAA configuration is applied to Claude Code (local mode) and Cowork (local mode). See [Set up Claude Code (local mode) for a HIPAA-ready organization](/docs/en/hipaa-setup). Organizations without the HIPAA configuration still need ZDR for BAA coverage of Claude Code. See the [Implementation Guide](https://trust.anthropic.com/resources?s=l1wrssd9hsbi4gak0tp5a6\&name=%5Banthropic%5D-hipaa-ready-offering-implementation-guide) for a list of Eligible Services.
+
 ZDR on Claude for Enterprise gives enterprise customers the ability to use Claude Code with zero data retention and access administrative capabilities:
 
 * Cost controls per user
@@ -35,31 +37,31 @@ ZDR applies to requests that authenticate into a ZDR-enabled organization. If a 
 
 ### What ZDR covers
 
-ZDR covers model inference calls made through Claude Code on Claude for Enterprise. When you use Claude Code in your terminal, the prompts you send and the responses Claude generates are not retained by Anthropic. This applies to every model available to ZDR organizations. Some models require data retention and are not available under ZDR; see [Model availability under ZDR](#model-availability-under-zdr).
+ZDR covers model inference calls made through Claude Code on Claude for Enterprise. When you use Claude Code in your terminal, the prompts you send and the responses Claude generates are not retained by Anthropic. This applies to every model available to your ZDR organization. Some models require data retention by default; see [Model availability under ZDR](#model-availability-under-zdr).
 
 ### What ZDR does not cover
 
 ZDR does not extend to the following, even for organizations with ZDR enabled. These features follow [standard data retention policies](/docs/en/data-usage#data-retention):
 
-| Feature                  | Details                                                                                                                                                                                                                                                     |
-| ------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Chat on claude.ai        | Chat conversations through the Claude for Enterprise web interface are not covered by ZDR.                                                                                                                                                                  |
-| Cowork                   | Cowork sessions are not covered by ZDR.                                                                                                                                                                                                                     |
-| Claude Code Analytics    | Does not store prompts or model responses, but collects productivity metadata such as account emails and usage statistics. Contribution metrics are not available for ZDR organizations; the [analytics dashboard](/docs/en/analytics) shows usage metrics only. |
-| User and seat management | Administrative data such as account emails and seat assignments is retained under standard policies.                                                                                                                                                        |
-| Third-party integrations | Data processed by third-party tools, MCP servers, or other external integrations is not covered by ZDR. Review those services' data handling practices independently.                                                                                       |
+| Feature | Details |
+| - | - |
+| Chat on claude.ai | Chat conversations through the Claude for Enterprise web interface are not covered by ZDR. |
+| Cowork | Cowork sessions are not covered by ZDR. |
+| Claude Code Analytics | Does not store prompts or model responses, but collects productivity metadata such as account emails and usage statistics. Contribution metrics are not available for ZDR organizations; the [analytics dashboard](/docs/en/analytics) shows usage metrics only. |
+| User and seat management | Administrative data such as account emails and seat assignments is retained under standard policies. |
+| Third-party integrations | Data processed by third-party tools, MCP servers, or other external integrations is not covered by ZDR. Review those services' data handling practices independently. |
 
 ## Features disabled under ZDR
 
 When ZDR is enabled for a Claude Code organization on Claude for Enterprise, certain features that require storing prompts or completions are automatically disabled at the backend level:
 
-| Feature                                                           | Reason                                                                                      |
-| ----------------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
-| [Claude Code on the Web](/docs/en/claude-code-on-the-web)              | Requires server-side storage of conversation history.                                       |
-| [Cloud sessions](/docs/en/desktop#cloud-sessions) from the Desktop app | Requires persistent session data that includes prompts and completions.                     |
-| [Artifacts](/docs/en/artifacts)                                        | Requires storing published page content on Anthropic-operated infrastructure.               |
-| Feedback submission (`/feedback`, `/bug`, `/share`)               | Submitting feedback sends conversation data to Anthropic.                                   |
-| [Remote Control](/docs/en/remote-control)                              | Stores the session transcript on Anthropic servers to sync the conversation across devices. |
+| Feature | Reason |
+| - | - |
+| [Cloud sessions](/docs/en/claude-code-on-the-web), including those started from the [Desktop app](/docs/en/desktop#cloud-sessions) | Requires server-side storage of session data, including conversation history with prompts and completions. |
+| [Claude Tag](https://claude.com/docs/claude-tag) | Retains channel memory and session transcripts. |
+| [Artifacts](/docs/en/artifacts) | Requires storing published page content on Anthropic-operated infrastructure. |
+| Feedback submission (`/feedback`, `/bug`, `/share`) | Submitting feedback sends conversation data to Anthropic. |
+| [Remote Control](/docs/en/remote-control) | Stores the session transcript on Anthropic servers to sync the conversation across devices. |
 
 These features are blocked in the backend regardless of client-side display. If you see a disabled feature in the Claude Code terminal during startup, attempting to use it returns an error indicating the organization's policies do not allow that action.
 
@@ -67,9 +69,9 @@ Future features may also be disabled if they require storing prompts or completi
 
 ### Model availability under ZDR
 
-Claude Fable 5 is not available for organizations with zero data retention enabled. This model class [requires data retention](https://platform.claude.com/docs/en/manage-claude/api-and-data-retention#model-specific-data-retention-requirements), so requests from ZDR organizations cannot be served by it. The model is either absent from the `/model` picker for ZDR organizations or shown as disabled with a notice that disabling ZDR is required, and the server rejects requests for it regardless of client configuration.
+Claude Fable 5.1 and Fable 5 are [Covered Models](https://support.claude.com/en/articles/15425695-covered-models) that [require data retention](https://platform.claude.com/docs/en/manage-claude/api-and-data-retention#model-specific-data-retention-requirements) by default, and whether a ZDR organization or workspace can use them is governed by the Covered Models policies rather than by Claude Code. Where your organization can't use them, the models are either absent from the `/model` picker or shown as disabled, and the server rejects requests for them regardless of client configuration.
 
-Other models remain available under ZDR. Fable 5 is not the default model, and the `best` alias, which resolves to Fable 5 where it is available, resolves to Opus for organizations where it is not, including ZDR organizations.
+Other models remain available under ZDR. Fable models are not the default, and the `best` alias, which resolves to the latest Fable model where it is available, resolves to Opus for organizations where it is not.
 
 ## Data retention for policy violations
 
