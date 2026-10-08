@@ -283,6 +283,24 @@ install rmux the first time a tab would have used it — `brew install rmux`,
 `cargo install rmux --locked`, or rmux.io's install script, whichever this
 machine can run — and one "no" holds for the run.
 
+#### cctop's own rmux, to try: `CCTOP_MUX=builtin`
+
+The rmux server is also built into cctop itself. Start cctop with
+`CCTOP_MUX=builtin` and its tabs' agents live in that daemon instead of in the
+rmux you installed: the same binary run as `cctop mux daemon`, on a socket under
+cctop's runtime directory (`cctop mux socket` prints it), with cctop's settings
+from the start and no config of yours applied. Nothing else on the machine knows
+about it — `rmux ls` does not list those agents, and your own `rmux kill-server`
+does not end them — and it needs no `rmux` installed at all. It exits when its
+last agent does.
+
+`cctop mux ls` lists its sessions and `cctop mux kill-session -t NAME` ends one;
+`cctop mux attach NAME` attaches your terminal to one, as `rmux attach` would.
+
+This is off by default while it settles. Agents started without the variable
+stay in your own rmux, and cctop without the variable does not see the ones
+started with it, so pick one and keep to it for now.
+
 #### Why rmux and not tmux
 
 cctop drove tmux until 0.8, and could be pointed at rmux with `CCTOP_MUX=rmux`.

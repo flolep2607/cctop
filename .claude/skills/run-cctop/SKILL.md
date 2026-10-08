@@ -246,11 +246,17 @@ cctop drives **rmux**, not tmux (since 0.8 — `crates/core/src/rmux.rs`). tmux 
 here because the *driver* uses it as a terminal to run cctop in; the two are
 unrelated, and cctop cannot see the driver's tmux server at all.
 
-- **Its tests share one machine-wide daemon.** `rmux::test_lock()` serialises
-  them, and a test that kills the last session must wait for it to be gone
-  before releasing the lock — killing the last one stops the server, and the
-  next test's `new-session` then reaches a socket mid-shutdown and fails. That
-  race is why an unrelated test goes red once in five runs.
+- **Each of its tests has a daemon of its own.** `mux::TestDaemon` runs
+  cctop's built-in daemon in the test process on a short private socket and
+  turns `CCTOP_MUX=builtin` on for that test's thread, so the tests that need
+  a real server never meet each other or the operator's rmux. Killing a
+  daemon's last session still stops it; `TestDaemon` starts it again when the
+  test asks for another session.
+- **`CCTOP_MUX=builtin`** drives cctop's own daemon (`cctop mux`) instead of
+  rmux. Exported when running `driver.sh`, it is passed to the app with a
+  private `XDG_RUNTIME_DIR` under `$CCTOP_SHOTS/../rmux/xdg`, so the socket is
+  the driver's own, and `down` ends its sessions. `cctop mux ls` with that
+  `XDG_RUNTIME_DIR` lists them.
 - **Check rmux's behaviour, don't infer it from tmux.** They differ in ways that
   compile fine: `list-panes -t =NAME` is a parse error under rmux while every
   other target takes the `=`, and a bare name prefix-matches. `rmux -L probe

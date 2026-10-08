@@ -30,6 +30,17 @@ ROWS="${CCTOP_ROWS:-50}"
 # CCTOP_DRIVE_REAL_RMUX=1 when the point is to test against those sessions.
 RMUX_DIR="${CCTOP_RMUX_TMPDIR:-${SHOTS%/*}/rmux}"
 if [ -n "${CCTOP_DRIVE_REAL_RMUX:-}" ]; then RMUX_ENV=(); else RMUX_ENV=(-e "RMUX_TMPDIR=$RMUX_DIR"); fi
+# CCTOP_MUX=builtin: cctop's own daemon (`cctop mux`) instead of rmux. Its
+# socket is under cctop's runtime directory, so the app gets a private one here
+# — short, since a socket path has to fit in 107 bytes — and the operator's own
+# cctop daemon, if they run one, is never the one the driver talks to.
+MUX_RUNTIME=""
+if [ "${CCTOP_MUX:-}" = builtin ]; then
+  MUX_RUNTIME="$RMUX_DIR/xdg"
+  RMUX_ENV+=(-e "CCTOP_MUX=builtin" -e "XDG_RUNTIME_DIR=$MUX_RUNTIME")
+fi
+# `cctop mux` against the driver's private daemon only.
+mux() { env -u TMUX -u TMUX_PANE -u RMUX -u RMUX_PANE CCTOP_MUX=builtin XDG_RUNTIME_DIR="$MUX_RUNTIME" "$BIN" mux "$@"; }
 
 say() { printf '\033[36m▶ %s\033[0m\n' "$*" >&2; }
 
@@ -129,6 +140,7 @@ cmd_up() {
   fi
   "${TM[@]}" kill-session -t "$SESSION" 2>/dev/null || true
   [ -n "${CCTOP_DRIVE_REAL_RMUX:-}" ] || mkdir -p -m 700 "$RMUX_DIR"
+  [ -z "$MUX_RUNTIME" ] || mkdir -p -m 700 "$MUX_RUNTIME"
   say "launching ${launch[*]} on tmux socket '$SOCKET' (${COLS}x${ROWS})"
   # -e, not `HOME=x tmux new-session`: the pane inherits the *server's*
   # environment, and a server is usually already running, so a variable set on
@@ -173,6 +185,13 @@ cmd_down() {
   # bare `rmux kill-server` obeys $TMUX/$RMUX before RMUX_TMPDIR, and when the
   # driver is run from inside an agent's own rmux pane that is the operator's
   # real server — which is how this line once killed the session running it.
+  # cctop's own daemon exits with its last session, so ending the sessions
+  # ends it: each one by name, on the private socket.
+  if [ -n "$MUX_RUNTIME" ]; then
+    mux ls 2>/dev/null | cut -d: -f1 | while read -r name; do
+      [ -n "$name" ] && mux kill-session -t "$name" 2>/dev/null || true
+    done
+  fi
   if [ -z "${CCTOP_DRIVE_REAL_RMUX:-}" ]; then
     local sock="$RMUX_DIR/rmux-$(id -u)/default"
     if [ -S "$sock" ]; then
