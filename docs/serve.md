@@ -443,11 +443,14 @@ these flags — the route says so with a 502 rather than an empty page.
 | `GET /favicon.svg` | The page's icon |
 | `GET /manifest.webmanifest` | Installable-page metadata, so a browser can add the dashboard as an app |
 
-The four that act rather than read, all `POST`, all refused on a read-only link:
+The routes that act rather than read, all `POST`, all refused on a read-only link and on a `--no-actions` serve:
 
 | | |
 |---|---|
-| `/api/launch` | Start an agent. Not under `/api/act/`, because a launch names no session |
+| `/api/launch` | Start an agent. Not under `/api/act/`, because a launch names no session. A `cwd` of `host:path` starts it on that ssh host under `cctop sandbox`, in an rmux session — claude and opencode only, as in the terminal's launcher |
+| `/api/ssh/hosts` | The hosts in `~/.ssh/config`, names and aliases only |
+| `/api/ssh/complete` | `{host, path}` → the folders under `path` on the host, and for a bare name its git repositories, newest first |
+| `/api/ssh/check` | `{host, path}` → whether the folder can be worked in, in the words the terminal uses (`read-only on the host`) |
 | `/api/tab/<name>/terminal` | The link that reaches one tab's terminal |
 | `/api/act/send/<id>` | Type a prompt into a live session's terminal |
 | `/api/act/answer/<id>` | Answer a permission prompt |
@@ -455,6 +458,17 @@ The four that act rather than read, all `POST`, all refused on a read-only link:
 | `/api/act/handoff/<id>` | Hand one session's work to another agent |
 | `/api/act/image/<id>` | File a pasted image and say where. Names a session, but the file lands on this machine |
 | `/api/act/terminal/<id>` | The link that reaches one session's terminal |
+
+The `/api/ssh/*` routes start ssh connections from a request, which is why they
+are behind the full token like the actions — and why the host list is: the names
+in `~/.ssh/config` are internal hostnames, and a read-only link is the one that
+gets handed around. Connections never prompt. A host that wants a password, a
+passphrase or a host-key answer comes back offline with that reason, and a
+launch there goes ahead anyway: the sandbox connects inside the rmux session,
+and the prompt appears in the session page's terminal. No password ever goes
+through the page. Each connection takes a lease on the shared ssh master, given
+back when `cctop serve` exits on Ctrl-C, SIGTERM or SIGHUP, or when the
+dashboard hosting it quits.
 
 `/api/sessions` is byte-for-byte the document `--json` prints and `--host` parses
 — one builder, so a browser is never shown different figures than the terminal.
