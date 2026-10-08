@@ -270,6 +270,13 @@ pub struct Args {
     #[arg(long, requires = "chat", value_name = "SEQ")]
     pub before: Option<usize>,
 
+    /// With --chat, one subagent's own conversation instead of the session's
+    ///
+    /// The id is the subagent's, as `/api/chat/<id>?agent=` takes it and as
+    /// the session's `Agent` calls name it in their `agent.id`
+    #[arg(long, requires = "chat", value_name = "AGENT")]
+    pub agent: Option<String>,
+
     /// Print one session's whole conversation as markdown, and exit
     ///
     /// Every turn, the words verbatim and each tool call on a line, headed by a
@@ -926,10 +933,19 @@ pub fn run_report(
 }
 
 /// Print one session's conversation as JSON, and exit.
-pub fn run_chat(sessions: &[Session], which: &str, before: Option<usize>) -> anyhow::Result<()> {
+pub fn run_chat(
+    sessions: &[Session],
+    which: &str,
+    before: Option<usize>,
+    agent: Option<&str>,
+) -> anyhow::Result<()> {
     let session = find_session(sessions, which)?;
     // Deliberately not the cache: a conversation is the text the cache drops.
-    let conversation = cctop_core::chat::build(session, before);
+    let conversation = match agent {
+        Some(agent) => cctop_core::chat::build_agent(session, agent, before)
+            .ok_or_else(|| anyhow::anyhow!("no subagent {agent} in this session"))?,
+        None => cctop_core::chat::build(session, before),
+    };
     println!("{}", serde_json::to_string(&conversation)?);
     Ok(())
 }

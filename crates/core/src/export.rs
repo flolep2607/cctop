@@ -34,8 +34,9 @@
 //! Its fence is one backtick longer than the longest run inside it, so no
 //! output can close it early.
 
-use crate::chat::{Conversation, ToolUse, Turn};
+use crate::chat::{AgentCall, Conversation, ToolUse, Turn};
 use crate::session::Session;
+use std::collections::HashMap;
 
 /// What one export includes beyond the words.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -116,9 +117,18 @@ pub fn render(session: &Session, conversation: &Conversation, options: Options) 
         return out;
     }
 
+    // A hand-back names its agent by id; the call that started the agent is
+    // where the id is described.
+    let agents: HashMap<&str, &AgentCall> = conversation
+        .turns
+        .iter()
+        .flat_map(|t| &t.tools)
+        .filter_map(|tool| tool.agent.as_ref())
+        .map(|agent| (agent.id.as_str(), agent))
+        .collect();
     for section in sections {
         out.push_str("\n---\n\n");
-        render_section(&mut out, &section, options);
+        render_section(&mut out, &section, options, &agents);
     }
     out
 }
@@ -152,15 +162,32 @@ fn heading(turn: &Turn) -> &'static str {
     }
     match (turn.role.as_ref(), turn.kind.as_ref()) {
         (_, "compaction") => "Context compacted",
+        // Another agent's report is neither the person's words nor the
+        // harness's, and filing it under User put pages of model output in
+        // the person's mouth.
+        (_, crate::chat::AGENT_MESSAGE) => "From an agent",
         ("user", _) => "User",
         ("system", _) => "System",
         _ => "Assistant",
     }
 }
 
-fn render_section(out: &mut String, section: &[&Turn], options: Options) {
+fn render_section(
+    out: &mut String,
+    section: &[&Turn],
+    options: Options,
+    agents: &HashMap<&str, &AgentCall>,
+) {
     out.push_str("## ");
     out.push_str(heading(section[0]));
+    let agent = (section[0].kind == crate::chat::AGENT_MESSAGE)
+        .then(|| agents.get(section[0].agent.as_deref()?))
+        .flatten();
+    match (agent, &section[0].from) {
+        (Some(agent), _) => out.push_str(&format!(" · {}", one_line(&agent.title()))),
+        (None, Some(from)) => out.push_str(&format!(" · {}", one_line(from))),
+        (None, None) => {}
+    }
     let at = when(&section[0].ts);
     if !at.is_empty() {
         out.push_str(&format!(" · {at}"));
@@ -191,6 +218,10 @@ fn render_turn(out: &mut String, turn: &Turn, options: Options) {
         out.push('\n');
     }
     for tool in &turn.tools {
+        if let Some(agent) = &tool.agent {
+            agent_call(out, tool, agent);
+            continue;
+        }
         out.push_str(&tool_line(tool));
         out.push('\n');
         if options.tool_output {
@@ -217,6 +248,42 @@ fn tool_line(tool: &ToolUse) -> String {
         line.push_str(" — still running");
     }
     line
+}
+
+/// A call that started a subagent: which agent, doing what, how much, and what
+/// it reported, quoted under the item.
+///
+/// Not the call's prompt and not its result: a background call's result is a
+/// launch receipt meant for the model, and the report is what anyone reading
+/// the export wants from it. The agent's own turns are its own conversation
+/// and are not written here.
+fn agent_call(out: &mut String, tool: &ToolUse, agent: &AgentCall) {
+    let mut line = format!(
+        "- **{}** ({})",
+        one_line(&tool.name),
+        one_line(&agent.agent_type)
+    );
+    if !agent.description.trim().is_empty() {
+        line.push_str(&format!(" — {}", one_line(&agent.description)));
+    }
+    let size = agent.size();
+    if !size.is_empty() {
+        line.push_str(&format!(" · {size}"));
+    }
+    match agent.status.as_str() {
+        "failed" => line.push_str(" — failed"),
+        "running" => line.push_str(" — still running"),
+        _ => {}
+    }
+    out.push_str(&line);
+    out.push('\n');
+    if let Some(report) = agent.report.as_deref().filter(|r| !r.trim().is_empty()) {
+        out.push('\n');
+        for line in quote(report).lines() {
+            out.push_str(&format!("  {line}\n"));
+        }
+        out.push('\n');
+    }
 }
 
 /// A call's result as a fenced block beneath its list item, indented into it
@@ -354,6 +421,8 @@ mod tests {
             text: text.into(),
             clipped: false,
             tools,
+            from: None,
+            agent: None,
         }
     }
 
@@ -409,6 +478,75 @@ mod tests {
             }
         }
         out
+    }
+
+    /// An `Agent` call reads as the agent and its report, never as its
+    /// prompt and launch receipt; its hand-back names the agent it came from.
+    #[test]
+    fn an_agent_call_reads_as_the_agent_and_its_report() {
+        let mut call = tool(
+            "Agent",
+            "dummy long brief",
+            Some("Async agent launched successfully"),
+        );
+        call.agent = Some(AgentCall {
+            id: "agent-a1".into(),
+            agent_type: "Explore".into(),
+            description: "map the parser".into(),
+            status: "done".into(),
+            duration_ms: 130_000,
+            tool_count: 3,
+            background: true,
+            report: Some("dummy report".into()),
+            ..AgentCall::default()
+        });
+        let mut handback = turn("system", crate::chat::AGENT_MESSAGE, "dummy report", vec![]);
+        handback.from = Some("Explore".into());
+        handback.agent = Some("agent-a1".into());
+        let doc = md(
+            vec![turn("assistant", "message", "", vec![call]), handback],
+            true,
+        );
+        assert!(
+            doc.contains(
+                "- **Agent** (Explore) — map the parser · 3 tools · 2m10s\n\n  > dummy report"
+            ),
+            "{doc}"
+        );
+        assert!(
+            !doc.contains("Async agent launched") && !doc.contains("dummy long brief"),
+            "{doc}"
+        );
+        assert!(
+            headings(&doc)
+                .iter()
+                .any(|h| h.starts_with("## From an agent · Explore — map the parser")),
+            "{doc}"
+        );
+    }
+
+    /// A subagent's report is filed as what it is. Under `## User` it read as
+    /// the person's prompt, and as the session's title when it came first.
+    #[test]
+    fn an_agent_message_has_its_own_heading_and_is_never_the_title() {
+        let mut report = turn("system", crate::chat::AGENT_MESSAGE, "dummy report", vec![]);
+        report.from = Some("general-purpose".into());
+        let mut s = session();
+        s.title = None;
+        let conversation = conversation(vec![
+            report,
+            turn("user", "message", "the real ask", vec![]),
+        ]);
+        let doc = render(&s, &conversation, Options { tool_output: false });
+        let heads = headings(&doc);
+        assert!(
+            heads
+                .iter()
+                .any(|h| h.starts_with("## From an agent · general-purpose")),
+            "{heads:?}"
+        );
+        assert_eq!(heads.iter().filter(|h| h.starts_with("## User")).count(), 1);
+        assert_eq!(title(&s, &conversation), "the real ask");
     }
 
     #[test]

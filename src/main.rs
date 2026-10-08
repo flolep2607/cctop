@@ -399,7 +399,7 @@ fn main() -> anyhow::Result<()> {
         } else if let Some(which) = &args.report {
             cli::run_report(&sessions, which, args.plan, &loader)?;
         } else if let Some(which) = &args.chat {
-            cli::run_chat(&sessions, which, args.before)?;
+            cli::run_chat(&sessions, which, args.before, args.agent.as_deref())?;
         } else if let Some(which) = &args.export {
             cli::run_export(&sessions, which, args.tool_output)?;
         } else if let Some(which) = &args.access {

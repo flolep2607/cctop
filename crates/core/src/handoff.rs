@@ -1210,6 +1210,8 @@ mod tests {
             text: text.to_string(),
             clipped: false,
             tools: Vec::new(),
+            from: None,
+            agent: None,
         }
     }
 
@@ -1351,6 +1353,30 @@ mod tests {
         ]);
         assert_eq!(prompts(&chat), vec![Asked::Said("the ask".into())]);
         assert_eq!(closing(&chat), vec!["the answer".to_string()]);
+    }
+
+    /// The brief quotes what the person asked: a message typed mid-turn is one
+    /// of those, and a subagent's report is not, however it was recorded.
+    #[test]
+    fn the_brief_quotes_typed_prompts_and_no_agent_reports() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("t.jsonl");
+        let lines = [
+            r#"{"type":"user","timestamp":"2026-10-08T10:00:00Z","origin":{"kind":"human"},"message":{"role":"user","content":"the first ask"}}"#,
+            r#"{"type":"user","timestamp":"2026-10-08T10:01:00Z","isMeta":true,"origin":{"kind":"peer","from":"a0000000000000001","name":"general-purpose"},"message":{"role":"user","content":"Another Claude session sent a message:\n<agent-message from=\"a0000000000000001\">\ndummy report\n</agent-message>"}}"#,
+            r#"{"type":"attachment","timestamp":"2026-10-08T10:02:00Z","attachment":{"type":"queued_command","commandMode":"prompt","origin":{"kind":"human"},"prompt":"typed while it worked"}}"#,
+            r#"{"type":"attachment","timestamp":"2026-10-08T10:03:00Z","attachment":{"type":"queued_command","isMeta":true,"origin":{"kind":"peer","from":"a0000000000000002"},"prompt":"<agent-message from=\"a0000000000000002\">\nanother dummy report\n</agent-message>"}}"#,
+        ];
+        std::fs::write(&path, lines.join("\n") + "\n").expect("write transcript");
+        let mut session = Session::new(crate::pricing::Provider::Claude, "s".into());
+        session.data_file = Some(path);
+        assert_eq!(
+            prompts(&chat::whole(&session)),
+            vec![
+                Asked::Said("the first ask".into()),
+                Asked::Said("typed while it worked".into()),
+            ]
+        );
     }
 
     /// The record is a file, and a brief rendered without one — the MCP tool

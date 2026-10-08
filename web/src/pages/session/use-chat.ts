@@ -13,7 +13,10 @@ import type { Chat, Turn } from "@/lib/types";
 // stamp of the transcript as last read (nothing at all comes back if it has
 // not moved) and `after` the newest held turn (which a landing tool result
 // changes) and anything after it.
-export function useChat(id: string, running: boolean) {
+//
+// With `agent`, the same for one subagent's own conversation, whose seqs are
+// its own file's — never mixed with the main conversation's.
+export function useChat(id: string, running: boolean, agent?: string) {
   const [turns, setTurns] = useState<Turn[]>([]);
   const [meta, setMeta] = useState<Pick<Chat, "supported" | "note" | "earlier"> | null>(null);
   const [error, setError] = useState("");
@@ -34,7 +37,8 @@ export function useChat(id: string, running: boolean) {
   const refresh = useCallback(() => {
     const newest = held.current.length ? held.current[held.current.length - 1].seq : null;
     const narrow = stamp.current !== null && newest !== null;
-    return getJson<Chat>("/api/chat/" + encodeURIComponent(id), narrow ? { since: stamp.current, after: newest } : undefined)
+    const scope = agent ? { agent } : {};
+    return getJson<Chat>("/api/chat/" + encodeURIComponent(id), narrow ? { ...scope, since: stamp.current, after: newest } : agent ? scope : undefined)
       .then((chat) => {
         if (chat.stamp) stamp.current = chat.stamp;
         setError("");
@@ -43,7 +47,7 @@ export function useChat(id: string, running: boolean) {
         merge(chat.turns ?? []);
       })
       .catch((e) => setError(String((e as Error).message || e)));
-  }, [id, merge]);
+  }, [id, agent, merge]);
 
   // Turns the transcript holds before everything fetched: the seq of the
   // oldest held turn is exactly the count of what came before it.
@@ -52,9 +56,9 @@ export function useChat(id: string, running: boolean) {
   const loadEarlier = useCallback(async () => {
     const first = held.current.length ? held.current[0].seq : 0;
     if (!first) return;
-    const chat = await getJson<Chat>("/api/chat/" + encodeURIComponent(id), { before: first });
+    const chat = await getJson<Chat>("/api/chat/" + encodeURIComponent(id), agent ? { agent, before: first } : { before: first });
     merge(chat.turns ?? []);
-  }, [id, merge]);
+  }, [id, agent, merge]);
 
   useEffect(() => {
     refresh();

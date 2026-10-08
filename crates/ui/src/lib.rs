@@ -1647,6 +1647,8 @@ mod tests {
             text: format!("turn {seq}"),
             clipped: false,
             tools: Vec::new(),
+            from: None,
+            agent: None,
         };
         let page = |seqs: &[usize], earlier: usize| {
             Box::new(cctop_core::chat::Conversation {

@@ -9,10 +9,12 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Kbd } from "@/components/ui/kbd";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { PromptBar } from "@/components/prompt-bar";
 import { useStored } from "@/hooks/use-live";
 import type { Session, Turn } from "@/lib/types";
 import { TurnView } from "./turn";
+import { AgentsContext, aboutAgent, agentCalls, type Agents } from "./agents";
 import { useChat } from "./use-chat";
 
 // How many of a long conversation's turns are drawn at once: the newest
@@ -23,7 +25,10 @@ const CHUNK = 120;
 // What a turn can be found by: its text and its tools' names, arguments,
 // results and diffs.
 const turnText = (t: Turn) =>
-  [t.text, ...(t.tools ?? []).flatMap((x) => [x.name, x.detail, x.full, x.result, ...(x.diff ?? [])])]
+  [
+    t.text,
+    ...(t.tools ?? []).flatMap((x) => [x.name, x.detail, x.full, x.result, x.agent?.type, x.agent?.description, x.agent?.report, ...(x.diff ?? [])]),
+  ]
     .filter(Boolean)
     .join(" ")
     .toLowerCase();
@@ -63,6 +68,9 @@ export function Conversation({ id, live, active }: { id: string; live: Session |
   const [selected, setSelected] = useState<number | null>(null);
   const [openTools, setOpenTools] = useState(false);
   const [density, setDensity] = useStored<"comfortable" | "compact">("cctop-density-v2", "comfortable");
+  // "main": the main agent's own timeline, each subagent's report left in its
+  // block. Nothing becomes unreachable — the hand-backs are what is hidden.
+  const [scope, setScope] = useStored<"everything" | "main">("cctop-chat-scope", "everything", (v): v is "everything" | "main" => v === "everything" || v === "main");
   const [more, setMore] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const findRef = useRef<HTMLInputElement>(null);
@@ -81,13 +89,15 @@ export function Conversation({ id, live, active }: { id: string; live: Session |
     if (m) wantTurn.current = Number(m[1]);
   }, []);
 
-  const hidden = Math.max(0, turns.length - shown);
-  const drawn = useMemo(() => turns.slice(hidden), [turns, hidden]);
+  const visible = useMemo(() => (scope === "main" ? turns.filter((t) => !aboutAgent(t)) : turns), [turns, scope]);
+  const hidden = Math.max(0, visible.length - shown);
+  const drawn = useMemo(() => visible.slice(hidden), [visible, hidden]);
 
   // Find runs over every fetched turn, not just the drawn ones: a hit the
-  // chunking hides is still a hit, and walking to it draws its window.
+  // chunking hides is still a hit, and walking to it draws its window. What
+  // "Main only" leaves out is not searched, nor is an agent's own transcript.
   const q = query.trim().toLowerCase();
-  const hits = useMemo(() => (q ? turns.filter((t) => turnText(t).includes(q)).map((t) => t.seq) : []), [turns, q]);
+  const hits = useMemo(() => (q ? visible.filter((t) => turnText(t).includes(q)).map((t) => t.seq) : []), [visible, q]);
   const hitSet = useMemo(() => new Set(hits), [hits]);
 
   // --- following the tail ----------------------------------------------------
@@ -191,6 +201,22 @@ export function Conversation({ id, live, active }: { id: string; live: Session |
       .catch((e) => toast.error("Copy failed: " + String(e?.message || e)));
   }, []);
 
+  // Rebuilt only when what it says changes, so a poll that adds an unrelated
+  // turn does not redraw every memoised turn through the context.
+  const callKey = turns.map((t) => (t.tools ?? []).filter((x) => x.agent).map((x) => `${t.seq}:${JSON.stringify(x.agent)}`).join()).join("|");
+  const reportKey = turns.filter((t) => t.kind === "agent-message").map((t) => t.seq + t.ts!).join();
+  const agents = useMemo<Agents>(
+    () => ({
+      session: id,
+      calls: agentCalls(turns),
+      reported: new Map(turns.filter((t) => t.kind === "agent-message").map((t) => [t.seq, t.ts ?? ""])),
+      everything: scope === "everything",
+      jump: gotoTurn,
+    }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [id, callKey, reportKey, scope, gotoTurn],
+  );
+
   const showEarlier = async () => {
     const el = scrollRef.current;
     const before = el?.scrollHeight ?? 0;
@@ -228,6 +254,7 @@ export function Conversation({ id, live, active }: { id: string; live: Session |
       else if (e.key === "n") seek(1);
       else if (e.key === "N") seek(-1);
       else if (e.key === "t") setOpenTools((o) => !o);
+      else if (e.key === "a") setScope(scope === "main" ? "everything" : "main");
       else if (e.key === "/") {
         e.preventDefault();
         findRef.current?.focus();
@@ -306,8 +333,33 @@ export function Conversation({ id, live, active }: { id: string; live: Session |
           </TooltipTrigger>
           <TooltipContent>Density: {density}</TooltipContent>
         </Tooltip>
-        <span className="text-muted-foreground hidden text-[11px] lg:inline" title="j/k move · n/N walk matches · t folds tools · 1–4 views · / find · Esc clears">
-          <Kbd>j</Kbd>/<Kbd>k</Kbd> <Kbd>n</Kbd> <Kbd>t</Kbd> <Kbd>/</Kbd>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <ToggleGroup
+              type="single"
+              variant="outline"
+              size="sm"
+              value={scope}
+              onValueChange={(v) => v && setScope(v as "everything" | "main")}
+              aria-label="Which turns to show"
+            >
+              <ToggleGroupItem value="everything" className="px-2.5 text-xs">
+                Everything
+              </ToggleGroupItem>
+              <ToggleGroupItem value="main" className="px-2.5 text-xs">
+                Main only
+              </ToggleGroupItem>
+            </ToggleGroup>
+          </TooltipTrigger>
+          <TooltipContent>
+            Main only leaves subagents' hand-backs in their blocks <Kbd>a</Kbd>
+          </TooltipContent>
+        </Tooltip>
+        <span
+          className="text-muted-foreground hidden text-[11px] lg:inline"
+          title="j/k move · n/N walk matches · t folds tools · a main only / everything · 1–4 views · / find (what is shown, not agents' own turns) · Esc clears"
+        >
+          <Kbd>j</Kbd>/<Kbd>k</Kbd> <Kbd>n</Kbd> <Kbd>t</Kbd> <Kbd>a</Kbd> <Kbd>/</Kbd>
         </span>
       </div>
 
@@ -333,7 +385,8 @@ export function Conversation({ id, live, active }: { id: string; live: Session |
             ) : !turns.length ? (
               <div className="text-muted-foreground p-10 text-center text-sm">{error || "Nothing has been said in this session yet."}</div>
             ) : (
-              drawn.map((t) => (
+              <AgentsContext.Provider value={agents}>
+                {drawn.map((t) => (
                 <TurnView
                   key={t.seq}
                   turn={t}
@@ -344,7 +397,8 @@ export function Conversation({ id, live, active }: { id: string; live: Session |
                   openTools={openTools || current === t.seq}
                   onLink={linkTurn}
                 />
-              ))
+                ))}
+              </AgentsContext.Provider>
             )}
           </div>
           {error && turns.length > 0 && <div className="text-destructive mt-2 text-xs">{error} Still trying.</div>}

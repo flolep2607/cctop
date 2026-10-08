@@ -1721,16 +1721,37 @@ fn api_chat(shared: &Shared, stream: &mut TcpStream, request: &Request, id: &str
             .filter(|s| !s.is_empty()),
         after: request.query.get("after").and_then(|v| v.parse().ok()),
     };
+    let agent = request.query.get("agent").filter(|a| !a.is_empty());
+    // Checked here as well as by the read, so a remote row never forwards an
+    // id the session does not list to the far machine's command line.
+    if let Some(agent) = agent
+        && !session.subagents.iter().any(|s| &s.agent_id == agent)
+    {
+        return http::respond_error(stream, Some(request), 404, "no such agent in this session");
+    }
     if session.remote.is_some() {
         let mut args = vec!["--chat".to_string(), session.session_id.clone()];
         if let Some(before) = before {
             args.extend(["--before".to_string(), before.to_string()]);
+        }
+        // A peer older than `--agent` rejects it, and the page says so in the
+        // agent's block rather than anywhere that would break the session.
+        if let Some(agent) = agent {
+            args.extend(["--agent".to_string(), agent.clone()]);
         }
         // The peer is asked the old question, because a cctop older than
         // `since` would reject the flag and the chat would not open at all.
         // The narrowing happens here instead: the ssh read is still whole,
         // but the browser gets — and redraws — only what changed.
         return remote_chat(shared, stream, request, session, &args, &since);
+    }
+    if let Some(agent) = agent {
+        return match chat::build_agent(session, agent, before) {
+            Some(conversation) => json(stream, request, &conversation.narrowed(&since)),
+            None => {
+                http::respond_error(stream, Some(request), 404, "no such agent in this session")
+            }
+        };
     }
     // Before the read, because skipping the read is the point: an unchanged
     // file is answered from its metadata alone.
@@ -3017,6 +3038,84 @@ mod tests {
         let missing = status_of(&guarded, "GET", "/api/chat/nope/markdown", bearer);
         assert!(missing.contains(" 404 "), "{missing}");
         let anonymous = status_of(&guarded, "GET", "/api/chat/sess-md/markdown", "");
+        assert!(anonymous.contains(" 403 "), "{anonymous}");
+    }
+
+    /// A subagent's own conversation, by the id the session lists, behind the
+    /// same token; anything the session does not list is a 404, never a path.
+    #[test]
+    fn the_agent_route_serves_one_listed_subagent() {
+        let dir = tempfile::tempdir().unwrap();
+        let main = dir.path().join("sess-ag.jsonl");
+        std::fs::write(
+            &main,
+            r#"{"type":"user","timestamp":"2026-10-08T10:00:00Z","message":{"content":"dummy ask"}}"#,
+        )
+        .unwrap();
+        let sub = dir.path().join("sess-ag").join("subagents");
+        std::fs::create_dir_all(&sub).unwrap();
+        let agent_lines = [
+            r#"{"type":"user","isSidechain":true,"timestamp":"2026-10-08T10:00:01Z","message":{"content":"dummy brief"}}"#,
+            r#"{"type":"assistant","isSidechain":true,"timestamp":"2026-10-08T10:00:02Z","message":{"content":[{"type":"text","text":"dummy agent reply"}]}}"#,
+        ];
+        std::fs::write(sub.join("agent-x1.jsonl"), agent_lines.join("\n")).unwrap();
+        let mut s = Session::new(cctop_core::pricing::Provider::Claude, "sess-ag".into());
+        s.data_file = Some(main);
+        s.subagents = vec![cctop_core::session::Subagent {
+            agent_id: "agent-x1".into(),
+            agent_type: "Explore".into(),
+            description: "dummy".into(),
+            model: "?".into(),
+            started_at: None,
+            last_active: None,
+            duration_ms: 0,
+            status: cctop_core::session::SubagentStatus::Done,
+            cost: 0.0,
+            tool_count: 0,
+            tool_use_id: Some("toolu_x".into()),
+            context: None,
+            ghost: false,
+        }];
+
+        let guarded = shared("full", "view");
+        *guarded.latest.lock().unwrap() = Arc::new(Snapshot {
+            version: 1,
+            json: "[]".to_string(),
+            rows: Vec::new(),
+            sessions: vec![s],
+            host_errors: Vec::new(),
+        });
+        let bearer = "Authorization: Bearer view\r\n";
+
+        let body = response_of(&guarded, "GET", "/api/chat/sess-ag?agent=agent-x1", bearer);
+        assert!(body.starts_with("HTTP/1.1 200 "), "{body}");
+        assert!(body.contains("dummy agent reply"), "{body}");
+        assert!(!body.contains("dummy ask"), "{body}");
+
+        // Narrowed like the main conversation: after the last turn, nothing.
+        let after = response_of(
+            &guarded,
+            "GET",
+            "/api/chat/sess-ag?agent=agent-x1&after=2",
+            bearer,
+        );
+        assert!(!after.contains("dummy agent reply"), "{after}");
+
+        for refused in [
+            "agent-nope",
+            "..%2Fsess-ag",
+            "../agent-x1",
+            "subagents/agent-x1",
+        ] {
+            let status = status_of(
+                &guarded,
+                "GET",
+                &format!("/api/chat/sess-ag?agent={refused}"),
+                bearer,
+            );
+            assert!(status.contains(" 404 "), "{refused}: {status}");
+        }
+        let anonymous = status_of(&guarded, "GET", "/api/chat/sess-ag?agent=agent-x1", "");
         assert!(anonymous.contains(" 403 "), "{anonymous}");
     }
 
