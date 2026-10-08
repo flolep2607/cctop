@@ -708,8 +708,9 @@ fn left_behind(host: &str, id: &str, error: &Error) -> String {
 }
 
 /// Give `session_id`'s shares the address `input` — a label, or a hostname
-/// under the account's zone — or, with an empty `input`, send it back to the
-/// default share hostname. `agents` names another session for a refusal.
+/// under the account's zone — or, with an empty `input` or the default share
+/// hostname's own label, send it back to the default share hostname.
+/// `agents` names another session for a refusal.
 ///
 /// Every refusal comes before any write. Then the order is setup's: the new
 /// record, the ingress list, and only then the old record, so a failure
@@ -733,7 +734,16 @@ pub fn name_share_with(
         note: None,
     };
 
-    if input.trim().is_empty() {
+    // The default share hostname typed back in — what the field is
+    // prefilled with for an agent with no name — is a clear, not a clash.
+    let typed = match input.trim().is_empty() {
+        true => None,
+        false => Some(label_for(input, &zone.name)?),
+    };
+    let default = typed.as_ref().is_some_and(|label| {
+        account.share_hostname.as_deref() == Some(&format!("{label}.{}", zone.name))
+    });
+    let Some(label) = typed.filter(|_| !default) else {
         let Some(current) = current else {
             return Ok(unchanged(account));
         };
@@ -757,9 +767,8 @@ pub fn name_share_with(
             changed: true,
             note,
         });
-    }
+    };
 
-    let label = label_for(input, &zone.name)?;
     if current.is_some_and(|c| c.label == label) {
         return Ok(unchanged(account));
     }
@@ -1459,7 +1468,9 @@ mod tests {
             "cctop.example.test is already used by the dashboard"
         );
         assert_eq!(
-            refused("cctop-share"),
+            name_dashboard_with(&api, &account, "cctop-share")
+                .unwrap_err()
+                .to_string(),
             "cctop-share.example.test is already used by shares without a name of their own"
         );
         assert_eq!(
@@ -1501,6 +1512,9 @@ mod tests {
         let nothing = name_share_with(&api, &account, "unnamed", "", &agents).unwrap();
         assert!(!nothing.changed);
         assert_eq!(nothing.new.as_deref(), Some("cctop-share.example.test"));
+        // The prefilled default, Enter'd unchanged, is no clash either.
+        let prefilled = name_share_with(&api, &account, "unnamed", "cctop-share", &agents).unwrap();
+        assert!(!prefilled.changed);
         assert!(writes(&seen).is_empty());
 
         let cleared = name_share_with(&api, &account, "other-session", "  ", &agents).unwrap();

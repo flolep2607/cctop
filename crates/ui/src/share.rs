@@ -141,6 +141,59 @@ pub struct ShareQr {
     /// may be drawn here at all.
     pub link: String,
     pub pin: Option<String>,
+    /// The agent's session id, which its own address is stored under.
+    pub session_id: String,
+    /// The multiplexer session the share is of, for a fresh one after a
+    /// rename.
+    pub name: String,
+    /// The hostname the link goes out on — drawn, unlike the link, since it
+    /// opens nothing without the token.
+    pub host: Option<String>,
+    /// Where the address can be chosen, or the sentence saying why it
+    /// cannot.
+    pub rename: Result<Naming, String>,
+}
+
+/// What choosing a share's address needs to know: the domain the name goes
+/// under, and the hostname an agent with no name of its own is on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Naming {
+    pub zone: String,
+    pub default: Option<String>,
+}
+
+/// Whether a share can have its address chosen, and why not.
+///
+/// Only one on the account's own domain, and only with an API token behind
+/// it: a quick tunnel's name is Cloudflare's pick, and a tunnel token can
+/// write no DNS.
+pub(super) fn share_rename(
+    own_domain: bool,
+    connected: Option<&connect::Connected>,
+) -> Result<Naming, String> {
+    let Some(connected) = connected else {
+        return Err(
+            "This address is picked by Cloudflare — connect your own domain \
+             (a in the serve panel) to choose one"
+                .to_string(),
+        );
+    };
+    connected.rename.map_err(str::to_string)?;
+    let zone = connected
+        .zone
+        .clone()
+        .ok_or_else(|| cctop_core::tunnel::TOKEN_ONLY.to_string())?;
+    match own_domain {
+        true => Ok(Naming {
+            zone,
+            default: connected.share_hostname.clone(),
+        }),
+        false => Err(
+            "This address is picked by Cloudflare — serve on your own domain \
+             (t in the serve panel) to choose one"
+                .to_string(),
+        ),
+    }
 }
 
 impl App {
@@ -179,11 +232,18 @@ impl App {
         // Tunnelled where the machine can be reached and this machine only
         // where it cannot; the status line below says which came back. Pressing
         // `W` twice reuses the first share rather than minting a second.
+        //
+        // On the account's domain it goes out on the agent's own address when
+        // it has one — see [`crate::address`].
+        let session_id = session.session_id.clone();
+        let address = cctop_core::tunnel::account().and_then(|a| a.share_host_for(&session_id));
         let mut reachable = false;
-        let share = cctop_core::rmux::share_link(&name, false, None).map(|(share, tunnelled)| {
-            reachable = tunnelled;
-            share
-        });
+        let share = cctop_core::rmux::share_link_at(&name, address.as_deref(), false).map(
+            |(share, tunnelled)| {
+                reachable = tunnelled;
+                share
+            },
+        );
         match share {
             Ok(share) => {
                 // `web_share` refuses a share with no operator link, so this is
@@ -214,6 +274,10 @@ impl App {
                         label,
                         link: operator.to_string(),
                         pin: share.pin.clone(),
+                        session_id,
+                        name,
+                        host: share.host.clone(),
+                        rename: share_rename(share.own_domain, self.connected.as_ref()),
                     });
                     self.mode = Mode::ShareQr;
                 }
@@ -598,6 +662,14 @@ mod tests {
                 "00112233445566778899aabbccddeeff"
             ),
             pin: Some("482913".to_string()),
+            session_id: "8f14e45f-ceea-467f-a0e6-0d1c6e1b0a11".to_string(),
+            name: "cctop-claude-8f14e45f".to_string(),
+            host: Some("tribute-resistance-resolved-moscow.trycloudflare.com".to_string()),
+            rename: Err(
+                "This address is picked by Cloudflare — connect your own domain \
+                 (a in the serve panel) to choose one"
+                    .to_string(),
+            ),
         });
         app.mode = Mode::ShareQr;
         app
@@ -630,6 +702,199 @@ mod tests {
         app.on_key(chip);
         assert_eq!(app.mode, Mode::List);
         assert!(app.share_qr.is_none(), "the link outlived its panel");
+    }
+
+    fn mouse(
+        kind: crossterm::event::MouseEventKind,
+        column: u16,
+        row: u16,
+    ) -> crossterm::event::MouseEvent {
+        crossterm::event::MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    fn right(column: u16, row: u16) -> crossterm::event::MouseEvent {
+        mouse(
+            crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Right),
+            column,
+            row,
+        )
+    }
+
+    /// Where `text` is drawn: its row and first column.
+    fn find(buf: &Buffer, text: &str) -> Option<(u16, u16)> {
+        (0..buf.area.height).find_map(|y| {
+            let line = row_text(buf, y);
+            line.find(text)
+                .map(|at| (y, line[..at].chars().count() as u16))
+        })
+    }
+
+    /// A share on the account's own domain, whose address can be chosen.
+    fn own_domain_app() -> App {
+        let mut app = shared_app();
+        let qr = app.share_qr.as_mut().unwrap();
+        qr.link = format!(
+            "https://cctop-share.example.test/#e=wss://cctop-share.example.test/share&t={}",
+            "fedcba9876543210".repeat(2)
+        );
+        qr.host = Some("cctop-share.example.test".to_string());
+        qr.rename = Ok(Naming {
+            zone: "example.test".to_string(),
+            default: Some("cctop-share.example.test".to_string()),
+        });
+        app
+    }
+
+    /// A quick tunnel's address is shown and why it cannot be chosen; `e` and
+    /// a right-click do nothing but say so, and any other key still closes.
+    #[test]
+    fn a_quick_tunnel_share_says_its_address_is_cloudflares_pick() {
+        let mut app = shared_app();
+        let (buf, layout) = draw(&mut app, 120, 50);
+        let text = text_rows(&buf, SHARE).join("\n");
+        assert!(
+            text.contains("Address  tribute-resistance-resolved-moscow.trycloudflare.com"),
+            "{text}"
+        );
+        assert!(text.contains("picked by Cloudflare"), "{text}");
+        assert!(!text.contains("fedcba98"), "the link drawn as text: {text}");
+        assert_eq!(layout.address_row, None, "nothing to right-click");
+        let (row, x) = find(&buf, "Address").unwrap();
+        app.on_mouse(right(x + 12, row), &layout);
+        assert_eq!(app.mode, Mode::ShareQr);
+        app.on_key(key('e'));
+        assert_eq!(app.mode, Mode::ShareQr, "e closed the panel");
+        assert!(app.address.is_none());
+        assert!(
+            app.status()
+                .is_some_and(|m| m.contains("picked by Cloudflare"))
+        );
+        app.on_key(key('x'));
+        assert_eq!(app.mode, Mode::List);
+        assert!(app.share_qr.is_none());
+    }
+
+    /// On the account's domain, `e` and a right-click on the address line
+    /// open the field on the current label, and Esc goes back to the panel
+    /// with the share untouched.
+    #[test]
+    fn an_own_domain_share_is_renamed_by_e_or_a_right_click() {
+        for by_click in [false, true] {
+            let mut app = own_domain_app();
+            let link = app.share_qr.as_ref().unwrap().link.clone();
+            let (buf, layout) = draw(&mut app, 120, 50);
+            let text = text_rows(&buf, SHARE).join("\n");
+            assert!(text.contains("Address  cctop-share.example.test"), "{text}");
+            assert!(
+                text.contains("e or right-click to choose another"),
+                "{text}"
+            );
+            let (row, x) = find(&buf, "Address").unwrap();
+            assert!(layout.address_at(x + 12, row), "{:?}", layout.address_row);
+            assert!(!layout.address_at(x + 12, row + 2));
+            match by_click {
+                true => {
+                    // A right-click anywhere else in the panel is not one.
+                    app.on_mouse(right(x + 12, row + 2), &layout);
+                    assert_eq!(app.mode, Mode::ShareQr);
+                    app.on_mouse(right(x + 12, row), &layout);
+                }
+                false => app.on_key(key('e')),
+            }
+            assert_eq!(app.mode, Mode::RenameAddress);
+            let edit = app.address.as_ref().unwrap();
+            assert_eq!(edit.field.to_string(), "cctop-share");
+            assert_eq!(edit.was, "cctop-share.example.test");
+            app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+            assert_eq!(app.mode, Mode::ShareQr);
+            assert_eq!(app.share_qr.as_ref().unwrap().link, link);
+        }
+    }
+
+    fn account_serve_app() -> App {
+        let (mut app, _) = tunnelled_app();
+        let serving = app.serving.as_mut().unwrap();
+        let token = "0b1e5d7a9c3f6e284d17a5c09b3f8e60";
+        serving.public = Some(format!("https://cctop.example.test/?t={token}"));
+        serving.readonly = format!("https://cctop.example.test/?t={token}ro");
+        app.connected = Some(connect::Connected {
+            hostname: Some("cctop.example.test".into()),
+            from_env: false,
+            share_hostname: Some("cctop-share.example.test".into()),
+            zone: Some("example.test".into()),
+            rename: Ok(()),
+        });
+        app
+    }
+
+    /// The serve panel offers the dashboard's address on its internet origin,
+    /// and the field says the old links stop working before Enter.
+    #[test]
+    fn the_dashboard_is_renamed_from_its_internet_origin() {
+        let mut app = account_serve_app();
+        let (buf, layout) = draw(&mut app, 120, 50);
+        let text = text_rows(&buf, SERVE).join("\n");
+        assert!(
+            text.contains("e or right-click to choose this address"),
+            "{text}"
+        );
+        let (row, x) = find(&buf, "https://cctop.example.test").unwrap();
+        assert!(layout.address_at(x, row));
+        app.on_mouse(right(x, row), &layout);
+        assert_eq!(app.mode, Mode::RenameAddress);
+        assert_eq!(app.address.as_ref().unwrap().field.to_string(), "cctop");
+        for _ in "cctop".chars() {
+            app.on_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        }
+        for c in "home".chars() {
+            app.on_key(key(c));
+        }
+        let (buf, _) = draw(&mut app, 120, 50);
+        let text = text_rows(&buf, "Move the dashboard").join("\n");
+        assert!(
+            text.contains("Links to cctop.example.test stop working"),
+            "{text}"
+        );
+        assert!(
+            text.contains("the page moves to home.example.test"),
+            "{text}"
+        );
+        app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(app.mode, Mode::Serve);
+
+        app.on_key(key('e'));
+        assert_eq!(app.mode, Mode::RenameAddress);
+    }
+
+    /// A quick tunnel's page, and an account connected with a tunnel token,
+    /// offer no address to choose — and the second says why.
+    #[test]
+    fn a_dashboard_address_is_not_offered_where_it_cannot_be_chosen() {
+        let (mut app, _) = tunnelled_app();
+        let (buf, layout) = draw(&mut app, 120, 50);
+        assert!(
+            !text_rows(&buf, SERVE)
+                .join("\n")
+                .contains("choose this address")
+        );
+        assert_eq!(layout.address_row, None);
+        app.on_key(key('e'));
+        assert_eq!(app.mode, Mode::Serve);
+
+        let mut app = account_serve_app();
+        app.connected.as_mut().unwrap().rename = Err(cctop_core::tunnel::TOKEN_ONLY);
+        let (buf, layout) = draw(&mut app, 120, 50);
+        let text = text_rows(&buf, SERVE).join("\n");
+        assert!(text.contains("Connected with a tunnel token"), "{text}");
+        assert_eq!(layout.address_row, None);
+        app.on_key(key('e'));
+        assert_eq!(app.mode, Mode::Serve);
+        assert!(app.status().is_some_and(|m| m.contains("tunnel token")));
     }
 
     /// Too short for the code: the panel still opens — the share happened —

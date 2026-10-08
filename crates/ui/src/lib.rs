@@ -11,6 +11,8 @@
 //! modes, the row type, construction and the toasts — that every one of
 //! them touches.
 
+/// Choosing an agent's share address, or the dashboard's.
+mod address;
 mod ansi;
 mod batch;
 pub mod columns;
@@ -145,6 +147,9 @@ pub enum Mode {
     /// A terminal just shared with `W`, as a code a phone can scan. See
     /// [`ShareQr`].
     ShareQr,
+    /// Choosing an address on the connected account's domain: an agent's
+    /// share hostname or the dashboard's. See [`address`].
+    RenameAddress,
     /// Adding a Claude account: naming it, then `claude setup-token` in a
     /// terminal inside the popup. See [`AddAccount`].
     AddAccount,
@@ -895,6 +900,8 @@ pub struct App {
     pub serve_qr: bool,
     /// The terminal share `W` just made, while `Mode::ShareQr` is up.
     pub share_qr: Option<ShareQr>,
+    /// The address field, while `Mode::RenameAddress` is up.
+    pub address: Option<address::AddressEdit>,
     /// A restart asked for while the agent was mid-turn: which agent, and when.
     ///
     /// Restarting kills the agent, and a turn in flight dies with it. The key
@@ -1218,6 +1225,7 @@ impl App {
             share_arm: false,
             serve_qr: false,
             share_qr: None,
+            address: None,
             restart_arm: None,
             torn: torn::Torn::default(),
             pending_brief: None,

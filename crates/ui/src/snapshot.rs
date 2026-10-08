@@ -668,3 +668,46 @@ fn connect_popup() {
     });
     snap("connect_done", &mut app);
 }
+
+/// Choosing an address: the share panel with its `Address` line, the field
+/// `e` opens on it, and the dashboard's field with its warning. Every token
+/// and link here is made up, and only hostnames reach the screen.
+#[test]
+fn address_rename() {
+    use super::address::{AddressEdit, Target};
+    use super::share::{Naming, ShareQr};
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    let mut app = fixture();
+    app.share_qr = Some(ShareQr {
+        label: "web".to_string(),
+        link: format!(
+            "https://fix-tests.example.com/#e=wss://fix-tests.example.com/share&t={}",
+            "0123456789abcdef".repeat(2)
+        ),
+        pin: Some("482913".to_string()),
+        session_id: "11111111-aaaa-4000-8000-000000000001".to_string(),
+        name: "cctop-claude-11111111".to_string(),
+        host: Some("fix-tests.example.com".to_string()),
+        rename: Ok(Naming {
+            zone: "example.com".to_string(),
+            default: Some("cctop-share.example.com".to_string()),
+        }),
+    });
+    app.mode = Mode::ShareQr;
+    snap("share_address", &mut app);
+    app.on_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+    assert_eq!(app.mode, Mode::RenameAddress);
+    snap("share_rename", &mut app);
+
+    let mut app = fixture();
+    let mut field = super::line_edit::LineEdit::default();
+    field.set("home");
+    app.address = Some(AddressEdit::for_test(
+        Target::Dashboard,
+        "cctop.example.com",
+        "example.com",
+        field,
+    ));
+    app.mode = Mode::RenameAddress;
+    snap("dashboard_rename", &mut app);
+}

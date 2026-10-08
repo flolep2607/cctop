@@ -75,6 +75,10 @@ pub struct Layout {
     /// have granted less room than the pane has, so this is the rectangle a
     /// mouse position can be turned into a cell of.
     pub(super) pane_rects: Vec<Rect>,
+    /// `(row, start_col, end_col)` of an address a right-click renames: the
+    /// share panel's `Address` line, or the serve panel's internet origin —
+    /// recorded only while renaming it is on offer.
+    pub(super) address_row: Option<(u16, u16, u16)>,
 }
 
 impl Layout {
@@ -97,6 +101,12 @@ impl Layout {
     }
 
     /// The key written under the cursor, if a click there means pressing one.
+    /// Whether a right-click here lands on an address that can be renamed.
+    pub fn address_at(&self, col: u16, row: u16) -> bool {
+        self.address_row
+            .is_some_and(|(r, a, b)| r == row && col >= a && col < b)
+    }
+
     pub fn key_at(&self, col: u16, row: u16) -> Option<event::KeyEvent> {
         self.key_hits
             .iter()
@@ -386,8 +396,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) -> Layout {
         Mode::KillConfirm => modals::draw_kill_confirm(frame, area, app, &mut layout),
         Mode::ResumeConfirm => modals::draw_resume_confirm(frame, area, app, &mut layout),
         Mode::TmuxInstall => modals::draw_rmux_install(frame, area, app),
-        Mode::Serve => modals::draw_serve(frame, area, app),
+        Mode::Serve => modals::draw_serve(frame, area, app, &mut layout),
         Mode::ShareQr => modals::draw_share_qr(frame, area, app, &mut layout),
+        Mode::RenameAddress => modals::draw_address(frame, area, app, &mut layout),
         Mode::QuitConfirm => modals::draw_quit_confirm(frame, area, app, &mut layout),
         Mode::RemoteUpdateConfirm => {
             modals::draw_remote_update_confirm(frame, area, app, &mut layout)
@@ -3613,7 +3624,13 @@ mod tests {
                 event::KeyEvent::new(event::KeyCode::Enter, event::KeyModifiers::NONE),
             )],
             pane_rects: vec![Rect::new(1, 7, 40, 10)],
+            address_row: Some((15, 11, 29)),
         };
+        // An address answers a right-click on its own row and columns only.
+        assert!(layout.address_at(11, 15));
+        assert!(layout.address_at(28, 15));
+        assert!(!layout.address_at(29, 15));
+        assert!(!layout.address_at(11, 14));
         // A key written on screen answers its own columns and nothing else.
         assert_eq!(
             layout.key_at(3, 24).map(|k| k.code),
