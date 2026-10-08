@@ -10,3 +10,14 @@
 channel = "1.99"
 components = ["clippy", "rustfmt"]
 profile = "minimal"
+
+# The cargo-semver-checks that `verify / release-plan` runs on a release
+# commit. It reads the rustdoc JSON this toolchain writes, whose format changes
+# between Rust releases, and each of its releases understands a range of them —
+# so it is pinned here, beside the channel it has to understand, and a pull
+# request that moves `channel` may have to move this line too (its release
+# notes name the Rust versions each one supports). CI installs the version on
+# this line and tools/release-plan.sh refuses any other; the line is read by
+# both, so keep its shape.
+#
+# cargo-semver-checks 0.51.0

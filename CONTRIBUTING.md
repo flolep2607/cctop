@@ -233,35 +233,62 @@ publishes to crates.io. **The version bump is the release** — there is no
 separate confirmation step, and `cargo publish` to crates.io cannot be undone.
 Do not create a release tag by hand for a normal version bump.
 
-The three internal crates, `cctop-core`, `cctop-serve` and `cctop-ui`, each
-have their own `version` in `crates/*/Cargo.toml`, and the root pins each with
-`=` under `[workspace.dependencies]`. A release bumps one only if it changed
-since the last `v*` tag, which is any of:
+The four internal crates, `cctop-tunnel`, `cctop-core`, `cctop-serve` and
+`cctop-ui`, each have their own `version` in `crates/*/Cargo.toml`. The root
+requires each with a caret on the compatible part of its version under
+`[workspace.dependencies]` — `"0.28"`, meaning at least 0.28.0 and below 0.29
+— so a published `cctop-ui` keeps building beside a newer `cctop-core` of the
+same minor. A release bumps one only if it changed since the last `v*` tag,
+which is any of:
 
 1. **its files changed** — anything under its directory besides its own
    `version` line;
 2. **its packaged manifest changed** without that — a `[workspace.dependencies]`
-   entry it uses was bumped, or a `[workspace.package]` field it inherits
-   (`edition`, `rust-version`, `license`…);
-3. **an internal crate it depends on was bumped.** The `=` pins make this
-   follow: a published `cctop-ui@0.28.3` requires `cctop-core =0.28.3`, so a
-   `cctop` that wants core 0.28.4 beside it resolves two cores and `cargo
-   install cctop` fails on mismatched types.
+   entry it uses was bumped, its requirement on an internal crate moved, or a
+   `[workspace.package]` field it inherits (`edition`, `rust-version`,
+   `license`…);
+3. **an internal crate it depends on takes a breaking bump**, because that
+   moves its requirement. Whether a crate's public API broke is
+   [`cargo-semver-checks`](https://github.com/obi1kenobi/cargo-semver-checks)'
+   answer, against the same crate at the tag; a crate that broke takes
+   0.28.x → 0.29.0, and its requirement moves to `"0.29"`.
 
 So a change to `crates/ui` alone bumps `cctop-ui` and `cctop`, one to
-`crates/serve` alone bumps `cctop-serve` and `cctop`, one to `crates/core`
-bumps all four, and one to the binary's own `src/` bumps `cctop` alone. Each
-bump is the crate's `version` line, its `=` pin, and `Cargo.lock`.
+`crates/core` that keeps its API bumps `cctop-core` and `cctop`, one that
+breaks it bumps core to the next minor and `cctop-serve` and `cctop-ui` by a
+patch for the moved requirement, and one to the binary's own `src/` bumps
+`cctop` alone. A patch bump is the crate's `version` line and `Cargo.lock`; a
+breaking one is its requirement as well. `pub` in these crates exists for use
+between them rather than as a designed API, so expect a breaking bump more
+often than a library would take one.
+
+The carets let `cargo install cctop` *without* `--locked` pick a newer
+compatible core than the one released with it. The published crate carries its
+`Cargo.lock`, `cctop --update` and the README both pass `--locked`, and
+`cargo-semver-checks` covers the API; what is left is a behaviour change that
+kept the API, reaching someone who typed a bare `cargo install cctop`.
 
 `tools/bump.sh <version>` makes those edits for you — the root to the version
-given, every crate the rules name up one patch, the lock refreshed — but it is
-optional, and a bump by hand is as good. Either way:
+given, every crate the rules name up one patch or one breaking step, the
+requirements and the lock with them — but it is optional, and a bump by hand
+is as good. It needs `cargo-semver-checks` at the version pinned at the end of
+`rust-toolchain.toml` (`cargo install cargo-semver-checks@<that> --locked`), or
+`CCTOP_BREAKING` set to the crates whose API broke, space-separated, empty for
+none. Either way:
 
 - **`verify / release-plan`** (`tools/release-plan.sh check`) fails a release
   commit — one whose root version differs from the last tag's — naming each
-  crate that changed but kept its version, and each one bumped with nothing
-  changed. On any other commit it passes with a notice, since a feature branch
-  changes crates without bumping them. Run it locally after committing.
+  crate that changed but kept its version, each one bumped with nothing
+  changed, each one whose API broke without a breaking bump, and each
+  requirement that is not the caret on its dependency's current version. On
+  any other commit it passes with a notice, since a feature branch changes
+  crates without bumping them, and does not run `cargo-semver-checks`. Run it
+  locally after committing.
+- **`cargo-semver-checks` moves with the toolchain.** It reads the rustdoc JSON
+  the pinned Rust writes, and each release of it understands a range of Rust
+  versions, so its version sits at the end of `rust-toolchain.toml`, beside
+  `channel`. A pull request that moves `channel` checks its release notes and
+  moves that line too when it has to.
 - **`publish-crate`** asks the crates.io index which crates are missing at
   their current version and publishes only those, dependency order first; the
   rest are skipped with a notice. A run that failed part-way can be re-run
