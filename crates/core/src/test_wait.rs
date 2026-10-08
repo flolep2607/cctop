@@ -13,10 +13,15 @@
 //! ([`PATIENCE`]) at no cost, and a generous one is what keeps a loaded
 //! machine from turning the suite red.
 //!
+//! The same goes for "the queue is full", which two tests of the hook once
+//! read off a second of a filler thread making no progress: [`fill_queue`]
+//! asks the kernel instead, and is here so both of them can.
+//!
 //! Compiled for this crate's tests and for any crate that turns on
 //! `test-support` (the UI's, the server's and the binary's tests, including
 //! `tests/`), so there is one copy rather than one per module.
 
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 /// How often a wait looks again. Short, because what is being waited on is
@@ -86,6 +91,64 @@ pub fn eventually<T>(what: &str, f: impl FnMut() -> Option<T>) -> T {
 #[track_caller]
 pub fn eventually_true(what: &str, mut f: impl FnMut() -> bool) {
     eventually(what, || f().then_some(()))
+}
+
+/// Connect to `path` until its queue has no room left, and hold every
+/// connection made, so that the queue stays full until they are dropped.
+///
+/// Non-blocking, so the connect that finds the queue full is told so —
+/// EAGAIN — instead of waiting in it. How many it takes is the kernel's
+/// business (a backlog of one takes two), which is why this counts nothing
+/// and asks instead. The listener's backlog has to be small — a handful —
+/// since every connection is held: one at `SOMAXCONN` would take thousands.
+pub fn fill_queue(path: &Path) -> Vec<std::os::fd::OwnedFd> {
+    use std::os::fd::FromRawFd;
+
+    let (addr, len) = sockaddr(path);
+    let mut held = Vec::new();
+    loop {
+        // SAFETY: a fresh descriptor, owned from the line below on.
+        let raw = unsafe {
+            libc::socket(
+                libc::AF_UNIX,
+                libc::SOCK_STREAM | libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC,
+                0,
+            )
+        };
+        assert!(raw >= 0, "socket");
+        // SAFETY: just opened, and owned by nothing else.
+        let fd = unsafe { std::os::fd::OwnedFd::from_raw_fd(raw) };
+        // SAFETY: a fully initialised address and its true length.
+        if unsafe { libc::connect(raw, std::ptr::from_ref(&addr).cast(), len) } == 0 {
+            held.push(fd);
+            assert!(held.len() <= 64, "the queue never filled");
+            continue;
+        }
+        let error = std::io::Error::last_os_error();
+        assert_eq!(
+            error.raw_os_error(),
+            Some(libc::EAGAIN),
+            "the queue refused for another reason: {error}"
+        );
+        return held;
+    }
+}
+
+/// `path` as the address a unix socket call takes, and its length.
+pub fn sockaddr(path: &Path) -> (libc::sockaddr_un, libc::socklen_t) {
+    use std::os::unix::ffi::OsStrExt;
+
+    let bytes = path.as_os_str().as_bytes();
+    // SAFETY: zeroed is a valid `sockaddr_un` once the family and the path
+    // are written, and the length returned covers exactly those bytes.
+    let mut addr: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+    addr.sun_family = libc::AF_UNIX as libc::sa_family_t;
+    for (slot, byte) in addr.sun_path.iter_mut().zip(bytes) {
+        *slot = *byte as libc::c_char;
+    }
+    let len =
+        (std::mem::offset_of!(libc::sockaddr_un, sun_path) + bytes.len() + 1) as libc::socklen_t;
+    (addr, len)
 }
 
 #[cfg(test)]
