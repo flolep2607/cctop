@@ -8,7 +8,7 @@
 # 0.23.0 is cut from the commit that touches this file: the first attempt failed verify, so nothing was tagged.
 #
 # The commit that bumps a version must bump `Cargo.lock` with it, in the same
-# commit, and for an internal crate its `=` requirement under
+# commit, and for an internal crate's breaking bump its requirement under
 # `[workspace.dependencies]` too — cargo refuses to resolve the moment one of
 # them disagrees, so a forgotten one fails loudly rather than shipping.
 # `verify / package` runs `cargo publish --dry-run`, which refuses a dirty tree,
@@ -16,7 +16,8 @@
 # it — so a bump on its own leaves one file changed and fails the release before
 # anything is tagged. 0.26.2 shipped that way once. `tools/bump.sh` makes all of
 # these edits, but it is a convenience: by hand it is one `version` line per
-# bumped crate, its pin, the root version and the lock.
+# bumped crate, its requirement if the bump is breaking, the root version and
+# the lock.
 [workspace.package]
 version = "0.29.1"
 edition = "2024"
@@ -65,21 +66,39 @@ homepage = "https://github.com/flolep2607/cctop"
 #
 # Every crate is published, because `cargo install cctop` builds from
 # crates.io and a crates.io package can only depend on others that are there
-# too. The internal ones are not meant to be used on their own and promise no
-# API between versions; the `=` pins below are what keeps a `cargo install
-# cctop@x` from ever pairing it with another version's core.
+# too. The internal ones are not meant to be used on their own, but they keep
+# semver with each other: the requirements below are carets on the version's
+# compatible part (`"0.28"`, meaning >=0.28.0, <0.29), so a cctop-ui published
+# against core 0.28.6 still builds beside core 0.28.7, and core can be
+# released alone.
+#
+# What makes that a promise rather than a hope is `cargo-semver-checks`, which
+# `verify / release-plan` runs on every release commit against the last tag:
+# a crate whose public API broke must take a breaking bump (0.28.x -> 0.29.0),
+# and that moves its requirement here, which in turn bumps every crate that
+# names it. Every requirement stays one caret within the dependency's current
+# minor, so the workspace never resolves two cores. `pub` here exists for use
+# between these crates rather than as a designed API, so expect more 0.x minors
+# than a library would take; that is the price of not republishing serve and
+# ui for every core fix.
+#
+# What a caret gives up is the guarantee that `cargo install cctop@x` builds
+# exactly the core it was tested with: without `--locked`, cargo takes the
+# newest compatible one. The published crate carries its Cargo.lock, `cctop
+# --update` passes `--locked`, and the README says to, so only a bare `cargo
+# install cctop` is exposed, and then only to a behaviour change that kept the
+# API.
 #
 # Each has its own version, and a release bumps (and publishes) only the ones
 # that changed since the last tag, plus the root every time. Changed means:
 #
 #   1. a file under its directory changed;
 #   2. its packaged manifest changed without one — a `[workspace.dependencies]`
-#      entry it uses, or a `[workspace.package]` field it inherits;
-#   3. an internal crate it depends on was bumped. This follows from the `=`
-#      pins: a published cctop-ui@0.28.3 requires cctop-core =0.28.3, so a
-#      cctop wanting core 0.28.4 beside it would resolve two cores and fail to
-#      build. A core change therefore bumps all but the tunnel,
-#      and a tunnel change bumps all five.
+#      entry it uses, a requirement on an internal crate that moved, or a
+#      `[workspace.package]` field it inherits;
+#   3. an internal crate it depends on takes a breaking bump. That is rule 2
+#      seen from before the bump: the requirement has to move. A non-breaking
+#      bump moves nothing, so a core fix publishes core and the root alone.
 #
 # `verify` enforces this on a release commit (tools/release-plan.sh check), and
 # `publish-crate` skips whatever crates.io already has.
@@ -91,10 +110,10 @@ default-members = [".", "crates/core", "crates/serve", "crates/tunnel", "crates/
 resolver = "3"
 
 [workspace.dependencies]
-cctop-core = { path = "crates/core", version = "=0.28.6" }
-cctop-serve = { path = "crates/serve", version = "=0.28.6" }
-cctop-tunnel = { path = "crates/tunnel", version = "=0.1.0" }
-cctop-ui = { path = "crates/ui", version = "=0.28.6" }
+cctop-core = { path = "crates/core", version = "0.28" }
+cctop-serve = { path = "crates/serve", version = "0.28" }
+cctop-tunnel = { path = "crates/tunnel", version = "0.1" }
+cctop-ui = { path = "crates/ui", version = "0.28" }
 
 anyhow = "1.0.104"
 # The pty shim and TIOCSTI injection need libc. It is already in the tree under
