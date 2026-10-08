@@ -16,13 +16,19 @@
 //!
 //! Parsing and matching are pure and pinned by the fixtures beside this file;
 //! [`fetch`] is the only part that touches the network, and the dashboard calls
-//! it from a thread of its own.
+//! it from a thread of its own — the loop in [`poll`], which the dashboard and
+//! a standalone `cctop serve` both run, so the vendor is asked on one schedule
+//! whichever of them is watching.
 
 use crate::pricing::Provider;
 use crate::session::{ActivityState, Session};
 use crate::util;
+use serde::Serialize;
 use serde_json::Value;
 use std::time::Duration;
+
+pub mod poll;
+pub use poll::spawn_poller;
 
 /// Short, because the answer is only useful while the user is still looking at
 /// the failure — and because the likeliest reason for a slow page is that this
@@ -35,7 +41,8 @@ const HTTP_TIMEOUT: Duration = Duration::from_secs(5);
 /// to. Google, Cursor and the rest publish pages too, but a session's failing
 /// request cannot be pinned to one of them from the transcript, and a status
 /// line that might be about your outage is worse than none.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Page {
     Anthropic,
     OpenAi,
@@ -68,7 +75,8 @@ impl Page {
 }
 
 /// Statuspage's severity ladder, ordered so `max` picks the worst.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Level {
     #[default]
     Operational,
@@ -105,7 +113,7 @@ impl Level {
 }
 
 /// One unresolved incident.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Incident {
     pub name: String,
     /// Where the vendor is in handling it: investigating, identified, monitoring.
@@ -118,7 +126,7 @@ pub struct Incident {
     pub components: Vec<String>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct Report {
     pub level: Level,
     /// The vendor's own one-line summary, e.g. "Partial System Degradation".
@@ -151,8 +159,32 @@ impl PageStatus {
     }
 }
 
+/// `{"state": "pending" | "ok" | "unavailable", …}`, with the report's fields
+/// beside the tag or the reason under `reason`.
+///
+/// Written by hand because the enum's shape is not the wire's: `Unavailable`
+/// carries a bare string, which serde's internal tagging cannot flatten, and a
+/// page reading `state` first is simpler than one probing for which key exists.
+impl Serialize for PageStatus {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        #[derive(Serialize)]
+        #[serde(tag = "state", rename_all = "lowercase")]
+        enum Wire<'a> {
+            Pending,
+            Ok(&'a Report),
+            Unavailable { reason: &'a str },
+        }
+        match self {
+            PageStatus::Pending => Wire::Pending,
+            PageStatus::Ok(r) => Wire::Ok(r),
+            PageStatus::Unavailable(why) => Wire::Unavailable { reason: why },
+        }
+        .serialize(serializer)
+    }
+}
+
 /// What every page last said.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct Status {
     pub anthropic: PageStatus,
     pub openai: PageStatus,
@@ -237,6 +269,31 @@ pub struct Alert {
     pub headline: String,
 }
 
+/// The fields, plus the two verdicts a reader would otherwise recompute — and
+/// could recompute differently.
+impl Serialize for Alert {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        #[derive(Serialize)]
+        struct Wire<'a> {
+            page: Page,
+            erroring: usize,
+            level: Level,
+            headline: &'a str,
+            confirmed: bool,
+            probably_local: bool,
+        }
+        Wire {
+            page: self.page,
+            erroring: self.erroring,
+            level: self.level,
+            headline: &self.headline,
+            confirmed: self.confirmed(),
+            probably_local: self.probably_local(),
+        }
+        .serialize(serializer)
+    }
+}
+
 impl Alert {
     /// The vendor is corroborating what the user is seeing. This is the whole
     /// point of the feature, so it gets a name.
@@ -300,6 +357,184 @@ pub fn alerts(status: &Status, erroring: &[(Page, usize)]) -> Vec<Alert> {
         )
     });
     out
+}
+
+// ---------------------------------------------------------------------------
+// Wording
+// ---------------------------------------------------------------------------
+//
+// Here rather than in the dashboard because two screens say it: the TUI's
+// footer and `!` panel, and the web dashboard's line and dialog. Worded once,
+// they cannot drift into telling the same user two different things.
+
+/// How loudly a line should be drawn. A tone rather than a colour, so each
+/// screen keeps its own palette.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Tone {
+    /// The vendor reports an outage.
+    Outage,
+    /// Maintenance, or the "probably this machine" hint: a warning, not a
+    /// verdict.
+    Warning,
+    /// Nothing worth raising a voice over.
+    Quiet,
+}
+
+impl Tone {
+    fn of(level: Level) -> Tone {
+        match level.is_outage() {
+            true => Tone::Outage,
+            false => Tone::Warning,
+        }
+    }
+}
+
+/// The one-line summary, when there is anything to say.
+///
+/// Three cases. The vendor reports an incident — name it, and say how many of
+/// yours fail against it when any do, because then it is the answer. Sessions
+/// fail while the page that covers them says all is well — say it is probably
+/// this machine, which is worth knowing early. Silent otherwise, including when
+/// no page could be reached: a line that permanently reads "operational", or
+/// "unknown" on every offline afternoon, is a line nobody reads.
+///
+/// The level is the alert's, which is what the TUI colours by; a probably-local
+/// alert's level is [`Level::Operational`], which reads as amber, not red.
+pub fn summary_line(alerts: &[Alert]) -> Option<(String, Level)> {
+    let a = alerts.first()?;
+    let what = match a.level {
+        Level::Maintenance => "maintenance",
+        _ => "incident",
+    };
+    let yours = match a.erroring {
+        0 => String::new(),
+        n => format!(" — {n} of yours failing"),
+    };
+    let text = match a.probably_local() {
+        true => format!(
+            "⚠ {} failing, {} reports all clear: probably this machine",
+            a.erroring,
+            a.page.label()
+        ),
+        false => format!(
+            "⚠ {} {what}: {}{yours}",
+            a.page.label(),
+            util::truncate(&a.headline, 40)
+        ),
+    };
+    Some((text, a.level))
+}
+
+/// The answer to "is it me?", which every detailed view leads with: on a bad
+/// day it is the only sentence that gets read.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Verdict {
+    pub text: String,
+    /// A second line, for the case that needs telling where to look.
+    pub detail: Option<String>,
+    pub tone: Tone,
+}
+
+pub fn verdict(alerts: &[Alert], erroring: &[(Page, usize)]) -> Verdict {
+    let total: usize = erroring.iter().map(|(_, n)| n).sum();
+    let are = |n: usize| if n == 1 { "is" } else { "are" };
+    let plain = |text: String| Verdict {
+        text,
+        detail: None,
+        tone: Tone::Quiet,
+    };
+    match alerts.first() {
+        Some(a) if a.confirmed() => Verdict {
+            text: format!(
+                "{} of your sessions {} failing, and {} reports an incident",
+                a.erroring,
+                are(a.erroring),
+                a.page.label()
+            ),
+            detail: None,
+            tone: Tone::of(a.level),
+        },
+        Some(a) if a.probably_local() => Verdict {
+            text: format!(
+                "{} of your sessions {} failing, but {} reports all clear",
+                a.erroring,
+                are(a.erroring),
+                a.page.label()
+            ),
+            detail: Some(
+                "so suspect this machine: network, proxy, credentials, a model name".into(),
+            ),
+            tone: Tone::Warning,
+        },
+        _ if total == 0 => plain("None of your running sessions is reporting API errors".into()),
+        // Failing, but no page that covers them has answered.
+        _ => plain(format!(
+            "{total} of your sessions {} failing; their status page has not answered",
+            are(total)
+        )),
+    }
+}
+
+/// Everything a reader needs to draw both the line and the panel, from the
+/// pages' last answers and the sessions on screen.
+#[derive(Debug, Clone, Serialize)]
+pub struct Document {
+    /// Every page, answered or not, in [`Page::ALL`] order.
+    pub pages: Vec<PageDocument>,
+    /// Most pressing first; see [`alerts`].
+    pub alerts: Vec<Alert>,
+    /// The one-line summary, absent when there is nothing to say.
+    pub line: Option<Line>,
+    pub verdict: Verdict,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PageDocument {
+    pub page: Page,
+    pub label: &'static str,
+    /// The page a human should open to read more.
+    pub site: &'static str,
+    /// Running sessions failing against this page.
+    pub erroring: usize,
+    #[serde(flatten)]
+    pub status: PageStatus,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct Line {
+    pub text: String,
+    pub tone: Tone,
+}
+
+/// Build the [`Document`] for these sessions.
+pub fn document<'a>(status: &Status, sessions: impl IntoIterator<Item = &'a Session>) -> Document {
+    let erroring = erroring_by_page(sessions);
+    let alerts = alerts(status, &erroring);
+    let mine = |page: Page| {
+        erroring
+            .iter()
+            .find(|(p, _)| *p == page)
+            .map_or(0, |(_, n)| *n)
+    };
+    Document {
+        pages: Page::ALL
+            .into_iter()
+            .map(|page| PageDocument {
+                page,
+                label: page.label(),
+                site: page.site(),
+                erroring: mine(page),
+                status: status.get(page).clone(),
+            })
+            .collect(),
+        line: summary_line(&alerts).map(|(text, level)| Line {
+            text,
+            tone: Tone::of(level),
+        }),
+        verdict: verdict(&alerts, &erroring),
+        alerts,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -451,8 +686,9 @@ fn degraded_components(components: Option<&Value>) -> Vec<String> {
     out
 }
 
-/// The fixtures, for the tests of the crates above that draw them.
-#[cfg(any(test, feature = "test-support"))]
+/// The fixtures, for the tests of the crates above that draw them, and for
+/// the server's debug build to stand a page in for the vendor's.
+#[cfg(any(test, feature = "test-support", feature = "debug"))]
 pub mod fixtures {
     /// Anthropic's page, healthy.
     pub const OPERATIONAL: &str = include_str!("fixtures/operational.json");
@@ -681,6 +917,104 @@ mod tests {
             openai: PageStatus::Pending,
         };
         assert!(alerts(&s, &[(Page::Anthropic, 3), (Page::OpenAi, 1)]).is_empty());
+    }
+
+    #[test]
+    fn a_page_serialises_with_its_state_first() {
+        let v = |status: PageStatus| serde_json::to_value(status).unwrap();
+        assert_eq!(
+            v(PageStatus::Pending),
+            serde_json::json!({"state": "pending"})
+        );
+        assert_eq!(
+            v(PageStatus::Unavailable("HTTP 503".into())),
+            serde_json::json!({"state": "unavailable", "reason": "HTTP 503"})
+        );
+        let major = v(parse(MAJOR));
+        assert_eq!(major["state"], "ok");
+        assert_eq!(major["level"], "major");
+        let first = &major["incidents"][0];
+        assert_eq!(first["name"], "Elevated errors on Claude Opus");
+        assert_eq!(first["stage"], "identified");
+        assert_eq!(first["level"], "major");
+        assert!(first["started_at"].is_i64(), "{first}");
+        assert_eq!(first["update"], "A bad deploy is being rolled back.");
+        assert_eq!(first["components"][1], "Claude Code");
+        assert_eq!(
+            v(parse(DEGRADED))["degraded"],
+            serde_json::json!(["Responses", "Login"])
+        );
+    }
+
+    #[test]
+    fn an_alert_serialises_its_verdicts() {
+        let a = &alerts(&status(OPERATIONAL, OPERATIONAL), &[(Page::Anthropic, 3)])[0];
+        assert_eq!(
+            serde_json::to_value(a).unwrap(),
+            serde_json::json!({
+                "page": "anthropic",
+                "erroring": 3,
+                "level": "operational",
+                "headline": "All Systems Operational",
+                "confirmed": false,
+                "probably_local": true,
+            })
+        );
+    }
+
+    #[test]
+    fn the_summary_line_says_who_is_to_blame() {
+        let line = |s: &Status, erroring: &[(Page, usize)]| {
+            summary_line(&alerts(s, erroring)).map(|(text, _)| text)
+        };
+        assert_eq!(line(&status(OPERATIONAL, OPERATIONAL), &[]), None);
+        assert_eq!(
+            line(&status(MAJOR, OPERATIONAL), &[]).as_deref(),
+            Some("⚠ Anthropic incident: Elevated errors on Claude Opus")
+        );
+        assert_eq!(
+            line(&status(OPERATIONAL, DEGRADED), &[(Page::OpenAi, 2)]).as_deref(),
+            Some("⚠ OpenAI incident: Increased error rates — 2 of yours failing")
+        );
+        assert_eq!(
+            line(&status(OPERATIONAL, OPERATIONAL), &[(Page::Anthropic, 3)]).as_deref(),
+            Some("⚠ 3 failing, Anthropic reports all clear: probably this machine")
+        );
+    }
+
+    fn failing(model: &str) -> Session {
+        let mut s = Session::new(Provider::Claude, model.into());
+        s.model = model.into();
+        s.inferred_running = true;
+        s.activity_state = ActivityState::ApiError;
+        s
+    }
+
+    #[test]
+    fn the_document_carries_every_page_and_the_line() {
+        let sessions = [failing("claude-opus-5")];
+        let doc = document(&status(MAJOR, OPERATIONAL), &sessions);
+        assert_eq!(doc.pages.len(), 2);
+        assert_eq!(doc.pages[0].erroring, 1);
+        assert_eq!(doc.pages[1].site, "https://status.openai.com");
+        assert!(doc.alerts[0].confirmed());
+        assert_eq!(doc.line.as_ref().unwrap().tone, Tone::Outage);
+        assert_eq!(
+            doc.verdict.text,
+            "1 of your sessions is failing, and Anthropic reports an incident"
+        );
+        let json = serde_json::to_value(&doc).unwrap();
+        assert_eq!(json["pages"][0]["state"], "ok");
+        assert_eq!(json["pages"][0]["label"], "Anthropic");
+        assert_eq!(json["line"]["tone"], "outage");
+
+        // Nothing fetched: every page pending, nothing to say.
+        let doc = document(&Status::default(), &sessions);
+        assert!(doc.alerts.is_empty() && doc.line.is_none());
+        let json = serde_json::to_value(&doc).unwrap();
+        assert_eq!(json["pages"][1]["state"], "pending");
+        assert_eq!(json["line"], serde_json::Value::Null);
+        assert_eq!(doc.verdict.tone, Tone::Quiet);
     }
 
     #[test]

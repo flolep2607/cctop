@@ -889,6 +889,7 @@ mod tests {
             updated: Condvar::new(),
             store: cctop_core::cache::Store::default(),
             quota: Mutex::new(quota::EMPTY.to_string()),
+            provider_status: Mutex::default(),
             topics: Mutex::new(search::Topics::default()),
             notify: None,
             hosts: HashMap::new(),

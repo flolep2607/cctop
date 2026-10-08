@@ -20,6 +20,7 @@ import { useSessions, useStored, useTabs, useTick } from "@/hooks/use-live";
 import type { Session, Tab } from "@/lib/types";
 import { SessionRow, WantingRow } from "./rows";
 import { Quota } from "./quota";
+import { ProviderStatus } from "./provider-status";
 
 type Sort = "recent" | "cost" | "tokens" | "context";
 // Every order is descending: each is a "which is the most" question.
@@ -224,6 +225,7 @@ export function DashboardPage() {
       <div className="shrink-0 space-y-2.5 px-3 pt-3 sm:px-4">
         <Quota />
         <HostBanners />
+        <ProviderStatus />
         <Tabs />
         <div className="flex flex-wrap items-center gap-2">
           <div className="relative min-w-52 flex-1 max-sm:basis-full">
