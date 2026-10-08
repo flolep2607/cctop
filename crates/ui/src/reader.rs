@@ -1024,6 +1024,9 @@ pub(super) fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
         ..inner
     };
 
+    // Laid out before the border is, because the footer offers `a` only when
+    // an agent's call is on screen, which only the layout knows.
+    lay_out(view, width);
     let block = Border::bordered()
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(theme::colors().border_hi))
@@ -1053,7 +1056,6 @@ pub(super) fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
         (Some(_), _) => {}
     }
 
-    lay_out(view, width);
     let Some(laid) = &view.laid else {
         return;
     };
