@@ -244,7 +244,10 @@ pub fn answer(session: &Session, choice: &str) -> Result<Done, Failed> {
 /// local row, a harness whose menu cctop knows, and an agent running to press
 /// at. Off is always allowed — it is the way out, and a way out that can be
 /// refused is not one.
-pub fn yolo(session: &Session, on: bool) -> Result<Done, Failed> {
+///
+/// `from` is where the switch was thrown, for the lasting record in
+/// [`crate::yolo_log`].
+pub fn yolo(session: &Session, on: bool, from: crate::yolo_log::Origin) -> Result<Done, Failed> {
     if on {
         local(session)?;
         if !matches!(
@@ -270,7 +273,12 @@ pub fn yolo(session: &Session, on: bool) -> Result<Done, Failed> {
         },
         false => None,
     };
-    match crate::yolo::set(&session.session_id, agent) {
+    let how = crate::yolo::Switch {
+        from,
+        cwd: Some(session.label_source.clone()).filter(|c| !c.is_empty()),
+        harness: Some(session.provider.as_str().to_string()),
+    };
+    match crate::yolo::set(&session.session_id, agent, &how) {
         Ok(()) => done(match on {
             true => "YOLO on — every prompt in this session will be allowed",
             false => "YOLO off — prompts wait for you again",
@@ -964,12 +972,27 @@ mod tests {
             branch: None,
             ..Default::default()
         });
-        assert!(yolo(&remote, true).unwrap_err().1.contains("build-box"));
+        assert!(
+            yolo(&remote, true, crate::yolo_log::Origin::Tui)
+                .unwrap_err()
+                .1
+                .contains("build-box")
+        );
         let gemini = Session::new(Provider::Gemini, "g1".into());
-        assert!(yolo(&gemini, true).unwrap_err().1.contains("gemini"));
-        assert_eq!(yolo(&session(), true).unwrap_err().0, 409);
-        assert!(yolo(&remote, false).is_ok());
-        assert!(yolo(&session(), false).is_ok());
+        assert!(
+            yolo(&gemini, true, crate::yolo_log::Origin::Tui)
+                .unwrap_err()
+                .1
+                .contains("gemini")
+        );
+        assert_eq!(
+            yolo(&session(), true, crate::yolo_log::Origin::Tui)
+                .unwrap_err()
+                .0,
+            409
+        );
+        assert!(yolo(&remote, false, crate::yolo_log::Origin::Tui).is_ok());
+        assert!(yolo(&session(), false, crate::yolo_log::Origin::Tui).is_ok());
     }
 
     #[test]

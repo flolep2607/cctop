@@ -332,7 +332,11 @@ impl App {
         let Some(session) = self.selected_session() else {
             return;
         };
-        let said = match cctop_core::actions::yolo(session, session.yolo.is_none()) {
+        let said = match cctop_core::actions::yolo(
+            session,
+            session.yolo.is_none(),
+            cctop_core::yolo_log::Origin::Tui,
+        ) {
             Ok(done) => done.message,
             Err((_, why)) => why,
         };
@@ -682,6 +686,7 @@ mod tests {
             session_id: "a".into(),
             pids: Vec::new(),
             reported: cctop_core::hook::Reported {
+                call: None,
                 signal,
                 cwd: "/w/proj".into(),
                 permission: None,
@@ -783,6 +788,7 @@ mod tests {
             session_id: "a".into(),
             pids: Vec::new(),
             reported: cctop_core::hook::Reported {
+                call: None,
                 signal: cctop_core::hook::Signal::NeedsInput,
                 cwd: "/w/proj".into(),
                 permission: None,
@@ -837,6 +843,7 @@ mod tests {
             session_id: "a".into(),
             pids: Vec::new(),
             reported: cctop_core::hook::Reported {
+                call: None,
                 signal: cctop_core::hook::Signal::Busy,
                 cwd: "/w/proj".into(),
                 permission: None,
@@ -876,6 +883,7 @@ mod tests {
             session_id: "a".into(),
             pids: Vec::new(),
             reported: cctop_core::hook::Reported {
+                call: None,
                 provisional: false,
                 signal,
                 cwd: "/w/proj".into(),
@@ -979,6 +987,7 @@ mod tests {
             session_id: "a".into(),
             pids: Vec::new(),
             reported: cctop_core::hook::Reported {
+                call: None,
                 signal: Signal::Idle,
                 cwd: "/w/proj".into(),
                 permission: None,
@@ -1040,6 +1049,7 @@ mod tests {
             session_id: "a".into(),
             pids: Vec::new(),
             reported: cctop_core::hook::Reported {
+                call: None,
                 provisional: false,
                 signal: cctop_core::hook::Signal::Busy,
                 cwd: "/w/proj".into(),
@@ -1092,6 +1102,7 @@ mod tests {
             session_id: id.into(),
             pids: Vec::new(),
             reported: cctop_core::hook::Reported {
+                call: None,
                 provisional: false,
                 signal,
                 cwd: "/w/proj".into(),
@@ -1153,6 +1164,7 @@ mod tests {
             session_id: id.into(),
             pids: Vec::new(),
             reported: cctop_core::hook::Reported {
+                call: None,
                 provisional: false,
                 signal,
                 cwd: "/w/proj".into(),
@@ -1197,6 +1209,7 @@ mod tests {
             session_id: "79709c93-1111-4111-8111-111111111111".into(),
             pids: Vec::new(),
             reported: cctop_core::hook::Reported {
+                call: None,
                 provisional: false,
                 signal: cctop_core::hook::Signal::Idle,
                 cwd: "/w/proj".into(),
@@ -1256,6 +1269,7 @@ mod tests {
             session_id: "a".into(),
             pids: Vec::new(),
             reported: cctop_core::hook::Reported {
+                call: None,
                 provisional: false,
                 signal: cctop_core::hook::Signal::NeedsInput,
                 cwd: "/w/proj".into(),
@@ -1282,6 +1296,7 @@ mod tests {
             session_id: "a".into(),
             pids: Vec::new(),
             reported: cctop_core::hook::Reported {
+                call: None,
                 provisional: false,
                 signal: cctop_core::hook::Signal::NeedsInput,
                 cwd: "/w/proj".into(),
@@ -1318,6 +1333,7 @@ mod tests {
             sandbox: None,
             agent: None,
             reported: Reported {
+                call: None,
                 signal,
                 cwd: String::new(),
                 permission: None,
@@ -1361,6 +1377,7 @@ mod tests {
             sandbox: None,
             agent: None,
             reported: Reported {
+                call: None,
                 signal,
                 cwd: String::new(),
                 permission: None,
@@ -1499,6 +1516,7 @@ mod tests {
         use cctop_core::alert::Hooked;
         use cctop_core::hook::Signal;
         let report = |signal, age| cctop_core::hook::Reported {
+            call: None,
             signal,
             cwd: String::new(),
             permission: None,

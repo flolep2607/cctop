@@ -71,6 +71,7 @@ pub mod update;
 pub mod util;
 pub mod watch;
 pub mod yolo;
+pub mod yolo_log;
 
 /// Set by the `cctop` binary before it does anything else.
 static THE_BINARY: AtomicBool = AtomicBool::new(false);

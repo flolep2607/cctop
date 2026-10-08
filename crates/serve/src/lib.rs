@@ -2122,7 +2122,7 @@ fn api_act(shared: &Shared, stream: &mut TcpStream, request: &Request, rest: &st
         "send" => actions::send(session, &field("text")),
         "answer" => actions::answer(session, &field("choice")),
         "yolo" => match body.get("on").and_then(serde_json::Value::as_bool) {
-            Some(on) => actions::yolo(session, on),
+            Some(on) => actions::yolo(session, on, cctop_core::yolo_log::Origin::Web),
             None => Err((400, "YOLO is `{\"on\": true}` or `{\"on\": false}`".into())),
         },
         "resume" => actions::resume(session),

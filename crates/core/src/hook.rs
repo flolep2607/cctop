@@ -454,6 +454,18 @@ fn yolo_decide(event: &str, verdict: &std::sync::mpsc::Sender<Option<String>>) {
         return;
     };
     let ask = ask_of(&body);
+    // The lasting record before anything that can wait: one append with no
+    // lock, so a busy `yolo.lock` below cannot cost it, and after the
+    // verdict, so nothing here can cost the answer.
+    let mut line = crate::yolo_log::Line::allow(
+        session,
+        crate::yolo_log::Via::Hook,
+        crate::yolo_log::call_of(&body),
+        ask.as_deref(),
+    );
+    line.cwd = field("cwd").map(str::to_string);
+    line.harness = Some(crate::pricing::Provider::Claude.as_str().to_string());
+    crate::yolo_log::record(&line);
     crate::elog::event(
         "yolo",
         "hook-allowed",
@@ -827,6 +839,10 @@ fn envelope(name: &str, payload: &[u8], pids: &[u32]) -> Option<Vec<u8>> {
         // What a permission prompt is asking for, so whoever answers it from
         // somewhere other than the agent's own terminal is not approving blind.
         "ask": ask_of(&body),
+        // The same prompt's tool and whole input field, redacted, for the
+        // YOLO log when cctop answers it with a key press. Only on a
+        // permission prompt, as `ask` is, and absent on everything else.
+        "call": is_permission(&body).then(|| crate::yolo_log::call_of(&body)).flatten(),
         // A question with choices, which Allow and Deny must never answer: see
         // [`Reported::question`].
         "question": is_question(&body),
@@ -869,12 +885,18 @@ fn is_question(body: &serde_json::Value) -> bool {
     body.get("tool_name").and_then(|v| v.as_str()) == Some("AskUserQuestion")
 }
 
+/// Whether an event is a permission prompt, in any harness's spelling.
+fn is_permission(body: &serde_json::Value) -> bool {
+    matches!(
+        body.get("hook_event_name")
+            .or_else(|| body.get("type"))
+            .and_then(|v| v.as_str()),
+        Some("PermissionRequest" | "permission.asked")
+    )
+}
+
 fn ask_of(body: &serde_json::Value) -> Option<String> {
-    let event = body
-        .get("hook_event_name")
-        .or_else(|| body.get("type"))
-        .and_then(|v| v.as_str())?;
-    if !matches!(event, "PermissionRequest" | "permission.asked") {
+    if !is_permission(body) {
         return None;
     }
     // A question says what it asks in its own words — the first one, when it
@@ -1121,6 +1143,11 @@ pub struct Reported {
     /// AskUserQuestion — rather than a permission prompt. Allow and Deny would
     /// press keys that *pick an option* there, so nothing may offer them.
     pub question: bool,
+    /// The tool the prompt is for and what it was asked to touch, in full
+    /// and redacted, when the payload named a tool: see
+    /// [`crate::yolo_log::call_of`]. What a key press records in the YOLO
+    /// log, which the one-line `ask` is too short and too unredacted for.
+    pub call: Option<crate::yolo_log::Call>,
 }
 
 /// How long a permission prompt is given to answer itself before it is somebody
@@ -1289,6 +1316,7 @@ impl Reports {
                     && before.signal == Signal::NeedsInput
                 {
                     reported.ask = before.ask.clone();
+                    reported.call = reported.call.take().or_else(|| before.call.clone());
                     // And what kind of prompt it is: the notification knows
                     // even less about that than about the question's words.
                     reported.question = reported.question || before.question;
@@ -1891,6 +1919,9 @@ fn parse(line: &str) -> Option<Event> {
                 .and_then(|v| v.as_str())
                 .map(str::to_string),
             question: value.get("question").and_then(|v| v.as_bool()) == Some(true),
+            call: value
+                .get("call")
+                .and_then(|v| serde_json::from_value(v.clone()).ok()),
             at: std::time::Instant::now(),
         },
     })
@@ -3716,6 +3747,7 @@ mod tests {
         // Held, not lost: it becomes real when the grace runs out with no
         // answer having arrived.
         let matured = Reported {
+            call: None,
             at: std::time::Instant::now() - (PERMISSION_GRACE + std::time::Duration::from_secs(1)),
             ..asked
         };
@@ -3774,6 +3806,7 @@ mod tests {
     #[test]
     fn a_stale_claim_to_be_working_stops_being_believed() {
         let aged = |signal: Signal, ago: std::time::Duration| Reported {
+            call: None,
             provisional: false,
             ask: None,
             question: false,
@@ -3890,6 +3923,40 @@ mod tests {
             "x".repeat(2000)
         );
         assert_eq!(ask(&long).unwrap().chars().count(), MAX_ASK);
+    }
+
+    /// A permission request also carries its tool and whole command,
+    /// redacted, through the socket to the reader — and keeps it through the
+    /// nameless notification Claude Code sends after it. Nothing else carries
+    /// one.
+    #[test]
+    fn a_permission_request_carries_its_call() {
+        let raw = br#"{"session_id":"s-1","cwd":"/w","hook_event_name":"PermissionRequest","tool_name":"Bash","tool_input":{"command":"TOKEN=dummy make\nmake install"}}"#;
+        let line = envelope("PermissionRequest", raw, &[]).expect("envelope");
+        let text = std::str::from_utf8(&line).unwrap();
+        let sent: serde_json::Value = serde_json::from_str(text.trim()).unwrap();
+        assert!(!sent["call"].to_string().contains("dummy"), "{text}");
+        let event = parse(text.trim()).expect("parse");
+        let call = event.reported.call.clone().expect("a call");
+        assert_eq!(call.tool, "Bash");
+        assert_eq!(
+            call.detail.as_deref(),
+            Some("TOKEN=[redacted] make\nmake install")
+        );
+
+        let mut reports = Reports::default();
+        reports.observe(&event);
+        let note = br#"{"session_id":"s-1","cwd":"/w","hook_event_name":"Notification","notification_type":"permission_prompt"}"#;
+        let line = envelope("Notification", note, &[]).expect("envelope");
+        let note = parse(std::str::from_utf8(&line).unwrap().trim()).expect("parse");
+        assert_eq!(note.reported.call, None);
+        reports.observe(&note);
+        assert_eq!(reports.report("s-1").unwrap().call, Some(call));
+
+        let tool = br#"{"session_id":"s-1","hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"ls"}}"#;
+        let line = envelope("PreToolUse", tool, &[]).expect("envelope");
+        let event = parse(std::str::from_utf8(&line).unwrap().trim()).expect("parse");
+        assert_eq!(event.reported.call, None);
     }
 
     /// End to end, from the bytes Claude Code actually writes to the hook.
