@@ -127,9 +127,11 @@ Three things live behind it, all reachable only from a build that asked:
   (`cctop -j`, `cctop why`), but not from the serving process itself, which is
   where a disagreement between the page and the terminal would show.
 - `/api/debug/fault` — makes subsequent `/api/` responses fail in a chosen way
-  (`502`, `slow`, `html`, `empty`). The pages have to survive a tunnel whose far
-  end has gone and a proxy answering HTML where JSON was asked for, and neither
-  can be produced on demand by a correct server.
+  (`502`, `slow`, `html`, `empty`), or holds the event stream open and silent
+  (`stall`, what a quick tunnel that does not carry SSE looks like). The pages
+  have to survive a tunnel whose far end has gone and a proxy answering HTML
+  where JSON was asked for, and neither can be produced on demand by a correct
+  server.
 - `/api/debug/log?level=io` — turns `CCTOP_LOG` on for a server that was not
   started with it.
 
