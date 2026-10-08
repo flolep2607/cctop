@@ -31,6 +31,7 @@
 #   needs-bump   The internal crates rules 1-3 say must be bumped, closing rule
 #                3 over rules 1 and 2 rather than over the versions, so it
 #                answers before anything is bumped. `tools/bump.sh` reads it.
+#   base         The tag the other commands compare against.
 #   unpublished  The workspace crates whose current version is not on
 #                crates.io yet, in the order they must be published. What
 #                `publish-crate` publishes.
@@ -218,6 +219,12 @@ case $cmd in
         done
         ;;
 
+    base)
+        base=$(last_tag)
+        [ -n "$base" ] || die "no v* tag to compare against"
+        echo "$base"
+        ;;
+
     needs-bump)
         base=$(last_tag)
         [ -n "$base" ] || die "no v* tag to compare against"
@@ -281,7 +288,7 @@ case $cmd in
         ;;
 
     *)
-        echo "usage: $0 [check|needs-bump|unpublished]" >&2
+        echo "usage: $0 [check|needs-bump|base|unpublished]" >&2
         exit 2
         ;;
 esac

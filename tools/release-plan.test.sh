@@ -19,7 +19,7 @@ trap 'rm -rf "$work"' EXIT
 # manifests point at. The mirrored docs and the web app are neither.
 git -C "$src" archive HEAD -- . ':(exclude)docs' ':(exclude)RnD' ':(exclude)web' | tar -x -C "$work"
 # The script under test as it is in the working tree, edits included.
-cp "$src/tools/release-plan.sh" "$work/tools/release-plan.sh"
+cp "$src/tools/release-plan.sh" "$src/tools/bump.sh" "$work/tools/"
 cd "$work"
 git init -q -b main
 git config user.name test
@@ -131,6 +131,23 @@ else
     fail=$((fail + 1))
     echo "FAIL needs-bump after a core change: $got"
 fi
+
+# bump.sh, after a serve change: serve and the root move, nothing else, and
+# the guard agrees.
+git checkout -q -f "v$base"
+touch_crate serve
+git commit -q -am serve
+CCTOP_BUMP_SKIP_LOCK=1 tools/bump.sh "$next" | sed 's/^/       /'
+git commit -q -am bumped
+out=$(tools/release-plan.sh check 2>&1) || true
+if grep -q "publishes: cctop-serve cctop$" <<<"$out"; then
+    pass=$((pass + 1))
+    echo "ok   bump.sh after a serve change"
+else
+    fail=$((fail + 1))
+    echo "FAIL bump.sh after a serve change"
+fi
+sed 's/^/       /' <<<"$out"
 
 echo "$pass passed, $fail failed"
 [ "$fail" = 0 ]
