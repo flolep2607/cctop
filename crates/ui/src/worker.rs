@@ -41,6 +41,11 @@ pub(super) enum Request {
         session: Box<Session>,
         host: Option<cctop_core::fleet::Host>,
         before: Option<usize>,
+        /// One of the session's subagents, by [`AgentCall::id`], to read its
+        /// own transcript rather than the session's.
+        ///
+        /// [`AgentCall::id`]: cctop_core::chat::AgentCall::id
+        agent: Option<String>,
     },
     /// What the agents' own hooks have said about which processes they run
     /// under. Sent when it changes rather than with each walk: events arrive on
@@ -141,6 +146,7 @@ pub(super) enum Response {
     /// local builder produces, which is why both come back in one arm.
     Chat {
         key: String,
+        agent: Option<String>,
         before: Option<usize>,
         result: Result<Box<cctop_core::chat::Conversation>, String>,
     },
@@ -548,6 +554,7 @@ pub(super) fn spawn_worker(
                     session,
                     host,
                     before,
+                    agent,
                 } => {
                     // Off the request loop, for the same reason as
                     // `Request::Data`: building the conversation re-reads a
@@ -569,6 +576,9 @@ pub(super) fn spawn_worker(
                                 if let Some(marker) = marker.as_deref() {
                                     args.extend(["--before", marker]);
                                 }
+                                if let Some(agent) = agent.as_deref() {
+                                    args.extend(["--agent", agent]);
+                                }
                                 host.run(&args).and_then(|json| {
                                     serde_json::from_str(&json).map_err(|e| {
                                         format!(
@@ -578,10 +588,30 @@ pub(super) fn spawn_worker(
                                     })
                                 })
                             }
-                            None => Ok(cctop_core::chat::build(&session, before)),
+                            None => Ok(match agent.as_deref() {
+                                Some(agent) => cctop_core::chat::build_agent(
+                                    &session, agent, before,
+                                )
+                                .unwrap_or_else(|| {
+                                    agent_note("this session does not list that agent")
+                                }),
+                                None => cctop_core::chat::build(&session, before),
+                            }),
+                        };
+                        // An agent's turns are a detail of a conversation that
+                        // is already on screen, so failing to read them is a
+                        // note in their place, as the web block says it — and
+                        // the likeliest failure is a remote cctop from before
+                        // `--agent`, which updating fixes.
+                        let result = match (&agent, result) {
+                            (Some(_), Err(why)) => Ok(agent_note(&format!(
+                                "Could not read this agent's turns: {why}. On a session from another machine, the cctop there may be too old to answer — update it."
+                            ))),
+                            (_, result) => result,
                         };
                         let _ = tx.send(Response::Chat {
                             key: session.key(),
+                            agent,
                             before,
                             result: result.map(Box::new),
                         });
@@ -644,6 +674,15 @@ pub(super) fn spawn_worker(
         }
         loader.store().save();
     })
+}
+
+/// A conversation that is only a note saying why there is nothing to read.
+fn agent_note(why: &str) -> cctop_core::chat::Conversation {
+    cctop_core::chat::Conversation {
+        supported: false,
+        note: Some(why.to_string()),
+        ..cctop_core::chat::Conversation::default()
+    }
 }
 
 #[cfg(test)]

@@ -147,6 +147,11 @@ pub struct ContextBreakdown {
     pub tool_input: u64,
     pub attachments: u64,
     pub user_text: u64,
+    /// Messages other agents sent in — a subagent's hand-back, a peer's or a
+    /// coordinator's message — which arrive where a person's prompt goes and
+    /// used to be counted as theirs.
+    #[serde(default)]
+    pub agent_text: u64,
     pub assistant_text: u64,
     /// The segment begins at a compaction summary rather than at the start of
     /// the session, so `startup` carries that summary too.
@@ -194,7 +199,12 @@ pub fn decimate(series: &mut Vec<CtxPoint>) {
 impl ContextBreakdown {
     /// Everything the transcript could be read for, `startup` excluded.
     pub fn estimated(&self) -> u64 {
-        self.tool_output + self.tool_input + self.attachments + self.user_text + self.assistant_text
+        self.tool_output
+            + self.tool_input
+            + self.attachments
+            + self.user_text
+            + self.agent_text
+            + self.assistant_text
     }
 
     /// The window minus everything attributed to it.
@@ -1742,6 +1752,17 @@ pub struct Subagent {
     pub status: SubagentStatus,
     pub cost: f64,
     pub tool_count: u64,
+    /// Replies in the agent's own transcript: one per API request that said
+    /// or called something, as the conversation view draws them.
+    #[serde(default)]
+    pub turns: u64,
+    /// Every token billed to the agent, whatever the plan priced them at.
+    #[serde(default)]
+    pub tokens: u64,
+    /// What the agent said last, clipped: the report a background agent that
+    /// never handed back is shown with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_text: Option<String>,
     pub tool_use_id: Option<String>,
     pub context: Option<ContextUsage>,
     /// The on-disk transcript was purged; only parent-side metadata survives.

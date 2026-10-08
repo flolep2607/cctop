@@ -437,6 +437,9 @@ mod tests {
                 status: cctop_core::session::SubagentStatus::Running,
                 cost: 0.0,
                 tool_count: 0,
+                turns: 0,
+                tokens: 0,
+                last_text: None,
                 tool_use_id: None,
                 context: None,
                 ghost: false,
@@ -484,6 +487,26 @@ mod tests {
                 },
             ]
         );
+    }
+
+    /// The reader opened on a child row reads that agent's own turns, through
+    /// the session that lists it.
+    #[test]
+    fn reading_a_child_row_opens_that_agents_turns() {
+        let mut app = test_app();
+        app.sessions = vec![with_subagents("a", &["one", "two"])];
+        app.expanded.insert(app.sessions[0].key());
+        app.refilter();
+        app.selected = 2;
+
+        app.open_conversation();
+
+        let view = app.chat.as_ref().expect("the reader opened");
+        assert_eq!(view.session.key(), app.sessions[0].key());
+        let agent = view.agent.as_ref().expect("on the agent");
+        assert_eq!(agent.id, "agent-two");
+        assert_eq!(agent.title(), "general-purpose — two");
+        assert!(view.parent.is_none(), "Esc leaves the reader");
     }
 
     /// The cursor is anchored on what it was pointing at, and a child is only

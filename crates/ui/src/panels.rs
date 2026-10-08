@@ -1267,6 +1267,7 @@ pub fn context(
         Slice::held("Tool input", b.tool_input, palette.chart_hues[0]),
         Slice::held("Attachments", b.attachments, palette.name_hue),
         Slice::held("Your messages", b.user_text, palette.cost_low),
+        Slice::held("Agent messages", b.agent_text, palette.cost_mid),
         Slice::held("Assistant text", b.assistant_text, palette.chart_hues[1]),
     ];
     slices.retain(|s| s.tokens > 0);
@@ -2260,6 +2261,9 @@ mod tests {
             status: SubagentStatus::Done,
             cost,
             tool_count: 3,
+            turns: 0,
+            tokens: 0,
+            last_text: None,
             tool_use_id: None,
             context: Some(ContextUsage {
                 used: 1000,
@@ -2800,6 +2804,7 @@ mod tests {
             tool_input: 18_000,
             attachments: 2_100,
             user_text: 8_100,
+            agent_text: 0,
             assistant_text: 6_900,
             after_compaction: false,
             superseded: false,
@@ -2835,6 +2840,32 @@ mod tests {
     /// The header carries the two numbers a running session is consulted for —
     /// how full the window is and how much room is left — and the bar underneath
     /// spans the panel exactly.
+    /// Another agent's words get a slice of their own, and only when there
+    /// are any: a session nobody reported into shows no empty row.
+    #[test]
+    fn agent_messages_get_a_slice_once_there_are_some() {
+        let mut s = Session::new(Provider::Claude, "x".into());
+        s.context = Some(ContextUsage {
+            used: 118_200,
+            max: 200_000,
+            compacted: false,
+        });
+        let shown = |agent_text: u64| {
+            let data = SessionData {
+                context_breakdown: Some(cctop_core::session::ContextBreakdown {
+                    agent_text,
+                    ..breakdown()
+                }),
+                ..Default::default()
+            };
+            rendered(&s, &data, 100).join("\n")
+        };
+        assert!(!shown(0).contains("Agent messages"));
+        let text = shown(4_000);
+        assert!(text.contains("Agent messages"), "{text}");
+        assert!(text.contains("Your messages"), "{text}");
+    }
+
     #[test]
     fn the_context_panel_leads_with_headroom_and_a_full_width_bar() {
         let mut s = Session::new(Provider::Claude, "x".into());

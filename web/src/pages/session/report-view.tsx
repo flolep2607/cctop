@@ -73,6 +73,9 @@ const PARTS: [string, string, string][] = [
   ["tool_input", "Tool input", "var(--chart-4)"],
   ["attachments", "Attachments", "var(--chart-3)"],
   ["user_text", "You", "var(--chart-5)"],
+  // Another agent's words, arriving where the person's go: kin to "You" in
+  // colour, so the two read as the same kind of message from different hands.
+  ["agent_text", "Agent messages", "color-mix(in oklch, var(--chart-5) 50%, var(--muted-foreground))"],
   ["assistant_text", "Assistant", "var(--chart-2)"],
 ];
 
