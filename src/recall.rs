@@ -678,8 +678,13 @@ mod tests {
     /// End to end on real transcript files: the session that discussed the
     /// thing comes back as a passage, the caller's own session does not, and
     /// a passage can be opened by number.
+    ///
+    /// Words alone: under test the model directory is a fresh temporary one,
+    /// so the topical tier is absent, and the index it would have saved goes
+    /// nowhere near the developer's `~/.cache/cctop`.
     #[test]
     fn recall_finds_the_passage_and_skips_the_caller() {
+        assert!(!cctop_core::embed::fetch::present());
         let dir = std::env::temp_dir().join(format!("cctop-recall-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let long = "filler words about nothing in particular ".repeat(20);
