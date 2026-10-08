@@ -287,6 +287,21 @@ see [Sharing an agent to a browser](driving-agents.md#sharing-an-agent-to-a-brow
 hostname, which would want the page's token. `CCTOP_TUNNEL_TOKEN` alone names
 no share hostname, so shares keep their quick tunnel there.
 
+**Choosing addresses.** With an API token connected, the page's hostname and
+each agent's share hostname can be renamed where they are shown: `e` or a
+right-click on the internet link in the serve panel, or on the `Address` line
+of a share's panel; on the page, the address in the header and the `Address`
+row of a session (full link only — the read-only link has neither, and the
+server refuses it). A name is one label under your domain. It is refused,
+before anything is written, when it is not a usable label, when another of
+cctop's names has it, or when the domain already has a record cctop did not
+make. The new record is made first and the old one deleted last, so a failure
+leaves the old name working. Renaming the dashboard moves the page while it
+runs and keeps its token: links to the old hostname stop working, which the
+field says before Enter, and the page you renamed it from goes to the new one.
+Agents' names live in the `[tunnel]` table beside the records cctop made, and
+`cctop tunnel remove` deletes them with the rest.
+
 `--tunnel=quick` asks for a quick tunnel even with an account connected. And if
 your tunnel cannot come up — its token revoked, the edge unreachable, or another
 cctop on this machine already serving it (two would become replicas, and

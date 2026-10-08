@@ -27,7 +27,7 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 
-use crate::tunnel::Account;
+use crate::tunnel::{Account, ShareName};
 
 /// Cloudflare's API.
 const API_BASE: &str = "https://api.cloudflare.com/client/v4";
@@ -474,17 +474,46 @@ pub fn check_hostname(hostname: &str, zone: &Zone) -> Result<String, Error> {
             zone = zone.name
         )));
     }
+    check_label(label)?;
+    Ok(hostname)
+}
+
+/// One DNS label as setup and renaming both accept it: letters, digits and
+/// `-`, not at either end, at most 63 characters. Lowercase is the caller's.
+fn check_label(label: &str) -> Result<(), Error> {
     let valid = !label.is_empty()
         && label.len() <= 63
         && !label.starts_with('-')
         && !label.ends_with('-')
         && label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-');
     match valid {
-        true => Ok(hostname),
+        true => Ok(()),
         false => Err(Error::Hostname(format!(
-            "{label} is not a usable DNS label: letters, digits and - only"
+            "{label} is not a usable name: letters, digits and - only"
         ))),
     }
+}
+
+/// The label a typed name means under `zone`: `myagent`, or
+/// `myagent.example.com` with the account's own zone, lowercased. Anything
+/// deeper or elsewhere is refused for the reason [`check_hostname`] gives.
+pub fn label_for(input: &str, zone: &str) -> Result<String, Error> {
+    let typed = input.trim().trim_end_matches('.').to_ascii_lowercase();
+    if !typed.contains('.') {
+        check_label(&typed)?;
+        return Ok(typed);
+    }
+    let zone = Zone {
+        id: String::new(),
+        name: zone.to_string(),
+        account_id: String::new(),
+        active: true,
+    };
+    let hostname = check_hostname(&typed, &zone)?;
+    Ok(hostname
+        .strip_suffix(&format!(".{}", zone.name))
+        .unwrap_or(&hostname)
+        .to_string())
 }
 
 /// The name to offer: `cctop.<zone>`, or — when another machine has that one
@@ -561,7 +590,338 @@ pub fn create(api: &Api, zone: &Zone, hostname: &str, machine: &str) -> Result<A
         tunnel_id: Some(tunnel_id),
         dns_record_ids: records,
         api_token: Some(api.token.clone()),
+        share_names: Default::default(),
         from_env: false,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Choosing addresses after setup
+// ---------------------------------------------------------------------------
+
+/// What a rename did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Renamed {
+    /// The account to store, with the new name and record id in it.
+    pub account: Account,
+    /// The hostname given up, whose record was deleted. `None` when nothing
+    /// was given up: a first name, or one that was already this.
+    pub old: Option<String>,
+    /// The hostname answering now. For a share, `None` when the name was
+    /// cleared and the agent is back on the default share hostname.
+    pub new: Option<String>,
+    /// Whether anything was written at all.
+    pub changed: bool,
+    /// Something left behind that the user should hear about: the old record,
+    /// when deleting it failed after the new one was up.
+    pub note: Option<String>,
+}
+
+/// The zone the account's names live in, when cctop can write it.
+fn writable_zone(account: &Account) -> Result<(Zone, String), Error> {
+    account
+        .can_rename()
+        .map_err(|why| Error::Hostname(why.to_string()))?;
+    let (Some(zone_id), Some(zone_name), Some(account_id), Some(tunnel_id)) = (
+        &account.zone_id,
+        account.zone_name(),
+        &account.account_id,
+        &account.tunnel_id,
+    ) else {
+        return Err(Error::Hostname(crate::tunnel::TOKEN_ONLY.to_string()));
+    };
+    let zone = Zone {
+        id: zone_id.clone(),
+        name: zone_name.to_string(),
+        account_id: account_id.clone(),
+        active: true,
+    };
+    Ok((zone, tunnel_id.clone()))
+}
+
+/// Every hostname the account's tunnel answers, for its ingress list.
+fn hostnames(account: &Account) -> Vec<String> {
+    let names = account
+        .share_names
+        .keys()
+        .filter_map(|session| account.named_share_host(session));
+    account
+        .hostname
+        .iter()
+        .chain(account.share_hostname.iter())
+        .cloned()
+        .chain(names)
+        .collect()
+}
+
+/// Who already answers on `host`, as the end of a sentence, when it is one
+/// of the account's own: the page, the default share hostname, or another
+/// agent's name. `owner` is the one being renamed, never in the way of
+/// itself.
+fn taken_by(
+    account: &Account,
+    host: &str,
+    owner: Option<&str>,
+    agents: &dyn Fn(&str) -> String,
+) -> Option<String> {
+    if account.hostname.as_deref() == Some(host) && owner.is_some() {
+        return Some("the dashboard".to_string());
+    }
+    if account.share_hostname.as_deref() == Some(host) {
+        return Some("shares without a name of their own".to_string());
+    }
+    account
+        .share_names
+        .keys()
+        .filter(|session| Some(session.as_str()) != owner)
+        .find(|session| account.named_share_host(session).as_deref() == Some(host))
+        .map(|session| agents(session))
+}
+
+/// Refuse `host` if anything already answers on it, before any write: one of
+/// the account's own names, or a record cctop did not make.
+fn check_free(
+    api: &Api,
+    zone: &Zone,
+    account: &Account,
+    host: &str,
+    owner: Option<&str>,
+    agents: &dyn Fn(&str) -> String,
+) -> Result<(), Error> {
+    if let Some(who) = taken_by(account, host, owner, agents) {
+        return Err(Error::Hostname(format!("{host} is already used by {who}")));
+    }
+    if api.record_exists(zone, host)? {
+        return Err(Error::Hostname(format!(
+            "{host} already has a DNS record that cctop did not make"
+        )));
+    }
+    Ok(())
+}
+
+/// The sentence for an old record that would not go.
+fn left_behind(host: &str, id: &str, error: &Error) -> String {
+    format!(
+        "{host} still has its DNS record ({id}): deleting it failed ({error}). Delete it in \
+         Cloudflare's dashboard."
+    )
+}
+
+/// Give `session_id`'s shares the address `input` — a label, or a hostname
+/// under the account's zone — or, with an empty `input` or the default share
+/// hostname's own label, send it back to the default share hostname.
+/// `agents` names another session for a refusal.
+///
+/// Every refusal comes before any write. Then the order is setup's: the new
+/// record, the ingress list, and only then the old record, so a failure
+/// part-way leaves the old name answering — whatever was created is deleted
+/// again.
+pub fn name_share_with(
+    api: &Api,
+    account: &Account,
+    session_id: &str,
+    input: &str,
+    agents: &dyn Fn(&str) -> String,
+) -> Result<Renamed, Error> {
+    let (zone, tunnel_id) = writable_zone(account)?;
+    let current = account.share_names.get(session_id);
+    let old = account.named_share_host(session_id);
+    let unchanged = |account: &Account| Renamed {
+        account: account.clone(),
+        old: None,
+        new: account.share_host_for(session_id),
+        changed: false,
+        note: None,
+    };
+
+    // The default share hostname typed back in — what the field is
+    // prefilled with for an agent with no name — is a clear, not a clash.
+    let typed = match input.trim().is_empty() {
+        true => None,
+        false => Some(label_for(input, &zone.name)?),
+    };
+    let default = typed.as_ref().is_some_and(|label| {
+        account.share_hostname.as_deref() == Some(&format!("{label}.{}", zone.name))
+    });
+    let Some(label) = typed.filter(|_| !default) else {
+        let Some(current) = current else {
+            return Ok(unchanged(account));
+        };
+        let mut next = account.clone();
+        next.share_names.remove(session_id);
+        let refs: Vec<String> = hostnames(&next);
+        api.configure(
+            &zone.account_id,
+            &tunnel_id,
+            &refs.iter().map(String::as_str).collect::<Vec<_>>(),
+        )?;
+        let note = current.record_id.as_ref().and_then(|id| {
+            api.delete_record(&zone.id, id)
+                .err()
+                .map(|e| left_behind(old.as_deref().unwrap_or_default(), id, &e))
+        });
+        return Ok(Renamed {
+            new: next.share_hostname.clone(),
+            account: next,
+            old,
+            changed: true,
+            note,
+        });
+    };
+
+    if current.is_some_and(|c| c.label == label) {
+        return Ok(unchanged(account));
+    }
+    let host = format!("{label}.{}", zone.name);
+    check_free(api, &zone, account, &host, Some(session_id), agents)?;
+
+    let record = api.add_cname(&zone, &host, &tunnel_id)?;
+    let mut next = account.clone();
+    next.share_names.insert(
+        session_id.to_string(),
+        ShareName {
+            label,
+            record_id: Some(record.clone()),
+        },
+    );
+    let names = hostnames(&next);
+    let names: Vec<&str> = names.iter().map(String::as_str).collect();
+    if let Err(e) = api.configure(&zone.account_id, &tunnel_id, &names) {
+        let _ = api.delete_record(&zone.id, &record);
+        return Err(e);
+    }
+    let note = current.and_then(|c| c.record_id.as_ref()).and_then(|id| {
+        api.delete_record(&zone.id, id)
+            .err()
+            .map(|e| left_behind(old.as_deref().unwrap_or_default(), id, &e))
+    });
+    Ok(Renamed {
+        account: next,
+        old,
+        new: Some(host),
+        changed: true,
+        note,
+    })
+}
+
+/// Move the dashboard to the address `input`, the way [`name_share_with`]
+/// renames a share: refusals first, then the new record, the account's
+/// hostname and record id swapped, the ingress list, and the old record
+/// last. The default share hostname is not renamed with it.
+///
+/// The page's record is the first of `dns_record_ids`, which is the order
+/// [`create`] stores them in and the order this keeps.
+pub fn name_dashboard_with(api: &Api, account: &Account, input: &str) -> Result<Renamed, Error> {
+    let (zone, tunnel_id) = writable_zone(account)?;
+    if input.trim().is_empty() {
+        return Err(Error::Hostname(
+            "The dashboard needs an address; type one, or Esc to keep this one".to_string(),
+        ));
+    }
+    let label = label_for(input, &zone.name)?;
+    let host = format!("{label}.{}", zone.name);
+    let old = account.hostname.clone();
+    if old.as_deref() == Some(host.as_str()) {
+        return Ok(Renamed {
+            account: account.clone(),
+            old: None,
+            new: old,
+            changed: false,
+            note: None,
+        });
+    }
+    check_free(api, &zone, account, &host, None, &|_| {
+        "another agent's shares".to_string()
+    })?;
+
+    let record = api.add_cname(&zone, &host, &tunnel_id)?;
+    let mut next = account.clone();
+    next.hostname = Some(host.clone());
+    let previous = match next.dns_record_ids.first_mut() {
+        Some(first) => Some(std::mem::replace(first, record.clone())),
+        None => {
+            next.dns_record_ids.push(record.clone());
+            None
+        }
+    };
+    let names = hostnames(&next);
+    let names: Vec<&str> = names.iter().map(String::as_str).collect();
+    if let Err(e) = api.configure(&zone.account_id, &tunnel_id, &names) {
+        let _ = api.delete_record(&zone.id, &record);
+        return Err(e);
+    }
+    let note = previous.as_ref().and_then(|id| {
+        api.delete_record(&zone.id, id)
+            .err()
+            .map(|e| left_behind(old.as_deref().unwrap_or_default(), id, &e))
+    });
+    Ok(Renamed {
+        account: next,
+        old,
+        new: Some(host),
+        changed: true,
+        note,
+    })
+}
+
+/// [`name_share_with`] on the connected account, then everything after it:
+/// the account saved, and the given-up name no longer routed. The new name
+/// is routed by the share minted on it. An error is a sentence for the user.
+///
+/// ponytail: two renames at once — the dashboard and the page, say — each
+/// read the account, write DNS, and save; the second save wins and the
+/// first's record is left out of the file. One person renames one thing at a
+/// time, and `cctop tunnel remove` names what it could not find.
+pub fn name_share(
+    session_id: &str,
+    input: &str,
+    agents: &dyn Fn(&str) -> String,
+) -> Result<Renamed, String> {
+    let (account, api) = connected()?;
+    let renamed =
+        name_share_with(&api, &account, session_id, input, agents).map_err(|e| e.to_string())?;
+    if renamed.changed {
+        saved(&renamed)?;
+        if let Some(old) = &renamed.old {
+            crate::tunnel::forget_share_host(old);
+        }
+    }
+    Ok(renamed)
+}
+
+/// [`name_dashboard_with`] on the connected account, then the account saved
+/// and the page's route moved to the new hostname while the tunnel is up.
+pub fn name_dashboard(input: &str) -> Result<Renamed, String> {
+    let (account, api) = connected()?;
+    let renamed = name_dashboard_with(&api, &account, input).map_err(|e| e.to_string())?;
+    if renamed.changed {
+        saved(&renamed)?;
+        if let (Some(old), Some(new)) = (&renamed.old, &renamed.new) {
+            crate::tunnel::move_page(old, new);
+        }
+    }
+    Ok(renamed)
+}
+
+/// The connected account and a client for it, or why addresses cannot be
+/// chosen on it.
+fn connected() -> Result<(Account, Api), String> {
+    let account = crate::tunnel::account().ok_or_else(|| {
+        "No Cloudflare account is connected — connect your own domain (a in the serve panel) to \
+         choose addresses"
+            .to_string()
+    })?;
+    account.can_rename()?;
+    let api = Api::new(account.api_token.as_deref().unwrap_or_default());
+    Ok((account, api))
+}
+
+fn saved(renamed: &Renamed) -> Result<(), String> {
+    crate::tunnel::save_account(&renamed.account).map_err(|e| {
+        format!(
+            "Cloudflare has the new address, but cctop could not remember it ({e}); \
+             `cctop tunnel remove` will not find its record"
+        )
     })
 }
 
@@ -585,7 +945,12 @@ pub(crate) fn remove_with(account: &Account, api: impl Fn(&str) -> Api) -> Lefto
     };
     let api = api(token);
     if let Some(zone_id) = &account.zone_id {
-        for record in &account.dns_record_ids {
+        // Agents' own names too, by the ids stored with them, after setup's.
+        let named = account
+            .share_names
+            .values()
+            .filter_map(|name| name.record_id.as_ref());
+        for record in account.dns_record_ids.iter().chain(named) {
             if let Err(e) = api.delete_record(zone_id, record) {
                 left.push(format!("the DNS record {record} ({e})"));
             }
@@ -597,20 +962,24 @@ pub(crate) fn remove_with(account: &Account, api: impl Fn(&str) -> Api) -> Lefto
     Leftovers(left)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+/// A stand-in for Cloudflare's API on loopback, for this crate's tests and
+/// for a build made for tests elsewhere — the server's rename routes are
+/// tested against it. Every token sent to it is made up; it answers 401 to
+/// any that does not start `made-up`.
+#[cfg(any(test, feature = "test-support"))]
+pub mod fake {
+    use serde_json::{Value, json};
     use std::io::{BufRead, BufReader, Read, Write};
     use std::net::TcpListener;
     use std::sync::{Arc, Mutex};
 
     /// One call the fake API saw: method, path, body.
-    type Seen = Arc<Mutex<Vec<(String, String, String)>>>;
+    pub type Seen = Arc<Mutex<Vec<(String, String, String)>>>;
 
     /// A stand-in for api.cloudflare.com on loopback. `answer` maps a call to
     /// a status and the JSON body; every call is recorded. Every token the
     /// tests send it is made up.
-    fn fake_api(
+    pub fn api(
         answer: impl Fn(&str, &str, &str) -> (u16, Value) + Send + Sync + 'static,
     ) -> (String, Seen) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -669,27 +1038,18 @@ mod tests {
         (base, seen)
     }
 
-    fn ok(result: Value) -> (u16, Value) {
+    pub fn ok(result: Value) -> (u16, Value) {
         (
             200,
             json!({"success": true, "errors": [], "result": result}),
         )
     }
 
-    fn zone() -> Zone {
-        Zone {
-            id: "zone1".into(),
-            name: "example.test".into(),
-            account_id: "acct1".into(),
-            active: true,
-        }
-    }
-
-    const TUNNEL_ID: &str = "6ff42ae2-765d-4adf-8112-31c55c1551ef";
+    pub const TUNNEL_ID: &str = "6ff42ae2-765d-4adf-8112-31c55c1551ef";
 
     /// A Cloudflare that has nothing in the zone and accepts every creation,
     /// except `fail_on`, a path prefix answered 500.
-    fn cloudflare(fail_on: Option<&'static str>) -> impl Fn(&str, &str, &str) -> (u16, Value) {
+    pub fn accepting(fail_on: Option<&'static str>) -> impl Fn(&str, &str, &str) -> (u16, Value) {
         move |method: &str, path: &str, _body: &str| {
             if let Some(prefix) = fail_on
                 && path.starts_with(prefix)
@@ -725,6 +1085,33 @@ mod tests {
         use std::sync::atomic::{AtomicU32, Ordering};
         static N: AtomicU32 = AtomicU32::new(1);
         N.fetch_add(1, Ordering::Relaxed)
+    }
+}
+
+impl Api {
+    /// A client for the [`fake`] API at `base`. Only in a build made for
+    /// tests, like `CCTOP_CLOUDFLARE_API`: a token sent to a base of someone's
+    /// choosing is a token given away.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn fake(base: &str, token: &str) -> Api {
+        Api::at(base, token)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    use super::fake::{Seen, TUNNEL_ID, accepting as cloudflare, api as fake_api, ok};
+
+    fn zone() -> Zone {
+        Zone {
+            id: "zone1".into(),
+            name: "example.test".into(),
+            account_id: "acct1".into(),
+            active: true,
+        }
     }
 
     fn calls(seen: &Seen) -> Vec<String> {
@@ -940,6 +1327,301 @@ mod tests {
         assert_eq!(left.0.len(), 2, "{left:?}");
         assert!(left.0[0].contains("rec-a"));
         assert!(left.0[1].contains(TUNNEL_ID));
+    }
+
+    /// An account set up by cctop, with one agent already named `taken`.
+    fn named_account() -> Account {
+        Account {
+            token: "eyJhIjoi-made-up".into(),
+            hostname: Some("cctop.example.test".into()),
+            share_hostname: Some("cctop-share.example.test".into()),
+            account_id: Some("acct1".into()),
+            zone_id: Some("zone1".into()),
+            tunnel_id: Some(TUNNEL_ID.into()),
+            dns_record_ids: vec!["rec-page".into(), "rec-share".into()],
+            api_token: Some("made-up-api-token".into()),
+            share_names: [(
+                "other-session".to_string(),
+                ShareName {
+                    label: "taken".into(),
+                    record_id: Some("rec-other".into()),
+                },
+            )]
+            .into(),
+            from_env: false,
+        }
+    }
+
+    fn agents(session: &str) -> String {
+        format!("Agent {session}")
+    }
+
+    /// The calls that write, in order.
+    fn writes(seen: &Seen) -> Vec<String> {
+        calls(seen)
+            .into_iter()
+            .filter(|c| !c.starts_with("GET"))
+            .collect()
+    }
+
+    #[test]
+    fn naming_a_share_creates_its_record_before_deleting_the_old_one() {
+        let (base, seen) = fake_api(cloudflare(None));
+        let api = Api::at(&base, "made-up-api-token");
+        let mut account = named_account();
+        account.share_names.insert(
+            "s1".into(),
+            ShareName {
+                label: "old".into(),
+                record_id: Some("rec-old".into()),
+            },
+        );
+        let renamed = name_share_with(&api, &account, "s1", "MyAgent.example.test.", &agents)
+            .expect("renamed");
+        assert!(renamed.changed);
+        assert_eq!(renamed.old.as_deref(), Some("old.example.test"));
+        assert_eq!(renamed.new.as_deref(), Some("myagent.example.test"));
+        assert_eq!(renamed.note, None);
+        let name = &renamed.account.share_names["s1"];
+        assert_eq!(name.label, "myagent");
+        assert!(name.record_id.as_deref().unwrap().starts_with("rec-"));
+        assert_ne!(name.record_id.as_deref(), Some("rec-old"));
+        // Nothing else of the account moved.
+        assert_eq!(renamed.account.hostname, account.hostname);
+        assert_eq!(renamed.account.dns_record_ids, account.dns_record_ids);
+        assert_eq!(
+            renamed.account.share_names["other-session"],
+            account.share_names["other-session"]
+        );
+
+        assert_eq!(
+            writes(&seen),
+            [
+                "POST /zones/zone1/dns_records",
+                &format!("PUT /accounts/acct1/cfd_tunnel/{TUNNEL_ID}/configurations"),
+                "DELETE /zones/zone1/dns_records/rec-old",
+            ]
+        );
+        let bodies = seen.lock().unwrap().clone();
+        let cname = &bodies.iter().find(|(m, ..)| m == "POST").unwrap().2;
+        assert!(
+            cname.contains("\"name\":\"myagent.example.test\""),
+            "{cname}"
+        );
+        let ingress = &bodies.iter().find(|(m, ..)| m == "PUT").unwrap().2;
+        for host in [
+            "cctop.example.test",
+            "cctop-share.example.test",
+            "taken.example.test",
+            "myagent.example.test",
+        ] {
+            assert!(ingress.contains(host), "{host} missing: {ingress}");
+        }
+        assert!(!ingress.contains("old.example.test"), "{ingress}");
+    }
+
+    #[test]
+    fn a_failed_create_leaves_the_old_name_and_its_record() {
+        let (base, seen) = fake_api(cloudflare(Some("/zones/zone1/dns_records")));
+        let api = Api::at(&base, "made-up-api-token");
+        let err =
+            name_share_with(&api, &named_account(), "other-session", "fresh", &agents).unwrap_err();
+        assert_eq!(err, Error::Api("made-up failure".into()));
+        assert_eq!(writes(&seen), ["POST /zones/zone1/dns_records"]);
+    }
+
+    #[test]
+    fn a_failed_ingress_update_deletes_the_new_record_and_keeps_the_old() {
+        let (base, seen) = fake_api({
+            let inner = cloudflare(None);
+            move |method: &str, path: &str, body: &str| match method {
+                "PUT" => (
+                    500,
+                    json!({"success": false, "errors": [{"code": 1, "message": "made-up failure"}]}),
+                ),
+                _ => inner(method, path, body),
+            }
+        });
+        let api = Api::at(&base, "made-up-api-token");
+        assert!(
+            name_share_with(&api, &named_account(), "other-session", "fresh", &agents).is_err()
+        );
+        let made = writes(&seen);
+        assert_eq!(made.len(), 3, "{made:?}");
+        assert_eq!(made[0], "POST /zones/zone1/dns_records");
+        assert!(
+            made[2].starts_with("DELETE /zones/zone1/dns_records/rec-"),
+            "{made:?}"
+        );
+        assert!(
+            !made[2].ends_with("rec-other"),
+            "the old record went: {made:?}"
+        );
+    }
+
+    #[test]
+    fn every_refusal_comes_before_any_write() {
+        let (base, seen) = fake_api({
+            let inner = cloudflare(None);
+            move |method: &str, path: &str, body: &str| match (method, path) {
+                ("GET", p) if p.contains("?name=foreign.example.test") => {
+                    ok(json!([{"id": "theirs"}]))
+                }
+                _ => inner(method, path, body),
+            }
+        });
+        let api = Api::at(&base, "made-up-api-token");
+        let account = named_account();
+        let refused = |input: &str| {
+            name_share_with(&api, &account, "s1", input, &agents)
+                .unwrap_err()
+                .to_string()
+        };
+        assert_eq!(
+            refused("myagent_"),
+            "myagent_ is not a usable name: letters, digits and - only"
+        );
+        assert!(refused("-x").contains("not a usable name"));
+        assert!(refused(&"a".repeat(64)).contains("not a usable name"));
+        assert!(refused("a.b.example.test").contains("two levels"));
+        assert!(refused("myagent.other.test").contains("is not under example.test"));
+        assert_eq!(
+            refused("cctop"),
+            "cctop.example.test is already used by the dashboard"
+        );
+        assert_eq!(
+            name_dashboard_with(&api, &account, "cctop-share")
+                .unwrap_err()
+                .to_string(),
+            "cctop-share.example.test is already used by shares without a name of their own"
+        );
+        assert_eq!(
+            refused("taken"),
+            "taken.example.test is already used by Agent other-session"
+        );
+        assert_eq!(
+            refused("foreign"),
+            "foreign.example.test already has a DNS record that cctop did not make"
+        );
+        let dashboard = name_dashboard_with(&api, &account, "taken").unwrap_err();
+        assert!(
+            dashboard.to_string().contains("already used by"),
+            "{dashboard}"
+        );
+        assert!(name_dashboard_with(&api, &account, "").is_err());
+        assert_eq!(writes(&seen), Vec::<String>::new());
+
+        // An account cctop cannot write DNS for refuses before any call.
+        let (base, seen) = fake_api(cloudflare(None));
+        let api = Api::at(&base, "made-up-api-token");
+        let pasted = Account {
+            api_token: None,
+            ..named_account()
+        };
+        let err = name_share_with(&api, &pasted, "s1", "myagent", &agents).unwrap_err();
+        assert_eq!(err.to_string(), crate::tunnel::TOKEN_ONLY);
+        assert!(calls(&seen).is_empty());
+    }
+
+    #[test]
+    fn the_same_name_again_writes_nothing_and_clearing_deletes_its_record() {
+        let (base, seen) = fake_api(cloudflare(None));
+        let api = Api::at(&base, "made-up-api-token");
+        let account = named_account();
+        let same = name_share_with(&api, &account, "other-session", "TAKEN", &agents).unwrap();
+        assert!(!same.changed);
+        assert_eq!(same.new.as_deref(), Some("taken.example.test"));
+        let nothing = name_share_with(&api, &account, "unnamed", "", &agents).unwrap();
+        assert!(!nothing.changed);
+        assert_eq!(nothing.new.as_deref(), Some("cctop-share.example.test"));
+        // The prefilled default, Enter'd unchanged, is no clash either.
+        let prefilled = name_share_with(&api, &account, "unnamed", "cctop-share", &agents).unwrap();
+        assert!(!prefilled.changed);
+        assert!(writes(&seen).is_empty());
+
+        let cleared = name_share_with(&api, &account, "other-session", "  ", &agents).unwrap();
+        assert!(cleared.changed);
+        assert!(cleared.account.share_names.is_empty());
+        assert_eq!(cleared.old.as_deref(), Some("taken.example.test"));
+        assert_eq!(cleared.new.as_deref(), Some("cctop-share.example.test"));
+        assert_eq!(
+            writes(&seen),
+            [
+                &format!("PUT /accounts/acct1/cfd_tunnel/{TUNNEL_ID}/configurations"),
+                "DELETE /zones/zone1/dns_records/rec-other",
+            ]
+        );
+    }
+
+    #[test]
+    fn an_old_record_that_will_not_go_is_said() {
+        let (base, _) = fake_api({
+            let inner = cloudflare(None);
+            move |method: &str, path: &str, body: &str| match method {
+                "DELETE" => (
+                    500,
+                    json!({"success": false, "errors": [{"code": 1, "message": "made-up failure"}]}),
+                ),
+                _ => inner(method, path, body),
+            }
+        });
+        let api = Api::at(&base, "made-up-api-token");
+        let renamed =
+            name_share_with(&api, &named_account(), "other-session", "fresh", &agents).unwrap();
+        assert_eq!(renamed.new.as_deref(), Some("fresh.example.test"));
+        let note = renamed.note.expect("a note");
+        assert!(note.contains("taken.example.test"), "{note}");
+        assert!(note.contains("rec-other"), "{note}");
+    }
+
+    #[test]
+    fn renaming_the_dashboard_swaps_its_record_and_hostname() {
+        let (base, seen) = fake_api(cloudflare(None));
+        let api = Api::at(&base, "made-up-api-token");
+        let account = named_account();
+        let renamed = name_dashboard_with(&api, &account, "home").unwrap();
+        assert_eq!(renamed.old.as_deref(), Some("cctop.example.test"));
+        assert_eq!(renamed.new.as_deref(), Some("home.example.test"));
+        assert_eq!(
+            renamed.account.hostname.as_deref(),
+            Some("home.example.test")
+        );
+        // The share hostname is not renamed along with it.
+        assert_eq!(renamed.account.share_hostname, account.share_hostname);
+        let ids = &renamed.account.dns_record_ids;
+        assert_eq!(ids.len(), 2);
+        assert!(
+            ids[0].starts_with("rec-") && ids[0] != "rec-page",
+            "{ids:?}"
+        );
+        assert_eq!(ids[1], "rec-share");
+        assert_eq!(renamed.account.share_names, account.share_names);
+        assert_eq!(
+            writes(&seen),
+            [
+                "POST /zones/zone1/dns_records",
+                &format!("PUT /accounts/acct1/cfd_tunnel/{TUNNEL_ID}/configurations"),
+                "DELETE /zones/zone1/dns_records/rec-page",
+            ]
+        );
+        let same = name_dashboard_with(&api, &renamed.account, "home.example.test").unwrap();
+        assert!(!same.changed);
+    }
+
+    #[test]
+    fn remove_deletes_agents_names_by_their_stored_ids_too() {
+        let (base, seen) = fake_api(cloudflare(None));
+        let left = remove_with(&named_account(), |token| Api::at(&base, token));
+        assert_eq!(left, Leftovers::default());
+        assert_eq!(
+            calls(&seen),
+            [
+                "DELETE /zones/zone1/dns_records/rec-page",
+                "DELETE /zones/zone1/dns_records/rec-share",
+                "DELETE /zones/zone1/dns_records/rec-other",
+                &format!("DELETE /accounts/acct1/cfd_tunnel/{TUNNEL_ID}"),
+            ]
+        );
     }
 
     #[test]

@@ -358,6 +358,13 @@ pub struct Share {
     /// `--no-pin`. Useless without the link and useless on its own, which is why
     /// it is safe to put on the status line while the link goes to the clipboard.
     pub pin: Option<String>,
+    /// The public hostname the link reaches the terminal through, when it
+    /// leaves this machine on a tunnel of cctop's. Safe to draw: it opens
+    /// nothing without the link's token.
+    pub host: Option<String>,
+    /// Whether that hostname is on the account's own domain, where the user
+    /// can choose it, rather than one a quick tunnel was handed.
+    pub own_domain: bool,
 }
 
 /// Open `name`'s terminal to a browser.
@@ -374,8 +381,12 @@ pub struct Share {
 /// the *stream* is the only thing telling them apart. Handing out input to a
 /// live coding agent should not rest on which file descriptor a line arrived
 /// on, and here it does not — the two links are separate fields.
-fn web_share(name: &str, public: Option<&str>) -> Result<Share, String> {
-    share_with(name, false, None, public)
+///
+/// `frontend` is where the link opens: `share.rmux.io` when `None`, or the
+/// share hostname itself when the account tunnel's share front serves the app
+/// there (see [`Road`]).
+fn web_share(name: &str, frontend: Option<&str>, public: Option<&str>) -> Result<Share, String> {
+    share_with(name, false, frontend, public)
 }
 
 /// cctop's quick tunnel to the daemon's share listener, and the port it
@@ -387,17 +398,30 @@ fn web_share(name: &str, public: Option<&str>) -> Result<Share, String> {
 /// socket relay included — wants the page's token, and a link opened cold on
 /// `share.rmux.io` has never seen that token. Putting it in the share link
 /// would hand whoever gets the link the whole dashboard. So a share with no
-/// page of cctop's around it gets a road straight to rmux's listener, whose
-/// own token, PIN and encryption are the whole of its door: the account
-/// tunnel's `-share` hostname when this process holds that tunnel
-/// ([`crate::tunnel::share_origin`]), and this quick tunnel otherwise.
+/// page of cctop's around it gets a road to rmux's listener, whose own token,
+/// PIN and encryption are the whole of its door: the account tunnel's
+/// `-share` hostname when this process holds that tunnel
+/// ([`crate::tunnel::share_origin`]), where a front with no route but rmux's
+/// app and its socket relays it, and this quick tunnel otherwise, straight to
+/// the listener.
 ///
 /// One for the process, however many sessions are shared: the listener is one
 /// per daemon and tells shares apart by the token in the fragment. Held until
 /// cctop exits, which is when the shares it handed out stop answering.
 static PUBLIC: std::sync::Mutex<Option<(u16, crate::tunnel::Tunnel)>> = std::sync::Mutex::new(None);
 
-/// The public origin of the daemon's share listener: the account tunnel's
+/// The way a share minted for the world reaches the daemon.
+struct Road {
+    /// The public origin of the daemon's share listener.
+    origin: String,
+    /// Where the link opens, when not `share.rmux.io`: the share hostname
+    /// itself, whose front serves rmux's app beside the socket. Only the
+    /// account tunnel's has one; a quick tunnel lands on rmux's listener,
+    /// which serves no app.
+    frontend: Option<String>,
+}
+
+/// The public road to the daemon's share listener: the account tunnel's
 /// share hostname when this process holds one, else a quick tunnel, started
 /// if none is up. An error where the edge cannot be reached, which leaves the
 /// caller a loopback share.
@@ -405,33 +429,47 @@ static PUBLIC: std::sync::Mutex<Option<(u16, crate::tunnel::Tunnel)>> = std::syn
 /// Blocking for as long as a quick registration takes — a few seconds — and
 /// with the lock held, so two pages asking at once register one tunnel, not
 /// two.
-fn public_origin() -> Result<String, String> {
+///
+/// `address` is an agent's own hostname on the account's domain, used in
+/// place of the default share hostname when the account tunnel is held.
+fn public_origin(address: Option<&str>) -> Result<Road, String> {
     let port = on_daemon(|rmux| async move { rmux.web_config().await })?.port;
     // Before the quick tunnel, even one already up: links it carried keep
     // working until cctop exits, and new ones take the stable hostname.
-    if let Some(origin) = crate::tunnel::share_origin(port) {
-        return Ok(origin);
+    let held = match address {
+        Some(host) => crate::tunnel::share_origin_at(port, host),
+        None => crate::tunnel::share_origin(port),
+    };
+    if let Some(origin) = held {
+        return Ok(Road {
+            frontend: Some(format!("{origin}/")),
+            origin,
+        });
     }
+    let quick = |origin: &str| Road {
+        origin: origin.to_string(),
+        frontend: None,
+    };
     let mut held = PUBLIC.lock().map_err(|_| "the share tunnel is poisoned")?;
     if let Some((at, tunnel)) = held.as_ref()
         && *at == port
     {
-        return Ok(tunnel.url.clone());
+        return Ok(quick(&tunnel.url));
     }
     // A quick one even when an account is connected: the account's hostname
     // is the page's, and this listener is not the page. The first line of the
     // error only: the rest is advice about `--tunnel`, a flag this caller
     // never had.
-    let tunnel = crate::tunnel::start(port, crate::tunnel::Want::Quick).map_err(|e| {
+    let tunnel = crate::tunnel::start(port, crate::tunnel::Want::Quick, None).map_err(|e| {
         format!("{e}")
             .lines()
             .next()
             .unwrap_or_default()
             .to_string()
     })?;
-    let url = tunnel.url.clone();
+    let road = quick(&tunnel.url);
     *held = Some((port, tunnel));
-    Ok(url)
+    Ok(road)
 }
 
 /// The share for `name`, minted on the first ask and reused after it.
@@ -478,16 +516,45 @@ pub fn share_link_with(
     frontend: Option<&str>,
     fresh: bool,
 ) -> Result<(Share, bool), String> {
+    share_link_on(name, embedded, frontend, None, fresh)
+}
+
+/// `W`'s share for `name`, going out on `address` — the agent's own hostname
+/// on the account's domain ([`crate::tunnel::Account::share_host_for`]) — when
+/// the account tunnel is held, and as [`share_link`] otherwise. `fresh` as
+/// for [`share_link_with`]; a renamed agent needs no `fresh`, since the
+/// address is part of what a held share is kept under.
+pub fn share_link_at(
+    name: &str,
+    address: Option<&str>,
+    fresh: bool,
+) -> Result<(Share, bool), String> {
+    share_link_on(name, false, None, address, fresh)
+}
+
+fn share_link_on(
+    name: &str,
+    embedded: bool,
+    frontend: Option<&str>,
+    address: Option<&str>,
+    fresh: bool,
+) -> Result<(Share, bool), String> {
     /// A share, whether its endpoint is reachable off this machine, when it
     /// was minted, and the account tunnel's generation then — a share on the
     /// `-share` hostname dies with the serve that held the tunnel, and one
     /// minted on a quick tunnel before it came up is better re-minted on it.
     type Reachable = (Share, bool, std::time::Instant, u64);
-    /// Session, flavour, and the frontend it opens in: a link minted for
-    /// one origin's copy of the app does not open on another's.
-    type Key = (String, bool, Option<String>);
+    /// Session, flavour, the frontend it opens in — a link minted for one
+    /// origin's copy of the app does not open on another's — and the address
+    /// it goes out on, so a renamed agent gets a share on its new name.
+    type Key = (String, bool, Option<String>, Option<String>);
     static CACHE: std::sync::Mutex<Option<HashMap<Key, Reachable>>> = std::sync::Mutex::new(None);
-    let key = (name.to_string(), embedded, frontend.map(str::to_string));
+    let key = (
+        name.to_string(),
+        embedded,
+        frontend.map(str::to_string),
+        address.map(str::to_string),
+    );
     if !fresh
         && let Ok(cache) = CACHE.lock()
         && let Some((share, tunnelled, at, generation)) = cache.as_ref().and_then(|c| c.get(&key))
@@ -497,9 +564,12 @@ pub fn share_link_with(
         return Ok((share.clone(), *tunnelled));
     }
     let generation = crate::tunnel::share_generation();
-    let mint = |public: Option<&str>| match embedded {
-        true => web_share_embedded(name, frontend, public),
-        false => web_share(name, public),
+    // `road` is the frontend the road out serves, if it serves one. A
+    // framed share keeps the page's own copy when it has one — that is the
+    // page doing the framing — and a `W` link opens where its socket is.
+    let mint = |public: Option<&str>, road: Option<&str>| match embedded {
+        true => web_share_embedded(name, frontend.or(road), public),
+        false => web_share(name, road, public),
     };
     // Every share goes out through a Cloudflare tunnel of cctop's — the
     // account's `-share` hostname or a quick one — or stays on loopback. rmux encrypts terminal traffic end to end between
@@ -529,7 +599,7 @@ pub fn share_link_with(
     // one desk.
     let made = match frontend.filter(|_| embedded) {
         Some(origin) => {
-            let share = mint(None)?;
+            let share = mint(None, None)?;
             match is_loopback_url(origin) {
                 true => (share, false),
                 false => match share
@@ -540,17 +610,17 @@ pub fn share_link_with(
                     Some(relayed) => (
                         Share {
                             operator: Some(relayed),
-                            pin: share.pin,
+                            ..share
                         },
                         true,
                     ),
                     // An endpoint not shaped as expected: straight to rmux's
                     // listener instead of through the page's relay.
-                    None => tunnelled(mint)?,
+                    None => tunnelled(mint, address)?,
                 },
             }
         }
-        None => tunnelled(mint)?,
+        None => tunnelled(mint, address)?,
     };
     if let Ok(mut cache) = CACHE.lock() {
         cache.get_or_insert_with(HashMap::new).insert(
@@ -572,11 +642,22 @@ pub fn share_link_with(
 /// The tunnel's error is kept for when loopback fails too, since then it is
 /// the more likely of the two to say what is wrong.
 fn tunnelled(
-    mint: impl Fn(Option<&str>) -> Result<Share, String>,
+    mint: impl Fn(Option<&str>, Option<&str>) -> Result<Share, String>,
+    address: Option<&str>,
 ) -> Result<(Share, bool), String> {
-    match public_origin() {
-        Ok(origin) => Ok((mint(Some(&origin))?, true)),
-        Err(why) => Ok((mint(None).map_err(|_| why)?, false)),
+    match public_origin(address) {
+        Ok(road) => {
+            let share = mint(Some(&road.origin), road.frontend.as_deref())?;
+            Ok((
+                Share {
+                    host: Some(road.origin.trim_start_matches("https://").to_string()),
+                    own_domain: road.frontend.is_some(),
+                    ..share
+                },
+                true,
+            ))
+        }
+        Err(why) => Ok((mint(None, None).map_err(|_| why)?, false)),
     }
 }
 
@@ -726,6 +807,8 @@ fn share_with(
         Ok(Share {
             operator: handle.operator_url().map(str::to_string),
             pin: handle.operator_pairing_code().map(str::to_string),
+            host: None,
+            own_domain: false,
         })
     })
     .and_then(|share| match share.operator {
@@ -2052,7 +2135,7 @@ mod tests {
         // What is being checked here is the daemon's answer, which is the same
         // either way — the endpoint is loopback instead of a hostname. The
         // tunnelled road has a test of its own below.
-        let share = web_share(&name, None);
+        let share = web_share(&name, None, None);
         // Killing the session ends its share; `web-share -X` would also end any
         // the user has open, which is not this test's to touch.
         end_session(&name);

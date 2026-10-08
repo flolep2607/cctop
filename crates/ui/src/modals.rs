@@ -1128,8 +1128,11 @@ pub(super) fn draw_rmux_install(frame: &mut Frame, area: Rect, app: &App) {
 /// binds nothing but `127.0.0.1`, so there is no LAN address to offer either.
 /// The code encodes what `y` copies, token and all, which is why it waits to be
 /// asked for rather than appearing with the link; see [`qr`].
-pub(super) fn draw_serve(frame: &mut Frame, area: Rect, app: &App) {
+pub(super) fn draw_serve(frame: &mut Frame, area: Rect, app: &App, layout: &mut Layout) {
     let mut lines: Vec<Line> = Vec::new();
+    // The internet origin's line, when its address can be chosen: what a
+    // right-click on it renames.
+    let mut address_at = None;
     // Where the code goes if there is one to draw: under the warning that says
     // what holding it grants, so the two are read together.
     let mut qr_at = None;
@@ -1173,6 +1176,22 @@ pub(super) fn draw_serve(frame: &mut Frame, area: Rect, app: &App) {
                 Some(public) => {
                     lines.push(Line::default());
                     show(&mut lines, &mut links, "The internet", public);
+                    match app.dashboard_rename() {
+                        Ok(_) => {
+                            address_at = Some(lines.len() - 1);
+                            lines.push(Line::from(Span::styled(
+                                "  e or right-click to choose this address",
+                                theme::dim(),
+                            )));
+                        }
+                        // On the account's domain and still not choosable:
+                        // a tunnel token, which writes no DNS. Said, since
+                        // the address is right there to want to change.
+                        Err(why) if app.serving_on_account() => {
+                            lines.push(Line::from(Span::styled(format!("  {why}"), theme::dim())))
+                        }
+                        Err(_) => {}
+                    }
                     lines.push(Line::default());
                     // The one thing to understand before sending this to
                     // anybody, said where the link is being looked at.
@@ -1288,7 +1307,11 @@ pub(super) fn draw_serve(frame: &mut Frame, area: Rect, app: &App) {
             )),
         );
     }
+    let address_row = address_at.map(|at| wrapped_rows(&lines[..at], width.saturating_sub(2)));
     let (_, inner) = modal(frame, area, "Serve this table to a browser", lines, width);
+    if let Some(row) = address_row {
+        layout.address_row = Some((inner.y + row, inner.x, inner.x + inner.width));
+    }
     if let (Some((_, Some(qr))), Some(row)) = (&qr_at, room) {
         draw_qr(frame, inner, row, qr);
     }
@@ -1341,14 +1364,36 @@ pub(super) fn draw_share_qr(frame: &mut Frame, area: Rect, app: &App, layout: &m
         " It is on your clipboard as well.",
         theme::dim(),
     )));
+    // Where the link goes, never the link: the hostname opens nothing without
+    // the token. The line a right-click renames, when it can be renamed.
+    let mut address_at = None;
+    if let Some(host) = &share.host {
+        lines.push(Line::default());
+        address_at = Some(lines.len());
+        lines.push(Line::from(vec![
+            Span::styled(" Address  ", theme::dim()),
+            Span::styled(host.clone(), Style::default().fg(theme::colors().accent)),
+        ]));
+        lines.push(Line::from(Span::styled(
+            match &share.rename {
+                Ok(_) => " e or right-click to choose another".to_string(),
+                Err(why) => format!(" {why}"),
+            },
+            theme::dim(),
+        )));
+    }
     lines.push(Line::default());
     lines.push(Line::from(Span::styled(DISMISS_KEYS, theme::dim())));
 
     let code = qr::encode(&share.link);
+    // A hostname is one line where the screen has the columns: broken in two,
+    // it reads as two names.
+    let address_width = address_at.map_or(0, |at| lines[at].width() as u16 + 3);
     let width = code
         .as_ref()
         .map_or(0, |qr| qr.width + 4)
         .max(56)
+        .max(address_width)
         .min(area.width.saturating_sub(4).max(24));
     let room = code
         .as_ref()
@@ -1360,7 +1405,17 @@ pub(super) fn draw_share_qr(frame: &mut Frame, area: Rect, app: &App, layout: &m
         ));
     }
     let last = lines.len() as u16 - 1;
+    // Placed after the code has made its room, which moves every line below
+    // it; counted in wrapped rows, since a long line above wraps.
+    let address_row = address_at.filter(|_| share.rename.is_ok()).map(|_| {
+        let at = lines.len() - 4;
+        wrapped_rows(&lines[..at], width.saturating_sub(2))
+    });
+    let last = wrapped_rows(&lines[..last as usize], width.saturating_sub(2));
     let (outer, inner) = modal(frame, area, "Open this terminal elsewhere", lines, width);
+    if let Some(row) = address_row {
+        layout.address_row = Some((inner.y + row, inner.x, inner.x + inner.width));
+    }
     if let (Some(qr), Some(row)) = (&code, room) {
         draw_qr(frame, inner, row, qr);
     }
@@ -3515,6 +3570,91 @@ pub(super) fn draw_insight(frame: &mut Frame, area: Rect, app: &App) {
         box_area,
     );
     super::scrollbar::on_border(frame, box_area, total, visible as usize, scroll as usize);
+}
+
+/// The address field: an agent's share hostname or the dashboard's, as one
+/// label under the account's domain.
+///
+/// What Enter will do is said before it is pressed. For the dashboard that is
+/// the whole of the warning the issue asked for — every link to the old
+/// hostname stops working — and it names the new one as it is typed, so the
+/// sentence is about this rename and not renames in general.
+pub(super) fn draw_address(frame: &mut Frame, area: Rect, app: &App, layout: &mut Layout) {
+    use super::address::Target;
+    let Some(edit) = &app.address else {
+        return;
+    };
+    let warn = Style::default().fg(theme::colors().cost_mid);
+    let mut lines = vec![Line::from(vec![
+        Span::styled(" Now at ", theme::dim()),
+        Span::styled(edit.was.clone(), theme::value()),
+    ])];
+    let title = match &edit.target {
+        Target::Share { label, .. } => {
+            lines.push(Line::from(Span::styled(
+                format!(
+                    " Where {} goes when shared with W.",
+                    util::truncate(label, 36)
+                ),
+                theme::dim(),
+            )));
+            if let Some(default) = &edit.default {
+                lines.push(Line::from(Span::styled(
+                    format!(" Empty sends it back to {default}."),
+                    theme::dim(),
+                )));
+            }
+            lines.push(Line::from(Span::styled(
+                " Links on the old address stop working.",
+                warn,
+            )));
+            "Choose this agent's address"
+        }
+        Target::Dashboard => {
+            let to = edit
+                .typed_host()
+                .filter(|host| *host != edit.was)
+                .unwrap_or_else(|| format!("<name>.{}", edit.zone));
+            lines.push(Line::from(Span::styled(
+                format!(" Links to {} stop working;", edit.was),
+                warn,
+            )));
+            lines.push(Line::from(Span::styled(
+                format!(" the page moves to {to}. Its token stays the same."),
+                warn,
+            )));
+            "Move the dashboard"
+        }
+    };
+    lines.push(Line::default());
+    let mut field = input_line(&edit.field);
+    field
+        .spans
+        .push(Span::styled(format!(".{}", edit.zone), theme::dim()));
+    lines.push(field);
+    lines.push(Line::default());
+    match (edit.frame(), &edit.problem) {
+        (Some(frame_char), _) => lines.push(Line::from(Span::styled(
+            format!(" {frame_char} Asking Cloudflare…"),
+            warn,
+        ))),
+        (None, Some(problem)) => lines.push(Line::from(Span::styled(
+            format!(" {problem}"),
+            Style::default().fg(theme::colors().cost_high),
+        ))),
+        (None, None) => lines.push(Line::from(Span::styled(
+            " Letters, digits and -.",
+            theme::dim(),
+        ))),
+    }
+    lines.push(Line::default());
+    lines.push(Line::from(Span::styled(
+        " Enter apply   Esc cancel",
+        theme::dim(),
+    )));
+    let width = 64.min(area.width.saturating_sub(4).max(24));
+    let (outer, _) = modal(frame, area, title, lines, width);
+    layout.modal_rect = Some(outer);
 }
 
 #[cfg(test)]

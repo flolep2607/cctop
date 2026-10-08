@@ -21,6 +21,7 @@ import { TerminalFrame } from "@/components/terminal";
 import { popOut, type Terminal } from "@/lib/terminal";
 import { POLL_EVERY, useSessions, useTick } from "@/hooks/use-live";
 import { YoloLog, YoloSwitch } from "@/components/yolo";
+import { AgentAddress } from "@/components/address";
 import type { Report } from "@/lib/types";
 import { AccessView } from "./access-view";
 import { ChangesView } from "./changes-view";
@@ -178,6 +179,7 @@ export function SessionPage() {
               >
                 {r.session_id.slice(0, 8)}
               </button>
+              {CAN_ACT && <AgentAddress session={r.session_id} agent={r.title || shortPath(r.project) || r.session_id.slice(0, 8)} />}
             </div>
           </div>
           <Actions r={r} id={id} running={running} term={term} onTerminal={toggleTerminal} />

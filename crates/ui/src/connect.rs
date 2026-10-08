@@ -165,6 +165,12 @@ impl Connect {
 pub struct Connected {
     pub hostname: Option<String>,
     pub from_env: bool,
+    /// The default share hostname, where an agent with no name goes.
+    pub share_hostname: Option<String>,
+    /// The domain addresses are chosen under.
+    pub zone: Option<String>,
+    /// Whether cctop can write the account's DNS, or why not.
+    pub rename: Result<(), &'static str>,
 }
 
 impl From<&Account> for Connected {
@@ -172,6 +178,9 @@ impl From<&Account> for Connected {
         Connected {
             hostname: account.hostname.clone(),
             from_env: account.from_env,
+            share_hostname: account.share_hostname.clone(),
+            zone: account.zone_name().map(str::to_string),
+            rename: account.can_rename(),
         }
     }
 }

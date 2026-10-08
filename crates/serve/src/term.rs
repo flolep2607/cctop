@@ -93,6 +93,25 @@ pub fn file(path: &str) -> Option<File> {
     })
 }
 
+/// The file at `path` on a share hostname, where the app is the whole site
+/// and sits at the root: `/` is the page a `W` link opens, and its crabs are
+/// asked for at `/crabs/…`. Nothing under `/term/` — that is the page's
+/// layout, and a share hostname has no page.
+///
+/// ponytail: the crab in a cold link's navigation bar is the same empty
+/// picture as in a frame, so the bar shows no logo. The 36 KB of rmux's
+/// crabs would be the only thing here that is not needed to open a terminal.
+pub fn share_file(path: &str) -> Option<File> {
+    match path {
+        "/" => file("/term/"),
+        p if p == "/term" || p.starts_with("/term/") => None,
+        p => match p.strip_prefix("/crabs/") {
+            Some(crab) => file(&format!("/term/crabs/{crab}")),
+            None => file(p),
+        },
+    }
+}
+
 /// Whether `path` is one of the app's brand crabs: `/term/crabs/<colour>-dark.svg`
 /// or `-light.svg`, the colour one lowercase word. By shape rather than by the
 /// app's list of ten colours, so a release that adds an eleventh does not

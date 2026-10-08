@@ -358,6 +358,14 @@ impl Request {
         &self.headers
     }
 
+    /// The `Host` header, or empty.
+    pub fn host(&self) -> &str {
+        self.headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("host"))
+            .map_or("", |(_, v)| v.as_str())
+    }
+
     /// Whether this asks to become a WebSocket.
     pub fn is_websocket(&self) -> bool {
         self.headers

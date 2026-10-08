@@ -834,6 +834,7 @@ fn event_loop(
         // a channel nothing polls but this, and until it does the corner has a
         // spinner to turn.
         app.needs_redraw |= app.tick_share();
+        app.needs_redraw |= app.tick_address();
         app.needs_redraw |= app.tick_connect();
         // The footer's own line refreshes on its own clock, and its command
         // answers on a channel nothing polls but this.

@@ -69,6 +69,8 @@
 //! the tunnel the user already has (ssh, Tailscale) is still better than
 //! anything here, because it authenticates rather than merely encrypting.
 
+/// `/api/address`: choosing the dashboard's address, and an agent's.
+mod address;
 /// Cross-session aggregation behind `/api/analytics` — the data the
 /// analytics page charts, built from the snapshot plus cached extractions.
 mod analytics;
@@ -85,6 +87,9 @@ mod metrics;
 mod notify;
 mod quota;
 mod search;
+/// The account tunnel's share hostnames: rmux's app and the share socket,
+/// on a listener of their own that has no other route.
+mod share_host;
 mod ssh;
 /// The TUI's tabs, read from rmux, for `/api/tabs`.
 mod tabs;
@@ -278,6 +283,15 @@ struct Shared {
     /// The web launcher's ssh: what it may connect to and what it learned.
     /// Reached only past `may_act` — see [`ssh`].
     ssh: ssh::Reach,
+    /// Whether a `Host` is one of the account tunnel's share hostnames,
+    /// which this server refuses whatever token comes with it — see
+    /// [`share_host`]. A function rather than the call itself so a test can
+    /// name a share host without lending a tunnel.
+    is_share_host: fn(&str) -> bool,
+    /// The connected account and its renames, for `/api/address` — see
+    /// [`address`]. A trait object so a test can rename against a fake
+    /// Cloudflare without touching `config.toml`.
+    addresses: Arc<dyn address::Addresses>,
 }
 
 /// One publish of the whole table.
@@ -451,6 +465,9 @@ pub struct Serving {
     version: Mutex<u64>,
     /// Held so dropping this unregisters from Cloudflare's edge.
     _tunnel: Option<tunnel::Tunnel>,
+    /// The share hostnames' server, after the tunnel so it outlives the
+    /// routes that point at it.
+    _front: Option<share_host::Front>,
     /// Cleared on drop; the accept loop reads it after every connection and
     /// stops when it is false.
     running: Arc<AtomicBool>,
@@ -559,9 +576,17 @@ pub fn start(options: Options) -> anyhow::Result<Serving> {
     let actions = !options.no_actions && !options.no_token;
     // Started before anything is announced, so the link works when it is read,
     // and before the accept loop because there is nothing to reach yet.
+    // The account's share hostnames land on a front of their own, which is
+    // up before the tunnel can route anything to it. Only for a tunnel that
+    // may be the account's: a quick one has no share hostname.
+    let front = match options.tunnel && !options.quick_tunnel {
+        true => Some(share_host::Front::start(Arc::new(tunnel::share_upstream))?),
+        false => None,
+    };
+    let share_front = front.as_ref().map(share_host::Front::port);
     let tunnel = match (options.tunnel, options.quick_tunnel) {
-        (true, true) => Some(tunnel::start(addr.port(), tunnel::Want::Quick)?),
-        (true, false) => Some(tunnel::start(addr.port(), tunnel::Want::Auto)?),
+        (true, true) => Some(tunnel::start(addr.port(), tunnel::Want::Quick, None)?),
+        (true, false) => Some(tunnel::start(addr.port(), tunnel::Want::Auto, share_front)?),
         (false, _) => None,
     };
 
@@ -608,6 +633,8 @@ pub fn start(options: Options) -> anyhow::Result<Serving> {
             .map(|host| (host.target.clone(), host.clone()))
             .collect(),
         ssh: ssh::Reach::ssh(),
+        is_share_host: tunnel::is_share_host,
+        addresses: Arc::new(address::Connected),
     });
 
     let remotes = Arc::new(Mutex::new(Remotes::default()));
@@ -681,6 +708,7 @@ pub fn start(options: Options) -> anyhow::Result<Serving> {
         plan: options.plan,
         version: Mutex::new(0),
         _tunnel: tunnel,
+        _front: front,
         running,
         port: addr.port(),
     })
@@ -1466,6 +1494,14 @@ fn serve_connection(shared: &Shared, stream: &mut TcpStream) {
         Err((status, why)) => return http::respond_error(stream, None, status, why),
     };
 
+    // A share hostname is not a way in, with any token or none. The tunnel
+    // sends those to the share front and never here; this is the second
+    // lock, for the day something routes one here anyway. Before `/metrics`,
+    // which is outside the token's gate but not outside this one.
+    if (shared.is_share_host)(request.host()) {
+        return http::respond_error(stream, Some(&request), 404, share_host::NOT_HERE);
+    }
+
     // The one route in front of the gate. It is aggregate counts, costs and
     // short session ids — no transcript, title or prompt — and what it says is
     // meant to be copied into a metrics store, so a scrape config should not
@@ -1820,6 +1856,16 @@ fn serve_connection(shared: &Shared, stream: &mut TcpStream) {
         }
         _ if path.starts_with("/api/act/") => {
             api_act(shared, stream, &request, &path["/api/act/".len()..], access);
+        }
+        "/api/address" => address::route(shared, stream, &request, "", access),
+        _ if path.starts_with("/api/address/") => {
+            address::route(
+                shared,
+                stream,
+                &request,
+                &path["/api/address/".len()..],
+                access,
+            );
         }
         _ => http::respond_error(stream, Some(&request), 404, "no such page"),
     }
@@ -2352,7 +2398,6 @@ fn relay_terminal(
     rest: &str,
     access: Access,
 ) {
-    use std::io::{Read, Write};
     if access != Access::Full || !shared.actions {
         return http::respond_error(
             stream,
@@ -2379,6 +2424,17 @@ fn relay_terminal(
     else {
         return http::respond_error(stream, Some(request), 404, "no such terminal");
     };
+    relay_socket(stream, request, port, &format!("/{tail}"));
+}
+
+/// Pass a WebSocket handshake to rmux's listener on loopback `port` at
+/// `path`, and pump bytes both ways until either side closes.
+///
+/// The handshake goes on whole, `Host` rewritten — rmux checks `Origin`,
+/// which is the browser's and left alone. Shared by the page's relay and the
+/// share front, which differ in who may ask, never in how the bytes move.
+fn relay_socket(stream: &mut TcpStream, request: &Request, port: u16, path: &str) {
+    use std::io::{Read, Write};
     let Ok(mut upstream) = TcpStream::connect(("127.0.0.1", port)) else {
         return http::respond_error(
             stream,
@@ -2391,7 +2447,7 @@ fn relay_terminal(
         "" => String::new(),
         q => format!("?{q}"),
     };
-    let mut head = format!("GET /{tail}{query} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n");
+    let mut head = format!("GET {path}{query} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n");
     for (name, value) in request.headers() {
         if !name.eq_ignore_ascii_case("host") {
             head.push_str(&format!("{name}: {value}\r\n"));
@@ -3065,6 +3121,8 @@ mod tests {
             notify: None,
             hosts: HashMap::new(),
             ssh: ssh::Reach::nowhere(),
+            is_share_host: |_| false,
+            addresses: Arc::new(address::Nowhere),
         }
     }
 
@@ -3478,6 +3536,196 @@ mod tests {
         assert!(raw.contains(r#""ready":false"#), "{raw}");
         assert!(raw.contains("needs a password or key prompt"), "{raw}");
         assert!(raw.contains(r#""prompt":true"#), "{raw}");
+    }
+
+    /// The page's second lock: a request whose `Host` is a share hostname is
+    /// refused before the token is looked at, `/metrics` included — so if a
+    /// share hostname were ever routed to the page instead of to the share
+    /// front, it still would not open the dashboard.
+    #[test]
+    fn a_share_hostname_never_reaches_the_dashboard_with_any_token() {
+        let mut guarded = shared("full", "view");
+        guarded.is_share_host = |host| host.starts_with("cctop-share.example.test");
+        // Not `/`: the app page is built on first use, which a debug build
+        // takes a minute over, and the gate in front of it is the same one.
+        for target in ["/api/sessions?t=full", "/api/config?t=full", "/metrics"] {
+            let page = status_of(&guarded, "GET", target, "Host: cctop.example.test\r\n");
+            assert!(page.contains(" 200 "), "{target}: {page}");
+            for host in ["cctop-share.example.test", "cctop-share.example.test:443"] {
+                let raw = response_of(&guarded, "GET", target, &format!("Host: {host}\r\n"));
+                assert!(
+                    raw.starts_with("HTTP/1.1 404 "),
+                    "{target} on {host}: {raw}"
+                );
+                assert!(raw.contains(share_host::NOT_HERE), "{raw}");
+            }
+        }
+        let root = status_of(
+            &guarded,
+            "GET",
+            "/?t=full",
+            "Host: cctop-share.example.test\r\n",
+        );
+        assert!(root.contains(" 404 "), "{root}");
+        let bearer = status_of(
+            &guarded,
+            "GET",
+            "/api/sessions",
+            "Host: cctop-share.example.test\r\nAuthorization: Bearer full\r\n",
+        );
+        assert!(bearer.contains(" 404 "), "{bearer}");
+    }
+
+    /// A server with one session and an account on a fake Cloudflare.
+    fn addressed() -> (Shared, cctop_core::cloudflare::fake::Seen) {
+        let (fake, seen) = address::tests::fake();
+        let shared = Shared {
+            addresses: Arc::new(fake),
+            ..shared("full", "view")
+        };
+        let mut s = Session::new(
+            cctop_core::pricing::Provider::Claude,
+            "8f14e45f-ceea-467f-a0e6-0d1c6e1b0a11".into(),
+        );
+        s.abbrev_label = "web".into();
+        *shared.latest.lock().unwrap() = Arc::new(Snapshot {
+            version: 1,
+            json: "[]".to_string(),
+            rows: Vec::new(),
+            sessions: vec![s],
+            host_errors: Vec::new(),
+        });
+        (shared, seen)
+    }
+
+    fn body_of(raw: &str) -> &str {
+        raw.split_once("\r\n\r\n").map_or("", |(_, body)| body)
+    }
+
+    /// The page renames an agent's address and the dashboard's with the full
+    /// token, against a fake Cloudflare, and is told what it needs: the new
+    /// hostname, and for the dashboard the origin to go to.
+    #[test]
+    fn the_full_token_chooses_addresses() {
+        let (guarded, seen) = addressed();
+        let read = response_of(&guarded, "GET", "/api/address", &bearer_line("full"));
+        assert!(read.starts_with("HTTP/1.1 200 "), "{read}");
+        assert!(
+            body_of(&read).contains(r#""host":"cctop.example.test""#),
+            "{read}"
+        );
+        assert!(body_of(&read).contains(r#""renamable":true"#), "{read}");
+        let agent = response_of(
+            &guarded,
+            "GET",
+            "/api/address/8f14e45f",
+            &bearer_line("full"),
+        );
+        assert!(
+            body_of(&agent).contains(r#""host":"cctop-share.example.test""#),
+            "{agent}"
+        );
+
+        let named = post_json(
+            &guarded,
+            "/api/address/8f14e45f",
+            "full",
+            r#"{"name":"myagent"}"#,
+        );
+        assert!(named.starts_with("HTTP/1.1 200 "), "{named}");
+        assert!(
+            body_of(&named).contains(r#""host":"myagent.example.test""#),
+            "{named}"
+        );
+        let agent = response_of(
+            &guarded,
+            "GET",
+            "/api/address/8f14e45f",
+            &bearer_line("full"),
+        );
+        assert!(
+            body_of(&agent).contains(r#""host":"myagent.example.test""#),
+            "{agent}"
+        );
+        assert!(
+            seen.lock().unwrap().iter().any(|(m, p, b)| m == "POST"
+                && p == "/zones/zone1/dns_records"
+                && b.contains("myagent")),
+            "no record was made"
+        );
+
+        let moved = post_json(&guarded, "/api/address", "full", r#"{"name":"home"}"#);
+        assert!(moved.starts_with("HTTP/1.1 200 "), "{moved}");
+        assert!(
+            body_of(&moved).contains(r#""origin":"https://home.example.test""#),
+            "{moved}"
+        );
+        assert!(!moved.contains("made-up"), "a token in the answer: {moved}");
+    }
+
+    /// Each refusal is its own sentence, as the dialog shows it, and nothing
+    /// is written for one.
+    #[test]
+    fn a_refused_address_is_said_in_a_sentence() {
+        let (guarded, seen) = addressed();
+        let refused = post_json(
+            &guarded,
+            "/api/address/8f14e45f",
+            "full",
+            r#"{"name":"myagent_"}"#,
+        );
+        assert!(refused.starts_with("HTTP/1.1 400 "), "{refused}");
+        assert_eq!(
+            body_of(&refused),
+            "myagent_ is not a usable name: letters, digits and - only"
+        );
+        let taken = post_json(
+            &guarded,
+            "/api/address/8f14e45f",
+            "full",
+            r#"{"name":"taken"}"#,
+        );
+        assert_eq!(
+            body_of(&taken),
+            "taken.example.test is already used by another agent's shares"
+        );
+        let dashboard = post_json(
+            &guarded,
+            "/api/address",
+            "full",
+            r#"{"name":"cctop-share"}"#,
+        );
+        assert!(dashboard.starts_with("HTTP/1.1 400 "), "{dashboard}");
+        assert!(
+            !seen.lock().unwrap().iter().any(|(m, ..)| m != "GET"),
+            "a refusal wrote something"
+        );
+    }
+
+    /// The read-only link and a `--no-actions` serve cannot choose an address,
+    /// nor read the controls' state, and a GET cannot write.
+    #[test]
+    fn only_the_full_token_on_an_acting_serve_chooses_addresses() {
+        let (guarded, seen) = addressed();
+        for target in ["/api/address", "/api/address/8f14e45f"] {
+            let view = post_json(&guarded, target, "view", r#"{"name":"myagent"}"#);
+            assert!(view.starts_with("HTTP/1.1 403 "), "{target}: {view}");
+            let read = status_of(&guarded, "GET", target, &bearer_line("view"));
+            assert!(read.contains(" 403 "), "{target}: {read}");
+        }
+        let (fake, _) = address::tests::fake();
+        let no_actions = Shared {
+            actions: false,
+            addresses: Arc::new(fake),
+            ..shared("full", "view")
+        };
+        for target in ["/api/address", "/api/address/8f14e45f"] {
+            let refused = post_json(&no_actions, target, "full", r#"{"name":"myagent"}"#);
+            assert!(refused.starts_with("HTTP/1.1 403 "), "{target}: {refused}");
+            let read = status_of(&no_actions, "GET", target, &bearer_line("full"));
+            assert!(read.contains(" 403 "), "{target}: {read}");
+        }
+        assert!(seen.lock().unwrap().is_empty(), "Cloudflare was asked");
     }
 
     #[test]

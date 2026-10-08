@@ -317,6 +317,25 @@ The page's hostname is never used for a share, because everything there wants
 the page's token and a share link must not carry it. Stop that serve and the
 share links on the `-share` hostname stop with it; the next `W` mints a new one.
 
+On that hostname the link is the address itself —
+`https://cctop-share.example.com/#…` rather than a page on `share.rmux.io` —
+because cctop serves rmux's browser app there too, from the same pinned copy the
+page frames its terminals with. What answers a share hostname is a server of its
+own with two things on it, the app and the share's socket, and no route of the
+dashboard's at all: a share link opens a terminal and never the page, whatever
+token anyone adds to it.
+
+**Choosing an agent's address.** The panel `W` opens shows the hostname the link
+goes out on (never the link). On your own domain, `e` or a right-click on that
+line asks for a name: `myagent` puts the agent on `myagent.example.com`, mints a
+fresh link there, copies it and redraws the code. The name sticks to the agent
+— the next `W`, after a restart too, goes out on it — and two agents can be
+shared at once on two names. An empty field sends it back to the `-share`
+hostname. The old name's DNS record is deleted, so links on it stop answering.
+The session page in the browser has the same rename on its `Address` row. A
+quick tunnel's address is Cloudflare's pick, and an account connected with a
+tunnel token cannot write DNS, so neither offers one; the panel says which.
+
 Otherwise it is a TryCloudflare quick tunnel, the same client `cctop serve
 --tunnel=quick` uses: opened on the first `W` of a run and closed when cctop
 exits. If the tunnel cannot be registered the share still happens and the status

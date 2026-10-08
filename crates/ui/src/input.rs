@@ -236,10 +236,15 @@ impl App {
             Mode::DeleteBlocked | Mode::KillBlocked => self.mode = Mode::List,
             // Any key, like the other panels that only have something to say;
             // and the link let go of with it, there being nothing left to draw.
+            // Except `e`, which chooses the address the link goes out on.
+            Mode::ShareQr if key.code == KeyCode::Char('e') && key.modifiers.is_empty() => {
+                self.rename_share_prompt()
+            }
             Mode::ShareQr => {
                 self.mode = Mode::List;
                 self.share_qr = None;
             }
+            Mode::RenameAddress => self.on_key_address(key),
             Mode::List => {
                 self.reload_settings();
                 if let Some(key) = self.keymap.apply(key) {
@@ -389,6 +394,7 @@ impl App {
             Mode::NewWorktree => {
                 paste_into(&mut self.worktree_input, text, BRANCH_MAX);
             }
+            Mode::RenameAddress => self.paste_address(text),
             Mode::RenameTab => {
                 // The clipboard a right-click brought along with it, not a
                 // paste anyone asked for. See `rename_opened_by_click`.
@@ -596,6 +602,7 @@ impl App {
             | Mode::SendKeys
             | Mode::NewWorktree
             | Mode::RenameTab
+            | Mode::RenameAddress
             | Mode::SwitchTab
             | Mode::LaunchCwd => true,
             Mode::AddAccount => {
@@ -803,6 +810,7 @@ impl App {
             KeyCode::Char('x') => self.stop_serving(),
             KeyCode::Char('a') => self.open_connect(Mode::Serve),
             KeyCode::Char('r') => self.serve_on_new_links(),
+            KeyCode::Char('e') => self.rename_dashboard_prompt(),
             // Only a tunnel's link is worth a code: the loopback one is the
             // link a phone cannot open.
             KeyCode::Char('c') => match self.serving.as_ref().is_some_and(|s| s.public.is_some()) {
@@ -2026,6 +2034,17 @@ impl App {
         // over a table that is still being scrolled and clicked while the query
         // is typed, and swallowing the wheel there strands the filter it exists
         // to drive.
+        // A right-click on an address offers to choose it, like a tab's
+        // name in the bar. Before the modal's own handling, which answers the
+        // left button only; and on the drawn line only, which the panel
+        // records while renaming is on offer.
+        if ev.kind == MouseEventKind::Down(MouseButton::Right)
+            && matches!(self.mode, Mode::ShareQr | Mode::Serve)
+            && layout.address_at(ev.column, ev.row)
+        {
+            self.rename_address_by_click();
+            return;
+        }
         if self.mode != Mode::List && layout.modal_rect.is_some() {
             if ev.kind != MouseEventKind::Down(MouseButton::Left) {
                 return;
