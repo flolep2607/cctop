@@ -102,6 +102,19 @@ const HOW: &str = "install wl-clipboard or xclip (WSL uses powershell.exe)";
 /// pressed to paste *whatever* is there and cannot stall on a clipboard that
 /// is usually text.
 pub fn image_to_file(ask_terminal: bool) -> Result<PathBuf, NoImage> {
+    // The clipboard read is the developer's, as the write is in
+    // [`copy_to_clipboard`]: a test that pressed F9 would hand an agent
+    // whatever screenshot was last copied on the machine running `cargo test`,
+    // and pass or fail on it. The one test that means to read it calls
+    // [`image_from_system`] itself.
+    if crate::under_test() {
+        return Err(NoImage::NoTool);
+    }
+    image_from_system(ask_terminal)
+}
+
+/// [`image_to_file`] without the test guard.
+fn image_from_system(ask_terminal: bool) -> Result<PathBuf, NoImage> {
     let dir = paste_dir();
     if std::fs::create_dir_all(&dir).is_err() {
         return Err(NoImage::NoTool);
@@ -258,6 +271,13 @@ pub fn write_image(image: &PastedImage) -> std::io::Result<PathBuf> {
 /// one becomes `-2`, `-3`, and so on.
 fn reserve(dir: &Path, ext: &str) -> std::io::Result<PathBuf> {
     let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
+    reserve_stamped(dir, ext, &stamp)
+}
+
+/// [`reserve`] with the second given rather than read, so a test of what
+/// happens inside one second is not at the mercy of the clock ticking over
+/// between two calls.
+fn reserve_stamped(dir: &Path, ext: &str, stamp: &str) -> std::io::Result<PathBuf> {
     for n in 1..=99u32 {
         let name = match n {
             1 => format!("paste-{stamp}.{ext}"),
@@ -464,10 +484,21 @@ fn bridge_port() -> u16 {
 /// sniffed like anything else — a listener on the port is a local process
 /// saying "clipboard", not proof of one.
 fn image_over_bridge(dest: &Path, port: u16) -> Attempt {
+    image_over_bridge_within(dest, port, Duration::from_millis(200))
+}
+
+/// [`image_over_bridge`] with the connect deadline given.
+///
+/// 200 ms is right for a paste gesture and wrong for a test: it is wall time,
+/// and a loaded machine can keep the connecting thread, or the softirq that
+/// finishes a loopback handshake, off the CPU for longer than that. The test
+/// of the bridge's answers then saw a listener that was there as `Missing`,
+/// once in 170 runs of the suite with every core busy.
+fn image_over_bridge_within(dest: &Path, port: u16, deadline: Duration) -> Attempt {
     use std::io::Read;
     use std::net::TcpStream;
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
-    let Ok(mut stream) = TcpStream::connect_timeout(&addr, Duration::from_millis(200)) else {
+    let Ok(mut stream) = TcpStream::connect_timeout(&addr, deadline) else {
         return Attempt::Missing;
     };
     let _ = stream.set_read_timeout(Some(Duration::from_secs(3)));
@@ -834,7 +865,7 @@ mod tests {
     #[test]
     #[ignore = "reads the machine's real clipboard"]
     fn the_clipboard_image_becomes_a_png_on_disk() {
-        match image_to_file(false) {
+        match image_from_system(false) {
             Ok(path) => {
                 assert!(is_png(&path), "{} is not a PNG", path.display());
                 eprintln!(
@@ -847,18 +878,31 @@ mod tests {
         }
     }
 
+    /// A test never reads the clipboard of whoever runs it, the same rule the
+    /// cache and [`copy_to_clipboard`] follow.
+    #[test]
+    fn a_test_never_reads_the_real_clipboard() {
+        assert!(matches!(image_to_file(true), Err(NoImage::NoTool)));
+    }
+
     /// Two images pasted in the same second are two files.
     ///
     /// The name resolves to a second, and more than one thing can paste inside
     /// one — two cctops on the same machine, the page and a terminal, or a
     /// finger on F9 twice. The second write used to land on the first, handing
     /// an agent a path to somebody else's picture.
+    ///
+    /// The second is fixed rather than read: with the clock read per call, a
+    /// tick between the first and second reservation gave the second a fresh
+    /// stamp and no `-2`, and the test failed under load for code that was
+    /// right.
     #[test]
     fn a_second_paste_in_the_same_second_gets_its_own_name() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let first = reserve(dir.path(), "png").expect("first");
-        let second = reserve(dir.path(), "png").expect("second");
-        let third = reserve(dir.path(), "png").expect("third");
+        let stamp = "20260901-142233";
+        let first = reserve_stamped(dir.path(), "png", stamp).expect("first");
+        let second = reserve_stamped(dir.path(), "png", stamp).expect("second");
+        let third = reserve_stamped(dir.path(), "png", stamp).expect("third");
         assert_ne!(first, second);
         assert_ne!(second, third);
         // Claimed, not merely named: the file is there, which is what stops
@@ -1059,22 +1103,34 @@ mod tests {
     /// to say "clipboard asked, nothing on it".
     #[test]
     fn the_bridges_three_answers_are_distinct() {
+        // A listener that is there is never `Missing`, however long the
+        // machine takes to connect to it; see [`image_over_bridge_within`].
+        const PATIENT: Duration = Duration::from_secs(10);
         let dir = tempfile::tempdir().expect("tempdir");
         let dest = dir.path().join("paste.png");
         let png = fake(PNG_MAGIC);
 
         let port = bridge(png.clone());
-        assert!(matches!(image_over_bridge(&dest, port), Attempt::Wrote));
+        assert!(matches!(
+            image_over_bridge_within(&dest, port, PATIENT),
+            Attempt::Wrote
+        ));
         assert_eq!(std::fs::read(&dest).expect("written"), png);
 
         // Answered, and the clipboard held no image.
         let port = bridge(Vec::new());
-        assert!(matches!(image_over_bridge(&dest, port), Attempt::Empty));
+        assert!(matches!(
+            image_over_bridge_within(&dest, port, PATIENT),
+            Attempt::Empty
+        ));
 
         // Answered, but not with an image — a listener claiming to be the
         // bridge is still just bytes to be sniffed.
         let port = bridge(b"not an image, whatever the port says".to_vec());
-        assert!(matches!(image_over_bridge(&dest, port), Attempt::Empty));
+        assert!(matches!(
+            image_over_bridge_within(&dest, port, PATIENT),
+            Attempt::Empty
+        ));
 
         // A port whose listener has gone away is refusal, not emptiness.
         //
