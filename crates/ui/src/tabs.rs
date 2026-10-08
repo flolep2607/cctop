@@ -72,8 +72,8 @@ pub struct Pane {
     ///
     /// Recorded whether or not rmux is what carries the agent, because it is the
     /// only durable answer to "is this session already open?" — `rmux` alone is
-    /// `None` on every pane when rmux is not installed, and resuming one
-    /// transcript into two agents is precisely what that question guards.
+    /// `None` on a pane on cctop's own pty, and resuming one transcript into two
+    /// agents is precisely what that question guards.
     pub resumed: Option<String>,
     /// The Claude profile this pane's agent was started under, when it is not
     /// the default one.
@@ -444,11 +444,8 @@ impl Pane {
         self.agent = found;
         // The first moment the session is known to be there is the first moment
         // its options can be set, and settling it here means it is done once per
-        // pane rather than on a timer. Every attach passes through, so a session
-        // left by an older cctop is quieted when it is picked up again.
+        // pane rather than on a timer.
         if self.agent.is_some() {
-            cctop_core::rmux::quiet(name);
-            cctop_core::rmux::mouse(name);
             // The one moment the session exists and this pane's label is settled
             // — the callers that rename a pane do it before it is ever pumped.
             // Every other cctop reads the tab's name back off the session, so
@@ -522,13 +519,14 @@ impl Pane {
 /// Who owns the agent a pane is opened onto.
 #[derive(Debug, Clone)]
 pub enum Own {
-    /// A rmux session of this name, so the agent outlives cctop. An existing
-    /// session of that name is attached to rather than replaced.
-    Tmux(String),
-    /// A rmux session that is already running: attach, never create. Picking one
+    /// A session of this name in cctop's own rmux daemon, so the agent
+    /// outlives cctop. An existing session of that name is attached to rather
+    /// than replaced.
+    Mux(String),
+    /// A session that is already running: attach, never create. Picking one
     /// from the launcher that has since ended must fail and say so, not quietly
     /// start something new under its name.
-    TmuxExisting(String),
+    MuxExisting(String),
     /// A pty cctop owns, which ends when cctop does.
     Cctop,
 }
@@ -537,17 +535,17 @@ impl Pane {
     /// Start `argv` and open a pane onto it.
     pub fn launch(argv: &[String], cwd: Option<&Path>, own: Own) -> anyhow::Result<Pane> {
         let rmux = match &own {
-            Own::Tmux(name) | Own::TmuxExisting(name) => Some(name.clone()),
+            Own::Mux(name) | Own::MuxExisting(name) => Some(name.clone()),
             Own::Cctop => None,
         };
         let spawn = match &own {
-            Own::Tmux(name) => {
-                // Before the client, not after: the pane's scrollback is fixed
-                // the moment it is made. See [`rmux::prepare`].
+            Own::Mux(name) => {
+                // Before the client, so the daemon is this cctop's child rather
+                // than the client's. See [`rmux::prepare`].
                 cctop_core::rmux::prepare(argv, name, cwd);
                 cctop_core::rmux::attach_or_create(argv, name, cwd)
             }
-            Own::TmuxExisting(name) => cctop_core::rmux::attach(name),
+            Own::MuxExisting(name) => cctop_core::rmux::attach(name),
             Own::Cctop => argv.to_vec(),
         };
         let hosted = cctop_core::shim::host(&spawn, cwd, super::render::pane_size())?;
@@ -892,11 +890,11 @@ impl Tab {
 
     /// One `Shared` as the pane it becomes when this cctop takes a client on it.
     fn attach_one(shared: &Shared) -> anyhow::Result<Pane> {
-        // `TmuxExisting` never creates: a session that ended between the sync
+        // `MuxExisting` never creates: a session that ended between the sync
         // that found it and this must fail and say so, not silently start a new
         // agent under a dead agent's name.
         let argv = [shared.label.clone()];
-        let mut pane = Pane::launch(&argv, None, Own::TmuxExisting(shared.name.clone()))?;
+        let mut pane = Pane::launch(&argv, None, Own::MuxExisting(shared.name.clone()))?;
         // The label the other cctop chose, not one reconstructed from the argv
         // above — which is the label already, but only by coincidence.
         pane.label = shared.label.clone();

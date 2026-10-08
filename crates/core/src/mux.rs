@@ -1,21 +1,22 @@
-//! cctop's own rmux daemon, built into the cctop binary (#197, stage 2).
+//! cctop's own rmux daemon, built into the cctop binary (#197).
 //!
-//! Every agent cctop keeps alive lives in an rmux daemon. Until now that was
-//! the user's own one, reached with the `rmux` they installed, so cctop's agents
-//! sat beside their sessions, saw their config, and died with their
-//! `kill-server`. This module is the other daemon: the rmux server linked into
-//! this binary, run as `cctop mux daemon`, on a socket under cctop's own runtime
-//! directory, which nothing of the user's knows about.
-//!
-//! It is behind `CCTOP_MUX=builtin` for now. Without the variable every path in
-//! [`crate::rmux`] keeps driving the user's daemon exactly as before; with it,
-//! the same functions ask this daemon instead, through the typed protocol, and
-//! nothing spawns `rmux`.
+//! Every agent cctop keeps alive lives in an rmux daemon, and that daemon is
+//! this one: the rmux server linked into this binary, run as `cctop mux
+//! daemon`, on a socket under cctop's own runtime directory, which nothing of
+//! the user's knows about. No `rmux` has to be installed, and an `rmux` the
+//! user does run never sees cctop's agents, never applies its config to them,
+//! and ends none of them with its `kill-server`.
 //!
 //! What keeps the two apart is that the socket is computed here and nowhere
 //! else, and from nothing the user's rmux reads: not `$RMUX`, `$TMUX`,
 //! `RMUX_TMPDIR`, `TMUX_TMPDIR` or any `RMUX_SDK_*` variable. A cctop started
 //! inside one of the user's rmux panes therefore still reaches its own daemon.
+//!
+//! The cost of that, said plainly because it lands on upgrade: cctop up to
+//! 0.31 kept its agents in the user's own rmux daemon, as `cctop-*` sessions.
+//! Those are still running there after an update, and this cctop does not see
+//! them — it never lists, attaches to or touches a session of another daemon.
+//! `rmux attach -t cctop-…` reaches one by hand, and `cctop doctor` says so.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -26,18 +27,6 @@ use rmux_proto::{
     NewSessionExtRequest, OptionScopeSelector, PaneTarget, Request, Response, SendKeysExtRequest,
     SessionName, SetOptionByNameRequest, SetOptionMode, Target,
 };
-
-/// Whether this cctop drives its own daemon rather than the user's rmux.
-///
-/// Read per call rather than once: it is one environment lookup, and tests flip
-/// it per thread (see [`TestDaemon`]) without touching the process environment.
-pub fn builtin() -> bool {
-    #[cfg(any(test, feature = "test-support"))]
-    if TEST_SOCKET.with(|socket| socket.borrow().is_some()) {
-        return true;
-    }
-    std::env::var_os("CCTOP_MUX").is_some_and(|value| value == "builtin")
-}
 
 /// The longest path a unix socket address holds: `sun_path` is 108 bytes on
 /// Linux, one of which is the terminating NUL.
@@ -81,28 +70,53 @@ fn checked(path: PathBuf) -> Result<PathBuf, String> {
     Ok(path)
 }
 
+/// How many lines of an agent's output a pane keeps.
+///
+/// rmux reports no `history-limit` until one is set, so what a pane keeps
+/// unasked is rmux's business and not something to rely on — tmux's answer was
+/// 2000, which is a few minutes of a working agent: a pane you can scroll but
+/// not scroll *back* to anything. These lines cost nothing until they exist and
+/// are gone with the session.
+pub const HISTORY_LINES: &str = "50000";
+
 /// The options every session in cctop's daemon starts with, as the config the
 /// daemon loads at startup.
 ///
-/// On the user's daemon each of these was set per session after the fact, and
-/// two of them server-wide, in a daemon that was not cctop's to configure. Here
-/// the daemon is cctop's, so they are its defaults, and a new pane is born with
-/// them — which is what `history-limit` needs, since a pane's scrollback is
-/// sized when the pane is made (see `rmux::prepare`).
+/// Defaults of the daemon rather than options set on each session after the
+/// fact, because the daemon is cctop's to configure and because one of them
+/// cannot be set after the fact: a pane's scrollback is allocated when the
+/// pane is *made* and never resized, so `history-limit` has to be in force
+/// before the agent's pane exists.
 ///
-/// - `history-limit`: `rmux::HISTORY_LINES`.
-/// - `mouse`, `status`: see `rmux::mouse` and `rmux::quiet`.
-/// - `window-size latest`: several cctops on one agent; see `rmux::prepare`.
-/// - `allow-passthrough`, `set-clipboard`: an agent's OSC 9 and its copies
-///   reach cctop; see `rmux::quiet`.
-const DEFAULTS: &str = "\
-set-option -g history-limit 50000
+/// - `history-limit`: [`HISTORY_LINES`].
+/// - `mouse on`: rmux is on the alternate screen, so the scrollback of the
+///   terminal cctop runs in holds none of the agent's output, and the history
+///   that does is reachable only from copy-mode. With the mouse on, the wheel
+///   enters copy-mode and scrolls, as it does in a terminal with no rmux.
+/// - `status off`: a cctop pane already has a border with the agent's name on
+///   it, and rmux's bar carries a clock that repaints every `status-interval`.
+///   A pane's fallback idleness test is "has the screen stopped changing", so a
+///   ticking clock made every abandoned agent read as busy forever.
+/// - `window-size latest`: several cctops may hold a client on one session —
+///   that is what sharing tabs means — and at rmux's default the window is
+///   sized to the smallest of them. `latest` fits whichever is being used.
+/// - `allow-passthrough on`: a harness wraps its desktop notification (OSC 9)
+///   in rmux's passthrough sequence, which rmux swallows unless told
+///   otherwise, and cctop listens for it in the pane's parser.
+/// - `set-clipboard on`: at `external`, clipboard writes from inside a pane are
+///   dropped, so a copy in Claude Code went nowhere.
+fn defaults() -> String {
+    format!(
+        "\
+set-option -g history-limit {HISTORY_LINES}
 set-option -g mouse on
 set-option -g status off
 set-option -g window-size latest
 set-option -g allow-passthrough on
 set-option -s set-clipboard on
-";
+"
+    )
+}
 
 /// How long cctop waits for its daemon to come up, or to answer.
 const DEADLINE: Duration = Duration::from_secs(30);
@@ -118,7 +132,7 @@ pub fn serve(socket: &Path) -> Result<(), String> {
         .parent()
         .ok_or_else(|| format!("{} has no directory", socket.display()))?;
     let config = parent.join("cctop.conf");
-    std::fs::write(&config, DEFAULTS)
+    std::fs::write(&config, defaults())
         .map_err(|e| format!("could not write {}: {e}", config.display()))?;
     let config = rmux_server::DaemonConfig::new(socket)
         // Only cctop's own file: never `~/.rmux.conf` or `~/.tmux.conf`, which
@@ -186,6 +200,10 @@ pub fn start() -> Result<(), String> {
     #[cfg(any(test, feature = "test-support"))]
     if TEST_SOCKET.with(|s| s.borrow().is_some()) {
         return TestDaemon::ensure(&socket);
+    }
+    #[cfg(any(test, feature = "test-support"))]
+    if in_test_harness() {
+        return Err("a test that starts an agent needs a mux::TestDaemon".into());
     }
     let mut daemon = std::process::Command::new("/proc/self/exe");
     // Named for `ps` as what it is, rather than as the path it was run by.
@@ -534,9 +552,24 @@ pub fn capture(pane: &PaneTarget, escapes: bool, join: bool) -> Option<Vec<u8>> 
 /// The binary by its path, not `/proc/self/exe`: the pane's command may be run
 /// by something other than this process, and `self` would then be that.
 pub fn attach_argv(name: &str, create: Option<(&[String], Option<&Path>)>) -> Vec<String> {
+    #[cfg(any(test, feature = "test-support"))]
+    if in_test_harness() {
+        // The harness would read `mux attach …` as test filters and run them in
+        // a pane. A program that is not there fails the spawn instead, which is
+        // what a pane whose client cannot run reports.
+        return vec!["/nonexistent/cctop-mux-in-a-test-binary".to_string()];
+    }
     let exe = std::env::current_exe()
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|_| "cctop".to_string());
+    attach_argv_of(exe, name, create)
+}
+
+fn attach_argv_of(
+    exe: String,
+    name: &str,
+    create: Option<(&[String], Option<&Path>)>,
+) -> Vec<String> {
     let mut out = vec![exe, "mux".into(), "attach".into()];
     if let Some((argv, cwd)) = create {
         out.push("--create".into());
@@ -699,15 +732,52 @@ fn utf8_locale() -> bool {
         })
 }
 
+/// Whether this process is a test harness rather than cctop: cargo puts those
+/// in `target/<profile>/deps/`, and the `cctop` binary a test runs one level up.
+///
+/// Every agent now lives in this daemon, so a test that opens a tab without a
+/// [`TestDaemon`] would otherwise run `/proc/self/exe mux daemon` — the harness,
+/// reading `mux` as a filter and running every test that matches, in a loop.
+#[cfg(any(test, feature = "test-support"))]
+fn in_test_harness() -> bool {
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| Some(exe.parent()?.file_name()? == "deps"))
+        .unwrap_or(false)
+}
+
+/// What `cctop doctor` says about the daemon.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Status {
+    /// The rmux version the running daemon was built from.
+    pub version: String,
+    /// How many sessions it holds — cctop's agents, all of them.
+    pub sessions: usize,
+}
+
+/// The running daemon's own account of itself, or `None` when none answers on
+/// [`socket`]. Never starts one: a doctor that started a daemon to report on
+/// it would be reporting on itself.
+pub fn status() -> Option<Status> {
+    let mut connection = connect()?;
+    match connection.daemon_status().ok()? {
+        Response::DaemonStatus(status) => Some(Status {
+            version: status.rmux_version,
+            sessions: status.session_count,
+        }),
+        _ => None,
+    }
+}
+
 #[cfg(any(test, feature = "test-support"))]
 thread_local! {
     /// The socket of this thread's [`TestDaemon`], while one is held.
     static TEST_SOCKET: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
 }
 
-/// A daemon of a test's own: a private runtime directory, cctop's daemon
-/// running in this process on a socket inside it, and [`builtin`] turned on
-/// for this thread while the guard is held.
+/// A daemon of a test's own: a private runtime directory, and cctop's daemon
+/// running in this process on a socket inside it, which is the one [`socket`]
+/// names on this thread while the guard is held.
 ///
 /// In this process rather than as `cctop mux daemon`, because a test binary is
 /// not cctop: `/proc/self/exe mux daemon` there would be the test harness
@@ -851,13 +921,33 @@ mod tests {
 
     #[test]
     fn a_pane_attaches_through_this_binary() {
-        let argv = attach_argv("cctop-a", Some((&["claude".to_string()], None)));
+        let cctop = || "/usr/bin/cctop".to_string();
+        let argv = attach_argv_of(cctop(), "cctop-a", Some((&["claude".to_string()], None)));
         assert_eq!(
-            &argv[1..],
-            ["mux", "attach", "--create", "cctop-a", "--", "claude"]
+            argv,
+            ["/usr/bin/cctop", "mux", "attach", "--create", "cctop-a", "--", "claude"]
         );
-        let argv = attach_argv("cctop-a", None);
-        assert_eq!(&argv[1..], ["mux", "attach", "cctop-a"]);
+        let argv = attach_argv_of(cctop(), "cctop-a", None);
+        assert_eq!(argv, ["/usr/bin/cctop", "mux", "attach", "cctop-a"]);
+        // A directory that is not there is left off rather than failing the
+        // spawn, matching what the pty path does with a stale cwd.
+        let gone = attach_argv_of(
+            cctop(),
+            "cctop-a",
+            Some((&["claude".to_string()], Some(Path::new("/nonexistent/gone")))),
+        );
+        assert!(!gone.contains(&"--cwd".to_string()));
+    }
+
+    /// A test binary is not cctop, and running it as `cctop mux` would run its
+    /// own tests in a pane: the guard is what keeps a test that opens a tab
+    /// without a daemon of its own from doing that.
+    #[test]
+    fn a_test_binary_never_runs_itself_as_the_daemon() {
+        assert!(in_test_harness());
+        assert!(!Path::new(&attach_argv("cctop-a", None)[0]).exists());
+        let _runtime = crate::config::claim_test_runtime_base("mux-harness-guard");
+        assert!(start().is_err());
     }
 
     #[test]

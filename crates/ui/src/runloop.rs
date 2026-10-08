@@ -795,10 +795,7 @@ fn event_loop(
             app.drop_empty_tabs();
         }
         app.pump_add_account();
-        // After the reap, so a finished install is seen as finished on the same
-        // tick its pane goes away.
-        app.poll_rmux_install();
-        // And after both, so a tab this cctop has just lost is not immediately
+        // After the reap, so a tab this cctop has just lost is not immediately
         // re-added by a listing taken before its session went.
         app.sync_shared_tabs();
         if drawn || closed {
