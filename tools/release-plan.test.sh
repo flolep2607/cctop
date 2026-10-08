@@ -77,7 +77,7 @@ case_() {
 
 case_ "(a) ui changed, ui and root bumped" 0 "publishes: cctop-ui cctop$" -- \
     touch_crate ui ';' bump ui ';' bump_root
-case_ "(b) ui changed, only root bumped" 1 "::error::cctop-ui changed .*crates/ui/.* still $base" -- \
+case_ "(b) ui changed, only root bumped" 1 "::error::cctop-ui changed .*crates/ui/.* still [0-9]+\.[0-9]+\.[0-9]+" -- \
     touch_crate ui ';' bump_root
 case_ "(c) core changed, all four bumped" 0 "publishes: cctop-core cctop-serve cctop-ui cctop$" -- \
     touch_crate core ';' bump core ';' bump serve ';' bump ui ';' bump_root
