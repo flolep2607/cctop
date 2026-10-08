@@ -318,6 +318,7 @@ these flags — the route says so with a 502 rather than an empty page.
 | `GET /api/analytics` | The whole fleet's history as one document, untrimmed — the page fetches it on its own cadence rather than every refresh |
 | `GET /api/report/<id>` | The report, as JSON |
 | `GET /api/chat/<id>` | The conversation, as JSON — what `cctop --chat` prints |
+| `GET /api/chat/<id>?agent=<agent>` | One subagent's own conversation, by the id its `Agent` call names — what `cctop --chat <id> --agent <agent>` prints; 404 for an id the session does not list |
 | `GET /api/access/<id>` | What one session can reach: instructions, skills, MCP servers — what `cctop --access` prints |
 | `GET /api/events` | Server-sent events; one `sessions` event per refresh |
 | `GET /api/hosts` | Which `--host` machines could not be read, and why |
