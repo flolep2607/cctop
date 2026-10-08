@@ -165,20 +165,27 @@ fn shim_screen(pid: u32) -> Option<Vec<String>> {
     Some(screen.rows(0, cols).collect())
 }
 
-/// The visible screen of a rmux target — a `%id` — as text rows.
+/// The visible screen of a rmux target — a `%id`, or `session:window.pane` on
+/// cctop's own daemon (see `inject::list_panes`) — as text rows.
 ///
 /// `-p` prints rather than captures to a buffer, and `-J` keeps a wrapped line
 /// one line so a footer hint cannot split mid-phrase on a narrow pane.
 fn capture(target: &str) -> Option<Vec<String>> {
-    let out = Command::new(crate::rmux::BIN)
-        .args(["capture-pane", "-p", "-J", "-t", target])
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
+    let screen = match crate::mux::builtin() {
+        true => crate::mux::capture(&crate::mux::pane_target(target)?, false, true)?,
+        false => {
+            let out = Command::new(crate::rmux::BIN)
+                .args(["capture-pane", "-p", "-J", "-t", target])
+                .output()
+                .ok()?;
+            if !out.status.success() {
+                return None;
+            }
+            out.stdout
+        }
+    };
     Some(
-        String::from_utf8_lossy(&out.stdout)
+        String::from_utf8_lossy(&screen)
             .lines()
             .map(String::from)
             .collect(),

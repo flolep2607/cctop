@@ -2437,15 +2437,10 @@ Enter to select · ↑/↓ to navigate · Esc to cancel";
     /// answer to "which sessions are mine" that does not live in this process.
     #[test]
     fn a_split_records_itself_onto_its_sessions() {
-        if !cctop_core::rmux::available() {
-            eprintln!("skipping: rmux not installed");
-            return;
-        }
-        // The daemon is machine-wide, so this serialises against the other
-        // tests that talk to it.
-        let _turn = cctop_core::rmux::test_lock();
-        let leader = format!("cctop-leader-{}", std::process::id());
-        let other = format!("cctop-other-{}", std::process::id());
+        // cctop's own daemon, on a socket of this test's.
+        let _daemon = cctop_core::mux::TestDaemon::new("a_split_records_itself_onto_its_sessions");
+        let leader = "cctop-leader".to_string();
+        let other = "cctop-other".to_string();
         for name in [&leader, &other] {
             let _ = cctop_core::rmux::start_detached(&["sleep".into(), "30".into()], name, None);
         }
