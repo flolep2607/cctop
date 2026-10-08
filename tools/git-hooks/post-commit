@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# Agents only: push every commit as it is made, so a draft PR always shows
+# where the work is. That is what lets a later session resume an issue from
+# the draft alone (see .claude/agents/issue-solver.md), and what a person
+# watching the PR sees move.
+#
+# Only a branch that already tracks one on the remote — set by the first
+# `git push -u`, which is the deliberate step — and never main, which is only
+# ever written by merging a PR. Nothing during a rebase, whose intermediate
+# commits are not meant to be seen. In the background, so the commit returns at
+# once; failures go to the log and not to the agent, who will see a stale PR
+# and push by hand.
+[[ "${CLAUDECODE:-}" == 1 ]] || exit 0
+branch=$(git symbolic-ref --quiet --short HEAD) || exit 0
+case "$branch" in main|master) exit 0 ;; esac
+git rev-parse --abbrev-ref --symbolic-full-name '@{u}' >/dev/null 2>&1 || exit 0
+gitdir=$(git rev-parse --git-dir)
+[[ -d "$gitdir/rebase-merge" || -d "$gitdir/rebase-apply" ]] && exit 0
+log="$(git rev-parse --git-common-dir)/agent-push.log"
+nohup git push --quiet >>"$log" 2>&1 </dev/null &
+exit 0

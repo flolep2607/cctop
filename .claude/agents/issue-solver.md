@@ -66,7 +66,14 @@ so never edit the main checkout; the worktree is yours.
 
 ## 3. Work in pushed steps
 
-Commit and push each step that builds, and tick it off the Plan with
+Commit with plain `git commit`. The identity is in the repository's config,
+and `tools/git-hooks` (enabled by `git config core.hooksPath tools/git-hooks`,
+which the main checkout has) adds the co-author line and pushes each commit
+in the background once the branch tracks `origin/issue-<N>` — so no `-c
+user.*`, no hand-written trailer, and no `git push` after the first one. If
+the draft looks stale, `.git/agent-push.log` in the main checkout says why.
+
+Commit each step that builds, and tick it off the Plan with
 `gh pr edit <pr> --body-file <file>`, rewriting Progress to say what is next.
 A session that dies mid-issue then loses only the step it was on: the branch,
 the draft and the comments are the whole state, and the next solver reads them
@@ -106,13 +113,9 @@ rebuilt `src/serve/assets/app/index.html`.
 
 ## 6. Ready for review
 
-Commits are authored as
-`Florian Leprat <24566964+flolep2607@users.noreply.github.com>` and end with
-`Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`. Squash the empty
-start commit away if the history reads better without it.
+Squash the empty start commit away if the history reads better without it.
 
 ```bash
-git push
 gh pr edit <pr> --title "<release-note title>" --body-file <file>
 gh pr ready <pr>
 gh issue edit <N> --add-label agent-pr --remove-label agent-working

@@ -218,3 +218,15 @@ Three traps the script guards, each of which produced a wrong picture first:
   (`─━│┊╭╮╯╰█░`) are drawn as geometry rather than text, because a font's box
   characters only span its *own* natural line height and would otherwise leave
   the panel borders visibly gapped.
+
+## Agents' git hooks
+
+`tools/git-hooks` holds two hooks that act only inside a Claude Code session
+(`CLAUDECODE=1`) and leave a person's commits alone: one adds the co-author
+line to an agent's commit, the other pushes each commit in the background on a
+branch that already tracks the remote (never `main`, never mid-rebase), so an
+agent's draft PR is always current. Enable them once per clone:
+
+```bash
+git config core.hooksPath tools/git-hooks
+```

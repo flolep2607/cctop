@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# Agents only: a commit made inside a Claude Code session carries the
+# co-author line, so nobody has to remember it on every commit. A person's own
+# commit — no CLAUDECODE in the environment — is left exactly as written.
+#
+# Enabled per clone with `git config core.hooksPath tools/git-hooks`.
+[[ "${CLAUDECODE:-}" == 1 ]] || exit 0
+msg="$1"
+source="${2:-}"
+# A merge or squash message is git's own, and an amend keeps what it had.
+case "$source" in merge|squash|commit) exit 0 ;; esac
+trailer="Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+grep -qiF "Co-Authored-By: Claude" "$msg" && exit 0
+git interpret-trailers --in-place --trailer "$trailer" "$msg"
