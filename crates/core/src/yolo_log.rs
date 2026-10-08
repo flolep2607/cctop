@@ -273,20 +273,67 @@ pub fn record(line: &Line) {
 /// case-insensitively, anywhere in a variable's, flag's or header's name.
 const SECRET_NAME: &str = "token|secret|password|passwd|pass|key|auth|credential|cookie";
 
+/// The words a secret's name contains, for deciding whether the name rules
+/// are worth compiling. `pass` covers `password` and `passwd`.
+const SECRET_WORDS: &[&str] = &[
+    "token",
+    "secret",
+    "pass",
+    "key",
+    "auth",
+    "credential",
+    "cookie",
+];
+
+/// One redaction: a pattern, what replaces its match, and the lowercase
+/// substrings without one of which it cannot match.
+///
+/// The triggers are there for the hook's clock. Compiling every rule costs
+/// about 13 ms in a release build — on each `PermissionRequest` the observer
+/// reports and each allow `yolo-hook` records, inside a 250 ms deadline — and
+/// almost no command has a secret in it. So a rule is compiled the first time
+/// its trigger turns up in a process, and a plain `cargo test` compiles none.
 struct Rule {
-    re: regex::Regex,
+    triggers: &'static [&'static str],
+    pattern: String,
+    re: std::sync::OnceLock<regex::Regex>,
     with: &'static str,
 }
 
+impl Rule {
+    fn new(
+        triggers: &'static [&'static str],
+        pattern: impl Into<String>,
+        with: &'static str,
+    ) -> Rule {
+        Rule {
+            triggers,
+            pattern: pattern.into(),
+            re: std::sync::OnceLock::new(),
+            with,
+        }
+    }
+
+    fn apply(&self, text: String, lower: &str) -> String {
+        if !self.triggers.iter().any(|t| lower.contains(t)) {
+            return text;
+        }
+        let re = self
+            .re
+            .get_or_init(|| regex::Regex::new(&self.pattern).expect("a redaction rule compiles"));
+        match re.is_match(&text) {
+            true => re.replace_all(&text, self.with).into_owned(),
+            false => text,
+        }
+    }
+}
+
 static RULES: LazyLock<Vec<Rule>> = LazyLock::new(|| {
-    let rule = |re: &str, with| Rule {
-        re: regex::Regex::new(re).expect("a redaction rule compiles"),
-        with,
-    };
     let value = r#"(?:"[^"]*"|'[^']*'|[^\s'"]+)"#;
     vec![
         // `scheme://user:password@host`: the whole userinfo.
-        rule(
+        Rule::new(
+            &["://"],
             r"(?i)([a-z][a-z0-9+.-]*://)[^/\s:@]+:[^/\s@]+@",
             "${1}[redacted]@",
         ),
@@ -294,47 +341,96 @@ static RULES: LazyLock<Vec<Rule>> = LazyLock::new(|| {
         // …`, `Cookie: …` — keeping the scheme word of an auth header. A value
         // already `[redacted]` is matched as one, or the scheme word would be
         // taken for the value on a second pass.
-        rule(
-            &format!(
+        Rule::new(
+            SECRET_WORDS,
+            format!(
                 r#"(?i)\b([a-z0-9-]*(?:{SECRET_NAME})[a-z0-9-]*\s*:\s*)((?:bearer|basic|digest|token)\s+)?(?:\[redacted\]|[^\s'"\[]+)"#
             ),
             "${1}${2}[redacted]",
         ),
         // A bearer token anywhere else.
-        rule(r#"(?i)\b(bearer\s+)[^\s'"\[]+"#, "${1}[redacted]"),
+        Rule::new(
+            &["bearer"],
+            r#"(?i)\b(bearer\s+)[^\s'"\[]+"#,
+            "${1}[redacted]",
+        ),
         // `NAME=value`, for a name that says secret.
-        rule(
-            &format!(r"(?i)\b([a-z0-9_]*(?:{SECRET_NAME})[a-z0-9_]*)={value}"),
+        Rule::new(
+            SECRET_WORDS,
+            format!(r"(?i)\b([a-z0-9_]*(?:{SECRET_NAME})[a-z0-9_]*)={value}"),
             "${1}=[redacted]",
         ),
         // `--flag=value` and `--flag value`. The spaced form never takes the
         // next flag as the value.
-        rule(
-            &format!(r"(?i)(--?[a-z0-9][a-z0-9_-]*(?:{SECRET_NAME})[a-z0-9_-]*)={value}"),
+        Rule::new(
+            SECRET_WORDS,
+            format!(r"(?i)(--?[a-z0-9][a-z0-9_-]*(?:{SECRET_NAME})[a-z0-9_-]*)={value}"),
             "${1}=[redacted]",
         ),
-        rule(
-            &format!(
+        Rule::new(
+            SECRET_WORDS,
+            format!(
                 r#"(?i)(--?[a-z0-9][a-z0-9_-]*(?:{SECRET_NAME})[a-z0-9_-]*\s+)(?:"[^"]*"|'[^']*'|[^\s'"-][^\s'"]*)"#
             ),
             "${1}[redacted]",
         ),
         // Shapes tokens are issued in.
-        rule(r"\bsk-[A-Za-z0-9_-]{8,}", "[redacted]"),
-        rule(r"\bgh[pousr]_[A-Za-z0-9]{16,}", "[redacted]"),
-        rule(r"\bgithub_pat_[A-Za-z0-9_]{16,}", "[redacted]"),
-        rule(r"\bxox[abposr]-[A-Za-z0-9-]{8,}", "[redacted]"),
-        rule(r"\bAKIA[0-9A-Z]{16}", "[redacted]"),
-        rule(r"\bglpat-[A-Za-z0-9_-]{16,}", "[redacted]"),
+        Rule::new(&["sk-"], r"\bsk-[A-Za-z0-9_-]{8,}", "[redacted]"),
+        Rule::new(
+            &["ghp_", "gho_", "ghu_", "ghs_", "ghr_"],
+            r"\bgh[pousr]_[A-Za-z0-9]{16,}",
+            "[redacted]",
+        ),
+        Rule::new(
+            &["github_pat_"],
+            r"\bgithub_pat_[A-Za-z0-9_]{16,}",
+            "[redacted]",
+        ),
+        Rule::new(&["xox"], r"\bxox[abposr]-[A-Za-z0-9-]{8,}", "[redacted]"),
+        Rule::new(&["akia"], r"\bAKIA[0-9A-Z]{16}", "[redacted]"),
+        Rule::new(&["glpat-"], r"\bglpat-[A-Za-z0-9_-]{16,}", "[redacted]"),
     ]
 });
 
-/// A run of base64 or hex characters. `/` is left out of it on purpose: with
-/// it, every long path is a run, and a path is the commonest detail there is.
-/// A base64 secret with slashes in it is still caught a segment at a time when
-/// its segments are long, which is the best this can do without a tokenizer.
-static LONG_RUN: LazyLock<regex::Regex> =
-    LazyLock::new(|| regex::Regex::new(r"[A-Za-z0-9+_=-]{32,}").expect("the run rule compiles"));
+/// The shortest run of base64 or hex characters taken for a secret.
+const LONG_RUN: usize = 32;
+
+/// Whether `c` belongs in a base64 or hex run. `/` is left out on purpose:
+/// with it every long path is a run, and a path is the commonest detail there
+/// is. A base64 secret with slashes in it is still caught a segment at a time
+/// when its segments are long, which is the best this can do without a
+/// tokenizer.
+fn in_run(c: char) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, '+' | '_' | '=' | '-')
+}
+
+/// Every run of [`LONG_RUN`] or more [`in_run`] characters with both a letter
+/// and a digit in it, replaced. By hand rather than by regex, since it is the
+/// one rule with no trigger and so would be compiled on every call.
+fn redact_runs(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut run = String::new();
+    let flush = |run: &mut String, out: &mut String| {
+        let mixed =
+            run.chars().any(|c| c.is_ascii_digit()) && run.chars().any(|c| c.is_ascii_alphabetic());
+        match run.chars().count() >= LONG_RUN && mixed {
+            true => out.push_str("[redacted]"),
+            false => out.push_str(run),
+        }
+        run.clear();
+    };
+    for c in text.chars() {
+        match in_run(c) {
+            true => run.push(c),
+            false => {
+                flush(&mut run, &mut out);
+                out.push(c);
+            }
+        }
+    }
+    flush(&mut run, &mut out);
+    out
+}
 
 /// Replace whatever looks like a secret in `text` with `[redacted]`.
 ///
@@ -351,23 +447,11 @@ static LONG_RUN: LazyLock<regex::Regex> =
 /// secret's name to this, so `--monkey=1` loses its value: over-redacting a
 /// harmless flag costs a line of context, under-redacting costs a secret.
 pub fn redact(text: &str) -> String {
-    let mut out = text.to_string();
-    for rule in RULES.iter() {
-        if rule.re.is_match(&out) {
-            out = rule.re.replace_all(&out, rule.with).into_owned();
-        }
-    }
-    LONG_RUN
-        .replace_all(&out, |m: &regex::Captures| {
-            let run = &m[0];
-            let mixed = run.chars().any(|c| c.is_ascii_digit())
-                && run.chars().any(|c| c.is_ascii_alphabetic());
-            match mixed {
-                true => "[redacted]".to_string(),
-                false => run.to_string(),
-            }
-        })
-        .into_owned()
+    let lower = text.to_ascii_lowercase();
+    let out = RULES
+        .iter()
+        .fold(text.to_string(), |out, rule| rule.apply(out, &lower));
+    redact_runs(&out)
 }
 
 /// What may be written as a `detail`: [`redact`]ed, with control characters

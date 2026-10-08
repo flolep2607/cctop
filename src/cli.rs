@@ -48,6 +48,8 @@ Commands:
                           did not use.
   cctop log               Print the event stream CCTOP_LOG writes; -f follows
                           it.
+  cctop yolo log          Every prompt YOLO allowed and every switch on or
+                          off, kept after the session ends. Redacted.
   cctop --trace           Time each stage of a run, for a bug report about
                           slowness.
 
@@ -67,6 +69,7 @@ Each command takes --help for the details.";
                       cctop sandbox <host>:<path> [claude args…]\n       \
                       cctop serve [--bind ADDR] [--port PORT]\n       \
                       cctop optimize | compare | yield | burn | log\n       \
+                      cctop yolo log [--session ID] [--since WHEN] [-n N] [--json] [-f]\n       \
                       cctop recall <query> [--read SESSION PASSAGE]\n       \
                       cctop wait <session> [--until …] [--timeout …]\n       \
                       cctop why [session]\n       \

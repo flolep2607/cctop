@@ -58,6 +58,20 @@ fn state(dir: &Path) -> PathBuf {
     dir.join("run").join("cctop").join("yolo.json")
 }
 
+/// The lasting record, under the sandbox's `XDG_DATA_HOME`.
+fn yolo_log(dir: &Path) -> PathBuf {
+    dir.join("data").join("cctop").join("yolo-log.jsonl")
+}
+
+/// Every line the hook has added to the lasting record.
+fn logged(dir: &Path) -> Vec<serde_json::Value> {
+    std::fs::read_to_string(yolo_log(dir))
+        .unwrap_or_default()
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect()
+}
+
 /// When `pid` started, in clock ticks since boot, as the kernel says.
 fn start_of(pid: u32) -> u64 {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
@@ -92,6 +106,10 @@ fn me() -> (u32, u64) {
 }
 
 fn request(session: &str) -> Vec<u8> {
+    request_for(session, "rm -rf build")
+}
+
+fn request_for(session: &str, command: &str) -> Vec<u8> {
     serde_json::to_vec(&serde_json::json!({
         "session_id": session,
         "transcript_path": "/t.jsonl",
@@ -99,7 +117,7 @@ fn request(session: &str) -> Vec<u8> {
         "permission_mode": "default",
         "hook_event_name": "PermissionRequest",
         "tool_name": "Bash",
-        "tool_input": {"command": "rm -rf build"},
+        "tool_input": {"command": command},
         "permission_suggestions": [],
     }))
     .unwrap()
@@ -189,6 +207,56 @@ fn the_recorded_session_in_the_recorded_process_is_allowed() {
     assert_eq!(event["event"], "cctop.yolo.allowed");
     assert_eq!(event["session_id"], "on");
     assert_eq!(event["ask"], "Bash: rm -rf build");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The allow is also written to the lasting record — one line, redacted,
+/// with its tool and whole command — and the hook says exactly the allow.
+#[test]
+fn an_allow_is_logged_redacted() {
+    let dir = sandbox("log");
+    switch(&dir, "on", Some(me()));
+    let fired = fire(&dir, &request_for("on", "TOKEN=dummy make\nmake install"));
+    assert_eq!(fired.code, Some(0));
+    assert_eq!(String::from_utf8_lossy(&fired.stdout), format!("{ALLOW}\n"));
+    let lines = logged(&dir);
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    let line = &lines[0];
+    assert_eq!(line["event"], "allow");
+    assert_eq!(line["session"], "on");
+    assert_eq!(line["via"], "hook");
+    assert_eq!(line["harness"], "claude");
+    assert_eq!(line["cwd"], "/w");
+    assert_eq!(line["tool"], "Bash");
+    assert_eq!(line["detail"], "TOKEN=[redacted] make\nmake install");
+    let raw = std::fs::read_to_string(yolo_log(&dir)).unwrap();
+    assert!(!raw.contains("dummy"), "{raw}");
+    use std::os::unix::fs::PermissionsExt;
+    let mode = std::fs::metadata(yolo_log(&dir))
+        .unwrap()
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o777, 0o600);
+
+    // Silence is not logged.
+    assert_silent(&fire(&dir, &request("other")), "another session");
+    assert_eq!(logged(&dir).len(), 1);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A data directory the log cannot be written in changes nothing about the
+/// answer.
+#[test]
+fn an_unwritable_log_still_allows() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = sandbox("readonly-log");
+    switch(&dir, "on", Some(me()));
+    std::fs::set_permissions(dir.join("data"), std::fs::Permissions::from_mode(0o500)).unwrap();
+    let fired = fire(&dir, &request("on"));
+    std::fs::set_permissions(dir.join("data"), std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert_eq!(fired.code, Some(0));
+    assert_eq!(String::from_utf8_lossy(&fired.stdout), format!("{ALLOW}\n"));
+    assert!(!yolo_log(&dir).exists());
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -292,6 +360,9 @@ fn a_held_lock_does_not_hold_the_agent_up() {
         "a held lock held the hook: {:?}",
         fired.took
     );
+    // The page's list gave up on the lock; the lasting record never asked
+    // for it.
+    assert_eq!(logged(&dir).len(), 1, "the busy lock cost the log line");
     drop(lock);
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -306,5 +377,48 @@ fn the_observer_never_decides_even_for_a_yolo_session() {
         &fire_as(&dir, "hook", "PermissionRequest", &request("on")),
         "cctop hook PermissionRequest",
     );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `cctop yolo log` reads both files from the data directory, and
+/// `--session` keeps the sessions whose id starts with it.
+#[test]
+fn yolo_log_reads_both_files_and_filters() {
+    let dir = sandbox("reader");
+    let data = dir.join("data").join("cctop");
+    std::fs::create_dir_all(&data).unwrap();
+    let line = |session: &str, at: &str, detail: &str| {
+        serde_json::json!({
+            "at": at, "event": "allow", "session": session, "via": "key", "detail": detail,
+        })
+        .to_string()
+            + "\n"
+    };
+    std::fs::write(
+        data.join("yolo-log.old.jsonl"),
+        line("abc-1", "2026-01-01T00:00:00Z", "cargo build")
+            + &line("xyz-1", "2026-01-02T00:00:00Z", "ls"),
+    )
+    .unwrap();
+    std::fs::write(
+        data.join("yolo-log.jsonl"),
+        line("abc-2", "2026-02-01T00:00:00Z", "cargo test"),
+    )
+    .unwrap();
+    let out = command(&dir)
+        .args(["yolo", "log", "--json", "--session", "abc"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    let sessions: Vec<String> = String::from_utf8(out.stdout)
+        .unwrap()
+        .lines()
+        .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap()["session"].to_string())
+        .collect();
+    assert_eq!(sessions, ["\"abc-1\"", "\"abc-2\""]);
+
+    let help = command(&dir).arg("yolo").output().unwrap();
+    assert_eq!(help.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&help.stdout).contains("cctop yolo log"));
     let _ = std::fs::remove_dir_all(&dir);
 }
