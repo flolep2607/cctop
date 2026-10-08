@@ -615,11 +615,18 @@ mod tests {
         assert_eq!(presses, 1, "the second cctop pressed too");
         assert!(rows[0].yolo.is_some(), "the second cctop still shows it");
 
-        // The owner goes; the next one to look takes over.
+        // The owner goes; the next one to look takes over. Looked for rather
+        // than expected at the first look: the lock lives as long as any copy
+        // of its descriptor, and a test on another thread that spawns a
+        // process holds a copy from its fork until its exec. Under load that
+        // window is long enough to be the one this tick lands in.
         drop(first);
-        second.tick_with(&mut rows, &mut |_| {
-            presses += 10;
-            Ok(())
+        crate::test_wait::eventually_true("the second cctop to take over", || {
+            second.tick_with(&mut rows, &mut |_| {
+                presses += 10;
+                Ok(())
+            });
+            presses > 1
         });
         assert_eq!(presses, 11);
         let _ = std::fs::remove_dir_all(&dir);

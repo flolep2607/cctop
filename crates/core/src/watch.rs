@@ -181,6 +181,7 @@ fn roots() -> Vec<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_wait::waits_for;
 
     /// A watch over `dir` alone, built the way [`Watch::start`] builds one.
     fn watch_dir(dir: &Path) -> Watch {
@@ -206,14 +207,6 @@ mod tests {
         }
     }
 
-    /// Poll until `f` holds, giving the watcher thread time to deliver.
-    fn eventually(f: impl Fn() -> bool) -> bool {
-        (0..50).any(|_| {
-            std::thread::sleep(Duration::from_millis(100));
-            f()
-        })
-    }
-
     /// A create under a watched tree has to reach the flag, and reading it has to
     /// disarm it — otherwise every tick would trigger a full walk forever.
     #[test]
@@ -222,7 +215,7 @@ mod tests {
         let watch = watch_dir(dir.path());
 
         std::fs::write(dir.path().join("new-session.jsonl"), b"{}\n").unwrap();
-        let armed = eventually(|| watch.took_structural_change());
+        let armed = waits_for(|| watch.took_structural_change());
 
         assert!(armed, "a created file did not reach the flag");
         assert!(
@@ -242,7 +235,7 @@ mod tests {
         let transcript = root.join("new-session.jsonl");
 
         std::fs::write(&transcript, b"{}\n").unwrap();
-        let waiting = eventually(|| watch.awaiting_discovery(|_| false));
+        let waiting = waits_for(|| watch.awaiting_discovery(|_| false));
 
         assert!(waiting, "a created file was not remembered");
         assert!(
@@ -279,7 +272,7 @@ mod tests {
         // watcher long enough to have delivered the noise had it been going to.
         std::fs::write(&chat, b"{}\n").unwrap();
         assert!(
-            eventually(|| watch.awaiting_discovery(|_| false)),
+            waits_for(|| watch.awaiting_discovery(|_| false)),
             "a created chat was not remembered"
         );
         assert!(
@@ -298,7 +291,7 @@ mod tests {
 
         std::fs::write(&transcript, b"{}\n").unwrap();
         assert!(
-            eventually(|| watch.awaiting_discovery(|_| false)),
+            waits_for(|| watch.awaiting_discovery(|_| false)),
             "a created file was not remembered"
         );
 

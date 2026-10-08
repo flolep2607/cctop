@@ -446,14 +446,18 @@ mod tests {
 
     #[test]
     fn a_command_that_overruns_is_cut_off() {
+        // A minute, against a bound of a fifth of a second: coming back at
+        // all well inside the minute is the property, and leaves the bound
+        // below room for any stall a busy machine can produce. `exec`, so the
+        // kill lands on the sleep itself and nothing is left running.
         let mut cmd = Command::new("sh");
-        cmd.args(["-c", "sleep 5"]);
+        cmd.args(["-c", "exec sleep 60"]);
         let started = Instant::now();
         assert_eq!(
             run_bounded(cmd, Duration::from_millis(200)),
             Err("timed out".to_string())
         );
-        assert!(started.elapsed() < Duration::from_secs(3));
+        assert!(started.elapsed() < Duration::from_secs(30));
         let mut cmd = Command::new("sh");
         cmd.args(["-c", "echo hi"]);
         assert_eq!(run_bounded(cmd, Duration::from_secs(5)), Ok("hi\n".into()));

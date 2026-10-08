@@ -160,12 +160,7 @@ mod tests {
     fn the_command_answer_replaces_the_note() {
         let mut extra = Extra::default();
         extra.apply(Some("note"), Some("printf 'live\\n'"));
-        for _ in 0..50 {
-            std::thread::sleep(Duration::from_millis(100));
-            if extra.tick() && extra.text() == Some("live") {
-                break;
-            }
-        }
+        cctop_core::test_wait::waits_for(|| extra.tick() && extra.text() == Some("live"));
         assert_eq!(extra.text(), Some("live"));
     }
 }

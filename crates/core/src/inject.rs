@@ -321,6 +321,7 @@ fn rmux(args: &[&str]) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_wait::{PATIENCE, wait_asking, wait_until};
 
     /// The Enter must reach the agent as its own write. Appended to the text it
     /// can land in the same read, where a TUI takes it for the newline inside a
@@ -452,7 +453,8 @@ mod tests {
                 .success()
         );
 
-        let reader = wait_for(|| {
+        // A scan of every process is the expensive kind of look.
+        let reader = wait_asking(|| {
             let sys = {
                 let mut s = System::new();
                 s.refresh_processes_specifics(
@@ -479,7 +481,9 @@ mod tests {
         // test — which is why this passed locally and failed on a loaded runner.
         let text = pane.as_ref().and_then(|pane| {
             send(pane, "continue").unwrap();
-            wait_for(|| std::fs::read_to_string(&out).ok().filter(|t| !t.is_empty()))
+            wait_until(PATIENCE, || {
+                std::fs::read_to_string(&out).ok().filter(|t| !t.is_empty())
+            })
         });
         let _ = Command::new(crate::rmux::BIN)
             .args(["kill-session", "-t", &session])
@@ -491,17 +495,5 @@ mod tests {
             text.expect("nothing reached the child as input").trim(),
             "continue"
         );
-    }
-
-    /// rmux starts panes and flushes writes asynchronously; poll rather than
-    /// guess a sleep long enough for a loaded CI box.
-    fn wait_for<T>(mut f: impl FnMut() -> Option<T>) -> Option<T> {
-        for _ in 0..50 {
-            if let Some(v) = f() {
-                return Some(v);
-            }
-            std::thread::sleep(std::time::Duration::from_millis(100));
-        }
-        None
     }
 }
