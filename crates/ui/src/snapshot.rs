@@ -624,8 +624,9 @@ fn idle_view_and_reclaim() {
     snap("idle_reclaim", &mut app);
 }
 
-/// The Cloudflare popup at the steps worth a look: the link with a paste in
-/// the field (masked), the domain picker, the no-domain refusal, and done.
+/// The Cloudflare popup at the steps worth a look: the browser login, and its
+/// address shown for a browser elsewhere; the link with a paste in the field
+/// (masked); the domain picker, the no-domain refusal, and done.
 /// Every token here is made up, and none of them reaches the screen.
 #[test]
 fn connect_popup() {
@@ -639,7 +640,19 @@ fn connect_popup() {
     };
 
     let mut app = open(Step::Start {
-        method: super::connect::METHODS[0],
+        method: super::connect::Method::Browser,
+        field: Default::default(),
+    });
+    snap("connect_login", &mut app);
+
+    let mut app = open(Step::LoggingIn {
+        url: "https://dash.cloudflare.com/argotunnel?aud=&callback=made-up".into(),
+        opened: false,
+    });
+    snap("connect_login_waiting", &mut app);
+
+    let mut app = open(Step::Start {
+        method: super::connect::Method::Paste,
         field: "made-up-api-token".into(),
     });
     snap("connect_link", &mut app);
@@ -651,7 +664,7 @@ fn connect_popup() {
         active: true,
     };
     let mut app = open(Step::Zones {
-        token: "made-up-api-token".into(),
+        auth: "made-up-api-token".into(),
         zones: vec![zone("example.com"), zone("example.org")],
         cursor: 1,
     });

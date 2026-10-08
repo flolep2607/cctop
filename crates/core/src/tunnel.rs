@@ -512,8 +512,14 @@ pub struct Account {
     pub account_id: Option<String>,
     pub zone_id: Option<String>,
     pub tunnel_id: Option<String>,
+    /// What [`crate::cloudflare`] deletes each record by: its id, or for an
+    /// account connected by browser login the hostname itself, since the
+    /// route that makes the record there answers with no id.
     pub dns_record_ids: Vec<String>,
     pub api_token: Option<String>,
+    /// Whether `api_token` came from a browser login's certificate rather
+    /// than a paste, which decides how cctop routes and deletes a hostname.
+    pub login: bool,
     /// Agents' own share addresses, by the session id of the agent: `W` on
     /// that agent goes out on `<label>.<zone>` instead of the default share
     /// hostname.
@@ -598,6 +604,7 @@ impl fmt::Debug for Account {
             .field("tunnel_id", &self.tunnel_id)
             .field("dns_record_ids", &self.dns_record_ids)
             .field("api_token", &self.api_token.as_ref().map(|_| "[redacted]"))
+            .field("login", &self.login)
             .field("share_names", &self.share_names)
             .field("from_env", &self.from_env)
             .finish()
@@ -666,6 +673,10 @@ fn from_table(text: &str) -> Option<Account> {
             })
             .unwrap_or_default(),
         api_token: text("api_token"),
+        login: table
+            .get("login")
+            .and_then(|v| v.as_str())
+            .is_some_and(|v| v == "browser"),
         share_names: table
             .get("share_names")
             .and_then(|v| v.as_table_like())
@@ -718,6 +729,10 @@ pub(crate) fn save_account_in(path: &Path, account: &Account) -> anyhow::Result<
             if let Some(value) = value {
                 table.insert(key, toml_edit::value(value));
             }
+        }
+        // A word rather than a boolean, so the file says what it means.
+        if account.login {
+            table.insert("login", toml_edit::value("browser"));
         }
         if !account.dns_record_ids.is_empty() {
             let ids: toml_edit::Array = account.dns_record_ids.iter().collect();
@@ -794,6 +809,7 @@ mod tests {
             tunnel_id: Some("6ff42ae2-765d-4adf-8112-31c55c1551ef".into()),
             dns_record_ids: vec!["rec1".into(), "rec2".into()],
             api_token: Some("made-up-api-token".into()),
+            login: true,
             share_names: [
                 (
                     "8f14e45f-ceea-467f-a0e6-0d1c6e1b0a11".to_string(),

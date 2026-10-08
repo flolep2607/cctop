@@ -10,11 +10,16 @@
 //!
 //! # Ways in
 //!
-//! The first step is laid out as one of several [`Method`]s, of which there is
-//! one today: paste a token made from a pre-filled link. A browser login is the
-//! follow-up the maintainer asked for, since pasting a token can be a chore —
-//! it becomes a second variant with its own body under the same title, and the
-//! popup grows a row to choose between them. Nothing else moves.
+//! The first step is one of two [`Method`]s, side by side on a row that Tab
+//! moves along: log in through the browser, the way `cloudflared tunnel login`
+//! does, or paste a token made from a pre-filled link. The login comes first,
+//! since pasting a token is the chore it exists to spare.
+//!
+//! A login opens the authorize page in this machine's browser, except over
+//! ssh, where that browser is not the user's: the address is drawn instead,
+//! with a QR code a key away, and the login is waited for from here either
+//! way. Both ways then meet at the same domain and hostname steps, carrying an
+//! [`Auth`] that says which kind of token they hold.
 //!
 //! # Credentials on screen
 //!
@@ -24,20 +29,24 @@
 //! of which quotes the token.
 
 use super::*;
-use cctop_core::cloudflare::{self, Pasted, Zone};
+use cctop_core::cloudflare::login::Login;
+use cctop_core::cloudflare::{self, Auth, Pasted, Zone};
 use cctop_core::tunnel::Account;
 use line_edit::LineEdit;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, TryRecvError, channel};
 
 /// The ways to connect an account, in the order the popup offers them.
-///
-/// ponytail: one, until the browser login lands; see the module docs.
-pub const METHODS: [Method; 1] = [Method::Paste];
+pub const METHODS: [Method; 2] = [Method::Browser, Method::Paste];
 
 /// One way to connect.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Method {
+    /// Log in on Cloudflare's own page and pick the domain there; a
+    /// certificate comes back with a token in it.
+    Browser,
     /// Make an API token from the pre-filled link, paste it. A tunnel token
     /// from the dashboard works in the same field.
     Paste,
@@ -47,8 +56,15 @@ impl Method {
     /// What the popup calls it.
     pub fn label(self) -> &'static str {
         match self {
+            Method::Browser => "Log in with browser",
             Method::Paste => "Paste a token",
         }
+    }
+
+    /// The one after it on the row, round to the first.
+    pub fn next(self) -> Method {
+        let at = METHODS.iter().position(|m| *m == self).unwrap_or(0);
+        METHODS[(at + 1) % METHODS.len()]
     }
 }
 
@@ -58,15 +74,21 @@ pub enum Step {
     Connected { account: Account, confirm: bool },
     /// The ways in. For [`Method::Paste`]: the link, and the masked field.
     Start { method: Method, field: LineEdit },
-    /// The token worked; which domain. `token` is the API token.
+    /// The login page is open, or its address is on screen, and the
+    /// certificate is being waited for. `opened` when a browser here was
+    /// asked to open it.
+    LoggingIn { url: String, opened: bool },
+    /// The token worked; which domain.
     Zones {
-        token: String,
+        auth: Auth,
         zones: Vec<Zone>,
         cursor: usize,
     },
-    /// The domain is picked; the hostname, pre-filled.
+    /// The domain is picked; the hostname, pre-filled. A login whose
+    /// domain's name could not be read has a `zone` with no name, and the
+    /// whole hostname is typed ([`cloudflare::login_zone_from`]).
     Hostname {
-        token: String,
+        auth: Auth,
         zone: Zone,
         field: LineEdit,
     },
@@ -88,8 +110,11 @@ pub enum Step {
 
 /// What a worker thread comes back with.
 enum Answer {
-    Zones(String, Result<Vec<Zone>, cloudflare::Error>),
-    Suggested(String, Zone, Result<String, cloudflare::Error>),
+    /// The login's token, and its domain: named, or with no name when it
+    /// could not be read.
+    LoggedIn(Result<(Auth, Zone), cloudflare::Error>),
+    Zones(Auth, Result<Vec<Zone>, cloudflare::Error>),
+    Suggested(Auth, Zone, Result<String, cloudflare::Error>),
     Created(Result<Account, String>),
     Removed(Result<(Vec<String>, bool), String>),
 }
@@ -112,6 +137,18 @@ pub struct Connect {
     /// A problem with what was just typed, said under the field it is about
     /// rather than ending the flow.
     pub problem: Option<String>,
+    /// Set when this popup goes, so a login still waiting stops polling
+    /// rather than holding a thread for the ten minutes it would wait.
+    cancel: Arc<AtomicBool>,
+    /// Where a login starts: Cloudflare, and in a test the fake, so that no
+    /// test polls the real store.
+    new_login: Box<dyn Fn() -> Login>,
+}
+
+impl Drop for Connect {
+    fn drop(&mut self) {
+        self.cancel.store(true, Ordering::Relaxed);
+    }
 }
 
 impl Connect {
@@ -122,6 +159,8 @@ impl Connect {
             working: None,
             qr: false,
             problem: None,
+            cancel: Arc::default(),
+            new_login: Box::new(Login::new),
         }
     }
 
@@ -141,7 +180,11 @@ impl Connect {
         self.working.is_none()
             && matches!(
                 self.step,
-                Step::Start { .. } | Step::Hostname { .. } | Step::TunnelHostname { .. }
+                Step::Start {
+                    method: Method::Paste,
+                    ..
+                } | Step::Hostname { .. }
+                    | Step::TunnelHostname { .. }
             )
     }
 
@@ -151,7 +194,10 @@ impl Connect {
             return None;
         }
         match &mut self.step {
-            Step::Start { field, .. }
+            Step::Start {
+                field,
+                method: Method::Paste,
+            }
             | Step::Hostname { field, .. }
             | Step::TunnelHostname { field, .. } => Some(field),
             _ => None,
@@ -255,14 +301,18 @@ impl App {
         self.needs_redraw = true;
     }
 
-    /// Enter on the first step: tell the paste apart and go on.
+    /// Enter on the first step: log in, or tell the paste apart and go on.
     fn submit_token(&mut self) {
         let Some(flow) = self.connect.as_mut() else {
             return;
         };
-        let Step::Start { field, .. } = &mut flow.step else {
+        let Step::Start { field, method } = &mut flow.step else {
             return;
         };
+        if *method == Method::Browser {
+            self.log_in();
+            return;
+        }
         let pasted = field.trim().to_string();
         if pasted.is_empty() {
             flow.problem = Some("Paste the token first.".to_string());
@@ -287,10 +337,54 @@ impl App {
                         .verify()
                         .and_then(|()| api.zones())
                         .and_then(cloudflare::usable);
-                    Answer::Zones(token, zones)
+                    Answer::Zones(Auth::Pasted(token), zones)
                 }
             }),
         }
+    }
+
+    /// Start a browser login: open the page where a browser here would be
+    /// the user's, and wait for the certificate off the UI thread.
+    fn log_in(&mut self) {
+        let Some(flow) = self.connect.as_ref() else {
+            return;
+        };
+        let login = (flow.new_login)();
+        let url = login.url().to_string();
+        // A test drives this with no browser to bother.
+        let opened = !cfg!(test) && !render::over_ssh() && share::open_in_browser(&url);
+        let Some(flow) = self.connect.as_mut() else {
+            return;
+        };
+        flow.step = Step::LoggingIn { url, opened };
+        // Over ssh the code is the quickest way to a browser, on a phone.
+        flow.qr = !opened;
+        let cancel = flow.cancel.clone();
+        self.connect_work("Waiting for the login in the browser…", move || {
+            let logged_in = login.wait(&|| cancel.load(Ordering::Relaxed)).map(|cert| {
+                let auth = cert.auth();
+                let zone = cloudflare::Api::with(&auth)
+                    .login_zone(&cert)
+                    .unwrap_or_else(|| Zone {
+                        id: cert.zone_id.clone(),
+                        name: String::new(),
+                        account_id: cert.account_id.clone(),
+                        active: true,
+                    });
+                (auth, zone)
+            });
+            Answer::LoggedIn(logged_in)
+        });
+    }
+
+    /// Copy the login page's address, the way [`App::copy_token_link`]
+    /// copies the token link — the one thing to do with it over ssh.
+    fn copy_login_link(&mut self) {
+        let Some(Step::LoggingIn { url, .. }) = self.connect.as_ref().map(|c| &c.step) else {
+            return;
+        };
+        render::copy_to_clipboard(url);
+        self.set_status("Copied the login link — open it in your browser");
     }
 
     /// A domain is picked: find the name to offer for it.
@@ -299,22 +393,22 @@ impl App {
             return;
         };
         let Step::Zones {
-            token,
+            auth,
             zones,
             cursor,
         } = &flow.step
         else {
             return;
         };
-        let (token, zone) = (token.clone(), zones[(*cursor).min(zones.len() - 1)].clone());
-        self.suggest_for(token, zone);
+        let (auth, zone) = (auth.clone(), zones[(*cursor).min(zones.len() - 1)].clone());
+        self.suggest_for(auth, zone);
     }
 
-    fn suggest_for(&mut self, token: String, zone: Zone) {
+    fn suggest_for(&mut self, auth: Auth, zone: Zone) {
         self.connect_work("Looking for a free name…", move || {
-            let api = cloudflare::Api::new(&token);
+            let api = cloudflare::Api::with(&auth);
             let suggested = cloudflare::suggest_hostname(&api, &zone, &cloudflare::machine_label());
-            Answer::Suggested(token, zone, suggested)
+            Answer::Suggested(auth, zone, suggested)
         });
     }
 
@@ -323,18 +417,29 @@ impl App {
         let Some(flow) = self.connect.as_mut() else {
             return;
         };
-        let Step::Hostname { token, zone, field } = &flow.step else {
+        let Step::Hostname { auth, zone, field } = &flow.step else {
             return;
+        };
+        // A login's domain with no name takes it from what was typed.
+        let zone = match zone.name.is_empty() {
+            true => match cloudflare::login_zone_from(&zone.id, &zone.account_id, field) {
+                Ok(zone) => zone,
+                Err(e) => {
+                    flow.problem = Some(e.to_string());
+                    return;
+                }
+            },
+            false => zone.clone(),
         };
         // Checked here first, so a typo is a line under the field and not a
         // spinner followed by a dead end.
-        if let Err(e) = cloudflare::check_hostname(field, zone) {
+        if let Err(e) = cloudflare::check_hostname(field, &zone) {
             flow.problem = Some(e.to_string());
             return;
         }
-        let (token, zone, hostname) = (token.clone(), zone.clone(), field.to_string());
+        let (auth, hostname) = (auth.clone(), field.to_string());
         self.connect_work("Creating the tunnel and its DNS records…", move || {
-            let api = cloudflare::Api::new(&token);
+            let api = cloudflare::Api::with(&auth);
             let made = cloudflare::create(&api, &zone, &hostname, &cloudflare::machine_label())
                 .map_err(|e| e.to_string())
                 .and_then(|account| {
@@ -469,37 +574,55 @@ impl App {
             return;
         };
         match answer {
-            Answer::Zones(token, Ok(zones)) => match zones.len() {
+            // The domain was picked in the browser: on to its name, or —
+            // when its name could not be read — to typing the whole address.
+            Answer::LoggedIn(Ok((auth, zone))) => {
+                flow.qr = false;
+                match zone.name.is_empty() {
+                    true => {
+                        flow.step = Step::Hostname {
+                            auth,
+                            zone,
+                            field: LineEdit::default(),
+                        }
+                    }
+                    false => self.suggest_for(auth, zone),
+                }
+            }
+            Answer::Zones(auth, Ok(zones)) => match zones.len() {
                 // One domain is no choice: straight on to its name.
                 1 => {
                     let zone = zones.into_iter().next().expect("one zone");
-                    self.suggest_for(token, zone);
+                    self.suggest_for(auth, zone);
                 }
                 _ => {
                     flow.step = Step::Zones {
-                        token,
+                        auth,
                         zones,
                         cursor: 0,
                     }
                 }
             },
-            Answer::Suggested(token, zone, Ok(name)) => {
+            Answer::Suggested(auth, zone, Ok(name)) => {
                 flow.step = Step::Hostname {
-                    token,
+                    auth,
                     zone,
                     field: name.into(),
                 };
             }
             // Every name it would offer is taken: an empty field to type one.
-            Answer::Suggested(token, zone, Err(cloudflare::Error::Hostname(why))) => {
+            Answer::Suggested(auth, zone, Err(cloudflare::Error::Hostname(why))) => {
                 flow.step = Step::Hostname {
-                    token,
+                    auth,
                     zone,
                     field: LineEdit::default(),
                 };
                 flow.problem = Some(why);
             }
-            Answer::Zones(_, Err(e)) | Answer::Suggested(_, _, Err(e)) => {
+            Answer::LoggedIn(Err(e))
+            | Answer::Zones(_, Err(e))
+            | Answer::Suggested(_, _, Err(e)) => {
+                flow.qr = false;
                 flow.step = Step::Failed { message: said(&e) };
             }
             Answer::Created(Ok(account)) => {
@@ -560,17 +683,30 @@ impl App {
         };
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         if flow.working.is_some() {
-            if key.code == KeyCode::Esc {
-                self.close_connect();
+            // Waiting on a login is waiting on the user, who may need the
+            // link again or its code; nothing else waits on anyone.
+            let login = matches!(flow.step, Step::LoggingIn { .. });
+            match key.code {
+                KeyCode::Esc => self.close_connect(),
+                KeyCode::Char('o') if ctrl && login => self.copy_login_link(),
+                KeyCode::Char('q') if ctrl && login => flow.qr = !flow.qr,
+                _ => {}
             }
             return;
         }
         match &mut flow.step {
-            Step::Start { field, .. } => match key.code {
+            Step::Start { field, method } => match key.code {
                 KeyCode::Esc => self.close_connect(),
                 KeyCode::Enter => self.submit_token(),
-                KeyCode::Char('o') if ctrl => self.copy_token_link(),
-                KeyCode::Char('q') if ctrl => flow.qr = !flow.qr,
+                KeyCode::Tab | KeyCode::BackTab => {
+                    *method = method.next();
+                    flow.problem = None;
+                    flow.qr = false;
+                }
+                KeyCode::Char('o') if ctrl && *method == Method::Paste => self.copy_token_link(),
+                KeyCode::Char('q') if ctrl && *method == Method::Paste => flow.qr = !flow.qr,
+                // The login has no field: keys are not text there.
+                _ if *method == Method::Browser => {}
                 _ => {
                     if field.key(key, TOKEN_MAX).changed() {
                         flow.problem = None;
@@ -629,6 +765,13 @@ impl App {
                     self.close_connect();
                 }
             }
+            // Only while working, handled above; a login that came back has
+            // moved on to another step.
+            Step::LoggingIn { .. } => {
+                if key.code == KeyCode::Esc {
+                    self.close_connect();
+                }
+            }
         }
     }
 
@@ -661,7 +804,13 @@ mod tests {
     /// config.
     fn app() -> App {
         let mut app = test_app();
-        app.open_connect_at(Connect::start(Mode::Serve));
+        app.open_connect_at(Connect::new(
+            Step::Start {
+                method: Method::Paste,
+                field: LineEdit::default(),
+            },
+            Mode::Serve,
+        ));
         app
     }
 
@@ -751,9 +900,11 @@ mod tests {
             };
             assert_eq!(*message, said(&error));
             assert!(!message.contains("permissionGroupKeys"), "{message}");
-            // Enter starts over, with a fresh field.
+            // Enter starts over, with a fresh field, at the first way in.
             app.on_key_connect(KeyCode::Enter.into());
-            assert!(matches!(step(&app), Step::Start { field, .. } if field.is_empty()));
+            assert!(
+                matches!(step(&app), Step::Start { field, method } if field.is_empty() && *method == METHODS[0])
+            );
         }
     }
 
@@ -816,6 +967,117 @@ mod tests {
         app.on_key_connect(KeyCode::Esc.into());
         assert!(app.connect.is_none());
         assert_eq!(app.mode, Mode::Serve, "back where it was opened");
+    }
+
+    #[test]
+    fn tab_moves_between_the_ways_in_and_the_login_has_no_field() {
+        let mut app = test_app();
+        app.open_connect_at(Connect::start(Mode::Serve));
+        assert!(matches!(
+            step(&app),
+            Step::Start {
+                method: Method::Browser,
+                ..
+            }
+        ));
+        let flow = app.connect.as_ref().unwrap();
+        assert!(!flow.typing(), "letters are not text on the login");
+        app.paste_connect("made-up-api-token");
+        app.on_key_connect(KeyCode::Char('x').into());
+        app.on_key_connect(KeyCode::Tab.into());
+        let Step::Start { method, field } = step(&app) else {
+            panic!("not the first step");
+        };
+        assert_eq!(*method, Method::Paste);
+        assert!(field.is_empty(), "nothing reached the paste field");
+        assert!(app.connect.as_ref().unwrap().typing());
+        app.on_key_connect(KeyCode::Tab.into());
+        assert!(matches!(
+            step(&app),
+            Step::Start {
+                method: Method::Browser,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn enter_on_the_login_waits_and_esc_cancels_it() {
+        let mut app = test_app();
+        let mut flow = Connect::start(Mode::Serve);
+        let store = cctop_core::cloudflare::login::fake::server(
+            cctop_core::cloudflare::login::fake::Store::Working,
+        );
+        flow.new_login = Box::new(move || Login::fake(&store));
+        app.open_connect_at(flow);
+        app.on_key_connect(KeyCode::Enter.into());
+        let flow = app.connect.as_ref().unwrap();
+        let Step::LoggingIn { url, opened } = &flow.step else {
+            panic!("not waiting on the login");
+        };
+        assert!(url.contains("/argotunnel?aud=&callback="), "{url}");
+        assert!(!opened);
+        assert!(flow.working.is_some());
+        assert!(flow.qr, "with no browser here, the code is up");
+        let cancel = flow.cancel.clone();
+        app.on_key_connect(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL));
+        assert!(!app.connect.as_ref().unwrap().qr);
+        app.on_key_connect(KeyCode::Esc.into());
+        assert!(app.connect.is_none());
+        assert!(cancel.load(Ordering::Relaxed), "the wait was told to stop");
+    }
+
+    fn login_zone(name: &str) -> Zone {
+        Zone {
+            name: name.to_string(),
+            ..zone("x")
+        }
+    }
+
+    #[test]
+    fn a_login_goes_on_to_the_name_or_asks_for_the_whole_address() {
+        let auth = Auth::Login("made-up-login-token".into());
+        let mut app = app();
+        app.connect_answer(Answer::LoggedIn(Ok((
+            auth.clone(),
+            login_zone("example.test"),
+        ))));
+        assert_eq!(
+            app.connect
+                .as_ref()
+                .unwrap()
+                .working
+                .as_ref()
+                .map(|w| w.what),
+            Some("Looking for a free name…")
+        );
+
+        let mut app = self::app();
+        app.connect_answer(Answer::LoggedIn(Ok((auth.clone(), login_zone("")))));
+        let Step::Hostname {
+            auth: kept, field, ..
+        } = step(&app)
+        else {
+            panic!("not the hostname");
+        };
+        assert_eq!(*kept, auth);
+        assert!(field.is_empty());
+        // A bare label cannot say which domain: refused before any call.
+        app.paste_connect("cctop");
+        app.on_key_connect(KeyCode::Enter.into());
+        let flow = app.connect.as_ref().unwrap();
+        assert!(flow.working.is_none());
+        assert!(
+            flow.problem
+                .as_deref()
+                .is_some_and(|p| p.contains("whole address"))
+        );
+
+        let mut app = self::app();
+        app.connect_answer(Answer::LoggedIn(Err(cloudflare::Error::Login(
+            "No login arrived within ten minutes; start again.".into(),
+        ))));
+        assert!(matches!(step(&app), Step::Failed { message } if message.contains("ten minutes")));
     }
 
     #[test]

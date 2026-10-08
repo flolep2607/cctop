@@ -315,6 +315,7 @@ pub mod tests {
             tunnel_id: Some(fake::TUNNEL_ID.into()),
             dns_record_ids: vec!["rec-page".into(), "rec-share".into()],
             api_token: Some("made-up-api-token".into()),
+            login: false,
             share_names: [(
                 "other".to_string(),
                 ShareName {
