@@ -77,6 +77,18 @@ fn main() -> anyhow::Result<()> {
         std::process::exit(hook::emit(&argv[2..]));
     }
 
+    // `cctop yolo-hook`, the one hook that may answer a permission prompt, is
+    // spawned by Claude Code exactly as `hook` is and answered here for the
+    // same reasons, ungated by any setting: whether it says anything is
+    // decided inside it, per session — see `hook::yolo_hook`. Its own word
+    // rather than an argument to `hook`, so that `cctop hook` cannot be talked
+    // into deciding by anything on its command line.
+    if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("yolo-hook")) {
+        std::panic::set_hook(Box::new(|_| std::process::exit(0)));
+        let argv: Vec<String> = std::env::args().collect();
+        std::process::exit(hook::yolo_hook(&argv[2..]));
+    }
+
     // The parts of `cctop sandbox` that the agent runs, as often as `hook` and
     // for the same reason answered before anything is set up: `--sandbox-exec`
     // is every Claude Bash call (and every hook, which it hands straight to

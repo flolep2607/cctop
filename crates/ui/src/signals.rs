@@ -343,13 +343,18 @@ impl App {
 
     /// Read the YOLO switch and answer what it covers. `now` skips the slow
     /// clock. Returns whether a row changed.
+    ///
+    /// On the draw loop, like the key press it may make. The screen read it
+    /// may make first is as rare: only a Claude YOLO session with a prompt the
+    /// hook did not answer, and once a second at most — see
+    /// [`cctop_core::yolo::FALLBACK_AFTER`].
     pub(super) fn tick_yolo(&mut self, now: bool) -> bool {
         const EVERY: std::time::Duration = std::time::Duration::from_millis(500);
         if !now && self.yolo_at.is_some_and(|at| at.elapsed() < EVERY) {
             return false;
         }
         self.yolo_at = Some(std::time::Instant::now());
-        let changed = self.yolo.tick(&mut self.sessions);
+        let changed = self.yolo.tick(&mut self.sessions, &self.reports);
         self.needs_redraw |= changed;
         changed
     }

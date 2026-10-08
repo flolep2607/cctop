@@ -45,6 +45,18 @@
 //! the same abandonable thread under the same deadline, and any failure on the
 //! way — a ledger that will not parse, a lock another hook holds, a deadline
 //! that runs out — is the ordinary silence. [`crate::advise`] has the rest.
+//!
+//! # The one hook that decides, and why it is not this one
+//!
+//! YOLO answers Claude Code's permission dialog with a decision, and that
+//! decision does not come from `cctop hook`. It comes from a second command,
+//! `cctop yolo-hook` ([`yolo_hook`]), installed as its own entry for
+//! `PermissionRequest` only, so that nothing about this command — its
+//! arguments, its settings, the state of any file — can make it decide. That
+//! one prints the allow for a session YOLO is on for, in the process it was
+//! switched on in, and is otherwise exactly as silent as this one, under the
+//! same deadline and the same exit-0 guarantee. [`crate::yolo`] has the
+//! matching rule.
 
 use std::collections::HashMap;
 use std::io::Read;
@@ -326,6 +338,163 @@ fn answer_line(session_id: &str, allowed: bool) -> Vec<u8> {
     let mut line = event.to_string().into_bytes();
     line.push(b'\n');
     line
+}
+
+/// The event `cctop yolo-hook` sends once it has allowed a prompt.
+///
+/// Its own name rather than [`ANSWERED_ALLOW`], because it carries what was
+/// allowed and races the observer's report of the same prompt: see
+/// [`Reports::observe`].
+const YOLO_ALLOWED: &str = "cctop.yolo.allowed";
+
+fn yolo_allowed_line(session_id: &str, agent: Option<&str>, ask: Option<&str>) -> Vec<u8> {
+    let event = serde_json::json!({
+        "event": YOLO_ALLOWED,
+        "session_id": session_id,
+        "agent_id": agent.unwrap_or_default(),
+        // Never absent, so the reader can tell this from every other
+        // working event: none of those carries an ask. Empty when the
+        // prompt named nothing, which is what the observer's report of it
+        // carries too.
+        "ask": ask.unwrap_or_default(),
+    });
+    let mut line = event.to_string().into_bytes();
+    line.push(b'\n');
+    line
+}
+
+/// The one thing `cctop yolo-hook` ever prints: Claude Code's
+/// `PermissionRequest` answer meaning "allow", and nothing beside it.
+///
+/// Checked against the schema in Claude Code 2.1.293 itself: the
+/// `PermissionRequest` hook-specific output is `{hookEventName, decision}`,
+/// where `decision` is `{"behavior": "allow"}` with an optional
+/// `updatedInput` and `updatedPermissions`, or a deny. Neither option is
+/// used — the tool runs as asked, and nothing is written into the person's
+/// permanent rules. No `continue`, no top-level `decision`, no
+/// `permissionDecision`: those are other events' fields, and the validator
+/// rejects or reinterprets them.
+pub const YOLO_ALLOW: &str = r#"{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}}"#;
+
+/// `cctop yolo-hook PermissionRequest` — the one hook that may decide.
+///
+/// It answers [`YOLO_ALLOW`] for a permission dialog Claude Code is about to
+/// draw in a session YOLO is on for, and prints nothing for anything else.
+/// Separate from [`emit`] so that `cctop hook` stays what the module docs
+/// promise, byte for byte: an observer that never decides. This keeps every
+/// other guarantee `emit` has — exit 0 whatever happens, a panic hook that
+/// turns an unwind into the same, all the work on a thread it can abandon
+/// under [`DEADLINE`], stdin read to [`MAX_EVENT`] — and adds one more: the
+/// only thing it can say is yes.
+///
+/// # Why it is safe to say yes
+///
+/// Only for a session someone switched YOLO on for, and only in the process
+/// that was running it then: the payload's `session_id` must have an entry in
+/// the switch, and the process recorded with it — pid and start time — must
+/// be one of this hook's ancestors. Claude Code spawns its hooks, so that is
+/// true exactly when the process asking is the one the person meant. See
+/// [`crate::yolo`] for what that rules out.
+///
+/// Silence is the answer everywhere else, because silence is what Claude Code
+/// reads as "no opinion": the dialog goes up as it would with no hook at all.
+/// No entry, a file that will not parse, a payload that is empty, malformed
+/// or about another event, a question with choices (allowing that would skip
+/// the question, not answer it), a deadline that passed — all the same
+/// nothing. It never denies: a no is the person's to give.
+///
+/// # Why `PermissionRequest`, not `PreToolUse`
+///
+/// `PreToolUse` fires on every tool call and its allow skips the person's own
+/// `ask` and `deny` rules; `PermissionRequest` fires only when a dialog was
+/// about to go up, which is exactly the moment YOLO stands in for a person
+/// clicking Allow.
+pub fn yolo_hook(args: &[String]) -> i32 {
+    std::panic::set_hook(Box::new(|_| std::process::exit(0)));
+    let event = args.first().cloned().unwrap_or_default();
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    // The verdict on a channel of its own, sent before the bookkeeping
+    // starts, so a slow write cannot cost the answer — and an answer not
+    // made by the deadline is no answer.
+    let (verdict_tx, verdict_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = std::panic::catch_unwind(|| yolo_decide(&event, &verdict_tx));
+        let _ = done_tx.send(());
+    });
+    if settle(&done_rx, &verdict_rx, DEADLINE).is_some() {
+        use std::io::Write;
+        // `println!` panics on a closed stdout; see [`answer`].
+        let _ = writeln!(std::io::stdout(), "{YOLO_ALLOW}");
+    }
+    0
+}
+
+/// Read the prompt, decide, and — having allowed — tell the cctops.
+fn yolo_decide(event: &str, verdict: &std::sync::mpsc::Sender<Option<String>>) {
+    crate::elog::event("hook", "yolo-fire", serde_json::json!({ "name": event }));
+    let mut payload = Vec::new();
+    if std::io::stdin()
+        .take(MAX_EVENT)
+        .read_to_end(&mut payload)
+        .is_err()
+    {
+        return;
+    }
+    let chain = ancestry();
+    let Some(body) = yolo_verdict(event, &payload, |id| crate::yolo::allows(id, &chain)) else {
+        return;
+    };
+    let _ = verdict.send(Some(YOLO_ALLOW.to_string()));
+    let field = |key: &str| {
+        body.get(key)
+            .and_then(|v| v.as_str())
+            .filter(|v| !v.is_empty())
+    };
+    let Some(session) = field("session_id") else {
+        return;
+    };
+    let ask = ask_of(&body);
+    crate::elog::event(
+        "yolo",
+        "hook-allowed",
+        serde_json::json!({ "session": session, "ask": ask }),
+    );
+    // The list first: it is the page's record, and the fan-out below may
+    // spend what is left of the deadline on a wedged cctop.
+    crate::yolo::record_allowed(session, ask.clone());
+    deliver(&yolo_allowed_line(
+        session,
+        field("agent_id"),
+        ask.as_deref(),
+    ));
+}
+
+/// The payload, when it is a permission prompt YOLO answers; `None` for the
+/// silence every other case gets. `allows` is the switch: see
+/// [`crate::yolo::allows`].
+///
+/// Apart from the reading and the printing so every refusal can be asserted
+/// on without a process.
+fn yolo_verdict(
+    event: &str,
+    payload: &[u8],
+    allows: impl FnOnce(&str) -> bool,
+) -> Option<serde_json::Value> {
+    if event != "PermissionRequest" {
+        return None;
+    }
+    let body: serde_json::Value = serde_json::from_slice(payload).ok()?;
+    // The payload must agree with the command line about what this is: a
+    // settings file edited by hand to fire this on another event is still
+    // not a permission dialog.
+    if body.get("hook_event_name").and_then(|v| v.as_str()) != Some("PermissionRequest") {
+        return None;
+    }
+    if is_question(&body) {
+        return None;
+    }
+    let session = body.get("session_id")?.as_str()?;
+    allows(session).then_some(body)
 }
 
 /// Write one framed event to every cctop that will take it.
@@ -1039,7 +1208,25 @@ pub struct Reports {
     /// is, said on every event and never changing, and an event that did not
     /// carry it — one from a cctop too old to send it — must not wipe it.
     pub sandboxes: HashMap<String, String>,
+    /// Prompts `cctop yolo-hook` allowed before the observer's report of them
+    /// arrived, by session: what was asked, and when the allow was heard.
+    ///
+    /// The two hooks fire together and race to every cctop, so the report
+    /// that the prompt went up can land after the news that it was answered.
+    /// Left to stand, it would be held for the grace, then shown — a row
+    /// asking about a prompt that never reached the screen, for as long as
+    /// the tool it allowed runs. See [`HOOK_RACE`].
+    hook_allowed: HashMap<String, (Option<String>, std::time::Instant)>,
 }
+
+/// How long after a `yolo-hook` allow a report of the same prompt is taken to
+/// be the one it answered.
+///
+/// Both hooks are bounded by [`DEADLINE`], so their events land within it of
+/// each other; four times that covers a busy machine. Not longer, because a
+/// genuine second prompt in the same words would be answered by the same hook
+/// anyway, and one that was not — YOLO switched off in between — should show.
+const HOOK_RACE: std::time::Duration = std::time::Duration::from_millis(1000);
 
 impl Reports {
     /// A fresh memory, seeded with the pid claims some cctop last wrote.
@@ -1084,11 +1271,12 @@ impl Reports {
                         .insert(event.session_id.clone(), event.pids.clone());
                     moved = true;
                 }
+                let reported = self.after_yolo_hook(event);
                 let mut reported = still_asking(
                     &mut self.asking_agents,
                     &event.session_id,
                     event.agent.clone(),
-                    event.reported.clone(),
+                    reported,
                 );
                 // Claude Code follows a `PermissionRequest` with a
                 // `permission_prompt` notification for the same question, and
@@ -1121,6 +1309,55 @@ impl Reports {
         self.claims.retain(|id, _| self.hooked.contains_key(id));
         self.sandboxes.retain(|id, _| self.hooked.contains_key(id));
         (lifecycle, moved || self.claims.len() != before)
+    }
+
+    /// What `event` says once `cctop yolo-hook`'s allows are taken into
+    /// account: see [`Reports::hook_allowed`].
+    ///
+    /// The allow is recognised by its ask. [`envelope`] gives an event one only
+    /// when it is a permission prompt, so a working event carrying one is the
+    /// allow and nothing else; the ask is kept to match the prompt it answered.
+    fn after_yolo_hook(&mut self, event: &Event) -> Reported {
+        let mut reported = event.reported.clone();
+        self.hook_allowed
+            .retain(|_, (_, at)| at.elapsed() < HOOK_RACE);
+        let ask = || reported.ask.clone().filter(|a| !a.is_empty());
+        if reported.signal == Signal::Busy && reported.ask.is_some() {
+            // Remembered only when it came first. Arriving second, it simply
+            // replaces the report it answers, and a memory of it would swallow
+            // the next prompt in the same words.
+            let answers = |held: &Reported| {
+                held.signal == Signal::NeedsInput
+                    && held.ask.clone().filter(|a| !a.is_empty()) == ask()
+            };
+            let held = match &event.agent {
+                Some(agent) => self
+                    .asking_agents
+                    .get(&event.session_id)
+                    .and_then(|open| open.get(agent)),
+                None => self.hooked.get(&event.session_id),
+            };
+            if !held.is_some_and(answers) {
+                self.hook_allowed
+                    .insert(event.session_id.clone(), (ask(), reported.at));
+            }
+            reported.ask = None;
+        } else if reported.signal == Signal::NeedsInput
+            && reported.provisional
+            && self
+                .hook_allowed
+                .get(&event.session_id)
+                .is_some_and(|(allowed, _)| *allowed == ask())
+        {
+            // The report of a prompt the hook has already answered: the tool
+            // is running, which is what the allow said.
+            self.hook_allowed.remove(&event.session_id);
+            reported.signal = Signal::Busy;
+            reported.provisional = false;
+            reported.ask = None;
+            reported.question = false;
+        }
+        reported
     }
 
     /// Promote every held permission prompt whose grace has expired, and say
@@ -1452,7 +1689,7 @@ fn signal_of(event: &str, notification: &str) -> Option<Signal> {
         // Esc, which ends the turn and sends nothing at all — so without this
         // the row asked a question that was no longer on screen, and the next
         // Allow typed a `1` into the composer.
-        ANSWERED_ALLOW => Some(Signal::Busy),
+        ANSWERED_ALLOW | YOLO_ALLOWED => Some(Signal::Busy),
         ANSWERED_DENY => Some(Signal::Idle),
         // Compaction is the one kind of work worth naming separately: the
         // context panel is about to lurch, and it is not the agent stalling.
@@ -1804,6 +2041,18 @@ const CODEX_EVENTS: &[&str] = &[
 /// room for a comment.
 const MARKER: &str = " hook ";
 
+/// The same for the one entry that may decide: `<cctop> yolo-hook <Event>`.
+/// See [`yolo_hook`].
+const YOLO_MARKER: &str = " yolo-hook ";
+
+/// The events `cctop yolo-hook` is installed for, beside the observer, in
+/// Claude Code's settings. One, because a permission dialog about to go up is
+/// the only moment YOLO answers — see [`yolo_hook`] for why not `PreToolUse`.
+const CLAUDE_DECIDING: &[&str] = &["PermissionRequest"];
+
+/// How a missing `yolo-hook` entry is named in a health report.
+const YOLO_HOOK_LABEL: &str = "PermissionRequest (yolo-hook)";
+
 /// The argument that tells `cctop hook` its payload is a Codex one, arriving in
 /// argv rather than on stdin.
 const CODEX_SELECTOR: &str = "codex";
@@ -1858,6 +2107,8 @@ enum Config {
         path: PathBuf,
         shape: Shape,
         events: &'static [&'static str],
+        /// The events that also get `cctop yolo-hook`, beside the observer.
+        deciding: &'static [&'static str],
     },
     /// Codex's single `notify` program, in TOML.
     Notify(PathBuf),
@@ -1881,8 +2132,9 @@ impl Config {
                 path,
                 shape,
                 events,
+                deciding,
             } => {
-                json_install(path, *shape, events, exe)?;
+                json_install(path, *shape, events, deciding, exe)?;
                 let note = match self.note() {
                     Some(note) => format!(" — {note}"),
                     None => String::new(),
@@ -1929,7 +2181,8 @@ impl Config {
                 path,
                 shape,
                 events,
-            } => json_health(path, *shape, events),
+                deciding,
+            } => json_health(path, *shape, events, deciding),
             Config::Notify(path) => notify_health(path),
             Config::Plugin(path) => plugin_health(path),
         }
@@ -1983,6 +2236,7 @@ impl Harness {
                 },
                 shape: Shape::Nested,
                 events: CLAUDE_EVENTS,
+                deciding: CLAUDE_DECIDING,
             }],
             Harness::Gemini => vec![Config::Json {
                 path: match project {
@@ -1991,6 +2245,7 @@ impl Harness {
                 },
                 shape: Shape::Nested,
                 events: GEMINI_EVENTS,
+                deciding: &[],
             }],
             Harness::Cursor => vec![Config::Json {
                 path: match project {
@@ -1999,6 +2254,7 @@ impl Harness {
                 },
                 shape: Shape::Flat,
                 events: CURSOR_EVENTS,
+                deciding: &[],
             }],
             Harness::Codex => {
                 let hooks = Config::Json {
@@ -2008,6 +2264,10 @@ impl Harness {
                     },
                     shape: Shape::Nested,
                     events: CODEX_EVENTS,
+                    // ponytail: Codex keeps the key press. Its hooks take
+                    // Claude Code's shape, but whether it honours a decision
+                    // from one has not been checked against it.
+                    deciding: &[],
                 };
                 match project {
                     // `notify` is a single machine-wide program, so only the
@@ -2150,7 +2410,13 @@ pub fn remove(scope: &Scope) -> Vec<String> {
 /// The file is the user's, and by the time cctop sees it their other tools have
 /// usually put hooks in it — so this merges into the arrays rather than writing
 /// them, and never reorders or reformats what it did not add.
-fn json_install(path: &Path, shape: Shape, events: &[&str], exe: &str) -> anyhow::Result<()> {
+fn json_install(
+    path: &Path,
+    shape: Shape,
+    events: &[&str],
+    deciding: &[&str],
+    exe: &str,
+) -> anyhow::Result<()> {
     let mut root = read_settings(path)?;
     // Cursor versions its hooks file and ignores one without the field. Only
     // written when absent, so a file that already declares a newer version is
@@ -2176,14 +2442,23 @@ fn json_install(path: &Path, shape: Shape, events: &[&str], exe: &str) -> anyhow
         // entry left by an older cctop at a path that has since moved is
         // replaced rather than added to.
         drop_ours(list);
-        let command = serde_json::json!({
-            "type": "command",
-            "command": hook_command(exe, event),
-        });
-        list.push(match shape {
-            Shape::Nested => serde_json::json!({ "hooks": [command] }),
-            Shape::Flat => command,
-        });
+        let mut commands = vec![hook_command(exe, event)];
+        // Its own entry, beside the observer's rather than inside it: the
+        // harness runs an event's hooks in parallel, so the observer reports
+        // exactly as it does without it.
+        if deciding.contains(event) {
+            commands.push(yolo_hook_command(exe, event));
+        }
+        for command in commands {
+            let command = serde_json::json!({
+                "type": "command",
+                "command": command,
+            });
+            list.push(match shape {
+                Shape::Nested => serde_json::json!({ "hooks": [command] }),
+                Shape::Flat => command,
+            });
+        }
     }
     write_settings(path, &root)
 }
@@ -2261,7 +2536,7 @@ fn is_ours(entry: &serde_json::Value) -> bool {
 /// the shape: a program whose *file name* mentions cctop, the word `hook`, and
 /// one bare event name.
 fn is_our_command(command: &str) -> bool {
-    let Some((exe, event)) = command.rsplit_once(MARKER) else {
+    let Some((exe, event)) = split_ours(command) else {
         return false;
     };
     let event = event.trim();
@@ -2297,15 +2572,33 @@ fn entry_commands(entry: &serde_json::Value) -> impl Iterator<Item = &str> {
 /// nothing the shell would read is written bare, so an install that already
 /// works is byte-for-byte what it was.
 fn hook_command(exe: &str, event: &str) -> String {
+    command_line(exe, MARKER, event)
+}
+
+/// The command line for the deciding entry: see [`yolo_hook`].
+fn yolo_hook_command(exe: &str, event: &str) -> String {
+    command_line(exe, YOLO_MARKER, event)
+}
+
+fn command_line(exe: &str, marker: &str, event: &str) -> String {
     let plain = !exe.is_empty()
         && exe
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || "/._-+,:=@%".contains(c));
     if plain {
-        format!("{exe}{MARKER}{event}")
+        format!("{exe}{marker}{event}")
     } else {
-        format!("'{}'{MARKER}{event}", exe.replace('\'', r"'\''"))
+        format!("'{}'{marker}{event}", exe.replace('\'', r"'\''"))
     }
+}
+
+/// A command line cut at whichever of cctop's two words it carries, into the
+/// binary and the event. The two cannot be confused: `yolo-hook` has no space
+/// before its `hook`.
+fn split_ours(command: &str) -> Option<(&str, &str)> {
+    command
+        .rsplit_once(YOLO_MARKER)
+        .or_else(|| command.rsplit_once(MARKER))
 }
 
 /// The cctop an installed command names, taken back out of the command text.
@@ -2318,7 +2611,7 @@ fn recorded_exe(command: &str) -> Option<String> {
     if !is_our_command(command) {
         return None;
     }
-    let exe = command.rsplit_once(MARKER)?.0.trim();
+    let exe = split_ours(command)?.0.trim();
     Some(
         match exe.strip_prefix('\'').and_then(|e| e.strip_suffix('\'')) {
             Some(quoted) => quoted.replace(r"'\''", "'"),
@@ -2696,7 +2989,12 @@ fn plugin_exe(text: &str) -> Option<String> {
 // ---------------------------------------------------------------------------
 
 /// What one JSON settings file has to say about cctop.
-fn json_health(path: &Path, shape: Shape, events: &[&'static str]) -> Health {
+fn json_health(
+    path: &Path,
+    shape: Shape,
+    events: &[&'static str],
+    deciding: &[&'static str],
+) -> Health {
     let root = match read_settings(path) {
         Err(e) => return Health::Unreadable(e.to_string()),
         Ok(root) => root,
@@ -2710,26 +3008,34 @@ fn json_health(path: &Path, shape: Shape, events: &[&'static str]) -> Health {
     let mut missing = Vec::new();
     let mut recorded: Option<String> = None;
     for event in events {
-        let entry = hooks
+        let ours: Vec<&str> = hooks
             .and_then(|h| h.get(*event))
             .and_then(|v| v.as_array())
-            .and_then(|list| list.iter().find(|e| is_ours(e)));
-        match entry {
-            None => missing.push(*event),
-            Some(entry) => {
-                let exe = entry_commands(entry).find_map(recorded_exe);
-                // An entry the installer would not write today — a spaced path
-                // left bare by an older cctop — is counted as missing, so that
-                // `repair` rewrites it instead of calling it installed while
-                // every fire fails.
-                if !entry_commands(entry)
-                    .any(|c| exe.as_deref().is_some_and(|e| c == hook_command(e, event)))
-                {
-                    missing.push(*event);
-                }
-                recorded = recorded.or(exe);
-            }
+            .map(|list| list.as_slice())
+            .unwrap_or_default()
+            .iter()
+            .flat_map(entry_commands)
+            .filter(|c| is_our_command(c))
+            .collect();
+        if ours.is_empty() {
+            missing.push(*event);
+            continue;
         }
+        let exe = ours.iter().find_map(|c| recorded_exe(c));
+        // A command the installer would not write today — a spaced path left
+        // bare by an older cctop — is counted as missing, so that `repair`
+        // rewrites it instead of calling it installed while every fire fails.
+        let has = |wanted: &dyn Fn(&str) -> String| {
+            ours.iter()
+                .any(|c| exe.as_deref().is_some_and(|e| *c == wanted(e)))
+        };
+        if !has(&|e| hook_command(e, event)) {
+            missing.push(*event);
+        }
+        if deciding.contains(event) && !has(&|e| yolo_hook_command(e, event)) {
+            missing.push(YOLO_HOOK_LABEL);
+        }
+        recorded = recorded.or(exe);
     }
     verdict(recorded, missing)
 }
@@ -3754,7 +4060,7 @@ mod tests {
         ]}]}});
         std::fs::write(&path, settings.to_string()).unwrap();
 
-        match json_health(&path, Shape::Nested, &["Stop"]) {
+        match json_health(&path, Shape::Nested, &["Stop"], &[]) {
             Health::Other {
                 exe: found,
                 missing,
@@ -4264,15 +4570,19 @@ mod tests {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
 
         let gone = dir.join("moved-away-cctop");
+        // A whole install, the deciding entry included, so the one thing
+        // repair could find wrong with it is where it points.
         let write_pointing_at = |exe: &Path| {
             let hooks: serde_json::Map<String, serde_json::Value> = CLAUDE_EVENTS
                 .iter()
                 .map(|e| {
-                    (
-                        (*e).to_string(),
-                        serde_json::json!([{"hooks": [{"type": "command",
-                            "command": format!("{} hook {e}", exe.display())}]}]),
-                    )
+                    let mut entries = vec![serde_json::json!({"hooks": [{"type": "command",
+                        "command": format!("{} hook {e}", exe.display())}]})];
+                    if CLAUDE_DECIDING.contains(e) {
+                        entries.push(serde_json::json!({"hooks": [{"type": "command",
+                            "command": format!("{} yolo-hook {e}", exe.display())}]}));
+                    }
+                    ((*e).to_string(), serde_json::Value::Array(entries))
                 })
                 .collect();
             std::fs::write(&path, serde_json::json!({"hooks": hooks}).to_string()).unwrap();
@@ -4827,5 +5137,253 @@ mod tests {
 
         deliver(b"{\"event\":\"Stop\",\"session_id\":\"a\"}\n");
         assert!(!stale.exists(), "a dead address was left on disk");
+    }
+
+    /// A `PermissionRequest` payload as Claude Code 2.1.293 sends it.
+    fn permission_request(session: &str, tool: &str, input: serde_json::Value) -> Vec<u8> {
+        serde_json::to_vec(&serde_json::json!({
+            "session_id": session,
+            "transcript_path": "/t.jsonl",
+            "cwd": "/w",
+            "permission_mode": "default",
+            "hook_event_name": "PermissionRequest",
+            "tool_name": tool,
+            "tool_input": input,
+            "permission_suggestions": [],
+        }))
+        .unwrap()
+    }
+
+    /// The deciding hook says yes for the session the switch names and for
+    /// nothing else, whatever arrives on its stdin.
+    #[test]
+    fn the_yolo_hook_allows_only_what_the_switch_allows() {
+        let bash = permission_request("on", "Bash", serde_json::json!({"command": "ls"}));
+        let yes = |id: &str| id == "on";
+        assert!(yolo_verdict("PermissionRequest", &bash, yes).is_some());
+
+        // The switch is asked about the payload's session, and its no is
+        // final.
+        let mut asked = Vec::new();
+        assert!(
+            yolo_verdict("PermissionRequest", &bash, |id| {
+                asked.push(id.to_string());
+                false
+            })
+            .is_none()
+        );
+        assert_eq!(asked, ["on"]);
+        let other = permission_request("off", "Bash", serde_json::json!({"command": "ls"}));
+        assert!(yolo_verdict("PermissionRequest", &other, yes).is_none());
+
+        // Fired for another event, or a payload naming another event.
+        for event in ["PreToolUse", "Notification", "", "Elicitation"] {
+            assert!(yolo_verdict(event, &bash, yes).is_none(), "{event}");
+        }
+        let mut renamed: serde_json::Value = serde_json::from_slice(&bash).unwrap();
+        renamed["hook_event_name"] = "PreToolUse".into();
+        let renamed = serde_json::to_vec(&renamed).unwrap();
+        assert!(yolo_verdict("PermissionRequest", &renamed, yes).is_none());
+
+        // A question with choices: allowing it would skip the question.
+        let question = permission_request(
+            "on",
+            "AskUserQuestion",
+            serde_json::json!({"questions": [{"question": "Which?"}]}),
+        );
+        assert!(yolo_verdict("PermissionRequest", &question, yes).is_none());
+
+        // Whatever else stdin can hold.
+        let oversized = vec![b'{'; MAX_EVENT as usize];
+        for payload in [
+            &b""[..],
+            b"not json",
+            b"{\"session_id\":",
+            b"\xff\xfe\x00garbage",
+            b"[]",
+            b"{\"hook_event_name\":\"PermissionRequest\"}",
+            b"{\"hook_event_name\":\"PermissionRequest\",\"session_id\":7}",
+            &oversized,
+        ] {
+            assert!(
+                yolo_verdict("PermissionRequest", payload, |_| true).is_none(),
+                "{:?}",
+                String::from_utf8_lossy(&payload[..payload.len().min(40)])
+            );
+        }
+    }
+
+    /// The answer is exactly the `PermissionRequest` allow Claude Code's
+    /// schema takes, with nothing beside it that another event would read as
+    /// a decision of its own.
+    #[test]
+    fn the_yolo_answer_is_the_permission_request_allow_and_nothing_else() {
+        let answer: serde_json::Value = serde_json::from_str(YOLO_ALLOW).unwrap();
+        assert_eq!(
+            answer,
+            serde_json::json!({
+                "hookSpecificOutput": {
+                    "hookEventName": "PermissionRequest",
+                    "decision": {"behavior": "allow"},
+                }
+            })
+        );
+        assert!(!YOLO_ALLOW.contains('\n'));
+        // And the observer is still the observer: no answer to a permission
+        // prompt, YOLO or not.
+        assert_eq!(answer_for("PermissionRequest"), None);
+        for event in CLAUDE_EVENTS {
+            assert!(
+                answer_for(event).is_none_or(|a| !a.contains("decision")),
+                "cctop hook {event} decides"
+            );
+        }
+    }
+
+    /// The hook's allow, landing on either side of the observer's report of
+    /// the same prompt, leaves the session working — and a prompt it did not
+    /// answer still asks.
+    #[test]
+    fn a_prompt_the_yolo_hook_allowed_never_reads_as_asking() {
+        let raised = |ask: &str| {
+            parse(&format!(
+                r#"{{"session_id":"s","event":"PermissionRequest","cwd":"/w","ask":"{ask}"}}"#
+            ))
+            .unwrap()
+        };
+        let allowed = |ask: Option<&str>| {
+            let line = yolo_allowed_line("s", None, ask);
+            parse(std::str::from_utf8(&line).unwrap()).unwrap()
+        };
+
+        // The allow first, then the report it raced.
+        let mut reports = Reports::default();
+        reports.observe(&allowed(Some("Bash: ls")));
+        reports.observe(&raised("Bash: ls"));
+        assert_eq!(reports.report("s").unwrap().signal, Signal::Busy);
+        // Used up: the next prompt in the same words asks.
+        reports.observe(&raised("Bash: ls"));
+        assert_eq!(reports.report("s").unwrap().signal, Signal::NeedsInput);
+
+        // The report first, then the allow.
+        let mut reports = Reports::default();
+        reports.observe(&raised("Bash: ls"));
+        reports.observe(&allowed(Some("Bash: ls")));
+        let now = reports.report("s").unwrap();
+        assert_eq!((now.signal, now.ask.as_deref()), (Signal::Busy, None));
+        // Nothing remembered from an allow that came second.
+        reports.observe(&raised("Bash: ls"));
+        assert_eq!(reports.report("s").unwrap().signal, Signal::NeedsInput);
+
+        // A prompt in other words is not the one allowed.
+        let mut reports = Reports::default();
+        reports.observe(&allowed(Some("Bash: ls")));
+        reports.observe(&raised("Bash: rm -rf /"));
+        assert_eq!(reports.report("s").unwrap().signal, Signal::NeedsInput);
+
+        // A prompt that named nothing, allowed as nothing.
+        let mut reports = Reports::default();
+        reports.observe(&allowed(None));
+        reports.observe(
+            &parse(r#"{"session_id":"s","event":"PermissionRequest","cwd":"/w"}"#).unwrap(),
+        );
+        assert_eq!(reports.report("s").unwrap().signal, Signal::Busy);
+    }
+
+    /// A subagent's prompt the hook allowed is closed out by the allow, so the
+    /// session does not go on asking on its behalf.
+    #[test]
+    fn a_subagents_prompt_the_yolo_hook_allowed_is_closed() {
+        let mut reports = Reports::default();
+        reports.observe(
+            &parse(
+                r#"{"session_id":"s","event":"PermissionRequest","cwd":"/w","agent_id":"sub","ask":"Bash: ls"}"#,
+            )
+            .unwrap(),
+        );
+        assert_eq!(reports.report("s").unwrap().signal, Signal::NeedsInput);
+        let line = yolo_allowed_line("s", Some("sub"), Some("Bash: ls"));
+        reports.observe(&parse(std::str::from_utf8(&line).unwrap()).unwrap());
+        assert_eq!(reports.report("s").unwrap().signal, Signal::Busy);
+        assert!(
+            reports
+                .asking_agents
+                .get("s")
+                .is_none_or(|open| open.is_empty())
+        );
+    }
+
+    /// Claude Code gets the deciding entry beside the observer, for
+    /// `PermissionRequest` alone; health notices it missing, repair puts it
+    /// back, and uninstall takes both.
+    #[test]
+    fn the_yolo_hook_is_installed_beside_the_observer_and_removed_with_it() {
+        let dir = scratch("yolo-install");
+        let scope = Scope::Project(dir.clone());
+        let path = Harness::Claude.config_file(&scope).unwrap();
+        install(&scope);
+        let exe = own_exe().unwrap();
+        let commands = |event: &str| -> Vec<String> {
+            read_settings(&path).unwrap()["hooks"][event]
+                .as_array()
+                .unwrap()
+                .iter()
+                .flat_map(|e| entry_commands(e).map(str::to_string).collect::<Vec<_>>())
+                .collect()
+        };
+        assert_eq!(
+            commands("PermissionRequest"),
+            [
+                hook_command(&exe, "PermissionRequest"),
+                yolo_hook_command(&exe, "PermissionRequest")
+            ]
+        );
+        for event in CLAUDE_EVENTS.iter().filter(|e| **e != "PermissionRequest") {
+            assert_eq!(commands(event), [hook_command(&exe, event)], "{event}");
+        }
+        assert_eq!(Harness::Claude.health(&scope).unwrap(), Health::Installed);
+        // Nobody else decides: no other harness was given one.
+        for harness in [Harness::Gemini, Harness::Cursor, Harness::Codex] {
+            if let Some(file) = harness.config_file(&scope) {
+                let text = std::fs::read_to_string(&file).unwrap_or_default();
+                assert!(!text.contains(YOLO_MARKER.trim()), "{}", harness.label());
+            }
+        }
+
+        // An install from before the hook: health says what is short, and
+        // repair fills it in.
+        let mut root = read_settings(&path).unwrap();
+        root["hooks"]["PermissionRequest"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|e| !entry_commands(e).any(|c| c.contains(YOLO_MARKER)));
+        write_settings(&path, &root).unwrap();
+        assert_eq!(
+            Harness::Claude.health(&scope).unwrap(),
+            Health::Partial(vec![YOLO_HOOK_LABEL])
+        );
+        repair_in(std::slice::from_ref(&scope));
+        assert_eq!(Harness::Claude.health(&scope).unwrap(), Health::Installed);
+        assert_eq!(commands("PermissionRequest").len(), 2, "repair doubled up");
+
+        remove(&scope);
+        assert_eq!(Harness::Claude.health(&scope).unwrap(), Health::Absent);
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(!text.contains("hook"), "{text}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The deciding command is recognised as cctop's, under any binary name,
+    /// and the path read back out of it.
+    #[test]
+    fn a_yolo_hook_command_is_recognised_as_ours() {
+        for exe in ["/usr/local/bin/cctop", "/Applications/My Tools/cctop-0.29"] {
+            let command = yolo_hook_command(exe, "PermissionRequest");
+            assert!(is_our_command(&command), "{command}");
+            assert_eq!(recorded_exe(&command).as_deref(), Some(exe));
+        }
+        assert!(!is_our_command(
+            "/usr/bin/other yolo-hook PermissionRequest"
+        ));
     }
 }
