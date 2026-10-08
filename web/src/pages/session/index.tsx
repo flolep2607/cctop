@@ -19,7 +19,7 @@ import { StateBadge, StateDot } from "@/components/status";
 import { dotOf } from "@/lib/status";
 import { TerminalFrame } from "@/components/terminal";
 import { popOut, type Terminal } from "@/lib/terminal";
-import { useSessions, useTick } from "@/hooks/use-live";
+import { POLL_EVERY, useSessions, useTick } from "@/hooks/use-live";
 import { YoloLog, YoloSwitch } from "@/components/yolo";
 import type { Report } from "@/lib/types";
 import { AccessView } from "./access-view";
@@ -81,7 +81,7 @@ export function SessionPage() {
   }, [urlId]);
 
   const id = r?.session_id ?? urlId;
-  const { sessions, live: streaming } = useSessions(urlId);
+  const { sessions, feed } = useSessions(urlId);
   // The URL may carry any unambiguous prefix of the id.
   const live = useMemo(
     () => sessions?.find((s) => s.session_id === id) ?? sessions?.find((s) => s.session_id.startsWith(urlId)) ?? null,
@@ -148,7 +148,15 @@ export function SessionPage() {
               <StateBadge state={state} running={running} question={!!live?.asking_question} />
               {live && <YoloSwitch session={live} className="shrink-0" />}
               {/* The state beside it is the last the stream said; say when that may be old. */}
-              {sessions && !streaming && (
+              {feed === "polling" && (
+                <span
+                  className="text-muted-foreground shrink-0 text-xs font-normal"
+                  title={`The live stream is not getting through, so the state is fetched every ${POLL_EVERY / 1000} seconds instead`}
+                >
+                  polling
+                </span>
+              )}
+              {sessions && feed === "down" && (
                 <span className="text-muted-foreground shrink-0 text-xs font-normal" title="The live connection dropped; the state shown may be out of date">
                   reconnecting…
                 </span>
