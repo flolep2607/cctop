@@ -27,7 +27,9 @@ One developer's personal settings. It picks a model and effort, adjusts the term
     ```json ~/.claude/settings.json theme={null}
     {
       "model": "claude-sonnet-5",
-      "effortLevel": "xhigh",
+      "modelSettings": {
+        "claude-sonnet-5": { "effortLevel": "xhigh" }
+      },
       "editorMode": "vim",
       "theme": "light-daltonized",
       "statusLine": {
@@ -56,8 +58,10 @@ One developer's personal settings. It picks a model and effort, adjusts the term
     {
       // Start every session on Sonnet 5
       "model": "claude-sonnet-5",
-      // Reason more deeply than the default high level; /effort saves a new level, and --effort overrides it for one session
-      "effortLevel": "xhigh",
+      // Run Sonnet 5 above its default high level; /effort saves a level per model, and --effort sets one for a single session
+      "modelSettings": {
+        "claude-sonnet-5": { "effortLevel": "xhigh" }
+      },
       // Vim keybindings in the prompt
       "editorMode": "vim",
       // The colorblind-friendly light theme
@@ -92,11 +96,13 @@ One developer's personal settings. It picks a model and effort, adjusts the term
   A team's shared settings
 </h2>
 
-One team's shared settings, committed to the repository so everyone who clones it gets the same permissions, hooks, telemetry, and plugin marketplace. Save a file like this at `.claude/settings.json` at the top of the repository. Three things to know before you commit one:
+One team's shared settings, committed to the repository so everyone who clones it gets the same permissions, hooks, and plugin marketplace. Save a file like this at `.claude/settings.json` at the top of the repository. What to know before you commit one:
 
-* **Cloud sessions read it too.** A [cloud session](/docs/en/settings#settings-in-cloud-sessions) on Claude Code on the web starts from a clone of the repository, so the committed file applies there as well.
+* **Cloud sessions read it too.** A [cloud session](/docs/en/settings#settings-in-cloud-sessions) starts from a clone of the repository, so the committed file applies there as well.
+* **Telemetry goes in managed or personal settings.** Claude Code ignores the [OpenTelemetry exporter variables](/docs/en/settings-reference#variables-claude-code-ignores-in-env) in a repository's settings files, apart from some values that turn telemetry off. Set them in [managed settings](/docs/en/monitoring-usage#administrator-configuration) for your organization, or in each person's `~/.claude/settings.json`.
 * **Allow rules wait for trust.** Allow rules and `extraKnownMarketplaces` entries take effect after each person [trusts this folder itself](/docs/en/permissions#project-allow-rules-and-workspace-trust), not only a parent folder; deny and ask rules apply in every session, trusted or not.
 * **The hook is a script in the repo.** This file's hook runs `.claude/hooks/block-rm.sh`; [How a hook resolves](/docs/en/hooks#how-a-hook-resolves) walks through writing it.
+* **Rules match the command and path as written.** `Bash(git push *)` doesn't match [`git -C . push`](/docs/en/permissions#bash-rule-limits). `Read(./.env)` on its own stops the file tools and commands that name the file, such as `cat .env`, but not [`grep -r` run over the directory](/docs/en/permissions#read-and-edit); the `sandbox` block in this file closes that gap, because the sandbox [adds your `Read` deny paths](/docs/en/settings-reference#sandbox-filesystem-denyread) to what every sandboxed command can't read.
 
 <Tabs>
   <Tab title="Copyable settings file">
@@ -116,12 +122,6 @@ One team's shared settings, committed to the repository so everyone who clones i
           "Read(./.env.*)",
           "Read(./secrets/**)"
         ]
-      },
-      "env": {
-        "CLAUDE_CODE_ENABLE_TELEMETRY": "1",
-        "OTEL_METRICS_EXPORTER": "otlp",
-        "OTEL_EXPORTER_OTLP_PROTOCOL": "grpc",
-        "OTEL_EXPORTER_OTLP_ENDPOINT": "http://collector.example.com:4317"
       },
       "hooks": {
         "PreToolUse": [
@@ -176,23 +176,16 @@ One team's shared settings, committed to the repository so everyone who clones i
         "allow": [
           "Bash(npm run *)"
         ],
-        // Always confirm before pushing
+        // Confirm before git push commands
         "ask": [
           "Bash(git push *)"
         ],
-        // Never read env files or the secrets folder
+        // Deny reads of env files and the secrets folder by the file tools and file-reading commands
         "deny": [
           "Read(./.env)",
           "Read(./.env.*)",
           "Read(./secrets/**)"
         ]
-      },
-      // Send OpenTelemetry metrics to the team's collector over gRPC; replace the endpoint with your collector's URL
-      "env": {
-        "CLAUDE_CODE_ENABLE_TELEMETRY": "1",
-        "OTEL_METRICS_EXPORTER": "otlp",
-        "OTEL_EXPORTER_OTLP_PROTOCOL": "grpc",
-        "OTEL_EXPORTER_OTLP_ENDPOINT": "http://collector.example.com:4317"
       },
       // Before every Bash command, run a script in the repo that can block it
       "hooks": {
@@ -221,7 +214,7 @@ One team's shared settings, committed to the repository so everyone who clones i
       "enabledPlugins": {
         "code-formatter@acme-tools": true
       },
-      // Sandbox commands: writable build dir; npm and example.com pre-allowed, other hosts still prompt
+      // Sandbox commands: writable build dir; npm and example.com pre-allowed
       "sandbox": {
         "enabled": true,
         "filesystem": {
@@ -251,11 +244,11 @@ A `managed-settings.json` file that shows the shape of the managed keys, with on
 
 * `forceLoginMethod` and `forceLoginOrgUUID` pin the login method and organization
 * `availableModels` and `enforceAvailableModels` restrict which models sessions can use
-* `permissions.deny` blocks two file reads and `curl`, and `disableBypassPermissionsMode` removes the bypass permission mode
-* `allowManagedPermissionRulesOnly` and `allowManagedMcpServersOnly` make the managed permission and MCP allowlists the only ones that apply
+* `permissions.deny` denies two file reads and `curl` commands [as Claude writes them](/docs/en/permissions#bash-rule-limits), and `disableBypassPermissionsMode` removes the bypass permission mode
+* [`allowManagedPermissionRulesOnly`](/docs/en/settings-reference#allowmanagedpermissionrulesonly) and [`allowManagedMcpServersOnly`](/docs/en/settings-reference#allowmanagedmcpserversonly) make the managed permission and MCP allowlists the only ones that apply
 * `allowedMcpServers` pins the MCP server by URL
 * `strictKnownMarketplaces` allows one plugin marketplace
-* `sandbox` sandboxes commands with a fixed network allowlist and no unsandboxed retry
+* `sandbox` sandboxes commands with a fixed network allowlist and no unsandboxed retry. Its `failIfUnavailable` key [stops Claude Code from starting where the sandbox can't run](/docs/en/sandboxing#enforce-sandboxing-with-managed-settings)
 * `requiredMinimumVersion` sets a minimum Claude Code version
 * `cleanupPeriodDays` shortens retention of session transcripts and other local data to seven days
 * `companyAnnouncements` shows a message at startup
@@ -336,7 +329,7 @@ Administrators deploy a file like this as `managed-settings.json`, or the same J
       ],
       "enforceAvailableModels": true,
       "permissions": {
-        // Block curl, the project's .env file, and its secrets folder on every machine
+        // Deny curl commands and reads of the project's .env file and secrets folder on every machine
         "deny": [
           "Bash(curl *)",
           "Read(./.env)",
@@ -345,12 +338,12 @@ Administrators deploy a file like this as `managed-settings.json`, or the same J
         // Remove the bypass-permissions mode from every session
         "disableBypassPermissionsMode": "disable"
       },
-      // Only managed permission rules apply
+      // Ignore permission rules from user, project, and local settings
       "allowManagedPermissionRulesOnly": true,
       // Only the GitHub MCP server, matched by URL rather than by name, since a user can
-      // name any server "github". Servers that don't match don't load, which includes every
-      // stdio server when the list has only URL entries; the lock below makes this managed
-      // list the only allowlist that counts
+      // name any server "github". User-added servers that don't match don't load, including
+      // every stdio server when the list has only URL entries. The allowManagedMcpServersOnly
+      // key below makes this managed list the only allowlist that applies
       "allowedMcpServers": [
         {
           "serverUrl": "https://api.githubcopilot.com/*"
@@ -364,9 +357,9 @@ Administrators deploy a file like this as `managed-settings.json`, or the same J
           "repo": "acme-corp/approved-plugins"
         }
       ],
-      // Sandbox every command, refuse to start if the sandbox can't be set up, and
-      // never let a blocked command retry outside the sandbox; network limited to
-      // npm and GitHub, and users can't add domains
+      // Sandbox every command Claude runs, refuse to start if the sandbox can't be
+      // set up, and never let a blocked command retry outside the sandbox; network
+      // limited to npm and GitHub, and users can't add domains
       "sandbox": {
         "enabled": true,
         "failIfUnavailable": true,

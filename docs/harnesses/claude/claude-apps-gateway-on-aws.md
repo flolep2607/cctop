@@ -28,7 +28,7 @@ The gateway runs as a private HTTPS endpoint on your network that developers sig
 * **Amazon ECR** repository for the gateway image
 * **Amazon RDS for PostgreSQL** instance in private subnets, not publicly accessible, for the gateway's [store](/docs/en/claude-apps-gateway-config#store)
 * **AWS Secrets Manager** secrets for the JWT signing key, the OIDC client secret, and the Postgres URL
-* **IAM role** with `bedrock:InvokeModel` and `bedrock:InvokeModelWithResponseStream`, attached as the ECS task role or bound via IAM Roles for Service Accounts (IRSA) on EKS
+* **IAM role** with `bedrock:InvokeModel`, `bedrock:InvokeModelWithResponseStream`, and `bedrock:CountTokens`, attached as the ECS task role or bound via IAM Roles for Service Accounts (IRSA) on EKS
 * **Internal Application Load Balancer** for HTTPS
 
 ## Prerequisites
@@ -103,7 +103,7 @@ The steps below provision the full deployment with `aws` commands.
       "Version": "2012-10-17",
       "Statement": [{
         "Effect": "Allow",
-        "Action": ["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"],
+        "Action": ["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream", "bedrock:CountTokens"],
         "Resource": [
           "arn:aws:bedrock:${AWS_REGION}:${ACCOUNT_ID}:inference-profile/us.anthropic.*",
           "arn:aws:bedrock:*::foundation-model/anthropic.*"
@@ -161,7 +161,7 @@ The steps below provision the full deployment with `aws` commands.
   </Step>
 
   <Step title="Provision Amazon RDS for PostgreSQL">
-    The instance runs in the private subnets with no public address and storage encryption on. The engine version is pinned to Postgres 16, which satisfies the gateway's supported floor of PostgreSQL 14 and guarantees the parameter-group family below matches the instance.
+    The instance runs Postgres 16 in the private subnets, with no public address and storage encryption on.
 
     First, create the subnet group that places the database in the private subnets, and a parameter group with `rds.force_ssl=1` so the server rejects plaintext connections. The engine version is pinned once because the parameter group's family must match the engine major version the instance runs:
 
@@ -219,6 +219,8 @@ The steps below provision the full deployment with `aws` commands.
 
     On both tracks the front end is an internal ALB, whether created directly or by the AWS Load Balancer Controller, and an ALB's nodes take addresses from the subnets it is attached to, so set `trusted_proxies` to those subnets' CIDRs. This trusts every host in those subnets as a proxy. Keep the ALB's ingress source, your corporate CIDR, from overlapping them, and don't share the subnets with untrusted workloads that could spoof client IPs via `X-Forwarded-For`.
 
+    The ALB's client port preservation attribute, `routing.http.xff_client_port.enabled`, can stay at either setting: with it on, the ALB writes the client as `203.0.113.7:54321` or `[2001:db8::1]:54321`, and the gateway reads both with the port dropped.
+
     ```yaml gateway.yaml theme={null}
     listen:
       host: 0.0.0.0
@@ -245,6 +247,8 @@ The steps below provision the full deployment with `aws` commands.
 
     store:
       postgres_url: ${GATEWAY_POSTGRES_URL}          # EKS: ${file:/secrets/postgres-url}
+      # readiness_grace_seconds: 300                 # keep passing the health check
+                                                     # through an RDS failover
 
     upstreams:
       - provider: bedrock
@@ -413,7 +417,9 @@ The steps below provision the full deployment with `aws` commands.
           --load-balancers "targetGroupArn=$TG_ARN,containerName=gateway,containerPort=8080"
         ```
 
-        The 60-second grace period gives a cold task time to pull the image, connect to the store, and answer its first health check before ECS starts counting failures against the deployment. The target group's health check on `GET /readyz` verifies the store is reachable, so a task that can't reach Postgres never enters rotation; see [Outage behavior](/docs/en/claude-apps-gateway-deploy#outage-behavior) for the tradeoff and the `/healthz` alternative.
+        The 60-second grace period gives a cold task time to pull the image, connect to the store, and answer its first health check before ECS starts counting failures against the deployment.
+
+        The target group's health check on `GET /readyz` verifies the store is reachable, so a task that can't reach Postgres never enters rotation. To keep tasks passing the check through a short database outage such as an RDS failover, set `store.readiness_grace_seconds` as described in [Outage behavior](/docs/en/claude-apps-gateway-deploy#outage-behavior), which also covers the `/healthz` alternative.
 
         The tasks run in private subnets with no public IP, so all egress (to Bedrock, your IdP, Secrets Manager, ECR, and CloudWatch Logs) goes through the NAT gateway. To keep Bedrock traffic off the public path, create a `bedrock-runtime` interface VPC endpoint and point the upstream's `base_url` at it, as shown in the [Bedrock upstream reference](/docs/en/claude-apps-gateway-config#amazon-bedrock); the IdP still needs internet egress.
 
@@ -483,20 +489,20 @@ Like this page, the bundle is a working example for customer-managed infrastruct
 
 For gateway boot and login errors, see the platform-agnostic [troubleshooting table](/docs/en/claude-apps-gateway-deploy#troubleshooting). The entries below are specific to AWS.
 
-| Symptom                                                                                                                                    | Cause                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       | Fix                                                                                                                                                                                                                                                                                                            |
-| ------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| CLI `/login`: `Gateway hosts must be on your organization's private network; <host> resolves to the public (or unrecognized) address <ip>` | The gateway name resolves to at least one public address. A dual-stack internal ALB publishes public-range AAAA records, and the [private-network check](/docs/en/claude-apps-gateway#prerequisites) requires every resolved address to be private                                                                                                                                                                                                                                                                                               | Create the ALB with `--ip-address-type ipv4`, or serve a separate internal-only DNS name with no public AAAA record                                                                                                                                                                                            |
-| Every Bedrock request returns 502; log shows `Could not load credentials from any providers`                                               | The task runs on the ECS EC2 launch type without a task role, or the pod runs on an EKS node without IRSA, so credentials come from instance metadata, which IMDSv2's default hop limit of 1 stops inside a container. Neither track on this page is affected: Fargate task roles and IRSA don't use instance metadata                                                                                                                                                                                                                      | Prefer task roles and IRSA. Where instance credentials are unavoidable, raise the hop limit with `aws ec2 modify-instance-metadata-options --instance-id <id> --http-put-response-hop-limit 2`; the [platform-agnostic table](/docs/en/claude-apps-gateway-deploy#troubleshooting) covers the tradeoffs             |
-| Bedrock requests return `403 AccessDeniedException`                                                                                        | The account hasn't submitted Anthropic's one-time use case form, the automatic AWS Marketplace subscription that starts on the account's first invoke hasn't finished yet, or the task role's policy is missing the inference-profile or foundation-model ARNs                                                                                                                                                                                                                                                                              | Submit the use case form from the Bedrock console's Model catalog; if it was just submitted or this is the account's first invoke, retry after a few minutes. Grant `bedrock:InvokeModel` and `bedrock:InvokeModelWithResponseStream` on both ARN families.                                                    |
-| Bedrock returns a `ValidationException` saying on-demand throughput isn't supported                                                        | A custom `models:` entry maps to a bare foundation-model ID that the region serves only through inference profiles                                                                                                                                                                                                                                                                                                                                                                                                                          | Map the model to its cross-region inference profile ID (`us.anthropic.*`) instead; the built-in catalog already does this                                                                                                                                                                                      |
-| ECS task stops with `ResourceInitializationError` before the gateway logs anything                                                         | The execution role can't read the Secrets Manager secrets, or the private subnets have no path to Secrets Manager or ECR                                                                                                                                                                                                                                                                                                                                                                                                                    | Grant `secretsmanager:GetSecretValue` on the three `gateway-` secrets' ARNs to the execution role, and provide egress via the NAT gateway, or, without one, interface endpoints for Secrets Manager, ECR, and CloudWatch Logs, which the `awslogs` driver needs at the same stage, plus an S3 gateway endpoint |
-| Gateway boot exits with a Postgres connection-timeout error                                                                                | The database security group doesn't admit the gateway's security group on 5432, or the service runs outside the database's VPC; the store stops waiting after 5 seconds                                                                                                                                                                                                                                                                                                                                                                     | Allow 5432 from the gateway's security group on the database's, and run the service in the same VPC as the DB subnet group                                                                                                                                                                                     |
-| Gateway boot exits with a Postgres TLS certificate verification error                                                                      | The connection string sets `sslmode=verify-full` but the image doesn't trust the RDS CA bundle: the bundle wasn't copied into the image, or `NODE_EXTRA_CA_CERTS` doesn't point at it                                                                                                                                                                                                                                                                                                                                                       | Add the build step's two Dockerfile lines that copy the bundle and set `NODE_EXTRA_CA_CERTS`, then rebuild, push under a new tag, and redeploy                                                                                                                                                                 |
-| Streaming responses drop mid-stream after a quiet period                                                                                   | A gateway older than v2.1.229 on a Bedrock or Claude Platform on AWS upstream sends nothing while the upstream is quiet, for example during extended thinking with no streamed output. The ALB closes a connection after 60 seconds with no data by default, so it cuts the stream at that gap. Gateways v2.1.229 and later keep a quiet stream under that timeout: on those upstreams the gateway emits an SSE `ping` event once about 15 seconds pass with no stream data, and on an Anthropic API upstream it relays the API's own pings | Update the gateway to v2.1.229 or later, or set the `idle_timeout.timeout_seconds` attribute to `3600`, via `modify-load-balancer-attributes` or the `load-balancer-attributes` Ingress annotation on EKS                                                                                                      |
+| Symptom | Cause | Fix |
+| - | - | - |
+| CLI `/login`: `Gateway hosts must be on your organization's private network; <host> resolves to the public (or unrecognized) address <ip>` | The gateway name resolves to at least one public address. A dual-stack internal ALB publishes public-range AAAA records, and the [private-network check](/docs/en/claude-apps-gateway#prerequisites) requires every resolved address to be private | Create the ALB with `--ip-address-type ipv4`, or serve a separate internal-only DNS name with no public AAAA record |
+| Every Bedrock request returns 502; log shows `Could not load credentials from any providers` | The task runs on the ECS EC2 launch type without a task role, or the pod runs on an EKS node without IRSA, so credentials come from instance metadata, which IMDSv2's default hop limit of 1 stops inside a container. Neither track on this page is affected: Fargate task roles and IRSA don't use instance metadata | Prefer task roles and IRSA. Where instance credentials are unavoidable, raise the hop limit with `aws ec2 modify-instance-metadata-options --instance-id <id> --http-put-response-hop-limit 2`; the [platform-agnostic table](/docs/en/claude-apps-gateway-deploy#troubleshooting) covers the tradeoffs |
+| Bedrock requests return `403 AccessDeniedException` | The account hasn't submitted Anthropic's one-time use case form, the automatic AWS Marketplace subscription that starts on the account's first invoke hasn't finished yet, or the task role's policy is missing the inference-profile or foundation-model ARNs | Submit the use case form from the Bedrock console's Model catalog; if it was just submitted or this is the account's first invoke, retry after a few minutes. Grant `bedrock:InvokeModel` and `bedrock:InvokeModelWithResponseStream` on both ARN families. |
+| Bedrock returns a `ValidationException` saying on-demand throughput isn't supported | A custom `models:` entry maps to a bare foundation-model ID that the region serves only through inference profiles | Map the model to its cross-region inference profile ID (`us.anthropic.*`) instead; the built-in catalog already does this |
+| ECS task stops with `ResourceInitializationError` before the gateway logs anything | The execution role can't read the Secrets Manager secrets, or the private subnets have no path to Secrets Manager or ECR | Grant `secretsmanager:GetSecretValue` on the three `gateway-` secrets' ARNs to the execution role, and provide egress via the NAT gateway, or, without one, interface endpoints for Secrets Manager, ECR, and CloudWatch Logs, which the `awslogs` driver needs at the same stage, plus an S3 gateway endpoint |
+| Gateway boot exits with a Postgres connection-timeout error | The database security group doesn't admit the gateway's security group on 5432, or the service runs outside the database's VPC | Allow 5432 from the gateway's security group on the database's, and run the service in the same VPC as the DB subnet group |
+| Gateway boot exits with a Postgres TLS certificate verification error | The connection string sets `sslmode=verify-full` but the image doesn't trust the RDS CA bundle: the bundle wasn't copied into the image, or `NODE_EXTRA_CA_CERTS` doesn't point at it | Add the build step's two Dockerfile lines that copy the bundle and set `NODE_EXTRA_CA_CERTS`, then rebuild, push under a new tag, and redeploy |
+| Streaming responses drop mid-stream after a quiet period | A gateway older than v2.1.229 on a Bedrock or Claude Platform on AWS upstream sends nothing while the upstream is quiet, for example during extended thinking with no streamed output. The ALB closes a connection after 60 seconds with no data by default, so it cuts the stream at that gap. Gateways v2.1.229 and later keep a quiet stream under that timeout: on those upstreams the gateway emits an SSE `ping` event once about 15 seconds pass with no stream data, and on an Anthropic API upstream it relays the API's own pings | Update the gateway to v2.1.229 or later, or set the `idle_timeout.timeout_seconds` attribute to `3600`, via `modify-load-balancer-attributes` or the `load-balancer-attributes` Ingress annotation on EKS |
 
 ## Telemetry
 
-The gateway gives you per-developer usage metrics without any per-machine OTEL configuration. Claude Code emits OpenTelemetry (OTLP) metrics, logs, and opt-in traces; [Monitoring usage](/docs/en/monitoring-usage) covers everything the CLI reports. On gateway sessions the CLI stamps each export with the authenticated IdP identity attributes `user.id`, `user.email`, and `user.groups`, so usage rolls up per developer with no `OTEL_RESOURCE_ATTRIBUTES` plumbing.
+The gateway gives you per-developer usage metrics without any per-machine OTEL configuration. Claude Code emits OpenTelemetry (OTLP) metrics, logs, and opt-in traces; [Monitoring usage](/docs/en/monitoring-usage) covers everything the CLI reports. In sessions signed in through `/login`, the CLI stamps each export with the authenticated IdP identity attributes `user.id`, `user.email`, and `user.groups`, so usage rolls up per developer.
 
 The gateway itself is an authenticated OTLP relay. Set [`telemetry.forward_to`](/docs/en/claude-apps-gateway-config#telemetry) together with `listen.public_url`, and it pushes the OTEL exporter settings to every connected client and forwards their OTLP traffic verbatim to each destination you list. Each destination opts into metrics, logs, and traces independently, and the default is metrics only; see the [`telemetry` reference](/docs/en/claude-apps-gateway-config#telemetry) for the per-signal fields and their sensitivity tradeoffs. The gateway doesn't buffer, aggregate, or store telemetry, so where the data lands is entirely the collector's exporter configuration.
 
@@ -518,7 +524,70 @@ Enable Container Insights on the cluster with `aws ecs update-cluster-settings -
 
 ### Spend
 
-Telemetry shows usage after the fact; [spend limits](/docs/en/claude-apps-gateway-spend-limits) are the gateway's live per-developer view and enforcement on top of the shared upstream credential.
+Telemetry shows usage after the fact; [spend limits](/docs/en/claude-apps-gateway-spend-limits) are the gateway's live per-developer view and enforcement.
+
+## Cost attribution
+
+The gateway signs every Bedrock request with its own principal, the ECS task role or EKS IRSA role, so by default AWS sees all of that spend under one IAM principal. There are two ways to split it in AWS's own billing data, and they combine.
+
+### Per developer with `assume_role`
+
+Create a second IAM role that holds the Bedrock permissions and trusts the gateway's principal, grant that principal `sts:AssumeRole` on it, and set [`assume_role`](/docs/en/claude-apps-gateway-config#per-developer-aws-cost-attribution) with `session_name: email` on the Bedrock upstream. The gateway then assumes that role once per developer per hour with the session name set to their email and signs their requests with the result. Requires a gateway running Claude Code v2.1.281 or later. The role can also be in another AWS account: see [Bedrock in another AWS account](/docs/en/claude-apps-gateway-config#bedrock-in-another-aws-account). In Terraform, next to the task role in the [Terraform bundle](#terraform-reference):
+
+```hcl theme={null}
+resource "aws_iam_role" "bedrock_user" {
+  name = "claude-gateway-bedrock-user"
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{ Effect = "Allow", Action = "sts:AssumeRole", Principal = { AWS = aws_iam_role.task.arn } }]
+  })
+}
+resource "aws_iam_role_policy" "bedrock_user_invoke" {   # same Bedrock policy as the task role's
+  role   = aws_iam_role.bedrock_user.id
+  policy = aws_iam_role_policy.bedrock_invoke.policy
+}
+resource "aws_iam_role_policy" "task_assume_bedrock_user" {
+  role   = aws_iam_role.task.id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{ Effect = "Allow", Action = "sts:AssumeRole", Resource = aws_iam_role.bedrock_user.arn }]
+  })
+}
+```
+
+With `assume_role` set the gateway signs every Bedrock call, the free `CountTokens` call for spend metering included, with the assumed role's credentials, so the gateway's principal needs a Bedrock policy of its own only for an upstream without `assume_role`.
+
+Because the gateway calls STS at request time, the private subnets need a path to `sts.<region>.amazonaws.com`. The NAT gateway from the prerequisites provides one, and so does an STS interface VPC endpoint that answers for that hostname. Each active developer costs one STS call per hour per gateway replica.
+
+Each developer's requests reach AWS as the principal `arn:aws:sts::<account>:assumed-role/<role>/<email>`. To see spend per principal, use a billing export that includes IAM principal data; AWS's [IAM principal cost allocation](https://docs.aws.amazon.com/awsaccountbilling/latest/aboutv2/iam-principal-cost-allocation.html) page covers how to enable it and which billing tools show it.
+
+### Per team with application inference profiles
+
+This route uses only the [`models`](/docs/en/claude-apps-gateway-config#models) and [`managed`](/docs/en/claude-apps-gateway-config#managed) sections. Create one Bedrock [application inference profile](https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-create.html) per team and model, tag each profile with the team, and activate that tag as a cost allocation tag. Then give each team its own model id in `gateway.yaml` and pin each IdP group to its team's ids:
+
+```yaml theme={null}
+models:
+  - id: platform-claude-opus-4-8
+    upstream_model:
+      bedrock: arn:aws:bedrock:us-east-1:123456789012:application-inference-profile/abc123
+  - id: data-claude-opus-4-8
+    upstream_model:
+      bedrock: arn:aws:bedrock:us-east-1:123456789012:application-inference-profile/def456
+managed:
+  policies:
+    - match: {groups: [team-platform]}
+      cli: {availableModels: [platform-claude-opus-4-8], enforceAvailableModels: true}
+    - match: {groups: [team-data]}
+      cli: {availableModels: [data-claude-opus-4-8], enforceAvailableModels: true}
+    - match: {}
+      cli: {availableModels: [claude-opus-4-8, claude-sonnet-4-6], enforceAvailableModels: true}
+```
+
+Tell developers in a pinned team to start Claude Code with `--model platform-claude-opus-4-8`, using their team's id, because a session started without it runs the default model, which the gateway refuses for them.
+
+The gateway enforces `availableModels` on every request, not only in the model picker, and AWS billing groups the spend by the tag you activated. Without the `match: {}` catch-all, a developer who matches no policy gets every model in the catalog and can bill either team's profile.
+
+The costs: the config grows with teams times models, and the role that signs this upstream's Bedrock requests must also be allowed to invoke the `application-inference-profile/*` ARNs. That role is the gateway's principal, or with `assume_role` the role it assumes. See [`pricing`](/docs/en/claude-apps-gateway-config#pricing) for how the gateway's own spend meter prices these ids.
 
 ## Next steps
 
