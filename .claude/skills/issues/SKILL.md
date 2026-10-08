@@ -13,9 +13,9 @@ the user's, because every agent posts under the user's own account.
 | label | meaning | who moves it on |
 |---|---|---|
 | `agent-ready` | written and waiting for a solver | this loop |
-| `agent-working` | a solver has it | the solver |
+| `agent-working` | a solver has it, with a draft PR from `issue-<N>` | the solver |
 | `agent-question` | the solver asked on the issue and stopped | the user's reply |
-| `agent-pr` | a PR is open, CI watched | the user: merge, or review comments |
+| `agent-pr` | the PR is ready for review, CI watched | the user: merge, or review comments |
 
 ## With arguments: file issues
 
@@ -29,6 +29,7 @@ it rather than filing.
 gh issue list --state open --label agent-ready    --json number,title
 gh issue list --state open --label agent-question --json number,title
 gh issue list --state open --label agent-pr       --json number,title
+gh issue list --state open --label agent-working  --json number,title
 ```
 
 1. **agent-ready** — spawn a background `issue-solver` with the number, up to
@@ -41,6 +42,12 @@ gh issue list --state open --label agent-pr       --json number,title
    Merged: nothing to do; GitHub closed the issue. Open with review comments or
    issue comments newer than the solver's last marked one, or failing CI: spawn
    a solver to address them. Otherwise skip.
+4. **agent-working** with no solver from this session running on it — a
+   solver that died, or one from a session that ended. Its draft PR
+   (`gh pr list --head issue-<N> --json number,updatedAt`) is the state: if it
+   has not moved for an hour, spawn a solver; it resumes from the draft's
+   Progress section. Issues labelled by hand for work outside this loop — a
+   branch not named `issue-<N>`, so no draft — are someone else's: skip them.
 
 Never spawn a second solver for an issue whose solver from this session is
 still running. Report the pass in a few lines: what started, what is waiting on

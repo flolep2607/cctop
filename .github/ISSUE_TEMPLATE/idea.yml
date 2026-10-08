@@ -1,0 +1,35 @@
+name: Idea
+description: Something cctop could do, or do better
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Add the `agent-ready` label once this says enough for an agent to build
+        it without asking; the `/issues` loop picks those up.
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What is slow, missing or awkward today, in your own words
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: What would fix it
+      description: The behaviour you want. Keys, screens and wording are welcome.
+    validations:
+      required: true
+  - type: textarea
+    id: done
+    attributes:
+      label: Done when
+      description: How you would check it works
+      placeholder: |
+        - [ ] ...
+  - type: textarea
+    id: out
+    attributes:
+      label: Not this
+      description: Things that look related but should stay out of it
