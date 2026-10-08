@@ -3191,17 +3191,26 @@ mod tests {
         let mut next = open_stream(&shared, "?session=abc", Duration::from_millis(300));
         assert_eq!(next(), ("sessions".into(), r#"[{"s":"asking"}]"#.into()));
 
+        // Refreshes keep landing, faster than the keepalive, until the ping
+        // has come through them; stopped then rather than run for a fixed
+        // count, which was seconds of churn after the answer was in.
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let churn = {
-            let shared = Arc::clone(&shared);
+            let (shared, stop) = (Arc::clone(&shared), Arc::clone(&stop));
             std::thread::spawn(move || {
-                for version in 2..60 {
+                let mut version = 2;
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
                     put(&shared, version, &[("abc", r#"{"s":"asking"}"#)]);
+                    version += 1;
+                    // The cadence of the churn, not a wait for anything.
                     std::thread::sleep(Duration::from_millis(50));
                 }
             })
         };
-        assert_eq!(next(), ("ping".into(), "1".into()));
+        let pinged = next();
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
         churn.join().unwrap();
+        assert_eq!(pinged, ("ping".into(), "1".into()));
     }
 
     #[test]
