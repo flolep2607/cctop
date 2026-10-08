@@ -534,12 +534,12 @@ fn fnv(bytes: &[u8]) -> u64 {
 /// For tests here and elsewhere: a [`Runner`] that runs the command line with
 /// a local `sh`, the way sshd would hand it to the login shell, in a home of
 /// the test's choosing. No ssh, no network.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub struct LocalSh {
     pub home: PathBuf,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl Runner for LocalSh {
     fn run(&self, _host: &str, command: &str, timeout: Duration) -> Result<String, String> {
         let mut cmd = std::process::Command::new("sh");

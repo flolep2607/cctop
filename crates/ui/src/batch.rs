@@ -167,7 +167,7 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ui::tests::{session, test_app};
+    use crate::tests::{session, test_app};
     #[test]
     fn batch_delete_keeps_marked_sessions_visible_until_worker_confirms() {
         let mut app = test_app();

@@ -53,7 +53,7 @@ pub enum ActivityState {
     /// newest thing written is a tool call in flight, which reads exactly like
     /// an agent still working. Only the agent's own hooks say this outright —
     /// see [`Signal::NeedsInput`](crate::hook::Signal::NeedsInput) and
-    /// [`App::apply_reports`](crate::ui::App::apply_reports).
+    /// [`App::apply_reports`](cctop_ui::App::apply_reports).
     Asking,
     ApiError,
 }
@@ -710,7 +710,7 @@ impl Session {
     /// *now*, where a hook event is what it said last: late for a permission
     /// prompt, stale for a question already answered, absent when hooks are not
     /// installed at all.
-    pub(crate) fn apply_reports(
+    pub fn apply_reports(
         &mut self,
         reported: Option<&crate::hook::Reported>,
         screened: Option<&crate::peek::Screened>,
@@ -1760,7 +1760,7 @@ pub type CostBuckets = HashMap<String, HashMap<String, f64>>;
 /// Serde's own `rc` feature would also have kept the JSON, and would have been
 /// less code; it is not used because turning it on is a build-configuration
 /// change for something no reader of a cache file can see.
-pub(crate) mod arc_as_map {
+pub mod arc_as_map {
     use super::{Arc, CostBuckets};
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
 

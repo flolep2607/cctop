@@ -47,8 +47,8 @@
 //! read by `rate()` as a reset and turned into a spike of the whole total.
 //! A gauge that went down is simply lower, which is the truth.
 
-use crate::pricing::Plan;
-use crate::session::{ActivityState, Session, SessionData};
+use cctop_core::pricing::Plan;
+use cctop_core::session::{ActivityState, Session, SessionData};
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::sync::Arc;
@@ -73,7 +73,7 @@ const SHORT_ID: usize = 8;
 pub fn render(
     sessions: &[Session],
     plan: Plan,
-    store: &crate::cache::Store,
+    store: &cctop_core::cache::Store,
     unreadable_hosts: usize,
 ) -> String {
     render_with(sessions, plan, unreadable_hosts, |s| store.session_data(s))
@@ -238,7 +238,7 @@ impl Aggregate {
                     .or_default() += n;
             }
         };
-        let mut split = |model: &str, t: &crate::session::Tokens| {
+        let mut split = |model: &str, t: &cctop_core::session::Tokens| {
             put(model, "input", t.input);
             put(model, "output", t.output);
             put(model, "cache_read", t.cache_read + t.cached_input);
@@ -284,7 +284,7 @@ impl Aggregate {
                 .or_default() += s.total_cost.unwrap_or(data.costs.total);
         }
 
-        let today = crate::util::local_date_key(&chrono::Utc::now());
+        let today = cctop_core::util::local_date_key(&chrono::Utc::now());
         for (day, models) in s.costs_by_day.iter() {
             if day.as_str() < today.as_str() {
                 continue;
@@ -559,8 +559,8 @@ fn number(v: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pricing::Provider;
-    use crate::session::{ContextUsage, ModelBreakdown, Tokens};
+    use cctop_core::pricing::Provider;
+    use cctop_core::session::{ContextUsage, ModelBreakdown, Tokens};
     use std::collections::HashMap;
 
     /// A parsed sample line: name, labels in order, value.
@@ -779,7 +779,7 @@ mod tests {
         s.cost_per_min = 0.1;
         s.tool_count = 10;
         s.tool_errors = 2;
-        let today = crate::util::local_date_key(&chrono::Utc::now());
+        let today = cctop_core::util::local_date_key(&chrono::Utc::now());
         s.costs_by_day = Arc::new(HashMap::from([(
             today,
             HashMap::from([("opus".to_string(), 1.0), ("haiku".to_string(), 0.5)]),
@@ -887,7 +887,7 @@ mod tests {
                 host_errors: Vec::new(),
             })),
             updated: Condvar::new(),
-            store: crate::cache::Store::default(),
+            store: cctop_core::cache::Store::default(),
             quota: Mutex::new(quota::EMPTY.to_string()),
             topics: Mutex::new(search::Topics::default()),
             notify: None,

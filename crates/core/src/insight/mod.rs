@@ -945,7 +945,7 @@ fn is_retry(timeline: &[(&str, &ToolDetail)], prev: usize, next: usize, outcomes
 /// A path as it would be in the main checkout rather than in a worktree of it.
 ///
 /// One file is one file across sessions only if it is spelled the same, and a
-/// session in `repo/.claude/worktrees/agent-x/` edits `src/ui/mod.rs` at a
+/// session in `repo/.claude/worktrees/agent-x/` edits `crates/ui/src/lib.rs` at a
 /// different absolute path from a session in `repo/`. On this machine that
 /// was every repeat edit of cctop's own files: rework found no file two
 /// sessions had both touched, though they had touched dozens.

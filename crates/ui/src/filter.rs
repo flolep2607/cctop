@@ -61,7 +61,7 @@ impl<'a> Query<'a> {
 
     fn admits(&self, s: &Session) -> bool {
         self.users.is_empty() || {
-            let name = crate::config::user_label(s.owner.as_deref());
+            let name = cctop_core::config::user_label(s.owner.as_deref());
             self.users.iter().any(|u| contains_ascii_ci(name, u))
         }
     }
@@ -114,7 +114,7 @@ impl App {
                     } else {
                         &s.last_active
                     };
-                    let within = crate::util::parse_ts(ts)
+                    let within = cctop_core::util::parse_ts(ts)
                         .map(|d| now_ms - d.timestamp_millis() <= age.max_age_ms())
                         .unwrap_or(false);
                     if !within {
@@ -262,7 +262,7 @@ impl App {
         }
         // The branch is derived rather than stored, so it is the one field that
         // cannot be borrowed straight off the session.
-        if crate::branch::branch_of(s).is_some_and(|b| contains_ascii_ci(&b, query)) {
+        if cctop_core::branch::branch_of(s).is_some_and(|b| contains_ascii_ci(&b, query)) {
             return true;
         }
         self.search_content && self.scan_query == query && self.scan_hits.contains_key(&s.key())
@@ -334,10 +334,10 @@ impl App {
             _ => {}
         }
         self.scan_typed_at = None;
-        let targets: Vec<crate::session::search::Target> = self
+        let targets: Vec<cctop_core::session::search::Target> = self
             .sessions
             .iter()
-            .map(crate::session::search::Target::of)
+            .map(cctop_core::session::search::Target::of)
             .collect();
         if self.tx.send(Request::Scan { query, targets }).is_ok() {
             self.scanning = true;
@@ -365,7 +365,7 @@ impl App {
         self.search_history.retain(|q| q != &query);
         self.search_history.insert(0, query);
         self.search_history
-            .truncate(crate::cache::MAX_SEARCH_HISTORY);
+            .truncate(cctop_core::cache::MAX_SEARCH_HISTORY);
         self.save_prefs();
     }
 
@@ -488,7 +488,7 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ui::tests::{key, session, test_app};
+    use crate::tests::{key, session, test_app};
     use ratatui::crossterm::event::KeyCode;
 
     /// `user:` narrows by whose a row is, without the name also matching every
@@ -532,7 +532,7 @@ mod tests {
         assert!(shown(&app).is_empty());
 
         // This user's own rows answer to this user's own name.
-        app.search = format!("user:{}", crate::config::MY_USER.to_ascii_lowercase()).into();
+        app.search = format!("user:{}", cctop_core::config::MY_USER.to_ascii_lowercase()).into();
         app.refilter();
         assert_eq!(shown(&app), ["m"]);
 

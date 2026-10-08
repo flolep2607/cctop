@@ -26,7 +26,7 @@
 //! [`Layout`]: super::render::Layout
 
 use super::theme;
-use crate::util;
+use cctop_core::util;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};

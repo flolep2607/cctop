@@ -10,7 +10,7 @@
 //! - the transcripts, through the same [`Loader`] — a full walk once to find the
 //!   session, then [`Loader::refresh_live`] on a timer, which is the sweep the
 //!   dashboard runs five times a second and costs only the live rows;
-//! - the agents' own hooks, live: a [`Listener`](crate::hook::Listener) is
+//! - the agents' own hooks, live: a [`Listener`](cctop_core::hook::Listener) is
 //!   bound like any cctop's, so `cctop hook` fans each event out to this
 //!   process too, and a finished turn or a held permission prompt is heard the
 //!   moment it happens rather than at the next transcript read;
@@ -27,10 +27,10 @@
 //! copy of every hook report on disk would close it, and would put a write on
 //! the path of every hook fire, which is the one path that must stay cheap.
 
-use crate::hook::Signal;
-use crate::loader::Loader;
-use crate::pricing::Plan;
-use crate::session::{ActivityState, Session};
+use cctop_core::hook::Signal;
+use cctop_core::loader::Loader;
+use cctop_core::pricing::Plan;
+use cctop_core::session::{ActivityState, Session};
 use std::time::{Duration, Instant};
 
 /// How often the transcripts are re-read. The hooks are the fast path; this is
@@ -170,7 +170,7 @@ pub enum Unresolved {
 /// often all digits.
 pub fn resolve(
     sessions: &[Session],
-    tabs: &[crate::rmux::Running],
+    tabs: &[cctop_core::rmux::Running],
     target: &str,
 ) -> Result<usize, Unresolved> {
     let target = target.trim();
@@ -313,7 +313,7 @@ impl Heard {
     /// same two tests the dashboard applies before a report reaches a row.
     fn believed(&self, now: u64) -> Option<Signal> {
         let age = Duration::from_secs(now.saturating_sub(self.at));
-        let settled = !self.provisional || age >= crate::hook::PERMISSION_GRACE;
+        let settled = !self.provisional || age >= cctop_core::hook::PERMISSION_GRACE;
         (settled && self.signal.is_current_after(age)).then_some(self.signal)
     }
 }
@@ -339,12 +339,12 @@ pub fn wait(
     let wall_start = chrono::Utc::now();
     // Bound before the walk, so an event fired while the transcripts are
     // being read is not lost to the gap.
-    let listener = listen.then(crate::hook::Listener::start).flatten();
+    let listener = listen.then(cctop_core::hook::Listener::start).flatten();
     let mut loader = Loader::new();
-    loader.set_hook_claims(crate::hook::load_claims());
+    loader.set_hook_claims(cctop_core::hook::load_claims());
     let plan = Plan::Retail;
     let mut sessions = loader.load(plan);
-    let mut tabs = crate::rmux::running();
+    let mut tabs = cctop_core::rmux::running();
     let at = resolve(&sessions, &tabs, target)?;
     let key = sessions[at].key();
     let id = sessions[at].session_id.clone();
@@ -355,7 +355,7 @@ pub fn wait(
     let mut refreshed = Instant::now();
     let mut reread_rmux = Instant::now();
     loop {
-        let now_secs = crate::rmux::now_secs();
+        let now_secs = cctop_core::rmux::now_secs();
         // Followed by key, then by pid: an agent that had written nothing yet
         // is a `_pid_` row until its transcript appears, and the row that
         // replaces it has a new key and the same process.
@@ -382,7 +382,7 @@ pub fn wait(
         };
         worked |= state == Now::Working
             || current
-                .and_then(|s| crate::util::parse_ts(&s.last_active))
+                .and_then(|s| cctop_core::util::parse_ts(&s.last_active))
                 .is_some_and(|last| last > wall_start);
         let met = until.met(state, worked);
         let timed_out = timeout.is_some_and(|limit| started.elapsed() >= limit);
@@ -412,7 +412,7 @@ pub fn wait(
                         &mut heard,
                         Heard {
                             signal: event.reported.signal,
-                            at: crate::rmux::now_secs(),
+                            at: cctop_core::rmux::now_secs(),
                             provisional: event.reported.provisional,
                         },
                     );
@@ -430,7 +430,7 @@ pub fn wait(
             }
         }
         if reread_rmux.elapsed() >= RMUX_EVERY && !tabs.is_empty() {
-            tabs = crate::rmux::running();
+            tabs = cctop_core::rmux::running();
             reread_rmux = Instant::now();
         }
     }
@@ -507,13 +507,13 @@ pub fn run(args: &crate::cli::WaitArgs) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pricing::Provider;
+    use cctop_core::pricing::Provider;
 
     fn live(id: &str, pid: u32, state: ActivityState) -> Session {
         let mut s = Session::new(Provider::Claude, id.into());
-        s.process = Some(crate::proc::ProcInfo {
+        s.process = Some(cctop_core::proc::ProcInfo {
             process_list: vec![
-                crate::proc::ProcEntry {
+                cctop_core::proc::ProcEntry {
                     pid,
                     is_root: true,
                     ghost: false,
@@ -521,7 +521,7 @@ mod tests {
                     memory: 0,
                     args: String::new(),
                 },
-                crate::proc::ProcEntry {
+                cctop_core::proc::ProcEntry {
                     pid: pid + 1,
                     is_root: false,
                     ghost: false,
@@ -540,8 +540,8 @@ mod tests {
         Session::new(Provider::Claude, id.into())
     }
 
-    fn tab(label: &str, pid: u32) -> crate::rmux::Running {
-        crate::rmux::Running {
+    fn tab(label: &str, pid: u32) -> cctop_core::rmux::Running {
+        cctop_core::rmux::Running {
             name: format!("cctop-{label}"),
             pid: Some(pid),
             cwd: None,

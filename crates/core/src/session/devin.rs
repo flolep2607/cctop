@@ -37,7 +37,7 @@ fn readonly_db(path: &Path) -> rusqlite::Result<Connection> {
 /// the session was read from. Asking the session rather than the static is
 /// what keeps another user's row from being answered out of root's own
 /// database, where its id is simply absent.
-pub(crate) fn db_for(transcript: Option<&Path>) -> std::path::PathBuf {
+pub fn db_for(transcript: Option<&Path>) -> std::path::PathBuf {
     transcript
         .and_then(Path::parent)
         .and_then(Path::parent)
@@ -357,7 +357,7 @@ fn canonical_model(name: &str) -> String {
 /// The transcript records that a call was made; the database records how it
 /// ended. Returns an empty map when the database cannot be read — a transcript
 /// without its database is still worth extracting.
-pub(crate) fn tool_statuses(session_id: Option<&str>, db: &Path) -> HashMap<String, String> {
+pub fn tool_statuses(session_id: Option<&str>, db: &Path) -> HashMap<String, String> {
     let mut out = HashMap::new();
     let Some(session_id) = session_id else {
         return out;

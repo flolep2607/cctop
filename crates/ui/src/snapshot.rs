@@ -32,7 +32,7 @@
 //! one a snapshot can hold still.
 
 use super::*;
-use crate::session::{ContextBreakdown, ContextUsage, CtxPoint};
+use cctop_core::session::{ContextBreakdown, ContextUsage, CtxPoint};
 use chrono::{Duration as Age, Utc};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
@@ -50,8 +50,8 @@ fn ago(ago: Age) -> String {
     (Utc::now() - ago).to_rfc3339()
 }
 
-fn proc(pid: u32, cpu: f32, mb: u64, args: &str, is_root: bool) -> crate::proc::ProcEntry {
-    crate::proc::ProcEntry {
+fn proc(pid: u32, cpu: f32, mb: u64, args: &str, is_root: bool) -> cctop_core::proc::ProcEntry {
+    cctop_core::proc::ProcEntry {
         pid,
         cpu,
         memory: mb * 1024 * 1024,
@@ -82,7 +82,7 @@ fn sessions() -> Vec<Session> {
         Age::seconds(20),
         Age::minutes(95),
     );
-    web.process = Some(crate::proc::ProcInfo {
+    web.process = Some(cctop_core::proc::ProcInfo {
         pids: 3,
         cpu: 12.5,
         memory: 412 * 1024 * 1024,
@@ -115,14 +115,14 @@ fn sessions() -> Vec<Session> {
         Age::seconds(7 * 60 + 30),
         Age::minutes(150),
     );
-    api.process = Some(crate::proc::ProcInfo {
+    api.process = Some(cctop_core::proc::ProcInfo {
         pids: 1,
         cpu: 0.4,
         memory: 180 * 1024 * 1024,
         command: "/usr/bin/claude".into(),
         process_list: vec![proc(5120, 0.4, 180, "/usr/bin/claude", true)],
     });
-    api.activity_state = crate::session::ActivityState::WaitingForInput;
+    api.activity_state = cctop_core::session::ActivityState::WaitingForInput;
     api.input_tokens = 310_000;
     api.output_tokens = 9_800;
     api.tool_count = 57;
@@ -209,13 +209,13 @@ fn fixture() -> App {
     // `Quota::default` lists one pending entry per profile found under
     // `$HOME`, so a developer with a second Claude login drew an extra column.
     let pending = || {
-        vec![crate::quota::ProfileQuota {
+        vec![cctop_core::quota::ProfileQuota {
             profile: "default".into(),
-            status: crate::quota::ProviderStatus::Pending,
-            source: crate::config::AccountSource::Directory,
+            status: cctop_core::quota::ProviderStatus::Pending,
+            source: cctop_core::config::AccountSource::Directory,
         }]
     };
-    app.quota = crate::quota::Quota {
+    app.quota = cctop_core::quota::Quota {
         fetched: false,
         claude: pending(),
         codex: pending(),
@@ -453,7 +453,7 @@ fn row_menu() {
 /// subscription it would spend.
 #[test]
 fn handoff_picker() {
-    use crate::handoff::Target;
+    use cctop_serve::handoff::Target;
     let mut app = fixture();
     let to = |agent: &str, account: Option<&str>| Target {
         agent: agent.into(),
@@ -543,7 +543,7 @@ fn launch_cwd_remote() {
         repos: Some(Vec::new()),
         dirs: [(
             "~/src".to_string(),
-            Dir::Listed(crate::remote_fs::Listing::default()),
+            Dir::Listed(cctop_core::remote_fs::Listing::default()),
         )]
         .into_iter()
         .collect(),

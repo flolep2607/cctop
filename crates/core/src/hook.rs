@@ -780,7 +780,7 @@ pub enum Signal {
     /// either raises a `Notification` on a six-second timer (`NOTIFY_HOOKS` in
     /// Claude Code 2.1.x) — by which point you have answered or gone looking
     /// for the tab yourself — or says nothing at all.
-    /// See [`Tab::attention`](crate::ui::tabs::Tab::attention).
+    /// See [`Tab::attention`](cctop_ui::tabs::Tab::attention).
     Acting,
     /// The agent is compacting its context: working, and about to lose history.
     Compacting,
@@ -802,7 +802,7 @@ impl Signal {
     /// Whether typing at the agent is an answer to this state, and so cancels
     /// it. A tool call in flight counts: the answer to a permission prompt is
     /// keystrokes, and no event reports that it arrived — see
-    /// [`App::mark_answered`](crate::ui::App::mark_answered).
+    /// [`App::mark_answered`](cctop_ui::App::mark_answered).
     pub fn awaits_you(self) -> bool {
         matches!(self, Signal::NeedsInput | Signal::Idle | Signal::Acting)
     }
@@ -1010,7 +1010,7 @@ impl Reported {
 /// inherits the description only its first event carried, a working claim
 /// expires where a waiting one stands, and an `Ended` erases the lot.
 #[derive(Default)]
-pub(crate) struct Reports {
+pub struct Reports {
     /// The last report each session made, however old — callers gate on
     /// [`Reported::is_current`] and [`Reported::is_settled`].
     pub hooked: HashMap<String, Reported>,
@@ -1024,7 +1024,7 @@ pub(crate) struct Reports {
     ///
     /// Visible to the crate for the tests that assert a question was closed,
     /// not for other writes — only [`Reports::observe`] folds these.
-    pub(crate) asking_agents: HashMap<String, HashMap<String, Reported>>,
+    pub asking_agents: HashMap<String, HashMap<String, Reported>>,
     /// The process tree each session's hooks reported running under, keyed by
     /// session id.
     ///
@@ -1049,7 +1049,7 @@ impl Reports {
     /// The file is the only way to know where a session runs when it has said
     /// nothing since this process started — which is exactly what a session
     /// blocked on a question does. See [`load_claims`].
-    pub(crate) fn new() -> Reports {
+    pub fn new() -> Reports {
         Reports {
             claims: load_claims(),
             ..Default::default()
@@ -1063,7 +1063,7 @@ impl Reports {
     /// and claims_moved when the session→pid map did, which is the caller's
     /// cue to republish it (`save_claims`, and the worker/loader that resolves
     /// pids by it).
-    pub(crate) fn observe(&mut self, event: &Event) -> (bool, bool) {
+    pub fn observe(&mut self, event: &Event) -> (bool, bool) {
         let lifecycle = event.reported.signal.is_lifecycle();
         let mut moved = false;
         match event.reported.signal {
@@ -1132,7 +1132,7 @@ impl Reports {
     /// a prompt still sitting here when the grace runs out is one a person has
     /// to answer. Cleared rather than re-tested every tick: once a prompt is
     /// real it stays real.
-    pub(crate) fn promote_matured(&mut self) -> bool {
+    pub fn promote_matured(&mut self) -> bool {
         let mut matured = false;
         for reported in self.hooked.values_mut() {
             if reported.provisional && reported.at.elapsed() >= PERMISSION_GRACE {
@@ -1148,14 +1148,14 @@ impl Reports {
     /// Beside [`Session::apply_reports`](crate::session::Session::apply_reports)
     /// at both of its callers, and for the same reason: rows are rebuilt from
     /// transcripts, which know nothing of how the agent was launched.
-    pub(crate) fn stamp_sandbox(&self, session: &mut crate::session::Session) {
+    pub fn stamp_sandbox(&self, session: &mut crate::session::Session) {
         if let Some(sandbox) = self.sandboxes.get(&session.session_id) {
             session.sandbox = Some(sandbox.clone());
         }
     }
 
     /// The report `session_id`'s hooks last made, however old, if they made one.
-    pub(crate) fn report(&self, session_id: &str) -> Option<&Reported> {
+    pub fn report(&self, session_id: &str) -> Option<&Reported> {
         if let Some(reported) = self.hooked.get(session_id) {
             return Some(reported);
         }
@@ -1183,7 +1183,7 @@ impl Reports {
 /// matching on the end of a uuid that happens to line up: only a stem shaped
 /// like Gemini's is looked up loosely, and only ever against a full id's
 /// prefix.
-pub(crate) fn gemini_id_tail(session_id: &str) -> Option<&str> {
+pub fn gemini_id_tail(session_id: &str) -> Option<&str> {
     let tail = session_id.strip_prefix("session-")?.rsplit_once('-')?.1;
     (tail.len() == 8 && tail.chars().all(|c| c.is_ascii_alphanumeric())).then_some(tail)
 }
@@ -2583,7 +2583,7 @@ const PLUGIN_MARKER: &str = "const CCTOP = ";
 /// A real `.ts` file because it is a real program: an editor highlights it, a
 /// formatter can be run over it, and a diff of it is a diff of JavaScript rather
 /// than of Rust lines with every brace doubled to survive `format!`. Embedded
-/// with `include_str!` for the reason [`crate::serve`] embeds its pages the same
+/// with `include_str!` for the reason [`cctop_serve`] embeds its pages the same
 /// way — an installed cctop is one binary, and a plugin cctop cannot find is a
 /// plugin that reports nothing.
 ///

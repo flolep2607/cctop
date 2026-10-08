@@ -143,11 +143,11 @@ pub struct Capture {
     name: String,
     parser: Option<vt100::Parser>,
     /// The last capture replayed, so an unchanged screen costs no redraw.
-    last: Option<crate::rmux::Capture>,
+    last: Option<cctop_core::rmux::Capture>,
     /// rmux answered, but not with a screen — the session went, most likely.
     failed: bool,
     asked_at: Option<Instant>,
-    pending: Option<Receiver<Option<crate::rmux::Capture>>>,
+    pending: Option<Receiver<Option<cctop_core::rmux::Capture>>>,
 }
 
 impl Capture {
@@ -155,7 +155,7 @@ impl Capture {
     ///
     /// One parser, resized and cleared rather than rebuilt, so a panel left on
     /// for an afternoon does not allocate a fresh grid twice a second.
-    fn apply(&mut self, capture: crate::rmux::Capture) -> bool {
+    fn apply(&mut self, capture: cctop_core::rmux::Capture) -> bool {
         if self.last.as_ref() == Some(&capture) {
             return false;
         }
@@ -184,7 +184,8 @@ impl App {
         if let Some(remote) = &session.remote {
             return Some(Target::Remote(remote.host.clone()));
         }
-        let resumed = crate::rmux::name_for_session(session.provider.as_str(), &session.session_id);
+        let resumed =
+            cctop_core::rmux::name_for_session(session.provider.as_str(), &session.session_id);
         Some(
             target_in(&self.tabs, session.root_pid(), &resumed).unwrap_or(Target::Nowhere {
                 running: session.is_running(),
@@ -237,7 +238,7 @@ impl App {
             std::thread::spawn(move || {
                 // The receiver is gone if the cursor moved on meanwhile; the
                 // answer is simply not wanted any more.
-                let _ = tx.send(crate::rmux::capture(&name));
+                let _ = tx.send(cctop_core::rmux::capture(&name));
             });
         }
         changed
@@ -349,10 +350,10 @@ pub(super) fn draw(frame: &mut Frame, area: Rect, inner: Rect, app: &App) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ui::tabs::Pane;
+    use crate::tabs::Pane;
 
-    fn running(name: &str, pid: Option<u32>) -> crate::rmux::Running {
-        crate::rmux::Running {
+    fn running(name: &str, pid: Option<u32>) -> cctop_core::rmux::Running {
+        cctop_core::rmux::Running {
             name: name.to_string(),
             pid,
             cwd: None,
@@ -496,7 +497,7 @@ mod tests {
         app.sessions = vec![super::super::tests::session("abc", false, "/x")];
         app.refilter();
         let mut pane = Pane::for_test("claude");
-        pane.resumed = Some(crate::rmux::name_for_session("claude", "abc"));
+        pane.resumed = Some(cctop_core::rmux::name_for_session("claude", "abc"));
         let lines: Vec<String> = (0..24).map(|i| format!("line-{i:02}")).collect();
         pane.view.parser.process(lines.join("\r\n").as_bytes());
         let size = pane.view.size;
@@ -530,7 +531,7 @@ mod tests {
     #[test]
     fn a_capture_replays_into_one_parser_and_skips_a_repeat() {
         let mut capture = Capture::default();
-        let screen = crate::rmux::Capture {
+        let screen = cctop_core::rmux::Capture {
             cols: 20,
             rows: 3,
             cursor: Some((2, 4)),
@@ -544,7 +545,7 @@ mod tests {
         assert!(!capture.apply(screen), "an unchanged screen is not redrawn");
 
         // A smaller screen clears what the bigger one left behind.
-        assert!(capture.apply(crate::rmux::Capture {
+        assert!(capture.apply(cctop_core::rmux::Capture {
             cols: 10,
             rows: 2,
             cursor: None,

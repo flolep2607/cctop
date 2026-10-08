@@ -4,12 +4,12 @@
 //! how full the window is, which tool failed how often. None of that keeps the
 //! words, and the words are what someone away from their desk actually wants —
 //! what they asked for, what the agent said back, what it edited on the way.
-//! [`crate::serve::report`] answers "where did the afternoon go"; this answers
+//! [`crate::report`] answers "where did the afternoon go"; this answers
 //! "what is it *doing*".
 //!
 //! # Why this is not the extraction path
 //!
-//! [`SessionData`](crate::session::SessionData) is built for the table: it is
+//! [`SessionData`](cctop_core::session::SessionData) is built for the table: it is
 //! cached, it is loaded for every row on the machine, and it deliberately drops
 //! message text — keeping it would multiply the cache by the size of every
 //! conversation on disk to serve a panel that shows one. So this is a separate
@@ -64,9 +64,9 @@
 //! before saying anything, which for a session file large enough to matter is
 //! the whole cost of opening the page.
 
-use crate::pricing::Provider;
-use crate::session::{Delta, Session, devin, extract, gemini, opencode, pi};
-use crate::util;
+use cctop_core::pricing::Provider;
+use cctop_core::session::{Delta, Session, devin, extract, gemini, opencode, pi};
+use cctop_core::util;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::borrow::Cow;
@@ -107,7 +107,7 @@ const MAX_DIFF_LINES: usize = 200;
 ///
 /// `Deserialize` because the same document is the wire format between two
 /// cctops: a remote row's conversation is this, read off an ssh pipe rather
-/// than off a transcript — see [`crate::fleet`].
+/// than off a transcript — see [`cctop_core::fleet`].
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct Conversation {
     /// Whether this harness has a reader at all. False carries a `note` saying
@@ -338,7 +338,7 @@ pub fn build(session: &Session, before: Option<usize>) -> Conversation {
 
 /// Read `session`'s whole conversation: every turn, every message in full.
 ///
-/// What [`crate::serve::export`] renders. One session, on request, so holding
+/// What [`crate::export`] renders. One session, on request, so holding
 /// all of it is the cost of the answer rather than of a page that polls.
 pub fn whole(session: &Session) -> Conversation {
     read(session, None, Limits::WHOLE)

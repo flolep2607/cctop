@@ -1,57 +1,18 @@
-mod access;
-mod advise;
-mod alert;
-mod alias;
-mod answer;
-mod attach;
-mod branch;
-mod burn;
-mod cache;
-mod cast;
 mod cli;
-mod clipboard;
-mod collide;
-mod config;
-mod convert;
 mod doctor;
-mod elog;
-mod embed;
-mod fingerprint;
-mod fleet;
-mod handoff;
-mod hook;
-mod inject;
-mod insight;
-mod json;
-mod loader;
 mod mcp;
-mod notify;
-mod opencode;
-mod peek;
-mod pricing;
-mod proc;
-mod quota;
 mod recall;
-mod remote_fs;
-mod rmux;
-mod sandbox;
-mod screen;
-mod serve;
-mod session;
-mod settings;
-mod shim;
-mod ssh_config;
-mod ssh_master;
-mod sshfs;
-mod trace;
-mod tunnel;
-mod ui;
-mod update;
-mod util;
 mod wait;
-mod watch;
 mod why;
-mod yolo;
+
+// The commands below are dispatched from here by their module names, as they
+// were when all of cctop was this one crate.
+use cctop_core::{
+    alias, attach, burn, cache, elog, embed, hook, insight, loader, pricing, quota, sandbox,
+    settings, shim, trace, update,
+};
+use cctop_serve as serve;
+use cctop_ui as ui;
 
 use clap::Parser;
 use std::io::IsTerminal;

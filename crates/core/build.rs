@@ -10,10 +10,12 @@
 //
 // So hash the sources instead. Emits `CCTOP_CACHE_HASH`, which `src/cache.rs`
 // uses as the cache version, and which its tests re-derive through the
-// functions below.
+// functions below. The paths are relative to this crate, `crates/core`, which
+// holds every source the cache depends on.
 //
 // Also emits `CCTOP_COMMIT`, the commit being built, which the help page shows
-// beside the version — so a report of "the help says X" can be told apart
+// beside the version (read through `update::current_commit`, since the help
+// page is in another crate) — so a report of "the help says X" can be told apart
 // from a build of the same version with a different tree under it.
 //
 // No dependencies here on purpose: a build script is compiled for the host
@@ -51,7 +53,9 @@ fn main() {
     // fingerprinted either.) The value is set by `.cargo/config.toml` to the
     // checkout's own path, so switching checkouts changes a watched variable,
     // which reruns this and so recompiles the crate once. The same checkout
-    // builds as incrementally as before.
+    // builds as incrementally as before. Only core has a build script, and
+    // that is enough: every other crate of the workspace depends on core, so
+    // rebuilding it rebuilds them.
     //
     // ponytail: only cargo run from inside the checkout reads that config, so
     // one built with `--manifest-path` from elsewhere is not covered.

@@ -110,7 +110,7 @@ pub fn line_chart(
     let hi = if max > 0.0 {
         max
     } else {
-        crate::util::nice_max(values.iter().cloned().fold(1.0f64, f64::max))
+        cctop_core::util::nice_max(values.iter().cloned().fold(1.0f64, f64::max))
     };
     let label_len = format!("{}", hi.ceil() as i64).len().max(1);
     let axis_w = axis_width.unwrap_or(label_len + 2);

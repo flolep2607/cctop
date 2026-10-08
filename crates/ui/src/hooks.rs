@@ -17,16 +17,16 @@ impl App {
     }
 
     /// The integration's state, scoped to whichever project the cursor is on.
-    pub(super) fn hook_status(&self) -> crate::hook::Report {
+    pub(super) fn hook_status(&self) -> cctop_core::hook::Report {
         let mut report =
-            crate::hook::status(self.hook_project().as_deref(), self.listener.as_ref());
+            cctop_core::hook::status(self.hook_project().as_deref(), self.listener.as_ref());
         // Codex's entry carries a reminder to go and trust its hooks, which is
         // advice until it is done and noise afterwards. Only the events can tell
         // which — see [`App::codex_hooks_heard`] — so the panel is where the
         // reminder is dropped rather than where it is written.
         if self.codex_hooks_heard() {
             for entry in &mut report.entries {
-                if entry.harness == crate::hook::Harness::Codex {
+                if entry.harness == cctop_core::hook::Harness::Codex {
                     entry.note = None;
                 }
             }
@@ -83,10 +83,10 @@ impl App {
     /// Every harness at once. The status line gets a count rather than five
     /// paths — the panel underneath is redrawn from disk immediately below, and
     /// that is where the detail belongs.
-    pub fn set_hooks(&mut self, scope: crate::hook::Scope, install: bool) {
+    pub fn set_hooks(&mut self, scope: cctop_core::hook::Scope, install: bool) {
         let done = match install {
-            true => crate::hook::install(&scope),
-            false => crate::hook::remove(&scope),
+            true => cctop_core::hook::install(&scope),
+            false => cctop_core::hook::remove(&scope),
         };
         self.set_status(format!(
             "{} {} agents ({})",
@@ -128,7 +128,7 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ui::tests::{session, test_app};
+    use crate::tests::{session, test_app};
     /// Codex's hooks are written to disk and then sit there doing nothing until
     /// a person has trusted them, and where that trust is recorded is not
     /// something Codex documents — so the only way to know is whether anything
@@ -156,7 +156,7 @@ mod tests {
         );
 
         // One hook event carries the mode, which nothing but a hook does.
-        app.sessions[0].permission = Some(crate::hook::Permission::Ask);
+        app.sessions[0].permission = Some(cctop_core::hook::Permission::Ask);
         assert!(app.codex_hooks_heard());
         assert!(
             app.codex_trust_hint(true).is_empty(),
@@ -165,7 +165,7 @@ mod tests {
 
         // A row from another machine says nothing about this one's hooks: its
         // mode came over `--host` from a cctop where they work.
-        app.sessions[0].remote = Some(crate::session::Remote {
+        app.sessions[0].remote = Some(cctop_core::session::Remote {
             host: "elsewhere".into(),
             branch: None,
             ..Default::default()

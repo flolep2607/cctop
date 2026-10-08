@@ -11,10 +11,10 @@ use super::*;
 
 /// The hosts in `~/.ssh/config`. Not read under test, where the person
 /// running the tests has a config of their own that no test should depend on.
-fn ssh_hosts() -> Vec<crate::ssh_config::Host> {
+fn ssh_hosts() -> Vec<cctop_core::ssh_config::Host> {
     match cfg!(test) {
         true => Vec::new(),
-        false => crate::ssh_config::hosts(),
+        false => cctop_core::ssh_config::hosts(),
     }
 }
 
@@ -50,7 +50,7 @@ impl App {
         let prefill = remote.clone().unwrap_or_else(|| {
             self.launch_cwd
                 .as_ref()
-                .map(|dir| crate::util::tildify(&dir.to_string_lossy()))
+                .map(|dir| cctop_core::util::tildify(&dir.to_string_lossy()))
                 .unwrap_or_default()
         });
         self.launch_cwd_input.set(prefill);
@@ -357,7 +357,7 @@ impl App {
         let taken = match typed.is_empty() {
             true => None,
             false => {
-                let path = std::path::PathBuf::from(crate::util::untildify(typed));
+                let path = std::path::PathBuf::from(cctop_core::util::untildify(typed));
                 if !path.is_dir() {
                     self.launch_cwd_bad = true;
                     return;
@@ -378,7 +378,7 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ui::tests::{key, session, test_app};
+    use crate::tests::{key, session, test_app};
     use ratatui::crossterm::event::KeyCode;
     use std::sync::mpsc::channel;
     /// The suggestions are part of the footer, not part of the list: a short
@@ -453,7 +453,7 @@ mod tests {
         assert_eq!(app.mode, Mode::LaunchCwd);
         assert_eq!(
             app.launch_cwd_input,
-            crate::util::tildify(&dir.path().to_string_lossy())
+            cctop_core::util::tildify(&dir.path().to_string_lossy())
         );
 
         // A directory that is not one is refused where it was typed, and the
@@ -750,7 +750,7 @@ mod tests {
         app.edit_launch_cwd();
         assert_eq!(
             app.launch_cwd_input,
-            crate::util::tildify(&here.to_string_lossy())
+            cctop_core::util::tildify(&here.to_string_lossy())
         );
         assert_eq!(app.launch_cwd_dirs(), vec![here.clone(), repo.clone()]);
 

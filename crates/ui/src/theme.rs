@@ -1166,8 +1166,8 @@ pub fn running_dot_color(age_secs: Option<i64>) -> Color {
 /// What a session's own hooks last said about it, coloured like the cost scale:
 /// the thing blocking an agent is the loudest, a finished turn is the middle,
 /// and work in progress is calm.
-pub fn signal_color(signal: crate::hook::Signal) -> Color {
-    use crate::hook::Signal;
+pub fn signal_color(signal: cctop_core::hook::Signal) -> Color {
+    use cctop_core::hook::Signal;
     match signal {
         Signal::NeedsInput => colors().cost_high,
         Signal::Idle => colors().cost_mid,
@@ -1258,7 +1258,7 @@ pub fn tool_color(name: &str) -> Color {
 /// them.
 ///
 /// A closed set on purpose: the choice is written onto the rmux session by
-/// name — see [`crate::rmux::set_color`] — so every cctop that shows the tab
+/// name — see [`cctop_core::rmux::set_color`] — so every cctop that shows the tab
 /// agrees on what the name means, and a word written by a newer cctop decodes
 /// to nothing rather than to a colour nobody picked.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

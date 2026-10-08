@@ -4,9 +4,9 @@
 //! the Performance tab draws itself, since it renders charts rather than text.
 
 use super::theme;
-use crate::pricing::{Plan, Provider};
-use crate::session::{Session, SessionData, Subagent, SubagentStatus, Surface};
-use crate::util;
+use cctop_core::pricing::{Plan, Provider};
+use cctop_core::session::{Session, SessionData, Subagent, SubagentStatus, Surface};
+use cctop_core::util;
 use chrono::{DateTime, Utc};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -49,8 +49,10 @@ fn note(text: &str) -> Vec<Line<'static>> {
 /// read on every frame and the home directory does not move under a running
 /// cctop; the file's *contents* are what change, and those are stamped.
 fn account_file(provider: Provider) -> Option<&'static Path> {
-    static CLAUDE: LazyLock<PathBuf> = LazyLock::new(|| crate::config::HOME.join(".claude.json"));
-    static CODEX: LazyLock<PathBuf> = LazyLock::new(|| crate::config::CODEX_HOME.join("auth.json"));
+    static CLAUDE: LazyLock<PathBuf> =
+        LazyLock::new(|| cctop_core::config::HOME.join(".claude.json"));
+    static CODEX: LazyLock<PathBuf> =
+        LazyLock::new(|| cctop_core::config::CODEX_HOME.join("auth.json"));
     match provider {
         Provider::Claude => Some(CLAUDE.as_path()),
         Provider::Codex => Some(CODEX.as_path()),
@@ -60,10 +62,10 @@ fn account_file(provider: Provider) -> Option<&'static Path> {
 
 /// The signed-in account for `provider`, read once per change rather than once
 /// per frame.
-fn account(provider: Provider) -> Option<crate::quota::Account> {
+fn account(provider: Provider) -> Option<cctop_core::quota::Account> {
     let read = match provider {
-        Provider::Claude => crate::quota::claude_account,
-        Provider::Codex => crate::quota::codex_account,
+        Provider::Claude => cctop_core::quota::claude_account,
+        Provider::Codex => cctop_core::quota::codex_account,
         _ => return None,
     };
     account_from(account_file(provider)?, read)
@@ -81,8 +83,8 @@ fn account(provider: Provider) -> Option<crate::quota::Account> {
 /// it, and the next frame says so.
 fn account_from(
     path: &Path,
-    read: impl FnOnce() -> Option<crate::quota::Account>,
-) -> Option<crate::quota::Account> {
+    read: impl FnOnce() -> Option<cctop_core::quota::Account>,
+) -> Option<cctop_core::quota::Account> {
     // A missing file has no stamp, and that is itself the answer: a provider
     // nobody has signed in has nothing to show, and re-reading a file that is
     // not there sixty times a second to learn that is the cost this cache
@@ -121,7 +123,7 @@ type FileStamp = (u64, u128);
 /// The last answer each credentials file gave, and the stamp that proved it
 /// current — `None` for a file that is not there. See [`account`].
 type Accounts =
-    LazyLock<Mutex<HashMap<PathBuf, (Option<FileStamp>, Option<crate::quota::Account>)>>>;
+    LazyLock<Mutex<HashMap<PathBuf, (Option<FileStamp>, Option<cctop_core::quota::Account>)>>>;
 
 static ACCOUNTS: Accounts = LazyLock::new(|| Mutex::new(HashMap::new()));
 
@@ -143,7 +145,7 @@ fn stamp_of(path: &Path) -> Option<FileStamp> {
     ))
 }
 
-fn is_free_model(model: &crate::session::ModelBreakdown) -> bool {
+fn is_free_model(model: &cctop_core::session::ModelBreakdown) -> bool {
     model.total == 0.0
         && model.tokens.all_input() + model.tokens.output + model.tokens.reasoning_output > 0
 }
@@ -196,7 +198,7 @@ fn wall_duration_ms(session: &Session, now: DateTime<Utc>) -> Option<i64> {
 /// handing the panel raw keys would make it look every peer up itself and
 /// print `claude:8f3a…` when it failed.
 pub struct Clash {
-    pub level: crate::collide::Overlap,
+    pub level: cctop_core::collide::Overlap,
     pub peers: Vec<String>,
     pub files: Vec<String>,
 }
@@ -217,7 +219,7 @@ fn clash_lines(clash: Option<&Clash>) -> Vec<Line<'static>> {
     };
     let peers = clash.peers.join(", ");
     let mut lines = match clash.level {
-        crate::collide::Overlap::File => vec![Line::from(vec![
+        cctop_core::collide::Overlap::File => vec![Line::from(vec![
             label(&format!("{:<9}", "Conflict")),
             Span::raw(" "),
             Span::styled(
@@ -227,7 +229,7 @@ fn clash_lines(clash: Option<&Clash>) -> Vec<Line<'static>> {
                     .add_modifier(Modifier::BOLD),
             ),
         ])],
-        crate::collide::Overlap::Directory => vec![Line::from(vec![
+        cctop_core::collide::Overlap::Directory => vec![Line::from(vec![
             label(&format!("{:<9}", "Sharing")),
             Span::raw(" "),
             Span::styled(
@@ -324,12 +326,12 @@ pub fn info(
         // Only when the two differ: a matching version is the expected state
         // and a line saying so on every remote row would be read past, which
         // is the one thing this line cannot afford.
-        let local = crate::update::current_version();
+        let local = cctop_core::update::current_version();
         let skew = match &r.skew {
-            Some(crate::fleet::Skew::Older(v)) => Some(format!(
+            Some(cctop_core::fleet::Skew::Older(v)) => Some(format!(
                 "{v} there, {local} here — Enter offers to update it"
             )),
-            Some(crate::fleet::Skew::Newer(v)) => Some(format!(
+            Some(cctop_core::fleet::Skew::Newer(v)) => Some(format!(
                 "{v} there, {local} here — this one is behind; cctop --update"
             )),
             _ => None,
@@ -474,7 +476,8 @@ pub fn info(
                 dim("compacted; no request since"),
             ]));
         } else {
-            let compact_at = (ctx.max as f64 * *crate::config::COMPACT_THRESHOLD).round() as u64;
+            let compact_at =
+                (ctx.max as f64 * *cctop_core::config::COMPACT_THRESHOLD).round() as u64;
             let pct = ctx.percent_to_compact();
             let color = theme::context_color(pct);
             lines.push(Line::from(vec![
@@ -619,7 +622,7 @@ pub fn tool_tabs(data: &SessionData) -> Vec<(&str, u64)> {
 /// Invocation rows for the selected tool tab, oldest first.
 /// Stable identity for one invocation, so an expanded row survives the log
 /// growing beneath it. Row indices shift as new entries arrive; ids don't.
-pub fn detail_key(d: &crate::session::ToolDetail) -> String {
+pub fn detail_key(d: &cctop_core::session::ToolDetail) -> String {
     d.id.clone().unwrap_or_else(|| format!("{}|{}", d.ts, d.d))
 }
 
@@ -716,7 +719,7 @@ pub fn tool_activity(
     // The tool name rides along borrowed: it is one string for a whole tool's
     // rows, and it was copied onto every one of them — a session with a few
     // hundred invocations paid a few hundred allocations per frame to label them.
-    let mut rows: Vec<(&str, &crate::session::ToolDetail)> = Vec::new();
+    let mut rows: Vec<(&str, &cctop_core::session::ToolDetail)> = Vec::new();
     for (tool, details) in &data.metrics.tool_details {
         if !all && tool.as_str() != *name {
             continue;
@@ -1357,7 +1360,7 @@ fn context_timeline(session: &Session, data: &SessionData, width: usize) -> Vec<
             label("How it filled  "),
             dim(format!("{} requests", data.context_series.len())),
             dim("   peak "),
-            value(crate::util::compact_tokens(peak as u64)),
+            value(cctop_core::util::compact_tokens(peak as u64)),
             match compactions {
                 0 => dim(String::new()),
                 // Named on the chart because they are the only drops in it: a
@@ -1370,7 +1373,7 @@ fn context_timeline(session: &Session, data: &SessionData, width: usize) -> Vec<
             },
         ]),
     ];
-    lines.extend(crate::ui::spark::line_chart(
+    lines.extend(crate::spark::line_chart(
         &values,
         width,
         5,
@@ -1411,7 +1414,7 @@ fn thrash_note(session: &Session, compactions: usize) -> Vec<Line<'static>> {
         Span::styled(
             format!(
                 "↺ one compaction every {}",
-                crate::util::compact_duration(every)
+                cctop_core::util::compact_duration(every)
             ),
             Style::default().fg(theme::colors().cost_mid),
         ),
@@ -1439,7 +1442,7 @@ fn compaction_cell(
     if scale == 0 || superseded {
         return None;
     }
-    let compact_at = ctx.max as f64 * *crate::config::COMPACT_THRESHOLD;
+    let compact_at = ctx.max as f64 * *cctop_core::config::COMPACT_THRESHOLD;
     let cell = (compact_at / scale as f64 * cells as f64).round() as usize;
     // Only inside the free tail: elsewhere it would overwrite something held.
     let held: u64 = slices
@@ -1457,7 +1460,7 @@ fn compaction_cell(
 /// is the decision this panel is consulted for, and a share of a window whose
 /// size varies by model does not answer it. The gauge rides on the same line
 /// because fullness is the one thing here worth seeing without reading.
-fn context_header(session: &Session, b: &crate::session::ContextBreakdown) -> Line<'static> {
+fn context_header(session: &Session, b: &cctop_core::session::ContextBreakdown) -> Line<'static> {
     let mut spans = vec![
         label("Window"),
         Span::raw("  "),
@@ -1490,7 +1493,7 @@ fn context_header(session: &Session, b: &crate::session::ContextBreakdown) -> Li
 
     let pct = ctx.percent_to_compact();
     let color = theme::context_color(pct);
-    let compact_at = (ctx.max as f64 * *crate::config::COMPACT_THRESHOLD).round() as u64;
+    let compact_at = (ctx.max as f64 * *cctop_core::config::COMPACT_THRESHOLD).round() as u64;
     // No gauge here: the bar below already shows how full the window is, and a
     // second meter measuring a *different* denominator — share of the threshold
     // rather than of the window — is two answers to one question.
@@ -1664,7 +1667,7 @@ fn legend(slices: &[Slice], width: usize) -> Vec<Line<'static>> {
 /// dim lines under the bar rather than as the three paragraphs it takes to say
 /// the same thing in prose.
 fn context_footnotes(
-    b: &crate::session::ContextBreakdown,
+    b: &cctop_core::session::ContextBreakdown,
     unaccounted: i64,
     marked: bool,
     per_cell: Option<u64>,
@@ -1794,7 +1797,7 @@ pub fn config(session: &Session) -> Vec<Line<'static>> {
         Provider::Claude => {
             let root = match (session.surface.is_desktop(), &session.mac_meta) {
                 (true, Some(m)) => m.session_dir.join(".claude"),
-                _ => crate::config::CLAUDE_CONFIG_DIR.clone(),
+                _ => cctop_core::config::CLAUDE_CONFIG_DIR.clone(),
             };
 
             lines.push(Line::from(Span::styled(
@@ -1837,7 +1840,7 @@ pub fn config(session: &Session) -> Vec<Line<'static>> {
                 "── Instructions ──".to_string(),
                 theme::title(),
             )));
-            let global = crate::config::CODEX_HOME.join("AGENTS.md");
+            let global = cctop_core::config::CODEX_HOME.join("AGENTS.md");
             match file_section(&global, "~/.codex/AGENTS.md", 30) {
                 Some(block) => lines.extend(block),
                 None => lines.push(missing("~/.codex/AGENTS.md not found".into())),
@@ -1853,7 +1856,7 @@ pub fn config(session: &Session) -> Vec<Line<'static>> {
                 "── Config ──".to_string(),
                 theme::title(),
             )));
-            let toml = crate::config::CODEX_HOME.join("config.toml");
+            let toml = cctop_core::config::CODEX_HOME.join("config.toml");
             match file_section(&toml, "~/.codex/config.toml", 30) {
                 Some(block) => lines.extend(block),
                 None => lines.push(missing("~/.codex/config.toml not found".into())),
@@ -1863,7 +1866,7 @@ pub fn config(session: &Session) -> Vec<Line<'static>> {
                 "── Skills ──".to_string(),
                 theme::title(),
             )));
-            lines.extend(skill_list(&crate::config::CODEX_HOME.join("skills")));
+            lines.extend(skill_list(&cctop_core::config::CODEX_HOME.join("skills")));
 
             lines.push(Line::from(Span::styled(
                 "── MCP ──".to_string(),
@@ -1903,7 +1906,7 @@ pub fn config(session: &Session) -> Vec<Line<'static>> {
                 "── Config ──".to_string(),
                 theme::title(),
             )));
-            let config = crate::config::OPENCODE_CONFIG_DIR.join("opencode.json");
+            let config = cctop_core::config::OPENCODE_CONFIG_DIR.join("opencode.json");
             match file_section(&config, &util::tildify(&config.to_string_lossy()), 30) {
                 Some(block) => lines.extend(block),
                 None => lines.push(missing(format!("{} not found", config.display()))),
@@ -1919,7 +1922,7 @@ pub fn config(session: &Session) -> Vec<Line<'static>> {
                 "── Instructions ──".to_string(),
                 theme::title(),
             )));
-            let global = crate::config::PI_AGENT_DIR.join("AGENTS.md");
+            let global = cctop_core::config::PI_AGENT_DIR.join("AGENTS.md");
             match file_section(&global, &util::tildify(&global.to_string_lossy()), 30) {
                 Some(block) => lines.extend(block),
                 None => lines.push(missing(format!("{} not found", global.display()))),
@@ -1934,7 +1937,7 @@ pub fn config(session: &Session) -> Vec<Line<'static>> {
                 "── Config ──".to_string(),
                 theme::title(),
             )));
-            let settings = crate::config::PI_AGENT_DIR.join("settings.json");
+            let settings = cctop_core::config::PI_AGENT_DIR.join("settings.json");
             match file_section(&settings, &util::tildify(&settings.to_string_lossy()), 30) {
                 Some(block) => lines.extend(block),
                 None => lines.push(missing(format!("{} not found", settings.display()))),
@@ -1943,7 +1946,7 @@ pub fn config(session: &Session) -> Vec<Line<'static>> {
                 "── Skills ──".to_string(),
                 theme::title(),
             )));
-            lines.extend(skill_list(&crate::config::PI_AGENT_DIR.join("skills")));
+            lines.extend(skill_list(&cctop_core::config::PI_AGENT_DIR.join("skills")));
             lines.push(Line::from(Span::styled(
                 "── MCP ──".to_string(),
                 theme::title(),
@@ -1955,7 +1958,7 @@ pub fn config(session: &Session) -> Vec<Line<'static>> {
                 "── Instructions ──".to_string(),
                 theme::title(),
             )));
-            let global = crate::config::GEMINI_HOME.join("GEMINI.md");
+            let global = cctop_core::config::GEMINI_HOME.join("GEMINI.md");
             match file_section(&global, &util::tildify(&global.to_string_lossy()), 30) {
                 Some(block) => lines.extend(block),
                 None => lines.push(missing(format!("{} not found", global.display()))),
@@ -1970,7 +1973,7 @@ pub fn config(session: &Session) -> Vec<Line<'static>> {
                 "── Config ──".to_string(),
                 theme::title(),
             )));
-            let settings = crate::config::GEMINI_HOME.join("settings.json");
+            let settings = cctop_core::config::GEMINI_HOME.join("settings.json");
             match file_section(&settings, &util::tildify(&settings.to_string_lossy()), 30) {
                 Some(block) => lines.extend(block),
                 None => lines.push(missing(format!("{} not found", settings.display()))),
@@ -1979,7 +1982,7 @@ pub fn config(session: &Session) -> Vec<Line<'static>> {
                 "── Skills ──".to_string(),
                 theme::title(),
             )));
-            lines.extend(skill_list(&crate::config::GEMINI_HOME.join("skills")));
+            lines.extend(skill_list(&cctop_core::config::GEMINI_HOME.join("skills")));
             lines.push(Line::from(Span::styled(
                 "── MCP ──".to_string(),
                 theme::title(),
@@ -1987,7 +1990,7 @@ pub fn config(session: &Session) -> Vec<Line<'static>> {
             lines.extend(mcp_from_config(&settings, "mcpServers", "user"));
         }
         Provider::Devin => {
-            let files = crate::access::devin_layout(&session.label_source);
+            let files = cctop_core::access::devin_layout(&session.label_source);
 
             lines.push(Line::from(Span::styled(
                 "── Instructions ──".to_string(),
@@ -2048,7 +2051,7 @@ pub fn config(session: &Session) -> Vec<Line<'static>> {
     lines
 }
 
-/// The skills in `dir`, drawn from the shared reader in [`crate::access`].
+/// The skills in `dir`, drawn from the shared reader in [`cctop_core::access`].
 ///
 /// The reading is not here because the browser needs the same list, and two
 /// readers of one directory are two answers to one question — see that module.
@@ -2056,7 +2059,7 @@ fn skill_list(dir: &Path) -> Vec<Line<'static>> {
     if !dir.is_dir() {
         return vec![missing(format!("No skills installed ({})", dir.display()))];
     }
-    let skills = crate::access::skills(dir);
+    let skills = cctop_core::access::skills(dir);
     if skills.is_empty() {
         return vec![missing("No skills installed".into())];
     }
@@ -2078,16 +2081,16 @@ fn skill_list(dir: &Path) -> Vec<Line<'static>> {
 
 /// MCP servers from a dedicated MCP file, as lines.
 fn mcp_from_json(path: &Path, scope: &'static str) -> Vec<Line<'static>> {
-    crate::access::mcp_from_json(path, scope)
+    cctop_core::access::mcp_from_json(path, scope)
         .into_iter()
         .map(mcp_line)
         .collect()
 }
 
 /// MCP servers from one key of a general config file, as lines — see
-/// [`crate::access::mcp_from_config`] for why the key is required.
+/// [`cctop_core::access::mcp_from_config`] for why the key is required.
 fn mcp_from_config(path: &Path, key: &str, scope: &'static str) -> Vec<Line<'static>> {
-    crate::access::mcp_from_config(path, key, scope)
+    cctop_core::access::mcp_from_config(path, key, scope)
         .into_iter()
         .map(mcp_line)
         .collect()
@@ -2095,14 +2098,14 @@ fn mcp_from_config(path: &Path, key: &str, scope: &'static str) -> Vec<Line<'sta
 
 /// MCP servers from Codex's `config.toml`, as lines.
 fn mcp_from_toml(path: &Path) -> Vec<Line<'static>> {
-    let servers = crate::access::mcp_from_toml(path);
+    let servers = cctop_core::access::mcp_from_toml(path);
     if servers.is_empty() {
         return vec![missing("No MCP servers in config.toml".into())];
     }
     servers.into_iter().map(mcp_line).collect()
 }
 
-fn mcp_line(server: crate::access::McpServer) -> Line<'static> {
+fn mcp_line(server: cctop_core::access::McpServer) -> Line<'static> {
     let mut spans = vec![
         Span::styled(server.name, Style::default().fg(theme::colors().name_hue)),
         Span::raw("  "),
@@ -2118,14 +2121,14 @@ fn mcp_line(server: crate::access::McpServer) -> Line<'static> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::session::{ContextUsage, SubagentStatus};
+    use cctop_core::session::{ContextUsage, SubagentStatus};
 
     fn series(windows: &[u64]) -> SessionData {
         SessionData {
             context_series: windows
                 .iter()
                 .enumerate()
-                .map(|(i, w)| crate::session::CtxPoint {
+                .map(|(i, w)| cctop_core::session::CtxPoint {
                     ts: format!("2026-08-05T10:{i:02}:00+00:00"),
                     window: *w,
                     after_compaction: false,
@@ -2140,7 +2143,7 @@ mod tests {
     /// prints, so the section stays off rather than drawing a truism.
     #[test]
     fn the_context_chart_needs_more_than_a_pair_of_points() {
-        let session = Session::new(crate::pricing::Provider::Claude, "x".into());
+        let session = Session::new(cctop_core::pricing::Provider::Claude, "x".into());
         assert!(context_timeline(&session, &series(&[10, 20]), 80).is_empty());
         assert!(!context_timeline(&session, &series(&[10, 20, 30]), 80).is_empty());
     }
@@ -2149,7 +2152,7 @@ mod tests {
     /// the bar and legend — which do fit — off the top.
     #[test]
     fn the_context_chart_stays_off_a_narrow_panel() {
-        let session = Session::new(crate::pricing::Provider::Claude, "x".into());
+        let session = Session::new(cctop_core::pricing::Provider::Claude, "x".into());
         assert!(context_timeline(&session, &series(&[10, 20, 30, 40]), 12).is_empty());
     }
 
@@ -2161,7 +2164,7 @@ mod tests {
     /// marker would under-report the one number it is being read for.
     #[test]
     fn the_context_chart_counts_the_compactions_it_drew() {
-        let session = Session::new(crate::pricing::Provider::Claude, "x".into());
+        let session = Session::new(cctop_core::pricing::Provider::Claude, "x".into());
         let mut data = series(&[10, 90, 20, 40]);
         data.context_series[2].after_compaction = true;
         data.compactions = 1;
@@ -2188,7 +2191,7 @@ mod tests {
     /// spelled out under it — and only once there is a cadence to spell.
     #[test]
     fn a_thrashing_session_is_told_how_often_it_is_rebuilding() {
-        let mut session = Session::new(crate::pricing::Provider::Claude, "x".into());
+        let mut session = Session::new(cctop_core::pricing::Provider::Claude, "x".into());
         session.started_at = "2026-08-11T10:00:00Z".into();
         session.last_active = "2026-08-11T11:00:00Z".into();
 
@@ -2216,7 +2219,7 @@ mod tests {
                 .tool_details
                 .entry("Bash".to_string())
                 .or_default()
-                .push(crate::session::ToolDetail {
+                .push(cctop_core::session::ToolDetail {
                     d: command.to_string(),
                     ts: "2026-08-05T10:00:00+00:00".to_string(),
                     failed,
@@ -2283,7 +2286,7 @@ mod tests {
         let signed_in = |email: &str| {
             let email = email.to_string();
             move || {
-                Some(crate::quota::Account {
+                Some(cctop_core::quota::Account {
                     email: Some(email.clone()),
                     organization: None,
                 })
@@ -2440,7 +2443,7 @@ mod tests {
         data.metrics.tool_count = 2;
         data.metrics.tool_details.insert("Bash".into(), vec![]);
         for origin in ["agent-abcdeé", "agent-abcde日", "agent-abcdefgh"] {
-            let mut d = crate::session::ToolDetail {
+            let mut d = cctop_core::session::ToolDetail {
                 d: format!("run {origin}"),
                 ts: "2026-08-05T10:00:00+00:00".into(),
                 ..Default::default()
@@ -2470,12 +2473,12 @@ mod tests {
         data.metrics.tool_details.insert(
             "Bash".into(),
             vec![
-                crate::session::ToolDetail {
+                cctop_core::session::ToolDetail {
                     d: "old".into(),
                     ts: "2026-01-01T00:00:00Z".into(),
                     ..Default::default()
                 },
-                crate::session::ToolDetail {
+                cctop_core::session::ToolDetail {
                     d: "new".into(),
                     ts: "2026-06-01T00:00:00Z".into(),
                     ..Default::default()
@@ -2517,7 +2520,7 @@ mod tests {
 
         assert_eq!(wall_duration_ms(&session, now), Some(49_000));
 
-        session.process = Some(crate::proc::ProcInfo::default());
+        session.process = Some(cctop_core::proc::ProcInfo::default());
         assert_eq!(wall_duration_ms(&session, now), Some(120_000));
     }
 
@@ -2525,7 +2528,7 @@ mod tests {
     fn bundled_plan_cost_panel_still_shows_retail_equivalent() {
         let s = Session::new(Provider::Claude, "x".into());
         let data = SessionData {
-            costs: crate::session::Costs {
+            costs: cctop_core::session::Costs {
                 total: 4.25,
                 ..Default::default()
             },
@@ -2545,9 +2548,9 @@ mod tests {
         let mut s = Session::new(Provider::OpenCode, "x".into());
         s.cost_is_free = true;
         let data = SessionData {
-            model_breakdown: vec![crate::session::ModelBreakdown {
+            model_breakdown: vec![cctop_core::session::ModelBreakdown {
                 model: "deepseek-v4-flash-free".into(),
-                tokens: crate::session::Tokens {
+                tokens: cctop_core::session::Tokens {
                     input: 100,
                     output: 20,
                     cache_read: 50,
@@ -2555,7 +2558,7 @@ mod tests {
                     total: 180,
                     ..Default::default()
                 },
-                costs: crate::session::Costs::default(),
+                costs: cctop_core::session::Costs::default(),
                 total: 0.0,
             }],
             ..Default::default()
@@ -2577,7 +2580,7 @@ mod tests {
     fn context_panel_shows_the_gap_rather_than_hiding_it() {
         let s = Session::new(Provider::Claude, "x".into());
         let data = SessionData {
-            context_breakdown: Some(crate::session::ContextBreakdown {
+            context_breakdown: Some(cctop_core::session::ContextBreakdown {
                 total: 100_000,
                 startup: 20_000,
                 tool_output: 30_000,
@@ -2612,7 +2615,7 @@ mod tests {
     fn context_panel_admits_when_the_estimate_exceeds_the_window() {
         let s = Session::new(Provider::Claude, "x".into());
         let data = SessionData {
-            context_breakdown: Some(crate::session::ContextBreakdown {
+            context_breakdown: Some(cctop_core::session::ContextBreakdown {
                 total: 50_000,
                 startup: 20_000,
                 tool_output: 60_000,
@@ -2641,7 +2644,7 @@ mod tests {
             compacted: true,
         });
         let data = SessionData {
-            context_breakdown: Some(crate::session::ContextBreakdown {
+            context_breakdown: Some(cctop_core::session::ContextBreakdown {
                 total: 100_000,
                 startup: 20_000,
                 tool_output: 30_000,
@@ -2789,8 +2792,8 @@ mod tests {
         assert!(text.contains("past auto-compaction"), "{text}");
     }
 
-    fn breakdown() -> crate::session::ContextBreakdown {
-        crate::session::ContextBreakdown {
+    fn breakdown() -> cctop_core::session::ContextBreakdown {
+        cctop_core::session::ContextBreakdown {
             total: 118_200,
             startup: 45_200,
             tool_output: 32_100,
@@ -2864,7 +2867,7 @@ mod tests {
         );
         // The marker lands on the auto-compaction threshold, wherever the
         // harness (or its env override) puts it.
-        let expected = (*crate::config::COMPACT_THRESHOLD * 100.0).round() as usize;
+        let expected = (*cctop_core::config::COMPACT_THRESHOLD * 100.0).round() as usize;
         assert_eq!(
             lines[2].find('┊').map(|i| lines[2][..i].chars().count()),
             Some(expected),

@@ -19,7 +19,7 @@ impl App {
     /// The name is in: check it, and ask which kind of account it is.
     pub(super) fn accept_account_name(&mut self) {
         let name = self.add_account.name.trim().to_string();
-        if !crate::quota::valid_account_name(&name) {
+        if !cctop_core::quota::valid_account_name(&name) {
             self.set_status("An account name is letters, digits, - _ and . only");
             return;
         }
@@ -44,11 +44,11 @@ impl App {
                 "claude setup-token",
             ),
             AccountKind::Login => {
-                let dir = crate::config::claude_login_dir(&flow.name);
-                if crate::quota::login_landed(&dir) {
+                let dir = cctop_core::config::claude_login_dir(&flow.name);
+                if cctop_core::quota::login_landed(&dir) {
                     flow.outcome = Some(Err(format!(
                         "{} is already logged in — it is in the launcher as {}.",
-                        crate::util::tildify(&dir.to_string_lossy()),
+                        cctop_core::util::tildify(&dir.to_string_lossy()),
                         flow.name
                     )));
                     self.needs_redraw = true;
@@ -105,17 +105,17 @@ impl App {
             // Read again on every draw rather than kept from the first: the
             // link is printed over several rows, and the first sighting can be
             // before the last of them has arrived — which kept half a URL.
-            if let Some(link) = crate::quota::link_on_screen(screen) {
+            if let Some(link) = cctop_core::quota::link_on_screen(screen) {
                 flow.link = Some(link);
             }
             if flow.kind == Some(AccountKind::Token)
-                && let Some(token) = crate::quota::token_on_screen(screen)
+                && let Some(token) = cctop_core::quota::token_on_screen(screen)
             {
                 // Its job is done, and a process holding a fresh token has no
                 // reason to outlive the popup that asked for it.
                 flow.pane = None;
                 flow.outcome = Some(
-                    crate::quota::save_token(&flow.name, &token)
+                    cctop_core::quota::save_token(&flow.name, &token)
                         .map(|()| flow.name.to_string())
                         .map_err(|e| format!("Could not save the token: {e}")),
                 );
@@ -128,7 +128,9 @@ impl App {
         self.needs_redraw = true;
         flow.outcome = Some(match flow.kind {
             Some(AccountKind::Login)
-                if crate::quota::login_landed(&crate::config::claude_login_dir(&flow.name)) =>
+                if cctop_core::quota::login_landed(&cctop_core::config::claude_login_dir(
+                    &flow.name,
+                )) =>
             {
                 // Gone, not left on screen: it succeeded, and the popup's
                 // outcome says so better than its last frame.
@@ -147,7 +149,7 @@ impl App {
     /// The profile a launch would use, or `None` when the highlighted command
     /// takes none — or takes one but has only a single account, so there is
     /// nothing to choose between.
-    pub fn launch_profile(&self) -> Option<&'static crate::config::Profile> {
+    pub fn launch_profile(&self) -> Option<&'static cctop_core::config::Profile> {
         self.chosen_profile(self.launch_provider()?)
     }
 
@@ -162,8 +164,11 @@ impl App {
 
     /// The profile `provider` would be started under, or `None` when it has
     /// only the one and so nothing to choose between.
-    pub fn chosen_profile(&self, provider: Provider) -> Option<&'static crate::config::Profile> {
-        let profiles = crate::config::launchable_for(provider);
+    pub fn chosen_profile(
+        &self,
+        provider: Provider,
+    ) -> Option<&'static cctop_core::config::Profile> {
+        let profiles = cctop_core::config::launchable_for(provider);
         if profiles.len() <= 1 {
             return None;
         }
@@ -178,7 +183,7 @@ impl App {
         let Some(provider) = self.launch_provider() else {
             return;
         };
-        let n = crate::config::launchable_for(provider).len();
+        let n = cctop_core::config::launchable_for(provider).len();
         if n > 1 {
             let at = self.launch_profile.entry(provider).or_insert(0);
             *at = (*at + 1) % n;
@@ -216,7 +221,7 @@ impl App {
         let Some(profile) = profile else {
             return argv;
         };
-        crate::config::argv_under_profile(argv, profile)
+        cctop_core::config::argv_under_profile(argv, profile)
     }
 }
 
@@ -230,7 +235,7 @@ mod tests {
     /// and a bad name is refused where it was typed.
     #[test]
     fn the_add_account_popup_asks_which_kind_after_the_name() {
-        let mut app = crate::ui::tests::test_app();
+        let mut app = crate::tests::test_app();
         app.open_add_account();
         for c in "work 2".chars() {
             app.on_key(KeyEvent::from(KeyCode::Char(c)));
@@ -280,13 +285,13 @@ mod tests {
     #[test]
     fn a_profile_reaches_the_agent_as_its_own_variable() {
         let under = |dir: &str, provider, command: &str| {
-            let profile = crate::config::Profile {
+            let profile = cctop_core::config::Profile {
                 provider,
                 name: "work".to_string(),
                 dir: std::path::PathBuf::from(dir),
-                source: crate::config::AccountSource::Directory,
+                source: cctop_core::config::AccountSource::Directory,
             };
-            crate::config::argv_under_profile(vec![command.to_string()], &profile)
+            cctop_core::config::argv_under_profile(vec![command.to_string()], &profile)
         };
         assert_eq!(
             under("/home/x/.codex-work", Provider::Codex, "codex"),

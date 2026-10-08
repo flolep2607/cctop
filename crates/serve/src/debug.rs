@@ -128,8 +128,8 @@ pub fn route(shared: &Shared, stream: &mut TcpStream, request: &Request, rest: &
                 "tokenless": shared.token.is_empty(),
                 "plan": format!("{:?}", shared.plan),
                 "fault": fault_name(FAULT.load(Ordering::Relaxed)),
-                "log": crate::elog::level_name(crate::elog::level()),
-                "log_file": crate::elog::path().display().to_string(),
+                "log": cctop_core::elog::level_name(cctop_core::elog::level()),
+                "log_file": cctop_core::elog::path().display().to_string(),
             });
             json(stream, request, &body);
             true
@@ -191,8 +191,8 @@ pub fn route(shared: &Shared, stream: &mut TcpStream, request: &Request, rest: &
         // next five minutes are worth recording.
         "log" => {
             if let Some(word) = request.query.get("level") {
-                match crate::elog::parse_level(word) {
-                    Some(level) => crate::elog::set(level),
+                match cctop_core::elog::parse_level(word) {
+                    Some(level) => cctop_core::elog::set(level),
                     None => {
                         http::respond_error(
                             stream,
@@ -208,8 +208,8 @@ pub fn route(shared: &Shared, stream: &mut TcpStream, request: &Request, rest: &
                 stream,
                 request,
                 &serde_json::json!({
-                    "log": crate::elog::level_name(crate::elog::level()),
-                    "file": crate::elog::path().display().to_string(),
+                    "log": cctop_core::elog::level_name(cctop_core::elog::level()),
+                    "file": cctop_core::elog::path().display().to_string(),
                 }),
             );
             true

@@ -7,7 +7,7 @@
 //! the clash reporting lives with it.
 
 use super::*;
-use crate::loader::Stats;
+use cctop_core::loader::Stats;
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
 
 impl App {
@@ -26,7 +26,7 @@ impl App {
         let mut agents = 0;
         let mut files: BTreeSet<&str> = BTreeSet::new();
         for c in self.collisions.values() {
-            if c.level != crate::collide::Overlap::File {
+            if c.level != cctop_core::collide::Overlap::File {
                 continue;
             }
             agents += 1;
@@ -39,7 +39,7 @@ impl App {
         };
         Some(format!(
             "Conflict: ⚠ {}{more} — {agents} agents have written it",
-            crate::util::path_tail(first, 2)
+            cctop_core::util::path_tail(first, 2)
         ))
     }
 
@@ -66,7 +66,7 @@ impl App {
                 s
             }));
         }
-        self.stats = crate::loader::compute_stats(&self.sessions);
+        self.stats = cctop_core::loader::compute_stats(&self.sessions);
         self.refilter();
     }
 
@@ -75,7 +75,7 @@ impl App {
     pub(super) fn adopt_stats(&mut self, stats: Stats) {
         self.stats = match self.remotes.is_empty() {
             true => stats,
-            false => crate::loader::compute_stats(&self.sessions),
+            false => cctop_core::loader::compute_stats(&self.sessions),
         };
     }
 
@@ -150,10 +150,10 @@ impl App {
     }
 
     /// How `host`'s cctop stands against this one, if it has said.
-    pub fn skew_of(&self, host: &str) -> Option<crate::fleet::Skew> {
-        crate::fleet::skew(
+    pub fn skew_of(&self, host: &str) -> Option<cctop_core::fleet::Skew> {
+        cctop_core::fleet::skew(
             self.remote_versions.get(host)?,
-            crate::update::current_version(),
+            cctop_core::update::current_version(),
         )
     }
 
@@ -164,8 +164,8 @@ impl App {
     /// newer build would have sent. So a mismatch is said out loud, once per
     /// host per run, and then left to the HOST column's marker and the Info
     /// panel — which stay true for as long as it does.
-    pub fn got_remote_version(&mut self, host: String, probe: crate::fleet::Probe) {
-        use crate::fleet::Skew;
+    pub fn got_remote_version(&mut self, host: String, probe: cctop_core::fleet::Probe) {
+        use cctop_core::fleet::Skew;
         self.remote_versions.insert(host.clone(), probe);
         let Some(skew) = self.skew_of(&host) else {
             return;
@@ -173,7 +173,7 @@ impl App {
         if !self.remote_skew_told.insert(host.clone()) {
             return;
         }
-        let local = crate::update::current_version();
+        let local = cctop_core::update::current_version();
         self.set_status(match skew {
             Skew::Older(v) => format!(
                 "{host} runs cctop {v}, older than this {local} — Enter on one of its rows \
@@ -198,7 +198,7 @@ impl App {
     /// self-replacing binary on someone's server on a guess is not a thing to
     /// put one keypress away.
     pub fn remote_update_refusal(&self, host: &str) -> Option<String> {
-        use crate::fleet::Skew;
+        use cctop_core::fleet::Skew;
         if self.remote_updating.contains(host) {
             return Some(format!("an update of {host} is already under way"));
         }
@@ -209,7 +209,7 @@ impl App {
             )),
             Some(Skew::Missing) => Some(format!("{host} has no cctop to update")),
             None => Some(match self.remote_versions.get(host) {
-                Some(crate::fleet::Probe::Version(v)) => format!("{host} already runs {v}"),
+                Some(cctop_core::fleet::Probe::Version(v)) => format!("{host} already runs {v}"),
                 _ => format!("{host}'s cctop version is not known yet"),
             }),
         }
@@ -234,7 +234,7 @@ impl App {
 
     /// The `Host` behind a name, command and all — what the confirmation shows
     /// and what the update runs.
-    pub fn remote_host(&self, target: &str) -> Option<&crate::fleet::Host> {
+    pub fn remote_host(&self, target: &str) -> Option<&cctop_core::fleet::Host> {
         self.remote_hosts.iter().find(|h| h.target == target)
     }
 
@@ -264,9 +264,9 @@ impl App {
     pub fn remote_updated(
         &mut self,
         host: String,
-        result: Result<String, crate::fleet::UpdateFailure>,
+        result: Result<String, cctop_core::fleet::UpdateFailure>,
     ) {
-        use crate::fleet::UpdateFailure;
+        use cctop_core::fleet::UpdateFailure;
         self.remote_updating.remove(&host);
         self.set_status(match result {
             Ok(said) => format!("{host}: {said}"),
@@ -282,7 +282,7 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ui::tests::{session, test_app};
+    use crate::tests::{session, test_app};
     use std::sync::mpsc::channel;
     /// Two live agents in one checkout, both having written the same file —
     /// the arrangement the whole warning exists for.
@@ -291,18 +291,18 @@ mod tests {
         let repo = std::env::temp_dir().join(format!("cctop-ui-clash-{}", std::process::id()));
         std::fs::create_dir_all(repo.join(".git")).expect("checkout");
         let dir = repo.to_string_lossy().into_owned();
-        let contested = crate::collide::normalise("src/ui/mod.rs", &dir);
+        let contested = cctop_core::collide::normalise("src/ui/mod.rs", &dir);
 
         let mut app = test_app();
         app.sessions = vec![session("a", true, &dir), session("b", true, &dir)];
         for s in app.sessions.iter_mut() {
             s.recent_writes = vec![contested.clone()];
         }
-        app.collisions = crate::collide::apply(&mut app.sessions);
+        app.collisions = cctop_core::collide::apply(&mut app.sessions);
 
         // On the rows, so the column can colour and sort by it…
         for s in &app.sessions {
-            assert_eq!(s.conflict, Some(crate::collide::Overlap::File));
+            assert_eq!(s.conflict, Some(cctop_core::collide::Overlap::File));
         }
         // …and in the footer, which names the file rather than a count.
         let footer = app.conflict_footer().expect("a warning");
@@ -316,11 +316,11 @@ mod tests {
 
         // A repository shared without a shared file is the quieter finding, and
         // deliberately does not reach the footer.
-        app.sessions[1].recent_writes = vec![crate::collide::normalise("other.rs", &dir)];
-        app.collisions = crate::collide::apply(&mut app.sessions);
+        app.sessions[1].recent_writes = vec![cctop_core::collide::normalise("other.rs", &dir)];
+        app.collisions = cctop_core::collide::apply(&mut app.sessions);
         assert_eq!(
             app.sessions[0].conflict,
-            Some(crate::collide::Overlap::Directory)
+            Some(cctop_core::collide::Overlap::Directory)
         );
         assert!(app.conflict_footer().is_none());
 
@@ -335,7 +335,7 @@ mod tests {
         app.sessions = vec![session("local", true, "/here")];
 
         let mut away = session("away", true, "/srv/work");
-        away.remote = Some(crate::session::Remote {
+        away.remote = Some(cctop_core::session::Remote {
             host: "box".into(),
             branch: Some("main".into()),
             ..Default::default()
@@ -372,7 +372,10 @@ mod tests {
 
         // The branch comes from the far side rather than from this filesystem,
         // where the same path may well exist and mean something else.
-        assert_eq!(crate::branch::branch_of(remote).as_deref(), Some("main"));
+        assert_eq!(
+            cctop_core::branch::branch_of(remote).as_deref(),
+            Some("main")
+        );
 
         // A host that stops answering keeps its rows and says so.
         app.remote_errors
@@ -391,7 +394,7 @@ mod tests {
         assert!(app.remotes_up_footer().is_none());
 
         let mut away = session("away", true, "/srv/work");
-        away.remote = Some(crate::session::Remote {
+        away.remote = Some(cctop_core::session::Remote {
             host: "box".into(),
             ..Default::default()
         });
@@ -399,7 +402,7 @@ mod tests {
         assert_eq!(app.remotes_up_footer().as_deref(), Some("box up"));
 
         let mut far = session("far", true, "/srv/other");
-        far.remote = Some(crate::session::Remote {
+        far.remote = Some(cctop_core::session::Remote {
             host: "bench".into(),
             ..Default::default()
         });
@@ -415,13 +418,13 @@ mod tests {
     /// updated only through a confirmation that names the command.
     #[test]
     fn an_older_remote_is_said_once_marked_and_offered_an_update() {
-        use crate::fleet::{Host, Probe, UpdateFailure};
+        use cctop_core::fleet::{Host, Probe, UpdateFailure};
         let (tx, rx) = channel();
         let mut app = App::new(Plan::Retail, tx);
         let host = Host::parse("box").expect("a host");
         app.remote_hosts = vec![host.clone()];
         let mut s = session("away", true, "/srv/work");
-        s.remote = Some(crate::session::Remote {
+        s.remote = Some(cctop_core::session::Remote {
             host: "box".into(),
             ..Default::default()
         });
@@ -489,14 +492,17 @@ mod tests {
     #[test]
     fn a_newer_remote_points_at_this_machine() {
         let mut app = test_app();
-        app.got_remote_version("box".into(), crate::fleet::Probe::Version("999.0.0".into()));
+        app.got_remote_version(
+            "box".into(),
+            cctop_core::fleet::Probe::Version("999.0.0".into()),
+        );
         let said = app.toasts.iter().next().expect("a toast").text.clone();
         assert!(said.contains("cctop --update` here"), "{said}");
         let why = app.remote_update_refusal("box").expect("refused");
         assert!(why.contains("update this one"), "{why}");
 
         // And a host with no cctop at all is told how to point at one.
-        app.got_remote_version("bare".into(), crate::fleet::Probe::Missing);
+        app.got_remote_version("bare".into(), cctop_core::fleet::Probe::Missing);
         let said = app.toasts.iter().next().expect("a toast").text.clone();
         assert!(said.contains("--host bare:/path/to/cctop"), "{said}");
     }
@@ -522,7 +528,7 @@ mod tests {
     fn the_menu_refuses_a_remote_row_the_way_the_keys_do() {
         let mut app = App::new(Plan::Retail, channel().0);
         let mut s = session("a", true, "/repo");
-        s.remote = Some(crate::session::Remote {
+        s.remote = Some(cctop_core::session::Remote {
             host: "devbox".into(),
             branch: None,
             ..Default::default()

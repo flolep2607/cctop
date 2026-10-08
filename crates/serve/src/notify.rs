@@ -2,7 +2,7 @@
 //!
 //! The page's Notify button covers a browser that is open; this covers the
 //! ones that are not — a phone screen that is off, a chat webhook, a pager.
-//! The trigger is the same edge the terminal bell uses (see [`crate::notify`]):
+//! The trigger is the same edge the terminal bell uses (see [`cctop_core::notify`]):
 //! a session *crossing into* waiting or asking, never the level. A snapshot
 //! that finds a session already waiting is not news — it is the state of the
 //! world when the server started — so the first snapshot fires nothing, and a
@@ -13,7 +13,7 @@
 //! must cost one stderr line and nothing else — not a stall, not a line per
 //! refresh for as long as it stays dead.
 
-use crate::session::{ActivityState, Session};
+use cctop_core::session::{ActivityState, Session};
 use std::collections::HashMap;
 
 /// Where `--notify` points, plus everything a payload's link is built from.
@@ -33,7 +33,7 @@ pub struct Webhook {
 
 /// What a session was doing at a snapshot, reduced to what the edge sees.
 ///
-/// The same states [`crate::notify`] distinguishes: a session that is not
+/// The same states [`cctop_core::notify`] distinguishes: a session that is not
 /// running is stopped whatever its last transcript line said, and an API
 /// error is the agent's problem, not yet the user's.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -67,7 +67,7 @@ impl Webhook {
     /// The sessions in `after` that just started needing someone, as
     /// `(event, session)` pairs.
     ///
-    /// Only a crossing out of `Busy` fires — the `crate::notify` rule, adopted
+    /// Only a crossing out of `Busy` fires — the `cctop_core::notify` rule, adopted
     /// here for the same reason: a permission prompt answered and the turn
     /// then ending is `Asking` to `Waiting`, which is the same news twice. A
     /// session absent from `before` has no edge at all, which is what makes
@@ -102,7 +102,7 @@ impl Webhook {
             true => link,
             false => format!("{link}?t={}", self.token),
         };
-        crate::notify::post(
+        cctop_core::notify::post(
             self.target.clone(),
             serde_json::json!({
                 "event": event,
@@ -120,7 +120,7 @@ impl Webhook {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pricing::Provider;
+    use cctop_core::pricing::Provider;
 
     fn hook() -> Webhook {
         Webhook::new(
@@ -134,7 +134,7 @@ mod tests {
         let mut s = Session::new(Provider::Claude, id.into());
         s.activity_state = state;
         if running {
-            s.process = Some(crate::proc::ProcInfo::default());
+            s.process = Some(cctop_core::proc::ProcInfo::default());
         }
         s
     }

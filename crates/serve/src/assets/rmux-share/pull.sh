@@ -3,7 +3,7 @@
 #
 # Reads index.html for the stylesheet and script it names, follows the script
 # to the WebAssembly module it loads, and prints the hashes SOURCE.md records.
-# It does not edit SOURCE.md or src/serve/term.rs: a new build is something to
+# It does not edit SOURCE.md or crates/serve/src/term.rs: a new build is something to
 # read before it is something to ship.
 set -eu
 cd "$(dirname "$0")"

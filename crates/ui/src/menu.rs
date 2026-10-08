@@ -149,7 +149,8 @@ pub fn items(app: &App) -> Vec<Item> {
                     _ if !has_pid => Some("no local process to answer for".into()),
                     _ if !matches!(
                         session.provider,
-                        crate::pricing::Provider::Claude | crate::pricing::Provider::Codex
+                        cctop_core::pricing::Provider::Claude
+                            | cctop_core::pricing::Provider::Codex
                     ) =>
                     {
                         Some(format!(

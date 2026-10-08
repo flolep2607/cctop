@@ -36,7 +36,7 @@
 //! work, so it does not mark it. "Done" means a transition this process
 //! watched happen, not a guess about what you have read elsewhere.
 
-use crate::session::Session;
+use cctop_core::session::Session;
 use std::collections::HashSet;
 
 /// What a session is doing, as far as the unseen mark cares.
@@ -54,8 +54,8 @@ pub enum Phase {
 
 impl Phase {
     /// The phase of a row, read the way the status dot reads it.
-    pub fn of(state: crate::session::ActivityState) -> Phase {
-        use crate::session::ActivityState;
+    pub fn of(state: cctop_core::session::ActivityState) -> Phase {
+        use cctop_core::session::ActivityState;
         match state {
             ActivityState::Working => Phase::Working,
             ActivityState::WaitingForInput => Phase::Stopped,
@@ -67,7 +67,7 @@ impl Phase {
 /// The sessions seen working since last looked at, and the ones that have
 /// since stopped.
 ///
-/// Keyed by [`Session::key`](crate::session::Session::key): the table's
+/// Keyed by [`Session::key`](cctop_core::session::Session::key): the table's
 /// identity for a row, which a tab reaches through its pane's pid.
 #[derive(Debug, Default)]
 pub struct Seen {
@@ -158,7 +158,7 @@ mod tests {
     /// the key is written once per pass, into a buffer, where before it was a
     /// `String` per live session handed over by the caller.
     fn row(id: &str) -> Session {
-        Session::new(crate::pricing::Provider::Claude, id.into())
+        Session::new(cctop_core::pricing::Provider::Claude, id.into())
     }
 
     /// The whole life of the mark: armed by working, fired by stopping
@@ -252,7 +252,7 @@ mod tests {
 
     #[test]
     fn a_row_reads_its_phase_off_its_dot() {
-        use crate::session::ActivityState;
+        use cctop_core::session::ActivityState;
         assert_eq!(Phase::of(ActivityState::Working), Phase::Working);
         assert_eq!(Phase::of(ActivityState::WaitingForInput), Phase::Stopped);
         assert_eq!(Phase::of(ActivityState::Asking), Phase::Other);

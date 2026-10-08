@@ -63,11 +63,11 @@ pub use runloop::run;
 use share::{Opening, ShareQr};
 use worker::Request;
 
-use crate::cache::UiPrefs;
-use crate::loader::Stats;
-use crate::pricing::{Plan, Provider};
-use crate::quota::Quota;
-use crate::session::{Session, SessionData};
+use cctop_core::cache::UiPrefs;
+use cctop_core::loader::Stats;
+use cctop_core::pricing::{Plan, Provider};
+use cctop_core::quota::Quota;
+use cctop_core::session::{Session, SessionData};
 use columns::ColumnId;
 use spark::History;
 use std::collections::{HashMap, HashSet};
@@ -147,7 +147,7 @@ pub enum Mode {
 /// The two things an added Claude account can be.
 ///
 /// Both, because each gives up something the other keeps — see
-/// [`AccountSource`](crate::config::AccountSource). A full login is its own
+/// [`AccountSource`](cctop_core::config::AccountSource). A full login is its own
 /// `~/.claude-<name>`, and every feature works under it. A token keeps the one
 /// `~/.claude` history every account resumes from, and Claude Code lets it make
 /// model requests and nothing else: no Remote Control, no claude.ai connectors.
@@ -430,7 +430,7 @@ pub struct App {
     /// Only show sessions whose total cost reaches this floor.
     pub cost_floor: f64,
     /// Which profile the launcher will start each harness under, as an index
-    /// into that harness's [`crate::config::launchable_for`] list.
+    /// into that harness's [`cctop_core::config::launchable_for`] list.
     ///
     /// Per harness rather than one index: the launcher cursor moves between
     /// `claude` and `codex`, and an index is only meaningful against the list
@@ -495,7 +495,7 @@ pub struct App {
     /// The hosts the directory field offers, read from `~/.ssh/config` when it
     /// opens — a snapshot, like the launcher's list, so an edit to the config
     /// mid-pick does not move the cursor.
-    pub ssh_hosts: Vec<crate::ssh_config::Host>,
+    pub ssh_hosts: Vec<cctop_core::ssh_config::Host>,
     /// What is known about each host put in the field this run: its
     /// connection, its repositories, the directories listed on it.
     pub ssh_states: HashMap<String, location::HostState>,
@@ -577,9 +577,9 @@ pub struct App {
     pub help_typing: bool,
 
     /// `[settings]` and `[keys]` from `config.toml`, as last read.
-    pub settings: crate::settings::Settings,
+    pub settings: cctop_core::settings::Settings,
     /// Those `[keys]`, applied in front of the dashboard's key handler.
-    pub keymap: crate::settings::Keymap,
+    pub keymap: cctop_core::settings::Keymap,
     /// The file those are read from and written to. `None` in tests, which
     /// must not touch the developer's own config.
     pub settings_file: Option<std::path::PathBuf>,
@@ -684,12 +684,12 @@ pub struct App {
     high: high::High,
 
     /// Bell and desktop notifications, and who rang last.
-    pub notify: crate::notify::Notifier,
+    pub notify: cctop_core::notify::Notifier,
     /// The `alert_*` thresholds' state: which have fired, and which rows are
     /// still past theirs. Beside the notifier rather than inside it, because
     /// the bell's question — is it my move? — is about a session's state and
     /// these are about its numbers.
-    pub alerts: crate::alert::Alerts,
+    pub alerts: cctop_core::alert::Alerts,
     /// Which finished turns have not been looked at yet — see [`seen`].
     pub seen: seen::Seen,
 
@@ -706,7 +706,7 @@ pub struct App {
     /// than one that was never added: the totals still look complete.
     pub remote_errors: HashMap<String, String>,
     /// What each host's `cctop --version` said, asked once per connection.
-    pub remote_versions: HashMap<String, crate::fleet::Probe>,
+    pub remote_versions: HashMap<String, cctop_core::fleet::Probe>,
     /// Hosts whose version skew has been toasted this run. Once per host: the
     /// news is the same every poll, and a toast that comes back every fifteen
     /// seconds is one people learn to stop reading.
@@ -722,7 +722,7 @@ pub struct App {
     /// rows move. The level also rides on each row so the table can sort by it;
     /// this holds the part only the footer and the Info panel need — who, and
     /// which files.
-    pub collisions: crate::collide::Map,
+    pub collisions: cctop_core::collide::Map,
 
     /// Workspace tabs beyond the dashboard, each holding one or more terminals.
     pub tabs: Vec<tabs::Tab>,
@@ -741,33 +741,33 @@ pub struct App {
     /// The listing is a subprocess and this runs on the thread that draws, so it
     /// is asked on a thread of its own and folded in here when it lands — the
     /// shape [`preview::Capture`] uses for its own capture.
-    shared_listing: Option<std::sync::mpsc::Receiver<Vec<crate::rmux::Running>>>,
+    shared_listing: Option<std::sync::mpsc::Receiver<Vec<cctop_core::rmux::Running>>>,
     /// The tab being dragged along the bar, indexed as the bar is: `1..=len`,
     /// and never `0` because the dashboard does not move.
     ///
     /// Set on the press and cleared on the release, which is also what makes the
     /// release the bar's rather than the agent's: a drag that started on the bar
     /// and ended over a pane must not be delivered as a click inside it.
-    pub(super) drag_tab: Option<usize>,
+    pub(crate) drag_tab: Option<usize>,
     /// What the agents have reported, folded together: last report per session,
     /// the questions its subagents are still waiting on, and the pid claims.
     ///
     /// Only sessions whose agent has cctop's hooks installed appear here, so an
     /// absent entry is the ordinary case and means "fall back to the transcript"
-    /// rather than "nothing is happening". See [`crate::hook::Reports`].
-    pub reports: crate::hook::Reports,
+    /// rather than "nothing is happening". See [`cctop_core::hook::Reports`].
+    pub reports: cctop_core::hook::Reports,
     /// The machine's YOLO switch: stamped on the rows wherever reports are,
     /// and — in the one cctop that owns the job — answered. See
-    /// [`crate::yolo`].
-    pub(super) yolo: crate::yolo::Auto,
+    /// [`cctop_core::yolo`].
+    pub(crate) yolo: cctop_core::yolo::Auto,
     /// When [`App::tick_yolo`] last read the switch, so an idle loop does not
     /// stat it on every pass.
-    pub(super) yolo_at: Option<Instant>,
+    pub(crate) yolo_at: Option<Instant>,
     /// What each tab's agent says on its own screen, by agent pid, while
     /// `read_screen` is on — see [`App::read_screens`]. Pane reads only: a
     /// detached tab's answer is in `peeked`, and the two are looked up together
     /// rather than copied into one map every tick.
-    pub screen_read: HashMap<u32, crate::peek::Screened>,
+    pub screen_read: HashMap<u32, cctop_core::peek::Screened>,
     /// What detached tabs' screens last said, by agent pid.
     ///
     /// Kept apart from the pane reads because it is refreshed on a slower
@@ -775,24 +775,24 @@ pub struct App {
     /// cost the way reading a parser this process owns is. Merged in at the
     /// lookup so nothing is copied per tick to answer "what is this agent
     /// doing" — see [`App::read_screens`].
-    pub(super) peeked: HashMap<u32, crate::peek::Screened>,
+    pub(crate) peeked: HashMap<u32, cctop_core::peek::Screened>,
     /// When `peeked` was last rebuilt. `None` until the first detached read.
-    pub(super) peeked_at: Option<Instant>,
+    pub(crate) peeked_at: Option<Instant>,
     /// The `capture-pane` sweep asked for on the last due tick, if it has not
     /// answered. A subprocess on a thread of its own, for the same reason as
     /// [`Self::shared_listing`].
-    pub(super) peeked_listing:
-        Option<std::sync::mpsc::Receiver<HashMap<u32, crate::peek::Screened>>>,
+    pub(crate) peeked_listing:
+        Option<std::sync::mpsc::Receiver<HashMap<u32, cctop_core::peek::Screened>>>,
     /// The integration's state, as of the last time the panel was opened.
     ///
     /// Rebuilt on opening and after every action rather than every frame: it
     /// reads three files off disk and scans a directory, which is nothing to do
     /// once and wasteful to do sixty times a second behind a closed panel.
-    pub hooks: Option<crate::hook::Report>,
+    pub hooks: Option<cctop_core::hook::Report>,
     /// Readings of each account's rate-limit windows, for the unused-allowance
     /// figure on the Limits pane. Reloaded when a quota response arrives rather
     /// than held by the poller, so the file has exactly one writer.
-    pub burn: crate::burn::Log,
+    pub burn: cctop_core::burn::Log,
     /// The open report, and how far it is scrolled. `None` while the worker is
     /// still building it, which is what the overlay draws as "working".
     pub insight: Option<String>,
@@ -806,11 +806,11 @@ pub struct App {
     /// The remote machines this run is reading, kept beside `remotes` because
     /// the rows say only *where* a session lives — reaching it for a
     /// conversation or a served report wants the `Host`, command and all.
-    pub remote_hosts: Vec<crate::fleet::Host>,
+    pub remote_hosts: Vec<cctop_core::fleet::Host>,
     /// The socket the agents push their events to. `None` when one could not be
     /// bound, in which case every estimate carries on exactly as it did before
     /// hooks existed.
-    pub listener: Option<crate::hook::Listener>,
+    pub listener: Option<cctop_core::hook::Listener>,
     /// The command highlighted in the launcher.
     pub launch_cursor: usize,
     /// What the launcher is offering, as it was when it opened.
@@ -831,7 +831,7 @@ pub struct App {
     pub launch_cwd: Option<std::path::PathBuf>,
     /// The install the rmux offer is currently showing, so the modal draws the
     /// command that will actually run rather than working it out again.
-    pub rmux_install: Option<crate::rmux::Install>,
+    pub rmux_install: Option<cctop_core::rmux::Install>,
     /// The launch waiting on the rmux question, or on the install it started.
     pub rmux_deferred: Option<Deferred>,
     /// Whether the offer has been turned down. One "no" holds for the run:
@@ -851,7 +851,7 @@ pub struct App {
     ///
     /// Dropping it revokes the tunnel and stops the listener, so quitting cctop
     /// takes the page with it. That is the same bargain `serve` makes.
-    pub serving: Option<crate::serve::Serving>,
+    pub serving: Option<cctop_serve::Serving>,
     /// The add-account popup, while `Mode::AddAccount` is up.
     pub add_account: AddAccount,
     /// A tunnel being registered on a thread of its own.
@@ -909,7 +909,7 @@ pub struct App {
     ///
     /// Held beside the brief rather than instead of it: which of the two is
     /// used is not known until an agent has been picked, and every agent but
-    /// Claude still needs the brief. See [`crate::handoff::fork`].
+    /// Claude still needs the brief. See [`cctop_serve::handoff::fork`].
     pub pending_fork: Option<std::path::PathBuf>,
     /// The harness that wrote [`pending_fork`](Self::pending_fork).
     ///
@@ -919,7 +919,7 @@ pub struct App {
     /// conversion. The default is Claude, which is what a session that is only
     /// forkable — and so never passed through `convert::convertible_session` —
     /// needs.
-    pub pending_provider: crate::pricing::Provider,
+    pub pending_provider: cctop_core::pricing::Provider,
     /// A brief handed to an agent that is still starting up, as
     /// `(pid, line, not before)`.
     ///
@@ -950,14 +950,14 @@ pub struct App {
 
 impl App {
     fn new(plan: Plan, tx: Sender<Request>) -> Self {
-        let settings = crate::settings::Settings::load();
+        let settings = cctop_core::settings::Settings::load();
         let mut prefs = UiPrefs::load();
         if let Some(notify) = settings.notify {
             prefs.notify = notify;
         }
         let mut app = Self::with_prefs(plan, tx, prefs);
-        app.burn = crate::burn::Log::load();
-        app.reports = crate::hook::Reports::new();
+        app.burn = cctop_core::burn::Log::load();
+        app.reports = cctop_core::hook::Reports::new();
         app.quota = Quota::default();
         app.launch_root = std::env::current_dir().ok();
         if std::env::var_os("CCTOP_COLUMNS_HIDE").is_none()
@@ -965,7 +965,7 @@ impl App {
         {
             app.hidden_columns = columns::parse_hidden(hide);
         }
-        app.settings_file = Some(crate::config::CONFIG_FILE.clone());
+        app.settings_file = Some(cctop_core::config::CONFIG_FILE.clone());
         app.reload_settings();
         app
     }
@@ -991,7 +991,7 @@ impl App {
 
         App {
             sessions: Vec::new(),
-            burn: crate::burn::Log::load(),
+            burn: cctop_core::burn::Log::load(),
             insight: None,
             insight_scroll: 0,
             insight_kind: "optimize",
@@ -1050,7 +1050,7 @@ impl App {
             .map(|(provider, remembered)| {
                 let at = remembered
                     .and_then(|name| {
-                        crate::config::launchable_for(provider)
+                        cctop_core::config::launchable_for(provider)
                             .iter()
                             .position(|p| p.name == name)
                     })
@@ -1126,10 +1126,10 @@ impl App {
                 claude: Vec::new(),
                 codex: Vec::new(),
             },
-            notify: crate::notify::Notifier::new(prefs.notify),
-            alerts: crate::alert::Alerts::default(),
+            notify: cctop_core::notify::Notifier::new(prefs.notify),
+            alerts: cctop_core::alert::Alerts::default(),
             seen: seen::Seen::default(),
-            collisions: crate::collide::Map::new(),
+            collisions: cctop_core::collide::Map::new(),
             remotes: HashMap::new(),
             remote_errors: HashMap::new(),
             remote_versions: HashMap::new(),
@@ -1155,11 +1155,11 @@ impl App {
             // other `$HOME` read here; [`App::new`] seeds it, because the row
             // most likely to want a tab blinking is the one blocked on a
             // question — and that is exactly the row that sends nothing until
-            // it is answered. See [`Reports::new`](crate::hook::Reports::new).
-            reports: crate::hook::Reports::default(),
+            // it is answered. See [`Reports::new`](cctop_core::hook::Reports::new).
+            reports: cctop_core::hook::Reports::default(),
             // Never answering until the run loop says so: an `App` built for a
             // test or a snapshot must not press keys at anything.
-            yolo: crate::yolo::Auto::new(false),
+            yolo: cctop_core::yolo::Auto::new(false),
             yolo_at: None,
             screen_read: HashMap::new(),
             peeked: HashMap::new(),
@@ -1199,7 +1199,7 @@ impl App {
             torn: torn::Torn::default(),
             pending_brief: None,
             pending_fork: None,
-            pending_provider: crate::pricing::Provider::Claude,
+            pending_provider: cctop_core::pricing::Provider::Claude,
             handoff_send: None,
             hosted: None,
             paste_preview: None,
@@ -1267,7 +1267,7 @@ impl App {
     /// Its spinner is what tells that wait from a hang, and the loop asks this
     /// so it knows to keep waking for the frames — the same reason
     /// [`tick_share`](share) turns its spinner while a tunnel dials.
-    pub(super) fn insight_loading(&self) -> bool {
+    pub(crate) fn insight_loading(&self) -> bool {
         self.mode == Mode::Insight && self.insight.is_none()
     }
 
@@ -1277,7 +1277,7 @@ impl App {
     /// it only reads the transcript the way the report page does. A remote
     /// row's transcript is read on the machine that has it, over the same ssh
     /// channel the row arrived by.
-    pub(super) fn open_conversation(&mut self) {
+    pub(crate) fn open_conversation(&mut self) {
         if self.on_subagent() {
             self.set_status("A subagent has no transcript of its own — read the session's");
             return;
@@ -1354,11 +1354,11 @@ impl App {
     /// An answer for a view that has since closed or moved to another row is
     /// dropped: the key is checked because `u` can still be in flight when the
     /// user picks a different session.
-    pub(super) fn got_chat(
+    pub(crate) fn got_chat(
         &mut self,
         key: String,
         before: Option<usize>,
-        result: Result<Box<crate::serve::chat::Conversation>, String>,
+        result: Result<Box<cctop_serve::chat::Conversation>, String>,
     ) {
         let Some(view) = &mut self.chat else {
             return;
@@ -1403,7 +1403,7 @@ impl App {
     /// A conversation still being read off disk — or off the wire — by the
     /// worker. Same contract as [`insight_loading`]: the loop keeps waking so
     /// the spinner turns.
-    pub(super) fn chat_loading(&self) -> bool {
+    pub(crate) fn chat_loading(&self) -> bool {
         self.mode == Mode::Conversation
             && self
                 .chat
@@ -1420,10 +1420,10 @@ pub struct ChatView {
     /// The host that can read it, when the row is remote. `Some` exactly when
     /// `session.remote` is — the fetch then goes over ssh rather than to the
     /// local transcript path, which does not exist on this machine.
-    pub host: Option<crate::fleet::Host>,
+    pub host: Option<cctop_core::fleet::Host>,
     /// What has been read so far. `None` while the first read is in flight;
     /// `error` says why it came back without one when it did.
-    pub conversation: Option<crate::serve::chat::Conversation>,
+    pub conversation: Option<cctop_serve::chat::Conversation>,
     /// Why the read failed, when it did.
     pub error: Option<String>,
     /// Rows scrolled back from the bottom. A scrollback's zero is the end:
@@ -1488,19 +1488,19 @@ mod tests {
     /// and it must stay quiet until it has enough windows to be worth saying.
     #[test]
     fn the_limits_pane_reports_unused_allowance_once_it_has_enough_windows() {
-        use crate::burn::{Log, Sample, key};
+        use cctop_core::burn::{Log, Sample, key};
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
 
         let mut app = test_app();
         app.quota = Quota {
             fetched: true,
-            claude: vec![crate::quota::ProfileQuota {
+            claude: vec![cctop_core::quota::ProfileQuota {
                 profile: "default".into(),
-                source: crate::config::AccountSource::Directory,
-                status: crate::quota::ProviderStatus::Ok(crate::quota::ProviderQuota {
+                source: cctop_core::config::AccountSource::Directory,
+                status: cctop_core::quota::ProviderStatus::Ok(cctop_core::quota::ProviderQuota {
                     plan: Some("max_20x".into()),
-                    windows: vec![crate::quota::Window {
+                    windows: vec![cctop_core::quota::Window {
                         label: "7d",
                         pct: 20,
                         duration: Some(Duration::from_secs(7 * 24 * 3600)),
@@ -1625,7 +1625,7 @@ mod tests {
         app.open_conversation();
         let key = app.chat.as_ref().expect("the view opened").session.key();
 
-        let turn = |seq: usize| crate::serve::chat::Turn {
+        let turn = |seq: usize| cctop_serve::chat::Turn {
             seq,
             role: "assistant".into(),
             kind: "message".into(),
@@ -1635,7 +1635,7 @@ mod tests {
             tools: Vec::new(),
         };
         let page = |seqs: &[usize], earlier: usize| {
-            Box::new(crate::serve::chat::Conversation {
+            Box::new(cctop_serve::chat::Conversation {
                 supported: true,
                 turns: seqs.iter().map(|s| turn(*s)).collect(),
                 earlier,
@@ -1699,7 +1699,7 @@ mod tests {
         s.last_active = chrono::Utc::now().to_rfc3339();
         s.started_at = s.last_active.clone();
         if running {
-            s.process = Some(crate::proc::ProcInfo::default());
+            s.process = Some(cctop_core::proc::ProcInfo::default());
         }
         s
     }
@@ -1708,7 +1708,7 @@ mod tests {
     fn the_root_pid_excludes_ghost_and_child_processes() {
         let mut session = session("a", true, "x");
         session.process.as_mut().unwrap().process_list = vec![
-            crate::proc::ProcEntry {
+            cctop_core::proc::ProcEntry {
                 pid: 1,
                 is_root: true,
                 ghost: true,
@@ -1716,7 +1716,7 @@ mod tests {
                 memory: 0,
                 args: String::new(),
             },
-            crate::proc::ProcEntry {
+            cctop_core::proc::ProcEntry {
                 pid: 2,
                 is_root: false,
                 ghost: false,
@@ -1724,7 +1724,7 @@ mod tests {
                 memory: 0,
                 args: String::new(),
             },
-            crate::proc::ProcEntry {
+            cctop_core::proc::ProcEntry {
                 pid: 3,
                 is_root: true,
                 ghost: false,
@@ -1951,7 +1951,7 @@ mod tests {
 
         // A toggle flips in place.
         app.settings_cursor = item_of(&app, "notify");
-        assert_eq!(crate::settings::SETTINGS[1].0, "notify");
+        assert_eq!(cctop_core::settings::SETTINGS[1].0, "notify");
         app.on_key(key(KeyCode::Enter));
         assert_eq!(app.settings.notify, Some(true));
         assert!(
@@ -1967,9 +1967,9 @@ mod tests {
             .position(|row| {
                 use super::settings::Item;
                 match row {
-                    Item::Setting(i) => crate::settings::SETTINGS[*i].0 == name,
+                    Item::Setting(i) => cctop_core::settings::SETTINGS[*i].0 == name,
                     Item::View(i) => super::settings::VIEWS[*i].0 == name,
-                    Item::Key(i) => crate::settings::BINDINGS[*i].0 == name,
+                    Item::Key(i) => cctop_core::settings::BINDINGS[*i].0 == name,
                 }
             })
             .unwrap_or_else(|| panic!("no row called {name}"))

@@ -334,9 +334,9 @@ mod tests {
     /// others.
     #[test]
     fn all_three_codes_are_heard_side_by_side() {
-        let mut app = crate::ui::tests::test_app();
+        let mut app = crate::tests::test_app();
         for code in CODE.into_iter().chain(rave::CODE).chain(drunk::CODE) {
-            app.on_key(crate::ui::tests::key(code));
+            app.on_key(crate::tests::key(code));
         }
         let colour = !theme::no_color();
         assert_eq!(app.tripping(), colour);

@@ -1,7 +1,7 @@
 //! Workspace tabs: the dashboard, plus a terminal for every agent you open.
 //!
-//! Nothing here is new machinery. [`shim::host`](crate::shim::host) already puts
-//! an agent on a pty cctop owns, and [`attach`](crate::attach) already turns that
+//! Nothing here is new machinery. [`shim::host`](cctop_core::shim::host) already puts
+//! an agent on a pty cctop owns, and [`attach`](cctop_core::attach) already turns that
 //! pty into a screen that can be drawn into any rectangle and resized to it. A
 //! tab is a list of those screens; a split is that list drawn side by side
 //! instead of one at a time.
@@ -57,8 +57,8 @@ pub struct Pane {
     /// on a session row must not make cctop responsible for its life.
     ///
     /// For a rmux-backed pane the process here is the rmux *client*, not the
-    /// agent — see [`rmux`](crate::rmux).
-    hosted: Option<crate::shim::Hosted>,
+    /// agent — see [`rmux`](cctop_core::rmux).
+    hosted: Option<cctop_core::shim::Hosted>,
     /// The rmux session the agent is really in, when there is one.
     ///
     /// Its presence is what separates closing a pane from ending an agent: with
@@ -68,7 +68,7 @@ pub struct Pane {
     /// answered. Off the draw loop — see [`Pane::find_agent`].
     asked: Option<std::sync::mpsc::Receiver<Option<u32>>>,
     /// The session this pane was opened to resume, named as
-    /// [`rmux::name_for_session`](crate::rmux::name_for_session) names it.
+    /// [`rmux::name_for_session`](cctop_core::rmux::name_for_session) names it.
     ///
     /// Recorded whether or not rmux is what carries the agent, because it is the
     /// only durable answer to "is this session already open?" — `rmux` alone is
@@ -104,7 +104,7 @@ pub struct Pane {
     /// no turns. Without this it goes green two seconds after you stop typing,
     /// which reads as an agent waiting for you in a tab where there is none.
     is_agent: bool,
-    pub view: crate::attach::Attach,
+    pub view: cctop_core::attach::Attach,
     /// When this pane's screen last changed, which is how idleness is told
     /// without asking the agent or its transcript anything.
     drew_at: Instant,
@@ -188,7 +188,7 @@ type ScreenPlace = (Instant, u16, usize);
 /// `None` for the signal is not an answer, it is an absence — the still-screen
 /// fallback in [`Pane::read_screen`] is what turns it into one, and that is
 /// decided by a clock rather than by the pixels.
-type ScreenReading = (Option<crate::hook::Signal>, Option<String>, bool);
+type ScreenReading = (Option<cctop_core::hook::Signal>, Option<String>, bool);
 
 impl Pane {
     /// A pane labelled `label` with no process behind it, for tests elsewhere
@@ -206,7 +206,7 @@ impl Pane {
             asked: None,
             label: label.into(),
             is_agent: true,
-            view: crate::attach::Attach::for_test(),
+            view: cctop_core::attach::Attach::for_test(),
             drew_at: Instant::now(),
             read: None,
             fit: Fit::default(),
@@ -234,7 +234,7 @@ impl Pane {
         };
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let _ = tx.send(crate::rmux::window_size(&name));
+            let _ = tx.send(cctop_core::rmux::window_size(&name));
         });
         self.fit.asking = Some(rx);
         self.fit.verifying = verifying;
@@ -294,7 +294,7 @@ impl Pane {
 
     /// What this pane's agent says it is doing, read off its screen.
     ///
-    /// Only for a harness with a row in [`crate::screen::FOOTERS`]: that row is what makes a
+    /// Only for a harness with a row in [`cctop_core::screen::FOOTERS`]: that row is what makes a
     /// pane an agent worth reading, where `is_agent` only knows the harnesses
     /// cctop aliases, and `Esc to cancel` in a shell is nobody's question.
     ///
@@ -302,10 +302,10 @@ impl Pane {
     /// same inference the tab bar makes from silence, and sound for the same
     /// reason: every one of these harnesses ticks a timer or a spinner while it
     /// works, so a still screen with no working hint on it is a turn that ended.
-    /// Still, and not merely unmatched: see [`crate::screen::FOOTERS`] for the frame mid-turn
+    /// Still, and not merely unmatched: see [`cctop_core::screen::FOOTERS`] for the frame mid-turn
     /// that has neither.
-    pub fn read_screen(&mut self) -> Option<crate::peek::Screened> {
-        if !crate::screen::screenable(self.harness()) {
+    pub fn read_screen(&mut self) -> Option<cctop_core::peek::Screened> {
+        if !cctop_core::screen::screenable(self.harness()) {
             return None;
         }
         // Only a screen that has changed since the last reading can have a
@@ -325,20 +325,20 @@ impl Pane {
             Some((where_, found)) if *where_ == at => found.clone(),
             _ => {
                 let rows: Vec<String> = screen.rows(0, cols).collect();
-                let signal = crate::screen::screen_state(self.harness(), &rows);
-                let asking = signal == Some(crate::hook::Signal::NeedsInput);
+                let signal = cctop_core::screen::screen_state(self.harness(), &rows);
+                let asking = signal == Some(cctop_core::hook::Signal::NeedsInput);
                 let ask = asking
-                    .then(|| crate::screen::screen_ask(self.harness(), &rows))
+                    .then(|| cctop_core::screen::screen_ask(self.harness(), &rows))
                     .flatten();
-                let question = asking && crate::screen::screen_question(self.harness(), &rows);
+                let question = asking && cctop_core::screen::screen_question(self.harness(), &rows);
                 let found = (signal, ask, question);
                 self.read = Some((at, found.clone()));
                 found
             }
         };
         let (signal, ask, question) = read;
-        let signal = signal.or_else(|| self.idle().then_some(crate::hook::Signal::Idle))?;
-        Some(crate::peek::Screened {
+        let signal = signal.or_else(|| self.idle().then_some(cctop_core::hook::Signal::Idle))?;
+        Some(cctop_core::peek::Screened {
             signal,
             ask,
             question,
@@ -434,7 +434,7 @@ impl Pane {
         std::thread::spawn(move || {
             // The receiver is gone if the pane closed while rmux was thinking;
             // the answer is then simply not wanted any more.
-            let _ = tx.send(crate::rmux::agent_pid(&name));
+            let _ = tx.send(cctop_core::rmux::agent_pid(&name));
         });
     }
 
@@ -447,18 +447,18 @@ impl Pane {
         // pane rather than on a timer. Every attach passes through, so a session
         // left by an older cctop is quieted when it is picked up again.
         if self.agent.is_some() {
-            crate::rmux::quiet(name);
-            crate::rmux::mouse(name);
+            cctop_core::rmux::quiet(name);
+            cctop_core::rmux::mouse(name);
             // The one moment the session exists and this pane's label is settled
             // — the callers that rename a pane do it before it is ever pumped.
             // Every other cctop reads the tab's name back off the session, so
             // without this a resumed agent would be one thing here and a uuid
             // next door.
-            crate::rmux::set_label(name, &self.label);
+            cctop_core::rmux::set_label(name, &self.label);
             // Only when there is one to record: an unset option reads back as
             // "the default account", which is exactly what `None` means here.
             if let Some(profile) = &self.profile {
-                crate::rmux::set_profile(name, profile);
+                cctop_core::rmux::set_profile(name, profile);
             }
         }
     }
@@ -489,7 +489,7 @@ impl Pane {
     ///
     /// ponytail: a renamed pane on cctop's own pty answers with its new name.
     pub fn harness(&self) -> &str {
-        crate::screen::harness_of(self.rmux.as_deref().unwrap_or(self.label.as_str()))
+        cctop_core::screen::harness_of(self.rmux.as_deref().unwrap_or(self.label.as_str()))
     }
 
     /// Whether an agent is what this pane started, rather than a shell or an
@@ -544,16 +544,16 @@ impl Pane {
             Own::Tmux(name) => {
                 // Before the client, not after: the pane's scrollback is fixed
                 // the moment it is made. See [`rmux::prepare`].
-                crate::rmux::prepare(argv, name, cwd);
-                crate::rmux::attach_or_create(argv, name, cwd)
+                cctop_core::rmux::prepare(argv, name, cwd);
+                cctop_core::rmux::attach_or_create(argv, name, cwd)
             }
-            Own::TmuxExisting(name) => crate::rmux::attach(name),
+            Own::TmuxExisting(name) => cctop_core::rmux::attach(name),
             Own::Cctop => argv.to_vec(),
         };
-        let hosted = crate::shim::host(&spawn, cwd, super::render::pane_size())?;
+        let hosted = cctop_core::shim::host(&spawn, cwd, super::render::pane_size())?;
         // The shim binds and serves the socket before returning, so there is
         // something to connect to even though the agent has drawn nothing yet.
-        let mut view = crate::attach::attach(hosted.pid).ok_or_else(|| {
+        let mut view = cctop_core::attach::attach(hosted.pid).ok_or_else(|| {
             anyhow::anyhow!(
                 "{} started but its terminal could not be opened",
                 label_of(argv)
@@ -604,7 +604,7 @@ impl Pane {
             // `a` on a session row is the only way here, and a session row is
             // an agent.
             is_agent: true,
-            view: crate::attach::attach(pid)?,
+            view: cctop_core::attach::attach(pid)?,
             drew_at: Instant::now(),
             read: None,
             fit: Fit::default(),
@@ -618,7 +618,7 @@ impl Pane {
     /// apart once rmux is in the picture.
     pub fn kill_agent(&self) -> Result<(), String> {
         match &self.rmux {
-            Some(name) => crate::rmux::kill(name),
+            Some(name) => cctop_core::rmux::kill(name),
             None => Ok(()),
         }
     }
@@ -647,7 +647,7 @@ pub struct Shared {
     /// The rmux session, which is the tab's identity across every cctop.
     pub name: String,
     /// What the cctop that started it called the tab. See
-    /// [`rmux::set_label`](crate::rmux::set_label).
+    /// [`rmux::set_label`](cctop_core::rmux::set_label).
     pub label: String,
     /// The agent's own pid, so a tab nobody is attached to can still say that it
     /// is waiting on you — the hooks report under this and need no pane.
@@ -660,19 +660,19 @@ pub struct Shared {
     /// [`Pane::profile`].
     pub profile: Option<String>,
     /// What the agent last reported about itself, as recorded on the rmux
-    /// session — see [`rmux::State`](crate::rmux::State).
+    /// session — see [`rmux::State`](cctop_core::rmux::State).
     ///
     /// This is the agent's own word, and it outranks [`Shared::idle`] below,
     /// which is only ever an inference from a clock. It is also the only thing
     /// either of them can say about a session this cctop was not running for:
     /// the live report went to whoever was listening at the time, and that was
     /// nobody.
-    pub state: Option<crate::rmux::State>,
+    pub state: Option<cctop_core::rmux::State>,
 }
 
 impl Shared {
-    /// What a [`crate::rmux::Running`] becomes when no client of ours is on it.
-    pub fn of(agent: &crate::rmux::Running) -> Shared {
+    /// What a [`cctop_core::rmux::Running`] becomes when no client of ours is on it.
+    pub fn of(agent: &cctop_core::rmux::Running) -> Shared {
         Shared {
             label: agent.label.clone().unwrap_or_else(|| {
                 // No label recorded: an agent from a cctop older than this,
@@ -698,8 +698,8 @@ impl Shared {
     /// rewritten — the same place [`Pane::harness`] looks — because a tab with
     /// no pane has no argv left to ask [`starts_an_agent`] about.
     pub fn is_agent(&self) -> bool {
-        let harness = crate::screen::harness_of(&self.name);
-        crate::alias::AGENTS
+        let harness = cctop_core::screen::harness_of(&self.name);
+        cctop_core::alias::AGENTS
             .split_whitespace()
             .any(|agent| agent == harness)
     }
@@ -707,13 +707,13 @@ impl Shared {
     /// What the rmux session records about its agent, if it is still true.
     ///
     /// Aged out by the same asymmetric rule a live report is — see
-    /// [`Signal::is_current_after`](crate::hook::Signal::is_current_after) — so
+    /// [`Signal::is_current_after`](cctop_core::hook::Signal::is_current_after) — so
     /// a session killed mid-turn stops claiming to be working, while one that
     /// has been asking since yesterday still is.
-    fn recorded(&self) -> Option<crate::hook::Signal> {
+    fn recorded(&self) -> Option<cctop_core::hook::Signal> {
         let state = self.state?;
         state
-            .is_current(crate::rmux::now_secs())
+            .is_current(cctop_core::rmux::now_secs())
             .then_some(state.signal)
     }
 
@@ -817,7 +817,7 @@ impl Tab {
     /// `@cctop_axis` from a split it has since been pulled out of comes back the
     /// way it was left.
     #[cfg(test)]
-    pub fn for_agent(agent: &crate::rmux::Running) -> Tab {
+    pub fn for_agent(agent: &cctop_core::rmux::Running) -> Tab {
         Tab::split_of(agent, &[], agent.axis())
     }
 
@@ -833,14 +833,14 @@ impl Tab {
     /// remember to ask. A word this cctop does not know reads as side by side,
     /// which is the default and not a claim.
     pub fn split_of(
-        leader: &crate::rmux::Running,
-        others: &[&crate::rmux::Running],
-        axis: crate::rmux::Axis,
+        leader: &cctop_core::rmux::Running,
+        others: &[&cctop_core::rmux::Running],
+        axis: cctop_core::rmux::Axis,
     ) -> Tab {
         Tab {
             panes: Vec::new(),
             focus: 0,
-            stacked: axis == crate::rmux::Axis::Stacked,
+            stacked: axis == cctop_core::rmux::Axis::Stacked,
             shared: Some(Shared::of(leader)),
             extra: others.iter().map(|agent| Shared::of(agent)).collect(),
             color: leader.color.as_deref().and_then(Hue::from_name),
@@ -974,7 +974,7 @@ impl Tab {
     pub fn rename(&mut self, name: String) {
         if let Some(pane) = self.panes.first_mut() {
             if let Some(session) = pane.rmux.as_deref() {
-                crate::rmux::set_label(session, &name);
+                cctop_core::rmux::set_label(session, &name);
             }
             pane.label = name;
             // A pane with no rmux session takes its harness from the label, so
@@ -982,7 +982,7 @@ impl Tab {
             // made under. See [`Pane::read_screen`].
             pane.forget_screen();
         } else if let Some(shared) = self.shared.as_mut() {
-            crate::rmux::set_label(&shared.name, &name);
+            cctop_core::rmux::set_label(&shared.name, &name);
             shared.label = name;
         }
     }
@@ -998,7 +998,7 @@ impl Tab {
     /// `None` hands the tab back to the default ink.
     pub fn recolor(&mut self, color: Option<Hue>) {
         for session in self.sessions() {
-            crate::rmux::set_color(session, color.map(Hue::name).unwrap_or(""));
+            cctop_core::rmux::set_color(session, color.map(Hue::name).unwrap_or(""));
         }
         self.color = color;
     }
@@ -1081,22 +1081,22 @@ impl Tab {
             return;
         };
         let axis = match self.stacked {
-            true => crate::rmux::Axis::Stacked,
-            false => crate::rmux::Axis::Side,
+            true => cctop_core::rmux::Axis::Stacked,
+            false => cctop_core::rmux::Axis::Side,
         };
         for (index, name) in names.iter().enumerate() {
             // A tab of one records nothing: it is the shape every session had
             // before this option existed, and writing it would mean a later split
             // has to take it back off.
             if names.len() < 2 {
-                crate::rmux::set_tab(name, "");
+                cctop_core::rmux::set_tab(name, "");
             } else {
-                crate::rmux::set_tab(name, leader);
-                crate::rmux::set_pane(name, index);
+                cctop_core::rmux::set_tab(name, leader);
+                cctop_core::rmux::set_pane(name, index);
             }
         }
         if names.len() > 1 {
-            crate::rmux::set_axis(&names, axis);
+            cctop_core::rmux::set_axis(&names, axis);
         }
     }
 
@@ -1144,7 +1144,7 @@ impl Tab {
     pub fn attention(
         &self,
         focused: bool,
-        known: &dyn Fn(u32) -> Option<crate::hook::Signal>,
+        known: &dyn Fn(u32) -> Option<cctop_core::hook::Signal>,
     ) -> Option<Attention> {
         // A tab nobody is attached to has no screen to read, so `known` is not
         // the tiebreak here — it is the whole answer. Which is enough for the
@@ -1159,11 +1159,13 @@ impl Tab {
             // clock instead.
             let reported = shared.pid.and_then(known).or_else(|| shared.recorded());
             return match reported {
-                Some(crate::hook::Signal::NeedsInput) => Some(Attention::NeedsInput),
+                Some(cctop_core::hook::Signal::NeedsInput) => Some(Attention::NeedsInput),
                 // The held-prompt shape, read off rmux's record of the session
                 // instead of a screen. See the pane arm below for why a tool in
                 // flight over a still terminal is a question.
-                Some(crate::hook::Signal::Acting) => shared.idle().then_some(Attention::NeedsInput),
+                Some(cctop_core::hook::Signal::Acting) => {
+                    shared.idle().then_some(Attention::NeedsInput)
+                }
                 Some(signal) if signal.is_working() => None,
                 Some(_) => Some(Attention::Idle),
                 // No hooks, so the fallback is the same one a pane uses — that
@@ -1184,7 +1186,7 @@ impl Tab {
                 // as a held question is how a tab that is merely done goes
                 // amber and stays amber. The agent's own word for its state is
                 // the one thing that can tell the two apart.
-                Some(crate::hook::Signal::Idle) if pane.rang() => Some(Attention::Idle),
+                Some(cctop_core::hook::Signal::Idle) if pane.rang() => Some(Attention::Idle),
                 // Otherwise, before anything inferred: the agent rang. A harness
                 // rings when it is blocked on you — see [`Pane::rang`].
                 _ if pane.rang() => Some(Attention::NeedsInput),
@@ -1199,7 +1201,7 @@ impl Tab {
                 // thing in the pane asking for you outright, and a long build
                 // that finishes with a `\a` means it as much as an agent does.
                 _ if !pane.is_agent => None,
-                Some(crate::hook::Signal::NeedsInput) => Some(Attention::NeedsInput),
+                Some(cctop_core::hook::Signal::NeedsInput) => Some(Attention::NeedsInput),
                 // A tool call that started, has not come back, and has stopped
                 // repainting is a permission prompt waiting on you. Claude Code
                 // says so outright — `PermissionRequest` arrives as
@@ -1219,7 +1221,9 @@ impl Tab {
                 // way. Claude Code, Gemini and Cursor all tick an elapsed timer
                 // while a tool runs, so in practice the screen is only still
                 // when the agent is blocked.
-                Some(crate::hook::Signal::Acting) => pane.idle().then_some(Attention::NeedsInput),
+                Some(cctop_core::hook::Signal::Acting) => {
+                    pane.idle().then_some(Attention::NeedsInput)
+                }
                 // Reported as working — compacting and just-started included:
                 // the screen is irrelevant, and this is the case the heuristic
                 // gets wrong for an agent that thinks quietly.
@@ -1279,9 +1283,9 @@ impl Tab {
 /// is `git diff`, and a tab that can only hold an agent would send you back out
 /// to another window for it.
 pub fn harnesses() -> Vec<Vec<String>> {
-    let mut found: Vec<Vec<String>> = crate::alias::AGENTS
+    let mut found: Vec<Vec<String>> = cctop_core::alias::AGENTS
         .split_whitespace()
-        .filter(|agent| crate::shim::is_command(agent))
+        .filter(|agent| cctop_core::shim::is_command(agent))
         .map(|agent| vec![agent.to_string()])
         .collect();
     if let Some(shell) = std::env::var("SHELL").ok().filter(|s| !s.is_empty()) {
@@ -1301,7 +1305,7 @@ pub enum Choice {
     /// where holding one of these inline doubles the enum. The box is per row,
     /// there are as many rows as there are live agents, and each is a handful of
     /// strings.
-    Waiting(Box<crate::rmux::Running>),
+    Waiting(Box<cctop_core::rmux::Running>),
     /// A command to start fresh.
     Start(Vec<String>),
     /// Somewhere a handoff can send the session: an agent, under an account.
@@ -1310,7 +1314,7 @@ pub enum Choice {
     /// account, because the launcher reads the account back off the choice —
     /// to name the tab's account, and to put a copied transcript where that
     /// account looks — and an `env` prefix is not something to parse back.
-    Handoff(crate::handoff::Target),
+    Handoff(cctop_serve::handoff::Target),
 }
 
 impl Choice {
@@ -1357,7 +1361,7 @@ impl Choice {
 /// is still offered. It has the same problem, but hiding a running agent is the
 /// worse of the two failures, so it is shown and labelled instead.
 pub fn choices(open: &[String]) -> Vec<Choice> {
-    crate::rmux::running()
+    cctop_core::rmux::running()
         .into_iter()
         .filter(|agent| !open.contains(&agent.name))
         .map(|agent| Choice::Waiting(Box::new(agent)))
@@ -1366,13 +1370,13 @@ pub fn choices(open: &[String]) -> Vec<Choice> {
 }
 
 /// How a command picked from the launcher is named on screen: the command as
-/// typed, minus any path, which matches what [`shim::host`](crate::shim::host)
+/// typed, minus any path, which matches what [`shim::host`](cctop_core::shim::host)
 /// calls it once it is running.
 pub fn label_of(argv: &[String]) -> String {
     // `env VAR=value claude` is a `claude` tab. The prefix is how the agent was
     // started, which is plumbing, and naming a tab after its plumbing is the
     // same mistake as calling one `rmux new-session -A -s cctop-claude`.
-    crate::config::without_launch_prefix(argv)
+    cctop_core::config::without_launch_prefix(argv)
         .iter()
         .map(|arg| arg.rsplit('/').next().unwrap_or(arg))
         .collect::<Vec<_>>()
@@ -1397,7 +1401,7 @@ fn starts_an_agent(argv: &[String]) -> bool {
     if command.starts_with("cctop") && words.next() == Some("sandbox") {
         return true;
     }
-    crate::alias::AGENTS
+    cctop_core::alias::AGENTS
         .split_whitespace()
         .any(|agent| agent == command)
 }
@@ -1429,12 +1433,12 @@ How should the deploy step (between migration 1 and the rest) happen?
 Enter to select · ↑/↓ to navigate · Esc to cancel",
         );
         assert_eq!(
-            crate::screen::screen_state("claude", &question),
-            Some(crate::hook::Signal::NeedsInput)
+            cctop_core::screen::screen_state("claude", &question),
+            Some(cctop_core::hook::Signal::NeedsInput)
         );
-        assert!(crate::screen::screen_question("claude", &question));
+        assert!(cctop_core::screen::screen_question("claude", &question));
         assert_eq!(
-            crate::screen::screen_ask("claude", &question).as_deref(),
+            cctop_core::screen::screen_ask("claude", &question).as_deref(),
             Some("How should the deploy step (between migration 1 and the rest) happen?"),
             "the question's own words, never the agent's message above it"
         );
@@ -1449,9 +1453,9 @@ Enter to select · ↑/↓ to navigate · Esc to cancel",
 
  Esc to cancel · Tab to amend",
         );
-        assert!(!crate::screen::screen_question("claude", &permission));
+        assert!(!cctop_core::screen::screen_question("claude", &permission));
         assert!(
-            !crate::screen::screen_question("codex", &question),
+            !cctop_core::screen::screen_question("codex", &question),
             "claude's menus only"
         );
     }
@@ -1526,10 +1530,10 @@ Enter to select · ↑/↓ to navigate · Esc to cancel",
     /// overlap stay apart.
     #[test]
     fn each_harness_is_read_by_its_own_words() {
-        use crate::hook::Signal::{Busy, NeedsInput};
+        use cctop_core::hook::Signal::{Busy, NeedsInput};
         let read = |harness: &str, text: &str| {
             let rows: Vec<String> = text.lines().map(String::from).collect();
-            crate::screen::screen_state(harness, &rows)
+            cctop_core::screen::screen_state(harness, &rows)
         };
         let cases = [
             (
@@ -1582,10 +1586,10 @@ Enter to select · ↑/↓ to navigate · Esc to cancel",
     /// above the prompt box; and an approval.
     #[test]
     fn codex_says_what_it_is_doing_above_its_prompt() {
-        use crate::hook::Signal;
+        use cctop_core::hook::Signal;
         let screen = |text: &str| {
             let rows: Vec<String> = text.lines().map(String::from).collect();
-            crate::screen::screen_state("codex", &rows)
+            cctop_core::screen::screen_state("codex", &rows)
         };
         let busy = "\
 › Run the shell command: touch hello.txt
@@ -1626,10 +1630,10 @@ Enter to select · ↑/↓ to navigate · Esc to cancel",
 
     #[test]
     fn claude_says_what_it_is_doing_in_its_footer() {
-        use crate::hook::Signal;
+        use cctop_core::hook::Signal;
         let screen = |text: &str| {
             let rows: Vec<String> = text.lines().map(String::from).collect();
-            crate::screen::screen_state("claude", &rows)
+            cctop_core::screen::screen_state("claude", &rows)
         };
         let idle = "\
 ────────────────────────────
@@ -1693,7 +1697,10 @@ Enter to select · ↑/↓ to navigate · Esc to cancel";
         let label = format!(
             "{} · {}",
             argv[0],
-            crate::util::truncate("Improve super cctop", super::super::launch::TAB_LABEL_CHARS)
+            cctop_core::util::truncate(
+                "Improve super cctop",
+                super::super::launch::TAB_LABEL_CHARS
+            )
         );
         assert_eq!(label, "claude · Improve super cctop");
         assert!(!label.contains("4ebf1ab4"));
@@ -1736,7 +1743,7 @@ Enter to select · ↑/↓ to navigate · Esc to cancel";
     fn the_launcher_only_offers_commands_that_exist() {
         for argv in harnesses() {
             assert!(
-                crate::shim::is_command(&argv[0]),
+                cctop_core::shim::is_command(&argv[0]),
                 "offered a command that is not installed: {argv:?}"
             );
         }
@@ -1778,12 +1785,12 @@ Enter to select · ↑/↓ to navigate · Esc to cancel";
 
     /// A session as rmux would describe it, with `ago` seconds since it last
     /// drew anything.
-    fn session(name: &str, label: Option<&str>, ago: u64) -> crate::rmux::Running {
+    fn session(name: &str, label: Option<&str>, ago: u64) -> cctop_core::rmux::Running {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        crate::rmux::Running {
+        cctop_core::rmux::Running {
             name: name.to_string(),
             pid: Some(4321),
             cwd: None,
@@ -1813,26 +1820,26 @@ Enter to select · ↑/↓ to navigate · Esc to cancel";
     fn a_tab_finds_a_question_that_was_asked_before_this_cctop_started() {
         let recorded = |signal, ago: u64| {
             let mut agent = session("cctop-x", Some("claude"), 0);
-            agent.state = Some(crate::rmux::State {
+            agent.state = Some(cctop_core::rmux::State {
                 signal,
-                at: crate::rmux::now_secs().saturating_sub(ago),
+                at: cctop_core::rmux::now_secs().saturating_sub(ago),
             });
             Tab::for_agent(&agent)
         };
         let unheard = &|_| None;
 
         assert_eq!(
-            recorded(crate::hook::Signal::NeedsInput, 300).attention(false, unheard),
+            recorded(cctop_core::hook::Signal::NeedsInput, 300).attention(false, unheard),
             Some(Attention::NeedsInput),
             "the session remembered what this cctop never heard"
         );
         assert_eq!(
-            recorded(crate::hook::Signal::Idle, 300).attention(false, unheard),
+            recorded(cctop_core::hook::Signal::Idle, 300).attention(false, unheard),
             Some(Attention::Idle),
             "and a finished turn is still the quieter of the two"
         );
         assert_eq!(
-            recorded(crate::hook::Signal::Busy, 5).attention(false, unheard),
+            recorded(cctop_core::hook::Signal::Busy, 5).attention(false, unheard),
             None,
             "an agent recorded as working is left alone"
         );
@@ -1842,14 +1849,14 @@ Enter to select · ↑/↓ to navigate · Esc to cancel";
         // fallback rather than asserting itself forever — and this tab's clock
         // says it last drew a moment ago, so that fallback is "not idle".
         assert_eq!(
-            recorded(crate::hook::Signal::Busy, 3 * 3_600).attention(false, unheard),
+            recorded(cctop_core::hook::Signal::Busy, 3 * 3_600).attention(false, unheard),
             None,
         );
 
         // A live report is fresher than anything written down, and wins.
-        let stale = recorded(crate::hook::Signal::NeedsInput, 300);
+        let stale = recorded(cctop_core::hook::Signal::NeedsInput, 300);
         assert_eq!(
-            stale.attention(false, &|_| Some(crate::hook::Signal::Busy)),
+            stale.attention(false, &|_| Some(cctop_core::hook::Signal::Busy)),
             None,
             "this cctop heard the agent go back to work"
         );
@@ -1868,7 +1875,7 @@ Enter to select · ↑/↓ to navigate · Esc to cancel";
             asked: None,
             label: label.into(),
             is_agent,
-            view: crate::attach::Attach::for_test(),
+            view: cctop_core::attach::Attach::for_test(),
             drew_at: Instant::now() - Duration::from_secs(ago),
             read: None,
             fit: Fit::default(),
@@ -1906,7 +1913,7 @@ Enter to select · ↑/↓ to navigate · Esc to cancel";
         // still terminal is a question only where a terminal holds an agent.
         assert_eq!(
             Tab::new(pane("zsh", false, 5))
-                .attention(false, &|_| Some(crate::hook::Signal::Acting)),
+                .attention(false, &|_| Some(cctop_core::hook::Signal::Acting)),
             None
         );
 
@@ -1955,30 +1962,30 @@ Enter to select · ↑/↓ to navigate · Esc to cancel";
     fn an_agent_that_rang_outranks_looking_busy() {
         let ringing = ringing_tab(b"\x07");
         assert_eq!(
-            ringing.attention(false, &|_| Some(crate::hook::Signal::Busy)),
+            ringing.attention(false, &|_| Some(cctop_core::hook::Signal::Busy)),
             Some(Attention::NeedsInput),
         );
         assert_eq!(
-            ringing.attention(false, &|_| Some(crate::hook::Signal::Idle)),
+            ringing.attention(false, &|_| Some(cctop_core::hook::Signal::Idle)),
             Some(Attention::Idle),
             "the idle nudge was read as a question"
         );
         // A tool call held over a rung bell is the permission prompt itself.
         assert_eq!(
-            ringing.attention(false, &|_| Some(crate::hook::Signal::Acting)),
+            ringing.attention(false, &|_| Some(cctop_core::hook::Signal::Acting)),
             Some(Attention::NeedsInput),
         );
 
         // The control: the same freshly drawn pane, silent, is left alone.
         let quiet = ringing_tab(b"thinking");
         assert_eq!(
-            quiet.attention(false, &|_| Some(crate::hook::Signal::Busy)),
+            quiet.attention(false, &|_| Some(cctop_core::hook::Signal::Busy)),
             None,
         );
 
         // And the pane you are looking at is never the one blinking at you.
         assert_eq!(
-            ringing.attention(true, &|_| Some(crate::hook::Signal::Busy)),
+            ringing.attention(true, &|_| Some(cctop_core::hook::Signal::Busy)),
             None,
         );
     }
@@ -1996,14 +2003,14 @@ Enter to select · ↑/↓ to navigate · Esc to cancel";
         pane.view.parser.process(busy);
         assert_eq!(
             pane.read_screen().map(|read| read.signal),
-            Some(crate::hook::Signal::Busy),
+            Some(cctop_core::hook::Signal::Busy),
             "a working hint on the footer"
         );
 
         // The same pixels, read again: the same answer, and nothing laid out.
         assert_eq!(
             pane.read_screen().map(|read| read.signal),
-            Some(crate::hook::Signal::Busy)
+            Some(cctop_core::hook::Signal::Busy)
         );
 
         // A pane that draws again is read afresh, so the answer moves with it.
@@ -2013,7 +2020,7 @@ Enter to select · ↑/↓ to navigate · Esc to cancel";
         pane.drew_at = Instant::now();
         assert_eq!(
             pane.read_screen().map(|read| read.signal),
-            Some(crate::hook::Signal::NeedsInput),
+            Some(cctop_core::hook::Signal::NeedsInput),
             "the footer changed under a pane that drew"
         );
     }
@@ -2029,7 +2036,7 @@ Enter to select · ↑/↓ to navigate · Esc to cancel";
             .process(" \u{280f} Reading files (esc to interrupt)".as_bytes());
         assert_eq!(
             pane.read_screen().map(|read| read.signal),
-            Some(crate::hook::Signal::Busy)
+            Some(cctop_core::hook::Signal::Busy)
         );
 
         // The same screen under a harness with no footer rules to read is no
@@ -2054,7 +2061,7 @@ Enter to select · ↑/↓ to navigate · Esc to cancel";
         // Four rows, six lines: the last two are a prompt on the live screen,
         // and the two the scrollback reveals above it are a turn in flight.
         let mut screen =
-            vt100::Parser::new_with_callbacks(4, 80, 5_000, crate::attach::Signals::default());
+            vt100::Parser::new_with_callbacks(4, 80, 5_000, cctop_core::attach::Signals::default());
         screen.process(
             format!("{working}\r\n{working}\r\n{working}\r\n{working}\r\n{asking}\r\n{asking}")
                 .as_bytes(),
@@ -2063,7 +2070,7 @@ Enter to select · ↑/↓ to navigate · Esc to cancel";
         pane.view.parser = screen;
         assert_eq!(
             pane.read_screen().map(|read| read.signal),
-            Some(crate::hook::Signal::NeedsInput),
+            Some(cctop_core::hook::Signal::NeedsInput),
             "the prompt is the last line on screen"
         );
 
@@ -2071,7 +2078,7 @@ Enter to select · ↑/↓ to navigate · Esc to cancel";
         pane.view.parser.screen_mut().set_scrollback(2);
         assert_eq!(
             pane.read_screen().map(|read| read.signal),
-            Some(crate::hook::Signal::Busy),
+            Some(cctop_core::hook::Signal::Busy),
             "a screen scrolled onto other lines says what they say"
         );
     }
@@ -2133,17 +2140,17 @@ Enter to select · ↑/↓ to navigate · Esc to cancel";
         // A held question outranks everything, and being reported as working
         // outranks a session that merely looks quiet.
         assert_eq!(
-            quiet.attention(false, &|_| Some(crate::hook::Signal::NeedsInput)),
+            quiet.attention(false, &|_| Some(cctop_core::hook::Signal::NeedsInput)),
             Some(Attention::NeedsInput)
         );
         assert_eq!(
-            quiet.attention(false, &|_| Some(crate::hook::Signal::Busy)),
+            quiet.attention(false, &|_| Some(cctop_core::hook::Signal::Busy)),
             None
         );
         // Asked about the agent's pid, which is the only one its hooks mention.
         assert_eq!(
             quiet.attention(false, &|asked| (asked == pid)
-                .then_some(crate::hook::Signal::NeedsInput)),
+                .then_some(cctop_core::hook::Signal::NeedsInput)),
             Some(Attention::NeedsInput)
         );
 
@@ -2151,11 +2158,11 @@ Enter to select · ↑/↓ to navigate · Esc to cancel";
         // whether the terminal is still: that is the shape of a permission
         // prompt, which nothing else reports in time to blink about.
         assert_eq!(
-            quiet.attention(false, &|_| Some(crate::hook::Signal::Acting)),
+            quiet.attention(false, &|_| Some(cctop_core::hook::Signal::Acting)),
             Some(Attention::NeedsInput)
         );
         assert_eq!(
-            busy.attention(false, &|_| Some(crate::hook::Signal::Acting)),
+            busy.attention(false, &|_| Some(cctop_core::hook::Signal::Acting)),
             None,
             "an agent still repainting mid-tool is working, not asking"
         );
@@ -2184,10 +2191,10 @@ Enter to select · ↑/↓ to navigate · Esc to cancel";
 
     /// A still-running agent in the launcher, as rmux would have described it.
     fn waiting(name: &str) -> Choice {
-        Choice::Waiting(Box::new(crate::rmux::Running {
+        Choice::Waiting(Box::new(cctop_core::rmux::Running {
             pid: Some(4321),
             cwd: Some(std::path::PathBuf::from("/home/x/proj")),
-            ..crate::rmux::Running::unrecorded(name)
+            ..cctop_core::rmux::Running::unrecorded(name)
         }))
     }
 
@@ -2221,7 +2228,8 @@ Enter to select · ↑/↓ to navigate · Esc to cancel";
     fn a_rmux_backed_tab_asks_about_the_agent_and_not_the_client() {
         // A pane standing in for a rmux client: what cctop hosts is one pid, and
         // the agent behind it is another.
-        let (_child, client_pid) = crate::shim::test_session(&["sh", "-c", "sleep 30"], (80, 24));
+        let (_child, client_pid) =
+            cctop_core::shim::test_session(&["sh", "-c", "sleep 30"], (80, 24));
         let mut pane = Pane::view_of(client_pid, "claude".into()).expect("attach");
         pane.rmux = Some("cctop-claude-abc".into());
         let agent_pid = client_pid + 1_000;
@@ -2237,14 +2245,14 @@ Enter to select · ↑/↓ to navigate · Esc to cancel";
         // agent's pid, which is the only pid its hooks ever mention.
         assert_eq!(
             tab.attention(true, &|pid| (pid == agent_pid)
-                .then_some(crate::hook::Signal::NeedsInput)),
+                .then_some(cctop_core::hook::Signal::NeedsInput)),
             Some(Attention::NeedsInput)
         );
         // The client's pid says nothing about the agent, and must not be taken
         // for it — this is the assertion the fix exists for.
         assert_ne!(
             tab.attention(true, &|pid| (pid == client_pid)
-                .then_some(crate::hook::Signal::NeedsInput)),
+                .then_some(cctop_core::hook::Signal::NeedsInput)),
             Some(Attention::NeedsInput)
         );
 
@@ -2252,7 +2260,7 @@ Enter to select · ↑/↓ to navigate · Esc to cancel";
         // has sat still.
         assert_eq!(
             tab.attention(true, &|pid| (pid == agent_pid)
-                .then_some(crate::hook::Signal::Busy)),
+                .then_some(cctop_core::hook::Signal::Busy)),
             None
         );
     }
@@ -2265,7 +2273,7 @@ Enter to select · ↑/↓ to navigate · Esc to cancel";
     fn a_tab_asks_for_attention_only_when_it_has_something_you_cannot_see() {
         let mut kids = Vec::new();
         let mut pane = |script: &str| {
-            let (child, pid) = crate::shim::test_session(&["sh", "-c", script], (80, 24));
+            let (child, pid) = cctop_core::shim::test_session(&["sh", "-c", script], (80, 24));
             kids.push(child);
             (pid, Pane::view_of(pid, "agent".into()).expect("attach"))
         };
@@ -2310,14 +2318,14 @@ Enter to select · ↑/↓ to navigate · Esc to cancel";
         // The busy pane holding a question outranks the quiet one being idle.
         assert_eq!(
             tab.attention(false, &|pid| (pid == busy_pid)
-                .then_some(crate::hook::Signal::NeedsInput)),
+                .then_some(cctop_core::hook::Signal::NeedsInput)),
             Some(Attention::NeedsInput)
         );
         // Focused tab: the focused pane is excluded, so the quiet one is left.
         tab.focus = 0;
         assert_eq!(
             tab.attention(true, &|pid| (pid == busy_pid)
-                .then_some(crate::hook::Signal::NeedsInput)),
+                .then_some(cctop_core::hook::Signal::NeedsInput)),
             Some(Attention::Idle)
         );
         // Focus the quiet one instead: it is the only pane with anything to
@@ -2331,7 +2339,7 @@ Enter to select · ↑/↓ to navigate · Esc to cancel";
             let _ = child.wait();
         }
         for pid in [busy_pid, quiet_pid] {
-            let _ = crate::shim::socket_path(pid).map(std::fs::remove_file);
+            let _ = cctop_core::shim::socket_path(pid).map(std::fs::remove_file);
         }
     }
 
@@ -2341,7 +2349,7 @@ Enter to select · ↑/↓ to navigate · Esc to cancel";
     /// this — and a split of them detaches whole, keeping each session's place.
     #[test]
     fn leaving_a_rmux_tab_gives_up_its_client_and_nothing_else() {
-        let (mut child, pid) = crate::shim::test_session(&["sh", "-c", "sleep 30"], (80, 24));
+        let (mut child, pid) = cctop_core::shim::test_session(&["sh", "-c", "sleep 30"], (80, 24));
         let mut pane = Pane::view_of(pid, "claude · Improve super cctop".into()).expect("attach");
         pane.rmux = Some("cctop-claude-abc".into());
         let agent_pid = pid + 1_000;
@@ -2401,7 +2409,7 @@ Enter to select · ↑/↓ to navigate · Esc to cancel";
 
         let _ = child.kill();
         let _ = child.wait();
-        let _ = crate::shim::socket_path(pid).map(std::fs::remove_file);
+        let _ = cctop_core::shim::socket_path(pid).map(std::fs::remove_file);
     }
 
     /// The whole reason a tab has an identity recorded on rmux rather than
@@ -2413,7 +2421,7 @@ Enter to select · ↑/↓ to navigate · Esc to cancel";
     /// restart as two tabs that had never met, with the arrangement lost.
     #[test]
     fn a_split_survives_being_put_down_and_picked_up() {
-        let (mut child, pid) = crate::shim::test_session(&["sh", "-c", "sleep 30"], (80, 24));
+        let (mut child, pid) = cctop_core::shim::test_session(&["sh", "-c", "sleep 30"], (80, 24));
         let mut tab = Tab::new(Pane::view_of(pid, "claude".into()).expect("attach"));
         tab.panes[0].rmux = Some("cctop-claude-abc".into());
         let mut second = Pane::view_of(pid, "shell".into()).expect("attach");
@@ -2429,32 +2437,36 @@ Enter to select · ↑/↓ to navigate · Esc to cancel";
 
         let _ = child.kill();
         let _ = child.wait();
-        let _ = crate::shim::socket_path(pid).map(std::fs::remove_file);
+        let _ = cctop_core::shim::socket_path(pid).map(std::fs::remove_file);
     }
 
     /// `Tab::split` writes the tab's membership onto rmux, so the tab has an
     /// answer to "which sessions are mine" that does not live in this process.
     #[test]
     fn a_split_records_itself_onto_its_sessions() {
-        if !crate::rmux::available() {
+        if !cctop_core::rmux::available() {
             eprintln!("skipping: rmux not installed");
             return;
         }
         // The daemon is machine-wide, so this serialises against the other
         // tests that talk to it.
-        let _turn = crate::rmux::test_lock();
+        let _turn = cctop_core::rmux::test_lock();
         let leader = format!("cctop-leader-{}", std::process::id());
         let other = format!("cctop-other-{}", std::process::id());
         for name in [&leader, &other] {
-            let _ = crate::rmux::start_detached(&["sleep".into(), "30".into()], name, None);
+            let _ = cctop_core::rmux::start_detached(&["sleep".into(), "30".into()], name, None);
         }
-        let (mut child, pid) = crate::shim::test_session(&["sh", "-c", "sleep 30"], (80, 24));
+        let (mut child, pid) = cctop_core::shim::test_session(&["sh", "-c", "sleep 30"], (80, 24));
         let mut tab = Tab::new(Pane::view_of(pid, "claude".into()).expect("attach"));
         tab.panes[0].rmux = Some(leader.clone());
         let mut second = Pane::view_of(pid, "shell".into()).expect("attach");
         second.rmux = Some(other.clone());
         tab.split(second, false);
-        let read = |name: &str| crate::rmux::running().into_iter().find(|s| s.name == name);
+        let read = |name: &str| {
+            cctop_core::rmux::running()
+                .into_iter()
+                .find(|s| s.name == name)
+        };
         assert_eq!(
             read(&leader).as_ref().and_then(|s| s.tab.as_deref()),
             Some(&leader[..])
@@ -2468,7 +2480,7 @@ Enter to select · ↑/↓ to navigate · Esc to cancel";
         assert_eq!(read(&other).as_ref().and_then(|s| s.pane), Some(1));
         assert_eq!(
             read(&other).map(|s| s.axis()),
-            Some(crate::rmux::Axis::Side)
+            Some(cctop_core::rmux::Axis::Side)
         );
 
         // A pane pulled back out of the tab stops claiming membership, rather
@@ -2478,11 +2490,11 @@ Enter to select · ↑/↓ to navigate · Esc to cancel";
         alone.record_shape();
         assert_eq!(read(&other).and_then(|s| s.tab), None);
 
-        let _ = crate::rmux::kill(&leader);
-        let _ = crate::rmux::kill(&other);
+        let _ = cctop_core::rmux::kill(&leader);
+        let _ = cctop_core::rmux::kill(&other);
         let _ = child.kill();
         let _ = child.wait();
-        let _ = crate::shim::socket_path(pid).map(std::fs::remove_file);
+        let _ = cctop_core::shim::socket_path(pid).map(std::fs::remove_file);
     }
 
     #[test]

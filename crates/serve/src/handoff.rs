@@ -26,7 +26,7 @@
 //! is read in full by an agent that has just started, so it stays short; the
 //! record is there for the question the summary does not answer, and costs
 //! nothing until something asks it. Reading a conversation is
-//! [`crate::serve::chat`]'s job, which is why this calls it rather than
+//! [`crate::chat`]'s job, which is why this calls it rather than
 //! learning the transcripts again — and why it carries what that can read:
 //! Claude Code and Codex. A session on any other harness still gets the brief
 //! it always got.
@@ -41,8 +41,8 @@
 //! its plan in prose leaves it empty rather than guessing at which assistant
 //! paragraph was the plan.
 
-use crate::serve::chat;
-use crate::session::{EDIT_TOOLS, Session, SessionData, ToolDetail};
+use crate::chat;
+use cctop_core::session::{EDIT_TOOLS, Session, SessionData, ToolDetail};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -60,7 +60,7 @@ const MAX_SUBAGENTS: usize = 15;
 /// How much of the conversation the brief itself quotes.
 ///
 /// Deliberately mean next to the JSONL beside it, which is bounded only by what
-/// [`crate::serve::chat`] will read. These are the two questions a receiving
+/// [`crate::chat`] will read. These are the two questions a receiving
 /// agent has before it can do anything — what was asked, and where it got to —
 /// and answering them costs a few hundred tokens rather than a window.
 ///
@@ -135,7 +135,7 @@ pub fn build(session: &Session, data: Option<&SessionData>) -> Brief {
             .or_else(|| data.and_then(|d| d.title.clone()))
             .unwrap_or_else(|| "(untitled session)".into()),
         cwd: session.label_source.clone(),
-        branch: crate::branch::branch_of(session),
+        branch: cctop_core::branch::branch_of(session),
         model: match session.model.is_empty() {
             true => data.map(|d| d.last_model.clone()).unwrap_or_default(),
             false => session.model.clone(),
@@ -428,7 +428,7 @@ impl Brief {
     /// The brief, optionally naming the JSONL record [`write`] left beside it.
     ///
     /// Separate from [`Brief::to_markdown`] because the record is a file, and a
-    /// caller that only wants the text — [`crate::mcp`] answers a tool call
+    /// caller that only wants the text — `mcp` answers a tool call
     /// with it — has no file to point at. Pointing at one that is not there
     /// would send the receiving agent looking for it.
     pub fn to_markdown_with(&self, record: Option<&Path>) -> String {
@@ -447,7 +447,7 @@ impl Brief {
         field(p, "Harness", &self.source);
         field(p, "Model", &self.model);
         field(p, "Session", &self.session_id);
-        field(p, "Directory", &crate::util::tildify(&self.cwd));
+        field(p, "Directory", &cctop_core::util::tildify(&self.cwd));
         if let Some(branch) = &self.branch {
             field(p, "Branch", branch);
         }
@@ -462,8 +462,8 @@ impl Brief {
             "Tokens",
             &format!(
                 "{} in / {} out",
-                crate::util::compact_tokens(self.input_tokens),
-                crate::util::compact_tokens(self.output_tokens)
+                cctop_core::util::compact_tokens(self.input_tokens),
+                cctop_core::util::compact_tokens(self.output_tokens)
             ),
         );
         if let Some((used, max)) = self.context
@@ -474,8 +474,8 @@ impl Brief {
                 "Context at handoff",
                 &format!(
                     "{} of {} ({}%)",
-                    crate::util::compact_tokens(used),
-                    crate::util::compact_tokens(max),
+                    cctop_core::util::compact_tokens(used),
+                    cctop_core::util::compact_tokens(max),
                     used * 100 / max
                 ),
             );
@@ -610,7 +610,7 @@ impl Brief {
 
     /// What the record leaves out, said plainly.
     ///
-    /// [`crate::serve::chat`] is bounded on both axes — it reads the newest
+    /// [`crate::chat`] is bounded on both axes — it reads the newest
     /// turns, and cuts a long message — so a long session's record begins
     /// partway through and can hold clipped messages. A heading that called it
     /// the conversation *in full* was wrong for exactly the sessions long
@@ -703,7 +703,7 @@ fn field(out: &mut String, name: &str, value: &str) {
 /// project directory would mean handing an agent a file its own repository is
 /// about to want to gitignore.
 pub fn dir() -> PathBuf {
-    crate::config::CACHE_DIR.join("handoff")
+    cctop_core::config::CACHE_DIR.join("handoff")
 }
 
 /// Write the brief out and return the path an agent can be pointed at.
@@ -770,7 +770,7 @@ fn write_in(dir: &Path, brief: &Brief) -> std::io::Result<PathBuf> {
 /// another machine, and Claude for Mac, which keeps its conversations in a
 /// directory of its own and resumes them by title rather than by id.
 pub fn forkable(session: &Session) -> Option<&Path> {
-    if session.provider != crate::pricing::Provider::Claude
+    if session.provider != cctop_core::pricing::Provider::Claude
         || session.surface.is_desktop()
         || session.remote.is_some()
     {
@@ -881,7 +881,7 @@ pub fn fork_codex(rollout: &Path, codex_home: &Path) -> std::io::Result<String> 
         .and_then(|n| n.to_str())
         .ok_or_else(|| missing("that rollout has no file name"))?;
     let stem = name.strip_suffix(".jsonl").unwrap_or(name);
-    let old = crate::config::trailing_uuid(stem)
+    let old = cctop_core::config::trailing_uuid(stem)
         .ok_or_else(|| missing("that rollout's name carries no session id"))?;
     // The path below the sending store's `sessions/`, which is the dated
     // directory; an archived rollout has none, and goes under today's.
@@ -899,7 +899,7 @@ pub fn fork_codex(rollout: &Path, codex_home: &Path) -> std::io::Result<String> 
     let prefix = &stem[..stem.len() - old.len()];
     let (id, path) = (0..3)
         .map(|_| new_session_id())
-        .filter(|id| !crate::convert::codex_id_taken(codex_home, id))
+        .filter(|id| !cctop_core::convert::codex_id_taken(codex_home, id))
         .map(|id| {
             let path = dir.join(format!("{prefix}{id}.jsonl"));
             (id, path)
@@ -940,7 +940,7 @@ pub fn fork_codex(rollout: &Path, codex_home: &Path) -> std::io::Result<String> 
 /// but "whose subscription". The motivating case is the second one alone: an
 /// account is out of window for the day, and the same harness under another
 /// login is exactly who should pick the work up. The accounts are cctop's
-/// existing ones — [`crate::config::launchable_for`], the list the launcher's
+/// existing ones — [`cctop_core::config::launchable_for`], the list the launcher's
 /// `p` cycles through — rather than a second notion of what an account is.
 ///
 /// `account` is `None` for a harness cctop cannot tell accounts apart for,
@@ -967,15 +967,15 @@ impl Target {
 
     /// The account this target launches under, when it names one cctop can
     /// still find.
-    pub fn profile(&self) -> Option<&'static crate::config::Profile> {
-        let provider = crate::pricing::Provider::parse(&self.agent)?;
-        crate::config::launchable_named(provider, self.account.as_deref()?)
+    pub fn profile(&self) -> Option<&'static cctop_core::config::Profile> {
+        let provider = cctop_core::pricing::Provider::parse(&self.agent)?;
+        cctop_core::config::launchable_named(provider, self.account.as_deref()?)
     }
 
     /// The target's argv: its agent, under its account.
     pub fn argv(&self, argv: Vec<String>) -> Vec<String> {
         match self.profile() {
-            Some(profile) => crate::config::argv_under_profile(argv, profile),
+            Some(profile) => cctop_core::config::argv_under_profile(argv, profile),
             None => argv,
         }
     }
@@ -986,9 +986,9 @@ impl Target {
 /// The same list the terminal launcher offers, minus the shell: handing a brief
 /// to `$SHELL` would start a shell with a paragraph typed into it.
 pub fn agents() -> Vec<String> {
-    crate::alias::AGENTS
+    cctop_core::alias::AGENTS
         .split_whitespace()
-        .filter(|agent| crate::shim::is_command(agent))
+        .filter(|agent| cctop_core::shim::is_command(agent))
         .map(str::to_string)
         .collect()
 }
@@ -1000,8 +1000,8 @@ pub fn agents() -> Vec<String> {
 /// is honoured.
 pub fn targets(session: &Session) -> Vec<Target> {
     let accounts = |agent: &str| -> Vec<String> {
-        crate::pricing::Provider::parse(agent)
-            .map(crate::config::launchable_for)
+        cctop_core::pricing::Provider::parse(agent)
+            .map(cctop_core::config::launchable_for)
             .unwrap_or_default()
             .into_iter()
             .map(|p| p.name.clone())
@@ -1066,9 +1066,9 @@ fn current(session: &Session, accounts: &[String]) -> Target {
         };
     }
     let token = match session.provider {
-        crate::pricing::Provider::Claude => {
-            session.root_pid().and_then(crate::quota::token_account_of)
-        }
+        cctop_core::pricing::Provider::Claude => session
+            .root_pid()
+            .and_then(cctop_core::quota::token_account_of),
         _ => None,
     };
     let account = token
@@ -1082,7 +1082,7 @@ fn current(session: &Session, accounts: &[String]) -> Target {
 
 /// A session id of the shape the harness writes: a version-4 UUID.
 fn new_session_id() -> String {
-    let mut bytes = crate::util::random_bytes(16);
+    let mut bytes = cctop_core::util::random_bytes(16);
     // The version and variant bits. Nothing checks them, but a file whose name
     // is not a UUID is one a person reading the directory cannot place.
     bytes[6] = (bytes[6] & 0x0f) | 0x40;
@@ -1101,7 +1101,7 @@ fn new_session_id() -> String {
 /// The brief as text, having left a record beside it where one could be
 /// written.
 ///
-/// What [`crate::cli`] prints and what the MCP tool answers with. Both used to
+/// What `cli` prints and what the MCP tool answers with. Both used to
 /// render the markdown alone, so a handoff taken from the command line or by an
 /// agent asking for one silently carried less than the same handoff taken in
 /// the TUI — the conversation was read, summarised, and then thrown away.
@@ -1173,15 +1173,17 @@ pub fn opening_argv(argv: &[String], line: &str) -> Option<Vec<String>> {
 /// The command an argv runs, bare of any path and of the prefix a profile
 /// launch carries.
 pub fn command_of(argv: &[String]) -> Option<&str> {
-    let first = crate::config::without_launch_prefix(argv).first()?.as_str();
+    let first = cctop_core::config::without_launch_prefix(argv)
+        .first()?
+        .as_str();
     Some(first.rsplit('/').next().unwrap_or(first))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pricing::Provider;
-    use crate::session::Delta;
+    use cctop_core::pricing::Provider;
+    use cctop_core::session::Delta;
 
     fn detail(d: &str, ts: &str) -> ToolDetail {
         ToolDetail {
@@ -1758,7 +1760,7 @@ mod tests {
         // Claude for Mac keeps its conversations elsewhere and resumes them by
         // title, so a copy under a new id is not a session it would ever find.
         let mut desktop = session.clone();
-        desktop.surface = crate::session::Surface::DesktopCode;
+        desktop.surface = cctop_core::session::Surface::DesktopCode;
         assert_eq!(forkable(&desktop), None);
 
         // Another harness cannot read this format at all — that is the whole

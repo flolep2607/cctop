@@ -217,7 +217,7 @@ impl App {
     pub(super) fn save_tab_order(&self) {
         for (at, tab) in self.tabs.iter().enumerate() {
             for name in tab.sessions() {
-                crate::rmux::set_order(name, at);
+                cctop_core::rmux::set_order(name, at);
             }
         }
     }
@@ -480,7 +480,7 @@ impl App {
                 let (tx, rx) = std::sync::mpsc::channel();
                 self.shared_listing = Some(rx);
                 std::thread::spawn(move || {
-                    let _ = tx.send(crate::rmux::running());
+                    let _ = tx.send(cctop_core::rmux::running());
                 });
                 return;
             }
@@ -498,7 +498,8 @@ impl App {
                 // server was restarted. The second question only gets asked
                 // about a tab already on its way out, so it costs nothing per
                 // sweep.
-                !running.iter().any(|agent| agent.name == s.name) && !crate::rmux::exists(&s.name)
+                !running.iter().any(|agent| agent.name == s.name)
+                    && !cctop_core::rmux::exists(&s.name)
             });
             if !gone {
                 return true;
@@ -571,22 +572,23 @@ impl App {
         // same way [`restore_running_tabs`] groups them — so a split another
         // cctop made arrives as one tab, and a session already held as part of a
         // tab here does not also turn up as a tab of its own.
-        let free: Vec<crate::rmux::Running> = crate::rmux::in_tab_order_of(running.clone())
-            .into_iter()
-            .filter(|agent| !mine.iter().any(|name| name == &agent.name))
-            .filter(|agent| {
-                !self.tabs.iter().any(|tab| {
-                    tab.sessions()
-                        .any(|held| agent.tab.as_deref() == Some(held))
+        let free: Vec<cctop_core::rmux::Running> =
+            cctop_core::rmux::in_tab_order_of(running.clone())
+                .into_iter()
+                .filter(|agent| !mine.iter().any(|name| name == &agent.name))
+                .filter(|agent| {
+                    !self.tabs.iter().any(|tab| {
+                        tab.sessions()
+                            .any(|held| agent.tab.as_deref() == Some(held))
+                    })
                 })
-            })
-            .collect();
-        for tab in crate::rmux::tabbed(free) {
+                .collect();
+        for tab in cctop_core::rmux::tabbed(free) {
             let Some((leader, rest)) = tab.split_first() else {
                 continue;
             };
             let axis = leader.axis();
-            let rest: Vec<&crate::rmux::Running> = rest.iter().collect();
+            let rest: Vec<&cctop_core::rmux::Running> = rest.iter().collect();
             self.tabs.push(tabs::Tab::split_of(leader, &rest, axis));
             arrived = true;
         }
@@ -604,7 +606,7 @@ impl App {
             return;
         };
         if let Some((path, finished)) = pane.view.stop_recording() {
-            self.set_status(crate::cast::stopped_message(&path, &finished));
+            self.set_status(cctop_core::cast::stopped_message(&path, &finished));
             return;
         }
         let label = pane.label.clone();
@@ -643,7 +645,7 @@ impl App {
         if tab.detached()
             && let Some(shared) = tab.shared.take()
         {
-            let stopped = crate::rmux::kill(&shared.name);
+            let stopped = cctop_core::rmux::kill(&shared.name);
             self.drop_empty_tabs();
             self.set_status(match stopped {
                 Err(error) => format!("Could not stop {}: {error}", shared.label),
@@ -666,7 +668,7 @@ impl App {
         drop(pane);
         self.drop_empty_tabs();
         if let Some((path, finished)) = recorded {
-            self.set_status(crate::cast::stopped_message(&path, &finished));
+            self.set_status(cctop_core::cast::stopped_message(&path, &finished));
         }
 
         self.set_status(match stopped {
@@ -808,12 +810,12 @@ impl App {
         // Grouped, so a split comes back as the one tab it was rather than as
         // one tab per session — see [`rmux::tabbed`]. A session nobody split is a
         // group of one and is a tab exactly as it always was.
-        for tab in crate::rmux::tabbed(crate::rmux::running_in_tab_order()) {
+        for tab in cctop_core::rmux::tabbed(cctop_core::rmux::running_in_tab_order()) {
             let Some((leader, rest)) = tab.split_first() else {
                 continue;
             };
             let axis = leader.axis();
-            let rest: Vec<&crate::rmux::Running> = rest.iter().collect();
+            let rest: Vec<&cctop_core::rmux::Running> = rest.iter().collect();
             self.tabs.push(tabs::Tab::split_of(leader, &rest, axis));
         }
         if !self.tabs.is_empty() {
@@ -825,8 +827,8 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ui::settings::{Item, VIEWS, View};
-    use crate::ui::tests::{key, test_app};
+    use crate::settings::{Item, VIEWS, View};
+    use crate::tests::{key, test_app};
     use ratatui::crossterm::event;
     use ratatui::crossterm::event::KeyCode;
 
@@ -857,7 +859,7 @@ mod tests {
     #[test]
     fn the_settings_tab_is_the_last_stop_and_no_tab_takes_it() {
         let named = |name: &str| {
-            tabs::Tab::for_agent(&crate::rmux::Running {
+            tabs::Tab::for_agent(&cctop_core::rmux::Running {
                 name: format!("cctop-{name}"),
                 pid: None,
                 cwd: None,
@@ -973,7 +975,9 @@ mod tests {
         let all = app.settings_items().len();
         assert_eq!(
             all,
-            crate::settings::SETTINGS.len() + VIEWS.len() + crate::settings::BINDINGS.len(),
+            cctop_core::settings::SETTINGS.len()
+                + VIEWS.len()
+                + cctop_core::settings::BINDINGS.len(),
             "a source is missing rows"
         );
         assert_eq!(all, app.settings_shown().len(), "an empty filter hid rows");
@@ -1084,7 +1088,7 @@ mod tests {
     #[test]
     fn closing_from_the_settings_page_says_there_is_nothing_to_close() {
         let shared = |name: &str| {
-            tabs::Tab::for_agent(&crate::rmux::Running {
+            tabs::Tab::for_agent(&cctop_core::rmux::Running {
                 name: format!("cctop-{name}"),
                 pid: None,
                 cwd: None,
@@ -1140,7 +1144,7 @@ mod tests {
     #[test]
     fn the_bar_changing_under_the_page_leaves_the_page_alone() {
         let shared = |name: &str| {
-            tabs::Tab::for_agent(&crate::rmux::Running {
+            tabs::Tab::for_agent(&cctop_core::rmux::Running {
                 name: format!("cctop-{name}"),
                 pid: None,
                 cwd: None,
@@ -1282,7 +1286,7 @@ mod tests {
         let mut app = test_app();
         let mut children = Vec::new();
         for name in ["first", "second"] {
-            let (child, pid) = crate::shim::test_session(&["sh", "-c", "sleep 30"], (80, 24));
+            let (child, pid) = cctop_core::shim::test_session(&["sh", "-c", "sleep 30"], (80, 24));
             children.push(child);
             let pane = tabs::Pane::view_of(pid, name.to_string()).expect("attach");
             app.tabs.push(tabs::Tab::new(pane));
@@ -1310,7 +1314,7 @@ mod tests {
     #[test]
     fn a_dragged_tab_moves_without_moving_the_view() {
         let named = |name: &str| {
-            tabs::Tab::for_agent(&crate::rmux::Running {
+            tabs::Tab::for_agent(&cctop_core::rmux::Running {
                 name: format!("cctop-{name}"),
                 pid: None,
                 cwd: None,
@@ -1371,7 +1375,7 @@ mod tests {
     #[test]
     fn dragging_a_tab_along_the_bar_reorders_it() {
         let named = |name: &str| {
-            tabs::Tab::for_agent(&crate::rmux::Running {
+            tabs::Tab::for_agent(&cctop_core::rmux::Running {
                 name: format!("cctop-{name}"),
                 pid: None,
                 cwd: None,
@@ -1415,7 +1419,7 @@ mod tests {
         // gesture working; only one of them is reachable on a given runner.
         app.on_mouse(at(press, 12), &layout);
         assert_eq!(app.drag_tab, Some(1), "the press did not pick the tab up");
-        match crate::rmux::available() {
+        match cctop_core::rmux::available() {
             true => assert_eq!(app.tab, 1, "the press did not show the tab"),
             false => {
                 assert_eq!(app.tab, 0, "a tab that cannot be attached moved the view");
@@ -1457,7 +1461,7 @@ mod tests {
     #[test]
     fn right_clicking_a_tab_renames_it() {
         let named = |name: &str| {
-            tabs::Tab::for_agent(&crate::rmux::Running {
+            tabs::Tab::for_agent(&cctop_core::rmux::Running {
                 name: format!("cctop-{name}"),
                 pid: None,
                 cwd: None,
@@ -1547,7 +1551,7 @@ mod tests {
     #[test]
     fn a_tab_is_painted_from_the_same_modal_that_names_it() {
         let named = |name: &str| {
-            tabs::Tab::for_agent(&crate::rmux::Running {
+            tabs::Tab::for_agent(&cctop_core::rmux::Running {
                 name: format!("cctop-{name}"),
                 pid: None,
                 cwd: None,
@@ -1623,7 +1627,7 @@ mod tests {
     /// was left alone rather than claiming a kill that never happened.
     #[test]
     fn closing_a_borrowed_pane_says_the_agent_was_left_running() {
-        let (mut child, pid) = crate::shim::test_session(&["sh", "-c", "sleep 30"], (80, 24));
+        let (mut child, pid) = cctop_core::shim::test_session(&["sh", "-c", "sleep 30"], (80, 24));
         let pane = tabs::Pane::view_of(pid, "agent".into()).expect("attach");
         assert!(
             !pane.owns_agent(),
@@ -1646,7 +1650,7 @@ mod tests {
 
         let _ = child.kill();
         let _ = child.wait();
-        let _ = crate::shim::socket_path(pid).map(std::fs::remove_file);
+        let _ = cctop_core::shim::socket_path(pid).map(std::fs::remove_file);
     }
 
     /// A tab standing for another cctop's agent has no pane here, so every key
@@ -1656,22 +1660,23 @@ mod tests {
     #[test]
     fn a_shared_tab_can_be_closed_without_a_pane_to_close() {
         let mut app = test_app();
-        app.tabs.push(tabs::Tab::for_agent(&crate::rmux::Running {
-            name: "cctop-claude-nosuchsession".into(),
-            pid: Some(4321),
-            cwd: None,
-            attached: false,
-            activity: None,
-            label: Some("claude · Improve super cctop".into()),
-            profile: None,
-            order: None,
-            state: None,
-            color: None,
-            tab: None,
-            pane: None,
-            axis: None,
-            window: None,
-        }));
+        app.tabs
+            .push(tabs::Tab::for_agent(&cctop_core::rmux::Running {
+                name: "cctop-claude-nosuchsession".into(),
+                pid: Some(4321),
+                cwd: None,
+                attached: false,
+                activity: None,
+                label: Some("claude · Improve super cctop".into()),
+                profile: None,
+                order: None,
+                state: None,
+                color: None,
+                tab: None,
+                pane: None,
+                axis: None,
+                window: None,
+            }));
         app.tab = 1;
         // Nothing has emptied it: a tab with no pane is still a tab, or every
         // cctop would drop the ones it is not looking at.
@@ -1695,8 +1700,8 @@ mod tests {
     /// somewhere arbitrary.
     #[test]
     fn the_next_waiting_tab_is_the_next_one_asking() {
-        let shared = |name: &str, signal: Option<crate::hook::Signal>| {
-            tabs::Tab::for_agent(&crate::rmux::Running {
+        let shared = |name: &str, signal: Option<cctop_core::hook::Signal>| {
+            tabs::Tab::for_agent(&cctop_core::rmux::Running {
                 name: format!("cctop-{name}"),
                 pid: None,
                 cwd: None,
@@ -1705,9 +1710,9 @@ mod tests {
                 label: Some(name.to_string()),
                 profile: None,
                 order: None,
-                state: signal.map(|signal| crate::rmux::State {
+                state: signal.map(|signal| cctop_core::rmux::State {
                     signal,
-                    at: crate::rmux::now_secs(),
+                    at: cctop_core::rmux::now_secs(),
                 }),
                 color: None,
                 tab: None,
@@ -1718,10 +1723,10 @@ mod tests {
         };
         let mut app = test_app();
         app.tabs = vec![
-            shared("a", Some(crate::hook::Signal::Busy)),
-            shared("b", Some(crate::hook::Signal::NeedsInput)),
+            shared("a", Some(cctop_core::hook::Signal::Busy)),
+            shared("b", Some(cctop_core::hook::Signal::NeedsInput)),
             shared("c", None),
-            shared("d", Some(crate::hook::Signal::NeedsInput)),
+            shared("d", Some(cctop_core::hook::Signal::NeedsInput)),
         ];
 
         // Bar positions, not vec indices: "a" is 1, "b" is 2, "d" is 4.
@@ -1739,16 +1744,16 @@ mod tests {
         assert_eq!(app.next_waiting(), Some(4), "the jump went backward first");
 
         // Nothing asking: the key has to say so rather than go nowhere quiet.
-        app.tabs = vec![shared("a", Some(crate::hook::Signal::Busy))];
+        app.tabs = vec![shared("a", Some(cctop_core::hook::Signal::Busy))];
         app.next_waiting_tab();
         let status = app.status().expect("nothing was said").to_owned();
         assert!(status.contains("Nothing is waiting"), "{status}");
     }
 
     /// A live row for the agent running as `pid`, doing `state`.
-    fn agent_row(id: &str, pid: u32, state: crate::session::ActivityState) -> Session {
-        let mut row = crate::ui::tests::session(id, true, id);
-        row.process.as_mut().unwrap().process_list = vec![crate::proc::ProcEntry {
+    fn agent_row(id: &str, pid: u32, state: cctop_core::session::ActivityState) -> Session {
+        let mut row = crate::tests::session(id, true, id);
+        row.process.as_mut().unwrap().process_list = vec![cctop_core::proc::ProcEntry {
             pid,
             is_root: true,
             ghost: false,
@@ -1761,8 +1766,8 @@ mod tests {
     }
 
     /// A tab no pane of this cctop's is attached to, for the agent `pid`.
-    fn detached_tab(name: &str, pid: u32, signal: Option<crate::hook::Signal>) -> tabs::Tab {
-        tabs::Tab::for_agent(&crate::rmux::Running {
+    fn detached_tab(name: &str, pid: u32, signal: Option<cctop_core::hook::Signal>) -> tabs::Tab {
+        tabs::Tab::for_agent(&cctop_core::rmux::Running {
             name: format!("cctop-{name}"),
             pid: Some(pid),
             cwd: None,
@@ -1771,9 +1776,9 @@ mod tests {
             label: Some(name.to_string()),
             profile: None,
             order: None,
-            state: signal.map(|signal| crate::rmux::State {
+            state: signal.map(|signal| cctop_core::rmux::State {
                 signal,
-                at: crate::rmux::now_secs(),
+                at: cctop_core::rmux::now_secs(),
             }),
             color: None,
             tab: None,
@@ -1788,7 +1793,7 @@ mod tests {
     /// before it, and looking at the row takes the mark down.
     #[test]
     fn a_turn_that_ended_unseen_is_marked_and_visited_after_a_question() {
-        use crate::session::ActivityState::{Asking, WaitingForInput, Working};
+        use cctop_core::session::ActivityState::{Asking, WaitingForInput, Working};
         let mut app = test_app();
         app.sessions = vec![agent_row("a", 101, Working), agent_row("b", 202, Working)];
         app.tabs = vec![detached_tab("a", 101, None), detached_tab("b", 202, None)];
@@ -1818,7 +1823,7 @@ mod tests {
         let row = app
             .visible
             .iter()
-            .position(|r| matches!(r, crate::ui::Row::Session(0)))
+            .position(|r| matches!(r, crate::Row::Session(0)))
             .expect("the row is not in the table");
         app.selected = row;
         assert!(app.observe_seen(), "clearing the mark owed no frame");
@@ -1869,7 +1874,7 @@ mod tests {
     #[test]
     fn the_keyboard_can_rename_the_tab_it_is_on() {
         let named = |name: &str| {
-            tabs::Tab::for_agent(&crate::rmux::Running {
+            tabs::Tab::for_agent(&cctop_core::rmux::Running {
                 name: format!("cctop-{name}"),
                 pid: None,
                 cwd: None,
@@ -1907,7 +1912,7 @@ mod tests {
     #[test]
     fn the_switcher_narrows_the_bar_and_goes_to_the_pick() {
         let named = |name: &str| {
-            tabs::Tab::for_agent(&crate::rmux::Running {
+            tabs::Tab::for_agent(&cctop_core::rmux::Running {
                 name: format!("cctop-{name}"),
                 pid: None,
                 cwd: None,
@@ -1973,9 +1978,9 @@ mod tests {
     /// name typed; Shift+Tab goes the other way, and it opens on all of them.
     #[test]
     fn tab_in_the_switcher_filters_by_state() {
-        use crate::hook::Signal;
+        use cctop_core::hook::Signal;
         let doing = |name: &str, signal: Signal| {
-            tabs::Tab::for_agent(&crate::rmux::Running {
+            tabs::Tab::for_agent(&cctop_core::rmux::Running {
                 name: format!("cctop-{name}"),
                 pid: None,
                 cwd: None,
@@ -1984,9 +1989,9 @@ mod tests {
                 label: Some(name.to_string()),
                 profile: None,
                 order: None,
-                state: Some(crate::rmux::State {
+                state: Some(cctop_core::rmux::State {
                     signal,
-                    at: crate::rmux::now_secs(),
+                    at: cctop_core::rmux::now_secs(),
                 }),
                 color: None,
                 tab: None,

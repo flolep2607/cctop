@@ -2,14 +2,14 @@
 //! keybind, changed in place.
 //!
 //! Three sources meet here, and this is the only place they do. `[settings]`
-//! and `[keys]` are [`crate::settings`]'s — the file a user wrote, which is why
+//! and `[keys]` are [`cctop_core::settings`]'s — the file a user wrote, which is why
 //! that module owns them. The view choices below are cctop's own: they live in
 //! `ui-prefs.json`, are the running dashboard's own fields, and have no
 //! `config.toml` entry to sit in. Before this page was a tab they were
 //! reachable only by remembering which key pressed which one, and a setting
 //! you cannot see is a setting you cannot find.
 //!
-//! Keeping the view table here rather than in [`crate::settings`] is what stops
+//! Keeping the view table here rather than in [`cctop_core::settings`] is what stops
 //! the file schema depending on the UI: the read and write halves both need
 //! `App`, and a `config.toml` entry that could only be understood by the
 //! dashboard would be one `doctor` and an editor could not check either.
@@ -31,11 +31,11 @@ use super::*;
 /// something else.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Item {
-    /// An entry of `[settings]`, by index into [`crate::settings::SETTINGS`].
+    /// An entry of `[settings]`, by index into [`cctop_core::settings::SETTINGS`].
     Setting(usize),
     /// A view choice, by index into [`VIEWS`].
     View(usize),
-    /// An entry of `[keys]`, by index into [`crate::settings::BINDINGS`].
+    /// An entry of `[keys]`, by index into [`cctop_core::settings::BINDINGS`].
     Key(usize),
 }
 
@@ -230,10 +230,10 @@ pub const VIEWS: [(&str, &str, View); 10] = [
         "claude_account",
         "The Claude account a new tab launches under",
         View::Choice {
-            value: |app| chosen_account(app, crate::pricing::Provider::Claude),
-            options: |app| account_names(app, crate::pricing::Provider::Claude),
+            value: |app| chosen_account(app, cctop_core::pricing::Provider::Claude),
+            options: |app| account_names(app, cctop_core::pricing::Provider::Claude),
             set: |app, name| {
-                set_account(app, crate::pricing::Provider::Claude, name);
+                set_account(app, cctop_core::pricing::Provider::Claude, name);
             },
         },
     ),
@@ -241,10 +241,10 @@ pub const VIEWS: [(&str, &str, View); 10] = [
         "codex_account",
         "The Codex account a new tab launches under",
         View::Choice {
-            value: |app| chosen_account(app, crate::pricing::Provider::Codex),
-            options: |app| account_names(app, crate::pricing::Provider::Codex),
+            value: |app| chosen_account(app, cctop_core::pricing::Provider::Codex),
+            options: |app| account_names(app, cctop_core::pricing::Provider::Codex),
             set: |app, name| {
-                set_account(app, crate::pricing::Provider::Codex, name);
+                set_account(app, cctop_core::pricing::Provider::Codex, name);
             },
         },
     ),
@@ -260,9 +260,9 @@ pub const VIEWS: [(&str, &str, View); 10] = [
 /// [`View::Choice::options`] signature every row in the table shares. The
 /// accounts are read off the filesystem rather than off the dashboard, so a
 /// row that did need the app would be a row reading something else.
-fn account_names(_app: &App, provider: crate::pricing::Provider) -> Vec<String> {
+fn account_names(_app: &App, provider: cctop_core::pricing::Provider) -> Vec<String> {
     let mut names = vec![String::new()];
-    for profile in crate::config::launchable_for(provider) {
+    for profile in cctop_core::config::launchable_for(provider) {
         // The default account is `default` by name, and the empty choice above
         // is that account; offering it twice would make the row cycle through
         // two entries that mean one thing.
@@ -280,7 +280,7 @@ fn account_names(_app: &App, provider: crate::pricing::Provider) -> Vec<String> 
 /// happens to go by. A row that read `default` against an option list whose
 /// first entry is the empty string would show a marker on every account
 /// selection nobody had ever made.
-fn chosen_account(app: &App, provider: crate::pricing::Provider) -> String {
+fn chosen_account(app: &App, provider: cctop_core::pricing::Provider) -> String {
     match app.chosen_profile(provider) {
         // The conventional directory is what "no choice" means here, and it is
         // named `default` on disk; the page does not need to say so.
@@ -295,8 +295,8 @@ fn chosen_account(app: &App, provider: crate::pricing::Provider) -> String {
 /// the machine between the row being drawn and Enter being pressed would
 /// otherwise leave `launch_profile` pointing past the end of a shorter list,
 /// and a new agent would start under whichever account happened to sit there.
-fn set_account(app: &mut App, provider: crate::pricing::Provider, name: &str) {
-    let Some(at) = crate::config::launchable_for(provider)
+fn set_account(app: &mut App, provider: cctop_core::pricing::Provider, name: &str) {
+    let Some(at) = cctop_core::config::launchable_for(provider)
         .iter()
         .position(|p| p.name == name)
     else {
@@ -317,13 +317,13 @@ impl App {
         let Some(path) = &self.settings_file else {
             return;
         };
-        let now = crate::config::file_mtime_ms(path);
+        let now = cctop_core::config::file_mtime_ms(path);
         if now == self.settings_stamp && now != 0 {
             return;
         }
         self.settings_stamp = now;
-        let mut settings = crate::settings::Settings::load_from(path);
-        let (keymap, problems) = crate::settings::Keymap::build(&settings);
+        let mut settings = cctop_core::settings::Settings::load_from(path);
+        let (keymap, problems) = cctop_core::settings::Keymap::build(&settings);
         settings.problems.extend(problems);
         self.settings = settings;
         self.keymap = keymap;
@@ -395,7 +395,7 @@ impl App {
             Some(v) => format!("{name} = {}", v.to_string().trim()),
             None => format!("{name} back to its default"),
         };
-        match crate::settings::write(&path, table, name, value) {
+        match cctop_core::settings::write(&path, table, name, value) {
             Ok(()) => self.set_status(format!("Saved {said}")),
             Err(e) => self.set_status(format!("Could not save: {e}")),
         }
@@ -410,10 +410,10 @@ impl App {
     /// that could only see one of them would be worse than no filter, and the
     /// cursor needs a single numbering to walk.
     pub(super) fn settings_items(&self) -> Vec<Item> {
-        (0..crate::settings::SETTINGS.len())
+        (0..cctop_core::settings::SETTINGS.len())
             .map(Item::Setting)
             .chain((0..VIEWS.len()).map(Item::View))
-            .chain((0..crate::settings::BINDINGS.len()).map(Item::Key))
+            .chain((0..cctop_core::settings::BINDINGS.len()).map(Item::Key))
             .collect()
     }
 
@@ -434,7 +434,7 @@ impl App {
             .filter(|item| {
                 let hay = match item {
                     Item::Setting(i) => {
-                        let (name, default, what) = crate::settings::SETTINGS[*i];
+                        let (name, default, what) = cctop_core::settings::SETTINGS[*i];
                         let (now, _) = self.settings.value_of(name);
                         format!("{name} {default} {what} {now}")
                     }
@@ -443,7 +443,7 @@ impl App {
                         format!("{name} {what} {}", self.view_value(view))
                     }
                     Item::Key(i) => {
-                        let (action, default, what) = crate::settings::BINDINGS[*i];
+                        let (action, default, what) = cctop_core::settings::BINDINGS[*i];
                         format!(
                             "{action} {default} {what} {}",
                             self.settings.key_for(action)
@@ -515,7 +515,7 @@ impl App {
         match item {
             Item::Key(_) => self.settings_capture = true,
             Item::View(i) => self.view_activate(i),
-            Item::Setting(i) => self.setting_activate(crate::settings::SETTINGS[i].0),
+            Item::Setting(i) => self.setting_activate(cctop_core::settings::SETTINGS[i].0),
         }
     }
 
@@ -557,7 +557,7 @@ impl App {
     fn setting_activate(&mut self, name: &str) {
         let (current, _) = self.settings.value_of(name);
         match name {
-            _ if crate::settings::is_toggle(name) => {
+            _ if cctop_core::settings::is_toggle(name) => {
                 let on = current != "true";
                 self.write_setting("settings", name, Some(on.into()));
                 // The one setting with a live switch of its own, so the file
@@ -597,9 +597,9 @@ impl App {
         };
         match item {
             Item::Setting(i) => {
-                self.write_setting("settings", crate::settings::SETTINGS[i].0, None)
+                self.write_setting("settings", cctop_core::settings::SETTINGS[i].0, None)
             }
-            Item::Key(i) => self.write_setting("keys", crate::settings::BINDINGS[i].0, None),
+            Item::Key(i) => self.write_setting("keys", cctop_core::settings::BINDINGS[i].0, None),
             Item::View(i) => self.view_reset(i),
         }
     }
@@ -630,7 +630,7 @@ impl App {
     /// wait. A key another action is on is still taken — the user pressed it
     /// on purpose — but the status line says which action just lost it.
     pub(super) fn settings_capture_key(&mut self, key: ratatui::crossterm::event::KeyEvent) {
-        use crate::settings::BINDINGS;
+        use cctop_core::settings::BINDINGS;
         self.settings_capture = false;
         if key.code == ratatui::crossterm::event::KeyCode::Esc {
             return;
@@ -641,7 +641,7 @@ impl App {
         let Some((action, default, _)) = BINDINGS.get(i) else {
             return;
         };
-        let Some(spec) = crate::settings::key_name(key) else {
+        let Some(spec) = cctop_core::settings::key_name(key) else {
             self.set_status("That key cannot be written in the config file");
             return;
         };
@@ -663,7 +663,7 @@ impl App {
     /// Enter in a field: an empty one resets the entry, anything else is
     /// checked the way the file's reader would check it.
     pub(super) fn settings_commit_input(&mut self) {
-        use crate::settings::SETTINGS;
+        use cctop_core::settings::SETTINGS;
         let Some(text) = self.settings_input.take() else {
             return;
         };

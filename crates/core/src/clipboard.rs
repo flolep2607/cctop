@@ -736,7 +736,7 @@ pub fn copy_to_clipboard(text: &str) {
     // A test that copies — an OSC 52 fed through a pane, a selection — would
     // otherwise land on the clipboard of whoever ran `cargo test`, which is how
     // a developer's copy came back as `hello`.
-    if cfg!(test) {
+    if cfg!(any(test, feature = "test-support")) {
         return;
     }
     // Over ssh the helpers below reach the remote machine's clipboard, and one

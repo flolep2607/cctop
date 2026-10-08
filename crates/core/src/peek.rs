@@ -1,7 +1,7 @@
 //! Reading an agent's screen without holding a pane on it.
 //!
 //! The dashboard reads each tab's screen off the vt100 parser it already owns
-//! ([`Pane::read_screen`](crate::ui::tabs::Pane::read_screen)). A detached rmux
+//! ([`Pane::read_screen`](cctop_ui::tabs::Pane::read_screen)). A detached rmux
 //! tab, and every session a standalone `cctop serve` watches, has no parser in
 //! this process — the screen has to be borrowed from whoever holds it. Two
 //! holders answer: the `cctop run` shim, which replays what the agent last drew
@@ -14,7 +14,7 @@
 //!
 //! ponytail: a peek is one snapshot, so a screen none of the phrases match says
 //! nothing. The still-screen "must be idle" inference belongs to
-//! [`Pane::read_screen`](crate::ui::tabs::Pane::read_screen), which watches the
+//! [`Pane::read_screen`](cctop_ui::tabs::Pane::read_screen), which watches the
 //! screen go still; a snapshot has no history to hold still against, and a
 //! transcript already reads a finished turn well enough on its own.
 
@@ -23,7 +23,7 @@ use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
 
 /// What one read of an agent's screen found.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Screened {
+pub struct Screened {
     /// What it is doing, plainly — asking, or working.
     pub signal: crate::hook::Signal,
     /// What a prompt on screen is asking for, when it can be seen: the `$ …`
@@ -42,7 +42,7 @@ pub(crate) struct Screened {
 /// They age, though: an agent started after the sweep is a pid the map cannot
 /// name, so the sweeps are redone once they are [`SWEEP_STALE`] rather than on
 /// every read.
-pub(crate) struct Peek {
+pub struct Peek {
     /// Every rmux pane as `(pane_pid, pane_id)`, or `None` where there is no
     /// server to ask — the common case worth an early answer of its own.
     panes: Option<Vec<(u32, String)>>,
@@ -55,8 +55,14 @@ pub(crate) struct Peek {
 /// for every session, every tick.
 const SWEEP_STALE: std::time::Duration = std::time::Duration::from_secs(5);
 
+impl Default for Peek {
+    fn default() -> Peek {
+        Peek::new()
+    }
+}
+
 impl Peek {
-    pub(crate) fn new() -> Peek {
+    pub fn new() -> Peek {
         // Swept lazily on the first read rather than eagerly here, so asking
         // for a Peek where nothing is running costs nothing.
         Peek {
@@ -72,7 +78,7 @@ impl Peek {
     /// can lend a screen of — a plain terminal is neither shim nor pane — and
     /// for a screen no phrase matched. The caller falls back to hooks, then to
     /// the transcript, in that order.
-    pub(crate) fn read(&mut self, harness: &str, pid: u32) -> Option<Screened> {
+    pub fn read(&mut self, harness: &str, pid: u32) -> Option<Screened> {
         // Checked before the borrow: a harness with no footer row to match has
         // no screen worth capturing.
         if !crate::screen::screenable(harness) {
@@ -109,7 +115,7 @@ impl Peek {
 /// detached tab knows its session's name, and `rmux::capture` resolves it to
 /// the exact pane rather than prefix-matching a neighbour. Free of [`Peek`]'s
 /// sweeps because it needs neither.
-pub(crate) fn named(name: &str) -> Option<Screened> {
+pub fn named(name: &str) -> Option<Screened> {
     let capture = crate::rmux::capture(name)?;
     let rows = replay(&capture);
     finish(crate::screen::harness_of(name), &rows)

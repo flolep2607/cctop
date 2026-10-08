@@ -69,7 +69,7 @@
 //! the tunnel the user already has (ssh, Tailscale) is still better than
 //! anything here, because it authenticates rather than merely encrypting.
 
-pub(crate) mod actions;
+pub mod actions;
 /// Cross-session aggregation behind `/api/analytics` — the data the
 /// analytics page charts, built from the snapshot plus cached extractions.
 mod analytics;
@@ -83,18 +83,24 @@ mod debug;
 /// A whole conversation as markdown, behind `/api/chat/<id>/markdown`.
 /// Crate-visible because `cctop --export` prints the same document, and a
 /// serve answers for a remote row by running that on the row's machine.
-pub(crate) mod export;
+pub mod export;
+/// The brief that hands a session's work to another harness. Part of the
+/// server's crate rather than core's because the brief carries the
+/// conversation [`chat`] reads, and the page's handoff action is its caller as
+/// much as `--handoff` and the dashboard are.
+pub mod handoff;
 mod http;
 /// `/metrics`, the snapshot in Prometheus's text format.
 mod metrics;
-/// The `--notify` webhook. Crate-visible because the TUI POSTs crossings to
-/// `$CCTOP_NOTIFY_URL` through the same send — one transport, two triggers.
-pub(crate) mod notify;
+/// The `--notify` webhook. Its send is `cctop_core::notify::post`, which the
+/// TUI POSTs crossings to `$CCTOP_NOTIFY_URL` through too — one transport, two
+/// triggers.
+mod notify;
 mod quota;
 /// The per-session postmortem behind `/api/report`. Crate-visible because
 /// `cctop --report` prints the same document — the flag exists so a serve can
 /// answer for a remote row by running it on the machine that has the file.
-pub(crate) mod report;
+pub mod report;
 mod search;
 /// The TUI's tabs, read from rmux, for `/api/tabs`.
 mod tabs;
@@ -103,12 +109,12 @@ mod term;
 /// The run's credentials, and `--token-file`, which keeps them across runs.
 mod tokens;
 
-use crate::fleet;
-use crate::loader::Loader;
-use crate::pricing::Plan;
-use crate::session::Session;
-use crate::tunnel;
-use crate::watch::Watch;
+use cctop_core::fleet;
+use cctop_core::loader::Loader;
+use cctop_core::pricing::Plan;
+use cctop_core::session::Session;
+use cctop_core::tunnel;
+use cctop_core::watch::Watch;
 use http::{EventStream, Request};
 use std::collections::HashMap;
 use std::io::Write;
@@ -254,7 +260,7 @@ struct Shared {
     /// report should not queue behind a directory sweep. It is never saved:
     /// two owners writing one cache file is how a cache file gets corrupted,
     /// and the refresh thread is the owner that has something worth keeping.
-    store: crate::cache::Store,
+    store: cctop_core::cache::Store,
     /// The `/api/quota` document, already serialised.
     ///
     /// Rendered by whoever produced the numbers — the standalone serve's own
@@ -460,7 +466,7 @@ impl Serving {
     /// panes — the page shares that reading rather than standing up a second
     /// poller against the same rate-limited endpoints, and the two can never
     /// disagree.
-    pub fn publish_with_quota(&self, sessions: &[Session], quota: &crate::quota::Quota) {
+    pub fn publish_with_quota(&self, sessions: &[Session], quota: &cctop_core::quota::Quota) {
         let Ok(mut version) = self.version.lock() else {
             return;
         };
@@ -567,7 +573,7 @@ pub fn start(options: Options) -> anyhow::Result<Serving> {
             host_errors: Vec::new(),
         })),
         updated: Condvar::new(),
-        store: crate::cache::Store::new(),
+        store: cctop_core::cache::Store::new(),
         quota: Mutex::new(quota::EMPTY.to_string()),
         topics: Mutex::new(search::Topics::default()),
         notify: options
@@ -615,7 +621,7 @@ pub fn start(options: Options) -> anyhow::Result<Serving> {
         true => String::new(),
         false => format!("?t={token}"),
     };
-    crate::elog::event(
+    cctop_core::elog::event(
         "serve",
         "listen",
         serde_json::json!({
@@ -947,12 +953,12 @@ fn announce(serving: &Serving, bind: &str, no_token: bool) {
 
 /// A token for this run.
 ///
-/// See [`crate::util::random_bytes`] for where the entropy comes from and what
+/// See [`cctop_core::util::random_bytes`] for where the entropy comes from and what
 /// it is worth: enough that a token cannot be guessed from across a network,
 /// which is why the default bind is loopback and this is defence in depth
 /// rather than the defence.
 fn new_token() -> String {
-    crate::util::random_hex(TOKEN_BYTES)
+    cctop_core::util::random_hex(TOKEN_BYTES)
 }
 
 /// Bytes of entropy behind a token, which is twice as many hex characters.
@@ -980,7 +986,7 @@ fn token_matches(expected: &str, given: &str) -> bool {
 ///
 /// A failed poll keeps the previous rows and records why: the ssh connection
 /// dropping has not stopped those agents, and blanking the machine would make
-/// the totals look complete when they are not — the same call [`crate::ui`]
+/// the totals look complete when they are not — the same call [`cctop_ui`]
 /// makes for the same reason.
 fn spawn_host_poller(host: fleet::Host, remotes: Arc<Mutex<Remotes>>) {
     std::thread::spawn(move || {
@@ -1007,12 +1013,12 @@ fn spawn_host_poller(host: fleet::Host, remotes: Arc<Mutex<Remotes>>) {
 ///
 /// Each provider is paced by its own last outcome — a throttled one backs off
 /// without stalling the other — which is the same arithmetic the dashboard's
-/// poller runs (`spawn_quota_poller` in `src/ui/runloop.rs`), minus the burn
+/// poller runs (`spawn_quota_poller` in `crates/ui/src/runloop.rs`), minus the burn
 /// log: a serve records nothing, it only reports.
 fn spawn_quota_poller(shared: Arc<Shared>) {
     std::thread::spawn(move || {
-        let mut claude: Vec<crate::quota::ProfileQuota> = Vec::new();
-        let mut codex: Vec<crate::quota::ProfileQuota> = Vec::new();
+        let mut claude: Vec<cctop_core::quota::ProfileQuota> = Vec::new();
+        let mut codex: Vec<cctop_core::quota::ProfileQuota> = Vec::new();
         let (mut claude_due, mut codex_due) = (Instant::now(), Instant::now());
         loop {
             let now = Instant::now();
@@ -1022,11 +1028,11 @@ fn spawn_quota_poller(shared: Arc<Shared>) {
             // to be polite to the provider, and a machine with two logins is
             // not entitled to twice the requests.
             if now >= claude_due {
-                claude = crate::config::accounts_for(crate::pricing::Provider::Claude)
+                claude = cctop_core::config::accounts_for(cctop_core::pricing::Provider::Claude)
                     .iter()
-                    .map(|profile| crate::quota::ProfileQuota {
+                    .map(|profile| cctop_core::quota::ProfileQuota {
                         profile: profile.name.clone(),
-                        status: crate::quota::fetch_claude(profile),
+                        status: cctop_core::quota::fetch_claude(profile),
                         source: profile.source,
                     })
                     .collect();
@@ -1041,11 +1047,11 @@ fn spawn_quota_poller(shared: Arc<Shared>) {
                 changed = true;
             }
             if now >= codex_due {
-                codex = crate::config::accounts_for(crate::pricing::Provider::Codex)
+                codex = cctop_core::config::accounts_for(cctop_core::pricing::Provider::Codex)
                     .iter()
-                    .map(|profile| crate::quota::ProfileQuota {
+                    .map(|profile| cctop_core::quota::ProfileQuota {
                         profile: profile.name.clone(),
-                        status: crate::quota::fetch_codex(profile),
+                        status: cctop_core::quota::fetch_codex(profile),
                         source: profile.source,
                     })
                     .collect();
@@ -1058,7 +1064,7 @@ fn spawn_quota_poller(shared: Arc<Shared>) {
                 changed = true;
             }
             if changed && let Ok(mut slot) = shared.quota.lock() {
-                *slot = serde_json::to_string(&quota::document(&crate::quota::Quota {
+                *slot = serde_json::to_string(&quota::document(&cctop_core::quota::Quota {
                     fetched: true,
                     claude: claude.clone(),
                     codex: codex.clone(),
@@ -1082,26 +1088,26 @@ fn spawn_refresher(shared: Arc<Shared>, remotes: Arc<Mutex<Remotes>>, plan: Plan
         // Blocking, once, before the first snapshot: a dashboard whose first
         // frame shows every cost as zero is worse than one that appears a
         // second later with the truth.
-        crate::pricing::refresh_pricing_blocking();
+        cctop_core::pricing::refresh_pricing_blocking();
 
         let mut loader = Loader::new();
         let watch = Watch::start();
         // A hook listener of our own: agents report to every socket in the
         // directory, so a standalone serve sees a permission prompt the moment
         // it goes up whether or not a dashboard process is running.
-        let listener = crate::hook::Listener::start();
-        let mut reports = crate::hook::Reports::new();
+        let listener = cctop_core::hook::Listener::start();
+        let mut reports = cctop_core::hook::Reports::new();
         // Reading an agent's screen needs somewhere to read it from — a shim
         // socket or an rmux pane — which [`Peek`] finds once and reuses. The
         // same opt-in as the TUI's: the phrases are each agent's own UI, not a
         // contract, so they are only looked for when the file says so.
-        let mut peek = crate::peek::Peek::new();
-        let read_screen = crate::settings::Settings::load().read_screen == Some(true);
+        let mut peek = cctop_core::peek::Peek::new();
+        let read_screen = cctop_core::settings::Settings::load().read_screen == Some(true);
         loader.set_hook_claims(reports.claims.clone());
         // The YOLO switch, read on every pass. Only a serve that may act
-        // competes to answer for it — see [`crate::yolo`] for why only one
+        // competes to answer for it — see [`cctop_core::yolo`] for why only one
         // cctop on the machine ever presses.
-        let mut yolo = crate::yolo::Auto::new(shared.actions);
+        let mut yolo = cctop_core::yolo::Auto::new(shared.actions);
         let mut rows = loader.load(plan);
         stamp(&mut rows, &reports, &mut peek, read_screen);
         yolo.tick(&mut rows);
@@ -1128,7 +1134,7 @@ fn spawn_refresher(shared: Arc<Shared>, remotes: Arc<Mutex<Remotes>>, plan: Plan
                 let (lifecycle, moved) = reports.observe(&event);
                 appeared |= lifecycle;
                 if moved {
-                    crate::hook::save_claims(&reports.claims);
+                    cctop_core::hook::save_claims(&reports.claims);
                     loader.set_hook_claims(reports.claims.clone());
                 }
             }
@@ -1176,8 +1182,8 @@ fn spawn_refresher(shared: Arc<Shared>, remotes: Arc<Mutex<Remotes>>, plan: Plan
 /// row.
 fn stamp(
     rows: &mut [Session],
-    reports: &crate::hook::Reports,
-    peek: &mut crate::peek::Peek,
+    reports: &cctop_core::hook::Reports,
+    peek: &mut cctop_core::peek::Peek,
     read_screen: bool,
 ) {
     for session in rows.iter_mut() {
@@ -1205,9 +1211,9 @@ fn publish(
     remotes: &Mutex<Remotes>,
     local: &[Session],
     plan: Plan,
-    store: &crate::cache::Store,
+    store: &cctop_core::cache::Store,
     version: &mut u64,
-    usage: Option<&crate::quota::Quota>,
+    usage: Option<&cctop_core::quota::Quota>,
 ) {
     let (mut sessions, host_errors) = match remotes.lock() {
         Ok(remotes) => {
@@ -1232,8 +1238,8 @@ fn publish(
 
     // The same document `--json` prints and `--host` parses, from the same
     // builder: a browser being shown different figures than the terminal is a
-    // bug nobody would think to look for. See [`crate::json::sessions`].
-    let document = crate::json::sessions(&sessions, plan, store);
+    // bug nobody would think to look for. See [`cctop_core::json::sessions`].
+    let document = cctop_core::json::sessions(&sessions, plan, store);
     // Serialised a row at a time and joined, which is byte for byte what the
     // whole array would serialise to — so the dashboard's document is
     // unchanged, and a session page's stream can send its one row of it.
@@ -1270,7 +1276,7 @@ fn publish(
         sessions,
         host_errors,
     });
-    crate::elog::event(
+    cctop_core::elog::event(
         "scan",
         "snapshot",
         serde_json::json!({
@@ -1392,7 +1398,7 @@ fn serve_connection(shared: &Shared, stream: &mut TcpStream) {
             )
         })
     else {
-        crate::elog::event(
+        cctop_core::elog::event(
             "http",
             "request",
             serde_json::json!({"method": request.method, "path": request.path, "access": "denied"}),
@@ -1404,7 +1410,7 @@ fn serve_connection(shared: &Shared, stream: &mut TcpStream) {
             "missing or wrong access token — open the link cctop printed",
         );
     };
-    crate::elog::event(
+    cctop_core::elog::event(
         "http",
         "request",
         serde_json::json!({
@@ -1611,7 +1617,7 @@ fn serve_connection(shared: &Shared, stream: &mut TcpStream) {
         // follow input on its own. Read-only, and only for cctop's tabs.
         _ if path.starts_with("/api/window/") => {
             let name = &path["/api/window/".len()..];
-            if !tabs::is_tab(&crate::rmux::running(), name) {
+            if !tabs::is_tab(&cctop_core::rmux::running(), name) {
                 return http::respond_error(
                     stream,
                     Some(&request),
@@ -1619,11 +1625,11 @@ fn serve_connection(shared: &Shared, stream: &mut TcpStream) {
                     "no open tab by that name",
                 );
             }
-            match crate::rmux::window_size(name) {
+            match cctop_core::rmux::window_size(name) {
                 // The browsers' own sizes ride along, so the page can tell the
                 // window is already a browser's without measuring its drawing.
                 Some((cols, rows)) => {
-                    let web: Vec<[u16; 2]> = crate::rmux::clients(name)
+                    let web: Vec<[u16; 2]> = cctop_core::rmux::clients(name)
                         .into_iter()
                         .filter(|(browser, _, _)| *browser)
                         .map(|(_, c, r)| [c, r])
@@ -1642,7 +1648,11 @@ fn serve_connection(shared: &Shared, stream: &mut TcpStream) {
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map_or(0, |d| d.as_secs());
-            let list = tabs::build(crate::rmux::running_in_tab_order(), &snapshot.sessions, now);
+            let list = tabs::build(
+                cctop_core::rmux::running_in_tab_order(),
+                &snapshot.sessions,
+                now,
+            );
             // Polled every few seconds by every open page and nearly always
             // the same answer, so it goes out tagged and comes back a `304`.
             // Tab names, titles and states — what the page shows in its bar,
@@ -1690,11 +1700,11 @@ fn api_search(shared: &Shared, stream: &mut TcpStream, request: &Request) {
 /// request rather than on the refresh clock — the same cost the CLI pays when
 /// asked the same question.
 fn api_insight(shared: &Shared, stream: &mut TcpStream, request: &Request, which: &str) {
-    let analyses = crate::insight::scan(shared.plan);
-    let selected = crate::insight::only(&analyses, None);
+    let analyses = cctop_core::insight::scan(shared.plan);
+    let selected = cctop_core::insight::only(&analyses, None);
     let text = match which {
-        "optimize" => crate::insight::optimize::report(&selected),
-        _ => crate::insight::compare::report(&selected),
+        "optimize" => cctop_core::insight::optimize::report(&selected),
+        _ => cctop_core::insight::compare::report(&selected),
     };
     http::respond(
         stream,
@@ -1912,7 +1922,11 @@ fn api_access(shared: &Shared, stream: &mut TcpStream, request: &Request, id: &s
     // the rest of the answer is worth having without it — so a session whose
     // extraction fails still reports its instructions, skills and servers.
     let data = shared.store.session_data_fresh(session);
-    json(stream, request, &crate::access::build(session, Some(&data)));
+    json(
+        stream,
+        request,
+        &cctop_core::access::build(session, Some(&data)),
+    );
 }
 
 /// The guards every acting route shares, answered here once: a read-only link,
@@ -2202,7 +2216,7 @@ fn relay_terminal(
     let Some(port) = port
         .parse::<u16>()
         .ok()
-        .filter(|p| crate::rmux::relayable(*p))
+        .filter(|p| cctop_core::rmux::relayable(*p))
     else {
         return http::respond_error(stream, Some(request), 404, "no such terminal");
     };
@@ -2313,7 +2327,7 @@ fn events_every(shared: &Shared, stream: &mut TcpStream, request: &Request, keep
     let Ok(mut sse) = EventStream::open(stream, request) else {
         return;
     };
-    crate::elog::event("sse", "open", serde_json::json!({}));
+    cctop_core::elog::event("sse", "open", serde_json::json!({}));
 
     let mut sent = 0u64;
     let mut wrote = Instant::now();
@@ -2396,7 +2410,7 @@ fn events_every(shared: &Shared, stream: &mut TcpStream, request: &Request, keep
             wrote = Instant::now();
         }
     };
-    crate::elog::event(
+    cctop_core::elog::event(
         "sse",
         "close",
         serde_json::json!({ "by": by, "sent": sent }),
@@ -2708,7 +2722,7 @@ mod tests {
     use super::*;
 
     fn session(id: &str) -> Session {
-        Session::new(crate::pricing::Provider::Claude, id.into())
+        Session::new(cctop_core::pricing::Provider::Claude, id.into())
     }
 
     #[test]
@@ -2827,7 +2841,7 @@ mod tests {
                 host_errors: Vec::new(),
             })),
             updated: Condvar::new(),
-            store: crate::cache::Store::new(),
+            store: cctop_core::cache::Store::new(),
             quota: Mutex::new(quota::EMPTY.to_string()),
             topics: Mutex::new(search::Topics::default()),
             notify: None,
@@ -2898,7 +2912,7 @@ mod tests {
         let path =
             std::env::temp_dir().join(format!("cctop-serve-search-{}.jsonl", std::process::id()));
         std::fs::write(&path, "{\"text\":\"please fix the flywheel\"}\n").unwrap();
-        let mut s = Session::new(crate::pricing::Provider::Claude, "sess-1".into());
+        let mut s = Session::new(cctop_core::pricing::Provider::Claude, "sess-1".into());
         s.data_file = Some(path.clone());
 
         let shared = shared("", "");
@@ -2952,7 +2966,7 @@ mod tests {
             r#"{"type":"user","timestamp":"2026-10-07T10:00:09Z","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"test result: ok"}]}}"#,
         ];
         std::fs::write(&path, lines.join("\n")).unwrap();
-        let mut s = Session::new(crate::pricing::Provider::Claude, "sess-md".into());
+        let mut s = Session::new(cctop_core::pricing::Provider::Claude, "sess-md".into());
         s.data_file = Some(path);
 
         let guarded = shared("full", "view");

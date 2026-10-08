@@ -32,7 +32,7 @@
 //! separately, because to them it is two pieces of work rather than one.
 
 use super::*;
-use crate::session::ActivityState;
+use cctop_core::session::ActivityState;
 use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex, PoisonError};
 
@@ -87,8 +87,8 @@ impl Group {
             self.cost = Some(self.cost.unwrap_or(0.0) + c);
         }
         let newer = match (
-            crate::util::parse_ts(&s.last_active),
-            crate::util::parse_ts(&self.last_active),
+            cctop_core::util::parse_ts(&s.last_active),
+            cctop_core::util::parse_ts(&self.last_active),
         ) {
             (Some(a), Some(b)) => a > b,
             (Some(_), None) => true,
@@ -177,7 +177,10 @@ fn locate(dir: &Path) -> Located {
     let common = match std::fs::read_to_string(target.join("commondir")) {
         Ok(rel) => {
             let joined = target.join(rel.trim());
-            PathBuf::from(crate::collide::normalise(&joined.to_string_lossy(), "/"))
+            PathBuf::from(cctop_core::collide::normalise(
+                &joined.to_string_lossy(),
+                "/",
+            ))
         }
         Err(_) => target,
     };
@@ -215,12 +218,12 @@ fn place(s: &Session) -> Place {
             } else {
                 match root.strip_prefix(&home) {
                     Ok(inside) => inside.to_string_lossy().into_owned(),
-                    Err(_) => crate::util::tildify(&root.to_string_lossy()),
+                    Err(_) => cctop_core::util::tildify(&root.to_string_lossy()),
                 }
             };
             Place {
                 repo: format!("repo:{}", common.display()),
-                repo_label: crate::util::tildify(&home.to_string_lossy()),
+                repo_label: cctop_core::util::tildify(&home.to_string_lossy()),
                 checkout: Some((format!("wt:{}", root.display()), checkout_label)),
             }
         }
@@ -234,7 +237,7 @@ fn place(s: &Session) -> Place {
         },
         None => Place {
             repo: format!("dir:{dir}"),
-            repo_label: crate::util::tildify(dir),
+            repo_label: cctop_core::util::tildify(dir),
             checkout: None,
         },
     }
@@ -252,7 +255,10 @@ type Checkout = (Option<(String, String)>, Vec<usize>);
 
 /// The fold key of a user's heading, and the prefix of every heading under it.
 fn user_key(s: &Session) -> String {
-    format!("user:{}", crate::config::user_label(s.owner.as_deref()))
+    format!(
+        "user:{}",
+        cctop_core::config::user_label(s.owner.as_deref())
+    )
 }
 
 /// A heading's fold key under `scope` — empty without a user level, so a
@@ -314,7 +320,8 @@ pub(super) fn build(
     }
     rank(&mut users, |(_, m)| m.clone(), sessions, sort);
     for (key, members) in users {
-        let label = crate::config::user_label(sessions[members[0]].owner.as_deref()).to_string();
+        let label =
+            cctop_core::config::user_label(sessions[members[0]].owner.as_deref()).to_string();
         tree.indent.push(String::new());
         let mut g = Group {
             collapsed: collapsed.contains(&key),
@@ -524,7 +531,7 @@ fn repos(
                 .push(format!("{rail}{}", if last { "└─ " } else { "├─ " }));
             let folded = heading(tree, key, label, depth + 1, &members);
             if let Some(g) = tree.groups.last_mut() {
-                g.branch = crate::branch::branch_of(&sessions[members[0]]);
+                g.branch = cctop_core::branch::branch_of(&sessions[members[0]]);
             }
             if !folded {
                 leaves(
@@ -649,7 +656,7 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ui::tests::{session, test_app};
+    use crate::tests::{session, test_app};
 
     /// A scratch tree of directories, removed when the test ends.
     struct Scratch(PathBuf);
@@ -906,7 +913,7 @@ mod tests {
         assert!(first_repo(&app).ends_with("one"), "{:?}", groups_of(&app));
 
         // Context does not add up, so the fullest session's group leads.
-        app.sessions[3].context = Some(crate::session::ContextUsage {
+        app.sessions[3].context = Some(cctop_core::session::ContextUsage {
             used: 150_000,
             max: 200_000,
             compacted: false,
@@ -946,7 +953,7 @@ mod tests {
         let mut app = test_app();
         app.tree = true;
         let mut parent = session("p", true, &repo);
-        parent.subagents = vec![crate::session::Subagent {
+        parent.subagents = vec![cctop_core::session::Subagent {
             agent_id: "agent-1".into(),
             agent_type: "general-purpose".into(),
             description: "look".into(),
@@ -954,7 +961,7 @@ mod tests {
             started_at: None,
             last_active: None,
             duration_ms: 0,
-            status: crate::session::SubagentStatus::Running,
+            status: cctop_core::session::SubagentStatus::Running,
             cost: 0.0,
             tool_count: 0,
             tool_use_id: None,
@@ -1010,7 +1017,7 @@ mod tests {
     /// move the bottom panels, heading or not.
     #[test]
     fn the_keys_fold_a_heading_and_leave_the_panels_alone() {
-        use crate::ui::tests::key;
+        use crate::tests::key;
         use ratatui::crossterm::event::KeyCode;
         let fx = Scratch::new("keys");
         let repo = fx.repo("r");
@@ -1041,7 +1048,7 @@ mod tests {
     /// a repository at all.
     #[test]
     fn f_resolves_where_a_worktree_forks_from() {
-        use crate::ui::tests::key;
+        use crate::tests::key;
         use ratatui::crossterm::event::KeyCode;
         let fx = Scratch::new("fork");
         let repo = fx.repo("r");
@@ -1130,7 +1137,7 @@ mod tests {
             .collect();
         assert_eq!(
             users,
-            ["ana", crate::config::MY_USER.as_str()],
+            ["ana", cctop_core::config::MY_USER.as_str()],
             "{groups:?}"
         );
         assert_eq!(

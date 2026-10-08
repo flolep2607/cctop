@@ -1,73 +1,66 @@
+# The version lives here, once, for every crate in the workspace — and before
+# anything else in the file, because the release workflow reads the first
+# `version` line of this file as the version to tag.
+#
 # 0.23.0 is cut from the commit that touches this file: the first attempt failed verify, so nothing was tagged.
 #
-# The commit that bumps this must bump `Cargo.lock` with it, in the same commit.
+# The commit that bumps this must bump `Cargo.lock` with it, in the same commit,
+# and the three `=` requirements on the internal crates under
+# `[workspace.dependencies]` with it — cargo refuses to resolve the moment one
+# of them disagrees, so a forgotten one fails loudly rather than shipping.
 # `verify / package` runs `cargo publish --dry-run`, which refuses a dirty tree,
 # and cargo rewrites the lock the moment it reads a version that disagrees with
 # it — so a bump on its own leaves one file changed and fails the release before
 # anything is tagged. 0.26.2 shipped that way once.
-[package]
-name = "cctop"
+[workspace.package]
 version = "0.28.2"
 edition = "2024"
 rust-version = "1.88"
-description = "An htop-like terminal monitor for AI coding agent sessions on Linux (Claude Code, Codex, Cursor, Devin, Gemini CLI, OpenCode, Pi, Windsurf)"
 license = "MIT"
 repository = "https://github.com/flolep2607/cctop"
 homepage = "https://github.com/flolep2607/cctop"
-readme = "README.md"
-# Derives the session cache's version from the parser sources; see build.rs.
-build = "build.rs"
-# crates.io accepts at most five — "monitoring" is in the description already.
-keywords = ["tui", "claude", "codex", "devin", "htop"]
-categories = ["command-line-utilities", "development-tools"]
-# docs/harnesses is a mirror of seven other projects' documentation — 14 MB of
-# it, against a 10 MB crate limit. It is for people reading this repository,
-# not for people installing the binary.
-# /docs/harnesses is 14 MB of other people's documentation against a 10 MB
-# crate limit. /docs/rmux is a fifth of a megabyte and could ship, but it is a
-# mirror on the same terms and belongs on the same side of the line.
-# /RnD is working notes — research, ideas and dead ends. It is for people
-# reading this repository, on the same terms as the mirrors above.
-exclude = ["/.github", "/target", "/docs/harnesses", "/docs/rmux", "/RnD", "/vendor", "/web"]
 
-# Off by default and never enabled for a release: `debug` compiles in
-# `src/serve/debug.rs`, which can make the server fail on demand. Handy against
-# a fixture (`cargo run --features debug -- serve`), and not something to ship —
-# a build without it contains neither the routes nor the strings that name them.
-[features]
-debug = []
+# cctop is one binary built from four crates, cut where the dependencies
+# already ran one way, so that an edit recompiles only what sits above it:
+#
+#   cctop (this package: main, cli, doctor, why, wait, mcp, recall)
+#     └─ cctop-ui      the terminal dashboard
+#          └─ cctop-serve   the web server, and the conversation model it
+#                           shares with the dashboard (chat, report, export,
+#                           handoff, actions)
+#               └─ cctop-core   sessions and their parsers, the cache,
+#                               pricing, config, processes, hooks, rmux and
+#                               the shim — everything both faces read
+#
+# - **core / everything else.** Sessions, the parsers and the cache are what
+#   every surface reads, and they reach each other in every direction (the
+#   loader needs the hooks, the hooks need the sessions), so they stay one
+#   crate rather than a cut through a cycle.
+# - **serve above core.** Nothing below it serves anything. What core used to
+#   borrow from it — the tunnel, the webhook POST, answering a prompt — moved
+#   down, because each had a user with no server running.
+# - **ui above serve.** The dashboard really does use the server: it starts
+#   one to share a session, and draws the conversation serve builds. The
+#   server uses nothing of the dashboard's. An edit to ui rebuilds ui and the
+#   binary; one to serve rebuilds serve, ui and the binary; neither touches
+#   core.
+# - **the binary on top**, holding the command line and the commands nothing
+#   else calls, so that changing a flag rebuilds only the binary.
+#
+# Every crate is published, at this one version, because `cargo install cctop`
+# builds from crates.io and a crates.io package can only depend on others
+# that are there too. The internal ones are not meant to be used on their own
+# and promise no API between versions; the `=` pins below are what keeps a
+# `cargo install cctop@x` from ever pairing it with another version's core.
+[workspace]
+members = ["crates/core", "crates/serve", "crates/ui"]
+resolver = "3"
 
-# `cargo binstall cctop` fetches the release archive instead of compiling. Its
-# default guesses would find these names too, but only after probing a dozen
-# URLs that 404; spelled out, it asks once. Only musl archives are built, and
-# binstall already falls back from a gnu host to the musl target on its own.
-[package.metadata.binstall]
-pkg-url = "{ repo }/releases/download/v{ version }/{ name }-{ target }{ archive-suffix }"
-pkg-fmt = "tgz"
-bin-dir = "{ bin }{ binary-ext }"
+[workspace.dependencies]
+cctop-core = { path = "crates/core", version = "=0.28.2" }
+cctop-serve = { path = "crates/serve", version = "=0.28.2" }
+cctop-ui = { path = "crates/ui", version = "=0.28.2" }
 
-[profile.release]
-# A monitoring tool is launched often and lives in the terminal; a smaller,
-# faster binary is worth the extra link time on release builds only.
-lto = true
-codegen-units = 1
-strip = true
-
-# Full debug info is mostly link time and disk for a debugger nobody attached.
-# Line tables keep panic backtraces useful; `--profile debugging` restores the
-# rest when someone does want to step through. Per the Cargo book's
-# build-performance guide.
-[profile.dev]
-debug = "line-tables-only"
-
-[profile.dev.package."*"]
-debug = false
-
-[profile.debugging]
-inherits = "dev"
-debug = true
-
-[dependencies]
 anyhow = "1.0.104"
 # The pty shim and TIOCSTI injection need libc. It is already in the tree under
 # sysinfo, so this adds no dependency.
@@ -198,16 +191,93 @@ ratatui-image = { version = "11.0.8", default-features = false }
 # the same set the sniff accepts (clipboard::format_of): a JPEG or WebP that
 # could not preview would still paste, but the toast would go silently missing.
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
-# Decodes the station the rave plays (src/ui/rave/sound.rs). Pure Rust, so it
+# Decodes the station the rave plays (crates/ui/src/rave/sound.rs). Pure Rust, so it
 # links into the static musl build where an audio crate tied to the system's
 # sound library could not; MP3 alone, because that is all the stream is.
 symphonia = { version = "0.6.1", default-features = false, features = ["mp3"] }
-
-[dev-dependencies]
-# Whole-screen snapshots of the TUI (`ui::snapshot`). The `.snap` files are
+# Whole-screen snapshots of the TUI (`cctop_ui::snapshot`). The `.snap` files are
 # committed, so CI compares against them and needs no insta CLI; CLAUDE.md
 # says how to accept a change.
 insta = "1.48.0"
+
+[package]
+name = "cctop"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "An htop-like terminal monitor for AI coding agent sessions on Linux (Claude Code, Codex, Cursor, Devin, Gemini CLI, OpenCode, Pi, Windsurf)"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+# crates.io accepts at most five — "monitoring" is in the description already.
+keywords = ["tui", "claude", "codex", "devin", "htop"]
+categories = ["command-line-utilities", "development-tools"]
+# /docs/harnesses is 14 MB of other people's documentation against a 10 MB
+# crate limit. /docs/rmux is a fifth of a megabyte and could ship, but it is a
+# mirror on the same terms and belongs on the same side of the line.
+# /RnD is working notes — research, ideas and dead ends. It is for people
+# reading this repository, on the same terms as the mirrors above.
+# /crates are the other packages of this workspace, each published on its own
+# (cargo leaves them out anyway; listed so the reason is written down).
+exclude = ["/.github", "/target", "/crates", "/docs/harnesses", "/docs/rmux", "/RnD", "/vendor", "/web"]
+
+# Off by default and never enabled for a release: `debug` compiles in
+# `crates/serve/src/debug.rs`, which can make the server fail on demand. Handy
+# against a fixture (`cargo run --features debug -- serve`), and not something
+# to ship — a build without it contains neither the routes nor the strings that
+# name them.
+[features]
+debug = ["cctop-serve/debug"]
+
+# `cargo binstall cctop` fetches the release archive instead of compiling. Its
+# default guesses would find these names too, but only after probing a dozen
+# URLs that 404; spelled out, it asks once. Only musl archives are built, and
+# binstall already falls back from a gnu host to the musl target on its own.
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/{ name }-{ target }{ archive-suffix }"
+pkg-fmt = "tgz"
+bin-dir = "{ bin }{ binary-ext }"
+
+[dependencies]
+cctop-core.workspace = true
+cctop-serve.workspace = true
+cctop-ui.workspace = true
+anyhow.workspace = true
+chrono.workspace = true
+clap.workspace = true
+crossterm.workspace = true
+libc.workspace = true
+mimalloc.workspace = true
+rayon.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+# Core's test-only guards — no bell, no clipboard, no write to the real
+# preferences — for this crate's tests as for core's own. See its `test-support`.
+cctop-core = { workspace = true, features = ["test-support"] }
+
+[profile.release]
+# A monitoring tool is launched often and lives in the terminal; a smaller,
+# faster binary is worth the extra link time on release builds only.
+lto = true
+codegen-units = 1
+strip = true
+
+# Full debug info is mostly link time and disk for a debugger nobody attached.
+# Line tables keep panic backtraces useful; `--profile debugging` restores the
+# rest when someone does want to step through. Per the Cargo book's
+# build-performance guide.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+
+[profile.debugging]
+inherits = "dev"
+debug = true
 
 # The quick-tunnel client, patched to carry WebSockets. Cloudflare's edge
 # strips `Upgrade`/`Connection` and marks the stream a WebSocket instead;

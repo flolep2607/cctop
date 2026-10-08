@@ -8,8 +8,8 @@
 //!
 //! # Why this is a module rather than a function in each caller
 //!
-//! Both surfaces widen: the terminal through `crate::ui::worker`, the browser
-//! through `crate::serve::search`. This existed in both of them, twice over —
+//! Both surfaces widen: the terminal through `cctop_ui::worker`, the browser
+//! through `cctop_serve::search`. This existed in both of them, twice over —
 //! the same three constants, the same lazily-loaded model, the same
 //! refresh-and-save, the same floor and limit — and the two copies agreed only
 //! because a doc comment in each pointed at the other and said so. Nothing

@@ -75,7 +75,7 @@ fn cache_base() -> PathBuf {
 /// perfectly good home for sockets (it is what the fallback already was), so an
 /// unusable runtime directory is treated as an absent one.
 pub fn runtime_base() -> PathBuf {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if let Some(dir) = test_runtime_base() {
         return dir;
     }
@@ -98,14 +98,14 @@ pub fn runtime_base() -> PathBuf {
 /// to find is a second live listener's socket to somebody else. The fallback for
 /// a test that claims nothing is still a temporary directory, so no test reaches
 /// the real one by forgetting.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub struct RuntimeBase {
     previous: Option<PathBuf>,
     #[allow(dead_code)]
     dir: PathBuf,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     static TEST_RUNTIME_BASE: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
 }
@@ -113,11 +113,11 @@ thread_local! {
 /// A directory no test outside this process can see, as the fallback for a test
 /// that claims none of its own. Kept rather than removed so a failing run leaves
 /// something to look at.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 static TEST_RUNTIME_ROOT: LazyLock<PathBuf> =
     LazyLock::new(|| std::env::temp_dir().join(format!("cctop-runtime-{}", std::process::id())));
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn test_runtime_base() -> Option<PathBuf> {
     let claimed = TEST_RUNTIME_BASE.with(|dir| dir.borrow().clone());
     if claimed.is_none() {
@@ -130,7 +130,7 @@ fn test_runtime_base() -> Option<PathBuf> {
 ///
 /// `name` is only a label: two tests that pass the same one are in the same
 /// directory, which is what makes it a collision rather than a sharing.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub fn claim_test_runtime_base(name: &str) -> RuntimeBase {
     let dir = TEST_RUNTIME_ROOT.join(name);
     std::fs::create_dir_all(&dir).expect("a runtime directory for this test");
@@ -138,7 +138,7 @@ pub fn claim_test_runtime_base(name: &str) -> RuntimeBase {
     RuntimeBase { previous, dir }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl Drop for RuntimeBase {
     fn drop(&mut self) {
         TEST_RUNTIME_BASE.with(|claimed| *claimed.borrow_mut() = self.previous.take());

@@ -7,9 +7,9 @@ use super::spark;
 use super::table;
 use super::theme::{self, Gradient};
 use super::{App, Mode, drunk, effects, high, panels, rave, scrollbar, tabs, toast};
-use crate::pricing::Provider;
-use crate::session::Surface;
-use crate::util;
+use cctop_core::pricing::Provider;
+use cctop_core::session::Surface;
+use cctop_core::util;
 use ratatui::Frame;
 use ratatui::crossterm::event;
 use ratatui::layout::{Constraint, Layout as RLayout, Rect};
@@ -834,7 +834,7 @@ enum QuotaDetail {
 fn pane_quota(
     label: &str,
     profile: Option<&str>,
-    quota: &crate::quota::Quota,
+    quota: &cctop_core::quota::Quota,
     now: i64,
     budget: u16,
 ) -> Option<String> {
@@ -866,8 +866,12 @@ fn pane_quota(
 }
 
 /// One provider's windows, compacted to `detail`.
-fn quota_suffix(status: &crate::quota::ProviderStatus, now: i64, detail: QuotaDetail) -> String {
-    let crate::quota::ProviderStatus::Ok(quota) = status else {
+fn quota_suffix(
+    status: &cctop_core::quota::ProviderStatus,
+    now: i64,
+    detail: QuotaDetail,
+) -> String {
+    let cctop_core::quota::ProviderStatus::Ok(quota) = status else {
         return String::new();
     };
     let windows = quota.windows.iter().map(|window| match detail {
@@ -1565,7 +1569,7 @@ fn draw_bottom(frame: &mut Frame, area: Rect, app: &mut App, layout: &mut Layout
             format!("{}: {}", sub.agent_type, sub.description)
         };
         spans.push(Span::styled(
-            format!("↳ {}", crate::util::truncate(&what, 48)),
+            format!("↳ {}", cctop_core::util::truncate(&what, 48)),
             Style::default().fg(theme::colors().accent),
         ));
     }
@@ -1729,7 +1733,7 @@ fn draw_tool_sidebar(
     frame: &mut Frame,
     inner: Rect,
     app: &App,
-    data: &crate::session::SessionData,
+    data: &cctop_core::session::SessionData,
     live: Option<&str>,
     width: usize,
     layout: &mut Layout,
@@ -1817,7 +1821,7 @@ fn draw_tool_sidebar(
 fn draw_performance(
     frame: &mut Frame,
     inner: Rect,
-    session: &crate::session::Session,
+    session: &cctop_core::session::Session,
     cpu_history: &std::collections::HashMap<String, spark::History>,
     mem_history: &std::collections::HashMap<String, spark::History>,
 ) {
@@ -1926,7 +1930,7 @@ fn draw_performance(
 /// Colour quota usage by whether it is being spent faster than an even budget
 /// across its reset window. Falling back to absolute pressure keeps windows
 /// useful when a provider omits either its reset time or duration.
-fn quota_color(window: &crate::quota::Window, now: i64) -> Color {
+fn quota_color(window: &cctop_core::quota::Window, now: i64) -> Color {
     if let (Some(duration), Some(reset)) = (window.duration, window.resets_at) {
         let duration_secs = duration.as_secs() as i64;
         let elapsed_secs = (now - (reset - duration_secs)).clamp(1, duration_secs);
@@ -1981,7 +1985,7 @@ fn draw_limits(frame: &mut Frame, area: Rect, app: &App, layout: &mut Layout) {
     // The harness travels alongside the label rather than being read back out
     // of it: `Codex (work)` is still Codex, and a hint chosen by comparing the
     // label told a Codex account to run `claude login`.
-    let mut accounts: Vec<(String, &'static str, &crate::quota::ProfileQuota)> = Vec::new();
+    let mut accounts: Vec<(String, &'static str, &cctop_core::quota::ProfileQuota)> = Vec::new();
     for (harness, qs) in [("Claude", &app.quota.claude), ("Codex", &app.quota.codex)] {
         for (i, q) in qs.iter().enumerate() {
             let name = match i {
@@ -2011,16 +2015,16 @@ fn draw_limits(frame: &mut Frame, area: Rect, app: &App, layout: &mut Layout) {
         // user to act, a rate-limit clears on its own, and "not signed in" is
         // neither. One catch-all string would hide all of that.
         match status {
-            crate::quota::ProviderStatus::Pending => {
+            cctop_core::quota::ProviderStatus::Pending => {
                 spans.push(Span::styled("checking…", theme::dim()));
             }
-            crate::quota::ProviderStatus::NotSignedIn => {
+            cctop_core::quota::ProviderStatus::NotSignedIn => {
                 spans.push(Span::styled("not signed in", theme::dim()));
             }
-            crate::quota::ProviderStatus::ApiBilling => {
+            cctop_core::quota::ProviderStatus::ApiBilling => {
                 spans.push(Span::styled("API billing, no limits", theme::dim()));
             }
-            crate::quota::ProviderStatus::Expired => {
+            cctop_core::quota::ProviderStatus::Expired => {
                 // A token account has no login to renew: its credentials are
                 // the line the user pasted into cctop's own config, and
                 // `claude login` would refresh a directory it does not use.
@@ -2028,7 +2032,7 @@ fn draw_limits(frame: &mut Frame, area: Rect, app: &App, layout: &mut Layout) {
                 // account's whole message lives in one column of a shared line
                 // and a hint clipped mid-flag is not a hint.
                 let (said, cmd) = match (account.source, *harness) {
-                    (crate::config::AccountSource::Token, _) => {
+                    (cctop_core::config::AccountSource::Token, _) => {
                         ("expired — ", "cctop --add-account")
                     }
                     (_, "Codex") => ("sign-in expired — ", "codex login"),
@@ -2048,7 +2052,7 @@ fn draw_limits(frame: &mut Frame, area: Rect, app: &App, layout: &mut Layout) {
                 ));
                 spans.push(Span::styled(cmd.to_string(), theme::value()));
             }
-            crate::quota::ProviderStatus::RateLimited { retry_at } => {
+            cctop_core::quota::ProviderStatus::RateLimited { retry_at } => {
                 spans.push(Span::styled(
                     "rate limited",
                     Style::default().fg(theme::colors().cost_mid),
@@ -2063,13 +2067,13 @@ fn draw_limits(frame: &mut Frame, area: Rect, app: &App, layout: &mut Layout) {
                     }
                 }
             }
-            crate::quota::ProviderStatus::Unavailable(reason) => {
+            cctop_core::quota::ProviderStatus::Unavailable(reason) => {
                 spans.push(Span::styled(
                     format!("unavailable ({reason})"),
                     theme::dim(),
                 ));
             }
-            crate::quota::ProviderStatus::Ok(q) => {
+            cctop_core::quota::ProviderStatus::Ok(q) => {
                 let now = chrono::Utc::now().timestamp();
                 if let Some(plan) = &q.plan {
                     spans.push(Span::styled(format!("({plan}) "), theme::dim()));
@@ -2120,7 +2124,7 @@ fn draw_limits(frame: &mut Frame, area: Rect, app: &App, layout: &mut Layout) {
                     // Keyed on the profile, not the label above: the label is
                     // "Claude" for the first account and "Claude (work)" for
                     // the rest, and the log knows accounts by profile.
-                    && let Some(text) = crate::burn::suffix(
+                    && let Some(text) = cctop_core::burn::suffix(
                         &app.burn,
                         harness.to_ascii_lowercase().as_str(),
                         &account.profile,
@@ -2767,15 +2771,15 @@ fn draw_footer_keys(frame: &mut Frame, area: Rect, app: &App, layout: &mut Layou
 
 // The clipboard and the ssh test live in `clipboard`, below the UI: `attach`
 // copies too, with no UI around it.
-pub use crate::clipboard::{copy_to_clipboard, over_ssh};
+pub use cctop_core::clipboard::{copy_to_clipboard, over_ssh};
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use ratatui::buffer::Buffer;
 
-    fn window(label: &'static str, pct: u32, resets_at: i64) -> crate::quota::Window {
-        crate::quota::Window {
+    fn window(label: &'static str, pct: u32, resets_at: i64) -> cctop_core::quota::Window {
+        cctop_core::quota::Window {
             label,
             pct,
             duration: None,
@@ -2844,13 +2848,13 @@ mod tests {
     /// ink. Its agent going idle is said on top of the fill, not instead.
     #[test]
     fn a_painted_tab_wears_its_colour_in_the_bar() {
-        use crate::cache::UiPrefs;
-        use crate::pricing::Plan;
+        use cctop_core::cache::UiPrefs;
+        use cctop_core::pricing::Plan;
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
 
         let named = |name: &str, color: Option<&str>, activity: Option<u64>| {
-            crate::ui::tabs::Tab::for_agent(&crate::rmux::Running {
+            crate::tabs::Tab::for_agent(&cctop_core::rmux::Running {
                 name: format!("cctop-{name}"),
                 pid: None,
                 cwd: None,
@@ -2955,14 +2959,14 @@ mod tests {
     /// nearer. The unpainted tab beside it does the same toward amber.
     #[test]
     fn a_tab_that_needs_you_pulses_between_its_fill_and_its_alert() {
-        use crate::cache::UiPrefs;
-        use crate::pricing::Plan;
+        use cctop_core::cache::UiPrefs;
+        use cctop_core::pricing::Plan;
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
         use std::time::{Duration, Instant};
 
         let asking = |name: &str, color: Option<&str>| {
-            crate::ui::tabs::Tab::for_agent(&crate::rmux::Running {
+            crate::tabs::Tab::for_agent(&cctop_core::rmux::Running {
                 name: format!("cctop-{name}"),
                 pid: None,
                 cwd: None,
@@ -2971,9 +2975,9 @@ mod tests {
                 label: Some(name.to_string()),
                 profile: None,
                 order: None,
-                state: Some(crate::rmux::State {
-                    signal: crate::hook::Signal::NeedsInput,
-                    at: crate::rmux::now_secs(),
+                state: Some(cctop_core::rmux::State {
+                    signal: cctop_core::hook::Signal::NeedsInput,
+                    at: cctop_core::rmux::now_secs(),
                 }),
                 color: color.map(str::to_string),
                 tab: None,
@@ -3058,9 +3062,9 @@ mod tests {
     /// title is the plain one it always was.
     #[test]
     fn a_painted_tab_wears_its_colour_on_its_panes() {
-        use crate::cache::UiPrefs;
-        use crate::pricing::Plan;
-        use crate::ui::tabs::{Pane, Tab};
+        use crate::tabs::{Pane, Tab};
+        use cctop_core::cache::UiPrefs;
+        use cctop_core::pricing::Plan;
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
 
@@ -3116,8 +3120,8 @@ mod tests {
     /// edge, and hit-testable where it was drawn.
     #[test]
     fn the_share_button_sits_in_the_bottom_right_corner() {
-        use crate::cache::UiPrefs;
-        use crate::pricing::Plan;
+        use cctop_core::cache::UiPrefs;
+        use cctop_core::pricing::Plan;
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
 
@@ -3152,8 +3156,8 @@ mod tests {
     /// says so twice: the first click only arms it.
     #[test]
     fn the_share_corner_asks_before_it_publishes() {
-        use crate::cache::UiPrefs;
-        use crate::pricing::Plan;
+        use cctop_core::cache::UiPrefs;
+        use cctop_core::pricing::Plan;
 
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::with_prefs(Plan::Retail, tx, UiPrefs::default());
@@ -3173,8 +3177,8 @@ mod tests {
     /// table would land on: local stays here, worldwide is the tunnel.
     #[test]
     fn the_armed_corner_offers_local_and_worldwide() {
-        use crate::cache::UiPrefs;
-        use crate::pricing::Plan;
+        use cctop_core::cache::UiPrefs;
+        use cctop_core::pricing::Plan;
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
 
@@ -3210,8 +3214,8 @@ mod tests {
     /// corner: a footer is the user's, and it has to be shorten-able.
     #[test]
     fn footer_hide_leaves_the_named_items_off() {
-        use crate::cache::UiPrefs;
-        use crate::pricing::Plan;
+        use cctop_core::cache::UiPrefs;
+        use cctop_core::pricing::Plan;
 
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::with_prefs(Plan::Retail, tx, UiPrefs::default());
@@ -3239,8 +3243,8 @@ mod tests {
     /// And `footer_hide = "share"` leaves the corner off altogether.
     #[test]
     fn the_share_corner_can_be_hidden() {
-        use crate::cache::UiPrefs;
-        use crate::pricing::Plan;
+        use cctop_core::cache::UiPrefs;
+        use cctop_core::pricing::Plan;
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
 
@@ -3266,8 +3270,8 @@ mod tests {
     /// the user supplied it.
     #[test]
     fn the_footer_note_shows_as_a_badge() {
-        use crate::cache::UiPrefs;
-        use crate::pricing::Plan;
+        use cctop_core::cache::UiPrefs;
+        use cctop_core::pricing::Plan;
 
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::with_prefs(Plan::Retail, tx, UiPrefs::default());
@@ -3288,8 +3292,8 @@ mod tests {
     /// that takes used to be a second of a frozen dashboard.
     #[test]
     fn the_share_corner_spins_while_the_tunnel_is_being_opened() {
-        use crate::cache::UiPrefs;
-        use crate::pricing::Plan;
+        use cctop_core::cache::UiPrefs;
+        use cctop_core::pricing::Plan;
 
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::with_prefs(Plan::Retail, tx, UiPrefs::default());
@@ -3349,8 +3353,8 @@ mod tests {
     /// and a filter that is on brings `Esc` forward.
     #[test]
     fn the_footer_hints_follow_what_the_dashboard_is_doing() {
-        use crate::cache::UiPrefs;
-        use crate::pricing::Plan;
+        use cctop_core::cache::UiPrefs;
+        use cctop_core::pricing::Plan;
 
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::with_prefs(Plan::Retail, tx, UiPrefs::default());
@@ -3385,7 +3389,7 @@ mod tests {
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
 
-        let mut app = crate::ui::tests::test_app();
+        let mut app = crate::tests::test_app();
         app.stats.total_input = 73_200;
         app.stats.total_output = 2_200;
         for cols in [80u16, 200] {
@@ -3411,12 +3415,12 @@ mod tests {
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
 
-        let expired = |profile: &str| crate::quota::ProfileQuota {
+        let expired = |profile: &str| cctop_core::quota::ProfileQuota {
             profile: profile.to_string(),
-            status: crate::quota::ProviderStatus::Expired,
-            source: crate::config::AccountSource::Directory,
+            status: cctop_core::quota::ProviderStatus::Expired,
+            source: cctop_core::config::AccountSource::Directory,
         };
-        let mut app = crate::ui::tests::test_app();
+        let mut app = crate::tests::test_app();
         app.quota.claude = vec![expired("default")];
         app.quota.codex = vec![expired("default"), expired("work")];
         for (cols, wanted) in [(120u16, "Codex (work) expired — codex login"), (80, "…")] {
@@ -3441,7 +3445,7 @@ mod tests {
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
 
-        let mut app = crate::ui::tests::test_app();
+        let mut app = crate::tests::test_app();
         for (cols, rows) in [(40u16, 12u16), (20, 5)] {
             let mut terminal = Terminal::new(TestBackend::new(cols, rows)).expect("backend");
             terminal
@@ -3464,9 +3468,9 @@ mod tests {
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
 
-        let mut app = crate::ui::tests::test_app();
-        app.sessions = vec![crate::ui::tests::session("a", false, "proj")];
-        app.visible = vec![crate::ui::Row::Session(0)];
+        let mut app = crate::tests::test_app();
+        app.sessions = vec![crate::tests::session("a", false, "proj")];
+        app.visible = vec![crate::Row::Session(0)];
         app.selected = 0;
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("backend");
         terminal
@@ -3480,11 +3484,11 @@ mod tests {
 
     #[test]
     fn pane_quota_narrows_to_fit_and_only_for_a_provider() {
-        let quota = crate::quota::Quota {
-            claude: vec![crate::quota::ProfileQuota {
+        let quota = cctop_core::quota::Quota {
+            claude: vec![cctop_core::quota::ProfileQuota {
                 profile: "default".into(),
-                source: crate::config::AccountSource::Directory,
-                status: crate::quota::ProviderStatus::Ok(crate::quota::ProviderQuota {
+                source: cctop_core::config::AccountSource::Directory,
+                status: cctop_core::quota::ProviderStatus::Ok(cctop_core::quota::ProviderQuota {
                     plan: None,
                     windows: vec![window("5h", 37, 10_000), window("7d", 21, 500_000)],
                     limit_reached: false,
@@ -3531,7 +3535,7 @@ mod tests {
 
     #[test]
     fn quota_suffix_drops_detail_step_by_step() {
-        let status = crate::quota::ProviderStatus::Ok(crate::quota::ProviderQuota {
+        let status = cctop_core::quota::ProviderStatus::Ok(cctop_core::quota::ProviderQuota {
             plan: None,
             windows: vec![window("5h", 37, 10_000), window("7d", 21, 500_000)],
             limit_reached: false,
@@ -3551,7 +3555,7 @@ mod tests {
         );
         assert!(
             quota_suffix(
-                &crate::quota::ProviderStatus::Pending,
+                &cctop_core::quota::ProviderStatus::Pending,
                 4_500,
                 QuotaDetail::Full
             )
@@ -3662,7 +3666,7 @@ mod tests {
     fn quota_colour_tracks_spending_pace() {
         let duration = std::time::Duration::from_secs(7 * 24 * 60 * 60);
         let reset = 1_000_000;
-        let window = crate::quota::Window {
+        let window = cctop_core::quota::Window {
             label: "7d",
             pct: 80,
             duration: Some(duration),
@@ -3672,7 +3676,7 @@ mod tests {
         };
         assert_eq!(quota_color(&window, reset), theme::colors().cost_high);
 
-        let sustainable = crate::quota::Window {
+        let sustainable = cctop_core::quota::Window {
             pct: 50,
             resets_at: Some(reset + duration.as_secs() as i64 / 2),
             ..window
@@ -3683,7 +3687,7 @@ mod tests {
     /// A test agent that draws `text` once and then sits there, so anything on
     /// screen came from the replay and anything that moves came from a resize.
     fn test_pane(text: &str) -> (std::process::Child, u32, super::super::tabs::Pane) {
-        let (child, pid) = crate::shim::test_session(
+        let (child, pid) = cctop_core::shim::test_session(
             &["sh", "-c", &format!("printf '{text}'; sleep 30")],
             // Wider and taller than any window below, so a crop would show.
             (200, 60),
@@ -3768,8 +3772,8 @@ mod tests {
     /// clicking that button is what `t` does.
     #[test]
     fn the_bar_offers_a_new_tab_with_nothing_open() {
-        use crate::cache::UiPrefs;
-        use crate::pricing::Plan;
+        use cctop_core::cache::UiPrefs;
+        use cctop_core::pricing::Plan;
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
 
@@ -3801,17 +3805,17 @@ mod tests {
     /// to run `claude login`.
     #[test]
     fn an_expired_account_is_told_to_log_into_its_own_harness() {
-        use crate::cache::UiPrefs;
-        use crate::pricing::Plan;
+        use cctop_core::cache::UiPrefs;
+        use cctop_core::pricing::Plan;
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
 
-        let expired = |profile: &str, source| crate::quota::ProfileQuota {
+        let expired = |profile: &str, source| cctop_core::quota::ProfileQuota {
             profile: profile.to_string(),
-            status: crate::quota::ProviderStatus::Expired,
+            status: cctop_core::quota::ProviderStatus::Expired,
             source,
         };
-        use crate::config::AccountSource::{Directory, Token};
+        use cctop_core::config::AccountSource::{Directory, Token};
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::with_prefs(Plan::Retail, tx, UiPrefs::default());
         app.quota.claude = vec![expired("default", Directory), expired("side", Token)];
@@ -3896,8 +3900,8 @@ mod tests {
     /// the breakdown leaves rather than being squeezed into initials.
     #[test]
     fn the_overview_spends_its_width_on_a_breakdown_and_gives_it_back_when_narrow() {
-        use crate::cache::UiPrefs;
-        use crate::pricing::Plan;
+        use cctop_core::cache::UiPrefs;
+        use cctop_core::pricing::Plan;
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
 
@@ -3965,9 +3969,9 @@ mod tests {
     /// decided against — a menu mostly made of grey.
     #[test]
     fn the_row_menu_gives_every_entry_exactly_one_line() {
-        use crate::cache::UiPrefs;
-        use crate::pricing::Plan;
-        use crate::session::Session;
+        use cctop_core::cache::UiPrefs;
+        use cctop_core::pricing::Plan;
+        use cctop_core::session::Session;
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
 
@@ -3975,7 +3979,7 @@ mod tests {
         let mut app = App::with_prefs(Plan::Retail, tx, UiPrefs::default());
         // A stopped session: nothing to type into and nothing to terminate, so
         // the menu carries two refusals and this actually tests the case.
-        let mut session = Session::new(crate::pricing::Provider::Claude, "abc".into());
+        let mut session = Session::new(cctop_core::pricing::Provider::Claude, "abc".into());
         session.started_at = "2026-01-01T00:00:00Z".into();
         session.last_active = session.started_at.clone();
         session.label_source = "/repo".into();
@@ -4046,7 +4050,7 @@ mod tests {
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
 
-        let mut app = crate::ui::tests::test_app();
+        let mut app = crate::tests::test_app();
         // A checkerboard, so the '▀' of a halfblock is earned in every cell —
         // a uniform picture renders as background alone and asserts nothing.
         let mut pixels = image::RgbaImage::new(16, 16);
@@ -4056,7 +4060,7 @@ mod tests {
                 false => image::Rgba([0, 0, 255, 255]),
             };
         }
-        app.paste_preview = Some(crate::ui::PastePreview {
+        app.paste_preview = Some(crate::PastePreview {
             name: "paste-20260922-120000.png".into(),
             at: std::time::Instant::now(),
             image: ratatui_image::picker::Picker::halfblocks()
@@ -4087,7 +4091,7 @@ mod tests {
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
 
-        let mut app = crate::ui::tests::test_app();
+        let mut app = crate::tests::test_app();
         app.set_status("Restarted 3 tabs, skipped 1 mid-turn");
         app.set_status("Tab renamed to api");
         let mut terminal = Terminal::new(TestBackend::new(100, 30)).expect("backend");
@@ -4121,8 +4125,8 @@ mod tests {
     /// land on cctop's Overview and leave the agent's screen alone.
     #[test]
     fn a_toast_in_a_tab_stays_off_the_agents_screen() {
-        use crate::cache::UiPrefs;
-        use crate::pricing::Plan;
+        use cctop_core::cache::UiPrefs;
+        use cctop_core::pricing::Plan;
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
 
@@ -4145,7 +4149,7 @@ mod tests {
         app.tabs.clear();
         let _ = child.kill();
         let _ = child.wait();
-        let _ = crate::shim::socket_path(pid).map(std::fs::remove_file);
+        let _ = cctop_core::shim::socket_path(pid).map(std::fs::remove_file);
 
         let at = screen
             .iter()
@@ -4158,8 +4162,8 @@ mod tests {
     /// stay, and the agent is resized into what is left rather than cropped.
     #[test]
     fn a_tab_resizes_its_agent_into_the_space_cctop_leaves_it() {
-        use crate::cache::UiPrefs;
-        use crate::pricing::Plan;
+        use cctop_core::cache::UiPrefs;
+        use cctop_core::pricing::Plan;
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
 
@@ -4182,7 +4186,7 @@ mod tests {
         app.tabs.clear();
         let _ = child.kill();
         let _ = child.wait();
-        let _ = crate::shim::socket_path(pid).map(std::fs::remove_file);
+        let _ = cctop_core::shim::socket_path(pid).map(std::fs::remove_file);
 
         assert!(
             sized,
@@ -4235,8 +4239,8 @@ mod tests {
     /// not at all — not even as a click target — and the bar says so.
     #[test]
     fn a_zoomed_pane_fills_the_tab_and_hides_the_rest() {
-        use crate::cache::UiPrefs;
-        use crate::pricing::Plan;
+        use cctop_core::cache::UiPrefs;
+        use cctop_core::pricing::Plan;
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
 
@@ -4283,8 +4287,8 @@ mod tests {
     /// both are resized to their half and both draw in it.
     #[test]
     fn a_split_sizes_both_agents_to_their_own_half() {
-        use crate::cache::UiPrefs;
-        use crate::pricing::Plan;
+        use cctop_core::cache::UiPrefs;
+        use cctop_core::pricing::Plan;
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
 
@@ -4314,7 +4318,7 @@ mod tests {
             let _ = child.wait();
         }
         for pid in [left_pid, right_pid] {
-            let _ = crate::shim::socket_path(pid).map(std::fs::remove_file);
+            let _ = cctop_core::shim::socket_path(pid).map(std::fs::remove_file);
         }
 
         assert!(
@@ -4343,13 +4347,13 @@ mod tests {
     /// border, and the same panel given room to finish carries none.
     #[test]
     fn a_bottom_panel_has_a_scrollbar_only_when_it_overflows() {
-        use crate::ui::scrollbar::tests::thumb_cells;
+        use crate::scrollbar::tests::thumb_cells;
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
 
         let draw = |rows: u16| {
-            let mut app = crate::ui::tests::test_app();
-            app.sessions = vec![crate::ui::tests::session("a", false, "x")];
+            let mut app = crate::tests::test_app();
+            app.sessions = vec![crate::tests::session("a", false, "x")];
             app.loaded = true;
             app.refilter();
             app.bottom_tab = 0;

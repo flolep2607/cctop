@@ -11,14 +11,14 @@
 //!
 //! Completion needs the host to answer quickly, so the moment a host is in the
 //! field an ssh ControlMaster is started for it on a background thread — never
-//! prompting, see [`ssh_master`](crate::ssh_master) — and each directory is
+//! prompting, see [`ssh_master`](cctop_core::ssh_master) — and each directory is
 //! listed over it once and remembered. The per-host state is a small machine:
 //! connecting, then ready (with the host's home) or offline (with why), and
 //! the field says which while it is not ready.
 
 use super::*;
-use crate::remote_fs::{self, Listing, RemoteFacts};
-use crate::ssh_master::Runner;
+use cctop_core::remote_fs::{self, Listing, RemoteFacts};
+use cctop_core::ssh_master::Runner;
 
 /// What the field's text names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -143,7 +143,7 @@ impl Hit {
     /// What the field holds once this is taken.
     pub fn text(&self) -> String {
         match self {
-            Hit::Dir(dir) => crate::util::tildify(&dir.to_string_lossy()),
+            Hit::Dir(dir) => cctop_core::util::tildify(&dir.to_string_lossy()),
             Hit::Host { name, .. } => format!("{name}:"),
             Hit::Remote { host, path, .. } => format!("{host}:{path}"),
         }
@@ -262,16 +262,19 @@ pub fn reach_of(argv: &[String]) -> Reach {
         .next()
         .unwrap_or_default()
         .to_string();
-    if crate::alias::AGENTS.split_whitespace().any(|a| a == name) {
-        return match crate::sandbox::reach(&name) {
-            crate::sandbox::Reach::Local => Reach::No(crate::sandbox::local_only(&name)),
+    if cctop_core::alias::AGENTS
+        .split_whitespace()
+        .any(|a| a == name)
+    {
+        return match cctop_core::sandbox::reach(&name) {
+            cctop_core::sandbox::Reach::Local => Reach::No(cctop_core::sandbox::local_only(&name)),
             _ => Reach::Sandbox(name),
         };
     }
     let shell = std::env::var("SHELL").unwrap_or_default();
     match argv {
         [only] if !shell.is_empty() && *only == shell => Reach::Shell(name),
-        _ => Reach::No(crate::sandbox::local_only(&name)),
+        _ => Reach::No(cctop_core::sandbox::local_only(&name)),
     }
 }
 
@@ -302,7 +305,7 @@ pub(super) fn sandbox_argv(
     };
     vec![
         "env".to_string(),
-        format!("{}=1", crate::sandbox::ENV_HOLD),
+        format!("{}=1", cctop_core::sandbox::ENV_HOLD),
         exe.to_string_lossy().into_owned(),
         "sandbox".to_string(),
         "--agent".to_string(),
@@ -317,13 +320,13 @@ pub(super) fn sandbox_argv(
 /// socket and otherwise connects, prompting in the tab as ssh at a prompt
 /// would). `~` is expanded there, by the host's `sh`.
 pub(super) fn shell_argv(host: &str, path: &str) -> Vec<String> {
-    use crate::sandbox::sh_quote;
+    use cctop_core::sandbox::sh_quote;
     let script = r#"p=$1
 case $p in "~"|"") p=$HOME ;; "~/"*) p=$HOME/${p#"~/"} ;; esac
 cd -- "$p" || exit 1
 exec "${SHELL:-sh}" -l"#;
     let mut argv = vec!["ssh".to_string(), "-t".to_string()];
-    if let Some(socket) = crate::ssh_master::socket_for(host) {
+    if let Some(socket) = cctop_core::ssh_master::socket_for(host) {
         argv.extend([
             "-S".to_string(),
             socket.to_string_lossy().into_owned(),
@@ -687,7 +690,7 @@ impl App {
                 let argv = match Self::profile_provider(std::slice::from_ref(&agent))
                     .and_then(|p| self.chosen_profile(p))
                 {
-                    Some(profile) => crate::config::argv_under_profile(argv, profile),
+                    Some(profile) => cctop_core::config::argv_under_profile(argv, profile),
                     None => argv,
                 };
                 (agent, argv)
@@ -695,7 +698,7 @@ impl App {
         };
         let host = target.host.clone();
         let Some(own) = self.own_preferring_rmux(Deferred::Launch, || {
-            crate::rmux::free_name(&format!("{agent}-{host}"))
+            cctop_core::rmux::free_name(&format!("{agent}-{host}"))
         }) else {
             return;
         };
@@ -768,7 +771,7 @@ pub(super) fn fill_of(hit: &Hit) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::remote_fs::LocalSh;
+    use cctop_core::remote_fs::LocalSh;
     use ratatui::crossterm::event::KeyCode;
     use std::sync::mpsc::{Receiver, channel};
 
@@ -834,7 +837,7 @@ mod tests {
             ]
         );
         let label = remote_label("opencode", "procdb");
-        assert_eq!(crate::screen::harness_of(&label), "opencode");
+        assert_eq!(cctop_core::screen::harness_of(&label), "opencode");
         let shell = shell_argv("devbox", "~/src");
         assert_eq!(shell[..2], ["ssh", "-t"]);
         assert!(shell.contains(&"devbox".to_string()));
@@ -857,7 +860,7 @@ mod tests {
     fn app_with_requests() -> (App, Receiver<worker::Request>) {
         let (tx, rx) = channel();
         (
-            App::with_prefs(Plan::Retail, tx, crate::ui::UiPrefs::default()),
+            App::with_prefs(Plan::Retail, tx, crate::UiPrefs::default()),
             rx,
         )
     }
@@ -888,7 +891,7 @@ mod tests {
 
     fn typed(app: &mut App, text: &str) {
         for c in text.chars() {
-            app.on_key(crate::ui::tests::key(KeyCode::Char(c)));
+            app.on_key(crate::tests::key(KeyCode::Char(c)));
         }
     }
 
@@ -950,14 +953,14 @@ mod tests {
             rx.try_iter().next().is_none(),
             "a listed directory is not asked again"
         );
-        app.on_key(crate::ui::tests::key(KeyCode::Tab));
+        app.on_key(crate::tests::key(KeyCode::Tab));
         assert_eq!(&*app.launch_cwd_input, "box:~/src/web/");
         // ↓ picks, Enter takes it after the host says it is usable.
         app.launch_cwd_input.set("box:~/src/".to_string());
         app.launch_cwd_edited();
-        app.on_key(crate::ui::tests::key(KeyCode::Down));
-        app.on_key(crate::ui::tests::key(KeyCode::Down));
-        app.on_key(crate::ui::tests::key(KeyCode::Enter));
+        app.on_key(crate::tests::key(KeyCode::Down));
+        app.on_key(crate::tests::key(KeyCode::Down));
+        app.on_key(crate::tests::key(KeyCode::Enter));
         assert!(app.launch_cwd_checking.is_some());
         serve(&mut app, &rx, &sh, true);
         assert_eq!(app.mode, Mode::Launch);
@@ -1011,8 +1014,8 @@ mod tests {
         );
         // Taken anyway, it is kept with its problem, which greys the agents
         // that mount and not the shell.
-        app.on_key(crate::ui::tests::key(KeyCode::Down));
-        app.on_key(crate::ui::tests::key(KeyCode::Enter));
+        app.on_key(crate::tests::key(KeyCode::Down));
+        app.on_key(crate::tests::key(KeyCode::Enter));
         serve(&mut app, &rx, &sh, true);
         let target = app.launch_remote.clone().expect("taken");
         assert_eq!(target.problem.as_deref(), Some("read-only on the host"));
@@ -1027,7 +1030,7 @@ mod tests {
         app.edit_launch_cwd();
         app.launch_cwd_input.set("box:~/nope".to_string());
         app.launch_cwd_edited();
-        app.on_key(crate::ui::tests::key(KeyCode::Enter));
+        app.on_key(crate::tests::key(KeyCode::Enter));
         serve(&mut app, &rx, &sh, true);
         assert_eq!(app.mode, Mode::LaunchCwd);
         assert_eq!(
@@ -1057,7 +1060,7 @@ mod tests {
         let (note, warn) = app.location_note().expect("a note");
         assert!(warn && note.contains("needs a password"), "{note}");
 
-        app.on_key(crate::ui::tests::key(KeyCode::Enter));
+        app.on_key(crate::tests::key(KeyCode::Enter));
         assert_eq!(app.mode, Mode::Launch);
         let target = app.launch_remote.clone().expect("taken");
         assert_eq!(
@@ -1072,7 +1075,7 @@ mod tests {
             Some(Conn::Connecting)
         );
         // And Esc keeps the location that was taken.
-        app.on_key(crate::ui::tests::key(KeyCode::Esc));
+        app.on_key(crate::tests::key(KeyCode::Esc));
         assert_eq!(app.launch_remote, Some(target));
     }
 
@@ -1105,7 +1108,7 @@ mod tests {
         let (mut app, rx) = app_with_requests();
         app.mode = Mode::Launch;
         app.edit_launch_cwd();
-        app.ssh_hosts = vec![crate::ssh_config::Host {
+        app.ssh_hosts = vec![cctop_core::ssh_config::Host {
             name: "nz-b-procurementdb1".into(),
             aliases: vec!["procdb".into()],
         }];
@@ -1117,7 +1120,7 @@ mod tests {
         );
         let at = app.launch_cwd_hits.len() - 1;
         app.launch_cwd_pick = Some(at);
-        app.on_key(crate::ui::tests::key(KeyCode::Enter));
+        app.on_key(crate::tests::key(KeyCode::Enter));
         assert_eq!(app.mode, Mode::LaunchCwd, "a host is not yet a folder");
         assert_eq!(&*app.launch_cwd_input, "nz-b-procurementdb1:");
         assert!(rx.try_iter().any(|r| matches!(

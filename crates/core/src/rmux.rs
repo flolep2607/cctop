@@ -657,7 +657,7 @@ fn is_loopback_url(url: &str) -> bool {
 ///
 /// `frontend` is where the app the link opens in is served, when that is not
 /// `share.rmux.io` — cctop's own copy, at the origin the page asking was
-/// reached on (see [`crate::serve`]'s `term` module). rmux mints the link for
+/// reached on (see [`cctop_serve`]'s `term` module). rmux mints the link for
 /// that frontend and names the daemon's endpoint in it, and the daemon accepts
 /// the app from there; a link minted for `share.rmux.io` and opened elsewhere
 /// is refused.
@@ -1250,7 +1250,7 @@ pub struct Running {
     /// where it began the next time cctop opened.
     pub order: Option<u64>,
     /// The colour the tab was painted, as [`set_color`] wrote it — a name like
-    /// "amber", left for [`ui::theme::Hue`](crate::ui::theme::Hue) to decode.
+    /// "amber", left for [`ui::theme::Hue`](cctop_ui::theme::Hue) to decode.
     /// Opaque here for the reason `label` and `profile` are strings: this
     /// module is the transport, not the palette.
     pub color: Option<String>,
@@ -1296,7 +1296,7 @@ impl Running {
     /// this is the shape an unarranged tab has in the wild and not only in a
     /// test — but nothing in the binary builds one, since the list comes from
     /// rmux rather than being constructed here.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn unrecorded(name: &str) -> Running {
         Running {
             name: name.to_string(),
@@ -1619,7 +1619,7 @@ pub fn holding(pid: u32) -> Option<String> {
 ///
 /// For the dashboard's Preview panel, which has no client of its own to read a
 /// screen from: a tab this cctop is not looking at gives up its rmux client (see
-/// [`Tab::detach`](crate::ui::tabs::Tab::detach)), so on the dashboard nearly
+/// [`Tab::detach`](cctop_ui::tabs::Tab::detach)), so on the dashboard nearly
 /// every agent tab has no parser behind it. Asking rmux for the screen is the
 /// read-only way to see it — attaching a client would resize the window to the
 /// panel, which the agent would then redraw for.
@@ -1706,7 +1706,7 @@ fn capture_bytes(raw: &[u8]) -> Vec<u8> {
 /// creating and killing sessions at once therefore fail each other at random,
 /// which is what happens without this — nothing about the code under test is
 /// racy, the fixture is.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub fn test_lock() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     // A test that panicked while holding the lock has poisoned it. The next one

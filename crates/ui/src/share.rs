@@ -16,7 +16,7 @@ use std::sync::mpsc::{Receiver, TryRecvError, channel};
 /// to be advanced by whoever happens to redraw, and the loop redraws on events
 /// that have nothing to do with this.
 pub struct Opening {
-    pub(super) rx: Receiver<Result<crate::serve::Serving, String>>,
+    pub(super) rx: Receiver<Result<cctop_serve::Serving, String>>,
     pub(super) since: Instant,
 }
 
@@ -86,7 +86,7 @@ impl App {
             self.set_status("Selected session has no local process");
             return;
         };
-        let Some(name) = crate::rmux::holding(pid) else {
+        let Some(name) = cctop_core::rmux::holding(pid) else {
             self.set_status("Only an agent cctop put in a multiplexer can be shared");
             return;
         };
@@ -94,7 +94,7 @@ impl App {
         // where it cannot; the status line below says which came back. Pressing
         // `W` twice reuses the first share rather than minting a second.
         let mut reachable = false;
-        let share = crate::rmux::share_link(&name, false, None).map(|(share, tunnelled)| {
+        let share = cctop_core::rmux::share_link(&name, false, None).map(|(share, tunnelled)| {
             reachable = tunnelled;
             share
         });
@@ -150,7 +150,7 @@ impl App {
     /// half — see [`Opening`].
     pub(super) fn start_serving(&mut self, tunnel: bool) {
         self.serve_error = None;
-        let options = crate::serve::Options {
+        let options = cctop_serve::Options {
             tunnel,
             plan: self.plan,
             // Fed from the rows this dashboard already has. Two loaders in one
@@ -174,7 +174,7 @@ impl App {
                 // The receiver is gone if cctop quit while this was dialling,
                 // and the tunnel then drops here — which unregisters it, which
                 // is the right ending for a link nobody is holding.
-                let _ = tx.send(crate::serve::start(options).map_err(|e| format!("{e}")));
+                let _ = tx.send(cctop_serve::start(options).map_err(|e| format!("{e}")));
             });
             self.share_opening = Some(Opening {
                 rx,
@@ -183,7 +183,7 @@ impl App {
             self.set_status("Opening a tunnel to trycloudflare…");
             return;
         }
-        match crate::serve::start(options) {
+        match cctop_serve::start(options) {
             Ok(serving) => {
                 // Something to look at immediately: the page's first request
                 // would otherwise find the empty snapshot it was built with and
@@ -258,7 +258,7 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ui::tests::test_app;
+    use crate::tests::test_app;
     /// Both halves matter. A panel that cannot say where the page is has not
     /// answered the question it was opened to answer; a panel that prints the
     /// token puts a credential into every screenshot of it. The link is drawn
@@ -269,7 +269,7 @@ mod tests {
         use ratatui::backend::TestBackend;
 
         let mut app = test_app();
-        let serving = crate::serve::start(crate::serve::Options {
+        let serving = cctop_serve::start(cctop_serve::Options {
             // A port nobody asked for, so a busy one is stepped past rather
             // than failing a test on whatever else is running here.
             port_given: false,
@@ -294,13 +294,13 @@ mod tests {
             .expect("draw");
         // What is on screen, which is the label of each link and not the URL
         // behind it — the token is meant to be in there, and not in view.
-        let screen = crate::ui::hyperlink::visible(terminal.backend().buffer());
+        let screen = crate::hyperlink::visible(terminal.backend().buffer());
         let linked = terminal
             .backend()
             .buffer()
             .content()
             .iter()
-            .filter_map(|cell| crate::ui::hyperlink::target_of(cell.symbol()))
+            .filter_map(|cell| crate::hyperlink::target_of(cell.symbol()))
             .any(|url| url.ends_with(&token));
 
         assert!(linked, "the drawn origin does not open the page");
@@ -325,7 +325,7 @@ mod tests {
     /// panel reads `public` and nothing else of the tunnel.
     fn tunnelled_app() -> (App, String) {
         let mut app = test_app();
-        let mut serving = crate::serve::start(crate::serve::Options {
+        let mut serving = cctop_serve::start(cctop_serve::Options {
             port_given: false,
             scan: false,
             ..Default::default()
@@ -391,7 +391,7 @@ mod tests {
             .filter(|&y| !is_code_row(buf, y))
             .map(|y| {
                 (x0 + 1..x1)
-                    .map(|x| crate::ui::hyperlink::shown_in(buf[(x, y)].symbol()))
+                    .map(|x| crate::hyperlink::shown_in(buf[(x, y)].symbol()))
                     .collect::<String>()
                     .replace("c hide QR", "c QR code")
                     .trim()
@@ -410,7 +410,7 @@ mod tests {
     #[test]
     fn the_serve_panel_draws_the_tunnel_link_as_a_code_on_request() {
         let (mut app, token) = tunnelled_app();
-        let expected = crate::ui::qr::encode(app.serving.as_ref().unwrap().best())
+        let expected = crate::qr::encode(app.serving.as_ref().unwrap().best())
             .expect("encodes")
             .height as usize;
 
@@ -503,7 +503,7 @@ mod tests {
     fn a_shared_terminal_is_offered_as_a_code() {
         let mut app = shared_app();
         let link = app.share_qr.as_ref().unwrap().link.clone();
-        let expected = crate::ui::qr::encode(&link).expect("encodes").height as usize;
+        let expected = crate::qr::encode(&link).expect("encodes").height as usize;
         let (buf, layout) = draw(&mut app, 120, 50);
         assert_eq!(code_rows(&buf), expected);
         let text = text_rows(&buf, SHARE);

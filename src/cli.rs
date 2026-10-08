@@ -1,9 +1,9 @@
 //! Command-line parsing and the non-interactive output modes.
 
-use crate::loader::Loader;
-use crate::pricing::{Plan, Provider};
-use crate::session::Session;
-use crate::util;
+use cctop_core::loader::Loader;
+use cctop_core::pricing::{Plan, Provider};
+use cctop_core::session::Session;
+use cctop_core::util;
 use clap::Parser;
 
 /// The command index printed after the options by `-h` and `--help` alike.
@@ -565,10 +565,10 @@ pub fn run_handoff(sessions: &[Session], which: &str, loader: &Loader) -> anyhow
     // The brief is built out of the tool history, which the cache does not
     // carry, so this is one of the two callers that needs a real parse.
     let data = loader.store().session_data_fresh(session);
-    let brief = crate::handoff::build(session, Some(&data));
+    let brief = cctop_serve::handoff::build(session, Some(&data));
     // Printed *and* written: the record of the conversation is a file, and a
     // brief that named one it had not left would send its reader looking.
-    print!("{}", crate::handoff::rendered(&brief));
+    print!("{}", cctop_serve::handoff::rendered(&brief));
     Ok(())
 }
 
@@ -582,7 +582,7 @@ pub fn run_handoff(sessions: &[Session], which: &str, loader: &Loader) -> anyhow
 /// The transcript form of a handoff: where `--handoff` writes a brief for an
 /// agent to read, this writes the conversation itself in the shape the
 /// receiving harness reads back. That is worth doing only for a pair cctop can
-/// transcode between, and `crate::convert` is what knows which those are —
+/// transcode between, and `cctop_core::convert` is what knows which those are —
 /// OpenCode keeps its transcripts in SQLite, so a conversion to or from it
 /// answers "not yet" rather than half-doing it.
 pub fn run_convert(sessions: &[Session], which: &str, agent: &str) -> anyhow::Result<()> {
@@ -592,7 +592,7 @@ pub fn run_convert(sessions: &[Session], which: &str, agent: &str) -> anyhow::Re
     // instead. Said here rather than left to chance, because the copy shares
     // its source's id and a bare prefix matches both.
     let session = find_original(sessions, which)?;
-    if !crate::convert::convertible_session(session) {
+    if !cctop_core::convert::convertible_session(session) {
         anyhow::bail!(
             "{} has no transcript on this machine cctop can convert",
             session.provider.as_str()
@@ -605,17 +605,17 @@ pub fn run_convert(sessions: &[Session], which: &str, agent: &str) -> anyhow::Re
         Some((agent, account)) => (agent, Some(account)),
         None => (agent, None),
     };
-    let target = crate::pricing::Provider::parse(agent)
+    let target = cctop_core::pricing::Provider::parse(agent)
         .ok_or_else(|| anyhow::anyhow!("{agent} is not a harness cctop knows"))?;
     let profile = match account {
         Some(name) => Some(
-            crate::config::launchable_named(target, name).ok_or_else(|| {
+            cctop_core::config::launchable_named(target, name).ok_or_else(|| {
                 anyhow::anyhow!("{agent} has no account named '{name}' on this machine")
             })?,
         ),
         None => None,
     };
-    if !crate::convert::convertible(session.provider, target) {
+    if !cctop_core::convert::convertible(session.provider, target) {
         anyhow::bail!(
             "cctop cannot convert {} sessions into {}",
             session.provider.as_str(),
@@ -628,11 +628,13 @@ pub fn run_convert(sessions: &[Session], which: &str, agent: &str) -> anyhow::Re
         .ok_or_else(|| anyhow::anyhow!("that session has no transcript on this machine"))?;
     let home = match (profile, target) {
         (Some(profile), _) => profile.dir.clone(),
-        (None, crate::pricing::Provider::Claude) => crate::config::CLAUDE_CONFIG_DIR.clone(),
-        (None, crate::pricing::Provider::Codex) => crate::config::CODEX_HOME.clone(),
+        (None, cctop_core::pricing::Provider::Claude) => {
+            cctop_core::config::CLAUDE_CONFIG_DIR.clone()
+        }
+        (None, cctop_core::pricing::Provider::Codex) => cctop_core::config::CODEX_HOME.clone(),
         _ => anyhow::bail!("that harness has no store cctop writes into"),
     };
-    let written = crate::convert::convert(session.provider, transcript, target, &home)
+    let written = cctop_core::convert::convert(session.provider, transcript, target, &home)
         .ok_or_else(|| anyhow::anyhow!("the transcript could not be converted"))?;
     // The id, because it is usually the session's own and the receiving store
     // may be a long way from the one it came from. `--json` and the tests read
@@ -650,16 +652,16 @@ pub fn run_convert(sessions: &[Session], which: &str, agent: &str) -> anyhow::Re
 #[cfg(test)]
 mod convert_tests {
     use super::*;
-    use crate::session::Session;
+    use cctop_core::session::Session;
 
     /// A session with just enough shape for the resolution rules to act on.
-    fn session(id: &str, provider: crate::pricing::Provider, converted: bool) -> Session {
+    fn session(id: &str, provider: cctop_core::pricing::Provider, converted: bool) -> Session {
         let mut s = Session::new(provider, id.into());
         s.label_source = "/tmp/proj".into();
         s.started_at = "2026-09-28T00:00:00.000Z".into();
         s.last_active = "2026-09-28T00:00:00.000Z".into();
         if converted {
-            s.converted_from = Some(crate::convert::Provenance {
+            s.converted_from = Some(cctop_core::convert::Provenance {
                 harness: "claude".into(),
                 session_id: id.into(),
                 session_path: "/tmp/proj/source.jsonl".into(),
@@ -674,8 +676,8 @@ mod convert_tests {
     #[test]
     fn a_prefix_matching_a_session_and_a_copy_of_it_resolves_to_the_session() {
         let sessions = vec![
-            session(ID, crate::pricing::Provider::Claude, false),
-            session(ID, crate::pricing::Provider::Codex, true),
+            session(ID, cctop_core::pricing::Provider::Claude, false),
+            session(ID, cctop_core::pricing::Provider::Codex, true),
         ];
         // Without the originals-first rule this is an ambiguity error, which is
         // the wrong complaint: the user named a session, and the copy is not it.
@@ -690,7 +692,7 @@ mod convert_tests {
 
     #[test]
     fn an_id_that_is_only_a_copy_says_where_the_session_really_is() {
-        let sessions = vec![session(ID, crate::pricing::Provider::Codex, true)];
+        let sessions = vec![session(ID, cctop_core::pricing::Provider::Codex, true)];
         let why = find_original(&sessions, ID).unwrap_err().to_string();
         assert!(why.contains("copy of a claude session"), "{why}");
         // Not "no session id starts with" — the id is right there.
@@ -699,18 +701,18 @@ mod convert_tests {
 
     #[test]
     fn an_id_matching_nothing_says_so_plainly() {
-        let sessions = vec![session(ID, crate::pricing::Provider::Claude, false)];
+        let sessions = vec![session(ID, cctop_core::pricing::Provider::Claude, false)];
         let why = find_original(&sessions, "zzz").unwrap_err().to_string();
         assert_eq!(why, "no session id starts with 'zzz'");
     }
 
     #[test]
     fn no_argument_takes_the_most_recent_original() {
-        let mut older = session(ID, crate::pricing::Provider::Claude, false);
+        let mut older = session(ID, cctop_core::pricing::Provider::Claude, false);
         older.last_active = "2026-09-28T00:00:00.000Z".into();
         let mut newer = session(
             "aa4ff133-cde9-470f-aaff-1fd6ac2da49e",
-            crate::pricing::Provider::Codex,
+            cctop_core::pricing::Provider::Codex,
             false,
         );
         newer.last_active = "2026-09-29T00:00:00.000Z".into();
@@ -721,7 +723,7 @@ mod convert_tests {
 
     #[test]
     fn only_copies_and_no_argument_says_rather_than_picking_one() {
-        let sessions = vec![session(ID, crate::pricing::Provider::Codex, true)];
+        let sessions = vec![session(ID, cctop_core::pricing::Provider::Codex, true)];
         let why = find_original(&sessions, "").unwrap_err().to_string();
         assert!(why.contains("copy of a claude session"), "{why}");
     }
@@ -873,7 +875,7 @@ pub fn run_statusline(sessions: &[Session]) {
 
 /// The line `run_statusline` prints, split out so the tests can read it.
 fn statusline(sessions: &[Session]) -> String {
-    use crate::session::ActivityState;
+    use cctop_core::session::ActivityState;
     let live: Vec<&Session> = sessions.iter().filter(|s| s.is_running()).collect();
     if live.is_empty() {
         return "no agents running".to_string();
@@ -918,7 +920,7 @@ pub fn run_report(
 ) -> anyhow::Result<()> {
     let session = find_session(sessions, which)?;
     let data = loader.store().session_data_fresh(session);
-    let report = crate::serve::report::build(session, &data, plan);
+    let report = cctop_serve::report::build(session, &data, plan);
     println!("{}", serde_json::to_string(&report)?);
     Ok(())
 }
@@ -927,7 +929,7 @@ pub fn run_report(
 pub fn run_chat(sessions: &[Session], which: &str, before: Option<usize>) -> anyhow::Result<()> {
     let session = find_session(sessions, which)?;
     // Deliberately not the cache: a conversation is the text the cache drops.
-    let conversation = crate::serve::chat::build(session, before);
+    let conversation = cctop_serve::chat::build(session, before);
     println!("{}", serde_json::to_string(&conversation)?);
     Ok(())
 }
@@ -936,14 +938,14 @@ pub fn run_chat(sessions: &[Session], which: &str, before: Option<usize>) -> any
 ///
 /// `/api/chat/<id>/markdown` on a serve, and what that route runs on a remote
 /// row's machine. The whole transcript, not the page's window: see
-/// [`crate::serve::chat::whole`].
+/// [`cctop_serve::chat::whole`].
 pub fn run_export(sessions: &[Session], which: &str, tool_output: bool) -> anyhow::Result<()> {
     let session = find_session(sessions, which)?;
-    let conversation = crate::serve::chat::whole(session);
-    let options = crate::serve::export::Options { tool_output };
+    let conversation = cctop_serve::chat::whole(session);
+    let options = cctop_serve::export::Options { tool_output };
     print!(
         "{}",
-        crate::serve::export::render(session, &conversation, options)
+        cctop_serve::export::render(session, &conversation, options)
     );
     Ok(())
 }
@@ -955,13 +957,13 @@ pub fn run_access(sessions: &[Session], which: &str, loader: &Loader) -> anyhow:
     let data = loader.store().session_data_fresh(session);
     println!(
         "{}",
-        serde_json::to_string(&crate::access::build(session, Some(&data)))?
+        serde_json::to_string(&cctop_core::access::build(session, Some(&data)))?
     );
     Ok(())
 }
 
 pub fn run_json(sessions: &[Session], plan: Plan, loader: &Loader) -> anyhow::Result<()> {
-    let out = crate::json::sessions(sessions, plan, loader.store());
+    let out = cctop_core::json::sessions(sessions, plan, loader.store());
     println!("{}", serde_json::to_string_pretty(&out)?);
     Ok(())
 }
@@ -1056,9 +1058,9 @@ mod tests {
     /// nothing is running — stale rows must not count.
     #[test]
     fn the_statusline_names_live_states_and_the_burn_rate() {
-        use crate::session::ActivityState;
+        use cctop_core::session::ActivityState;
         let live = |state| {
-            let mut s = Session::new(crate::pricing::Provider::Claude, "x".into());
+            let mut s = Session::new(cctop_core::pricing::Provider::Claude, "x".into());
             s.inferred_running = true;
             s.activity_state = state;
             s
@@ -1066,7 +1068,10 @@ mod tests {
 
         assert_eq!(statusline(&[]), "no agents running");
         assert_eq!(
-            statusline(&[Session::new(crate::pricing::Provider::Claude, "x".into())]),
+            statusline(&[Session::new(
+                cctop_core::pricing::Provider::Claude,
+                "x".into()
+            )]),
             "no agents running",
             "a stale transcript is not an agent at work"
         );

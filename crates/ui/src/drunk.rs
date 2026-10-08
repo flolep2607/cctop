@@ -318,13 +318,13 @@ mod tests {
     /// without either getting in the other's way.
     #[test]
     fn both_codes_are_heard_side_by_side() {
-        let mut app = crate::ui::tests::test_app();
+        let mut app = crate::tests::test_app();
         for code in CODE {
-            app.on_key(crate::ui::tests::key(code));
+            app.on_key(crate::tests::key(code));
         }
         assert!(app.reeling() && !app.raving());
         for code in rave::CODE {
-            app.on_key(crate::ui::tests::key(code));
+            app.on_key(crate::tests::key(code));
         }
         assert!(app.reeling() && app.raving());
     }

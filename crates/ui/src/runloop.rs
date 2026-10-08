@@ -16,7 +16,7 @@ use ratatui::crossterm::execute;
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, TryRecvError, channel};
 
-use crate::quota::INTERVAL_SECS as QUOTA_INTERVAL_SECS;
+use cctop_core::quota::INTERVAL_SECS as QUOTA_INTERVAL_SECS;
 
 /// How often the poller wakes to see whether any provider is due.
 const QUOTA_TICK: Duration = Duration::from_secs(10);
@@ -45,16 +45,16 @@ const PENDING_WALK_INTERVAL: Duration = Duration::from_secs(3);
 /// The three flags the UI reads are taken one by one rather than as the
 /// command line they came from: the parser is the binary's, above the UI.
 pub fn run(
-    plan: crate::pricing::Plan,
+    plan: cctop_core::pricing::Plan,
     delay: f64,
     hosts: &[String],
-    hosted: Option<crate::shim::Hosted>,
+    hosted: Option<cctop_core::shim::Hosted>,
 ) -> anyhow::Result<i32> {
     // Before anything draws, and once: the palette is read by every widget and
     // must not change under them mid-run. Before `ratatui::init` too, because
     // `auto` asks the terminal for its background and reads the answer off
     // stdin, which nothing else may be reading yet.
-    theme::init_from_env(crate::settings::Settings::load().theme.as_deref());
+    theme::init_from_env(cctop_core::settings::Settings::load().theme.as_deref());
 
     let (req_tx, req_rx) = channel::<Request>();
     let (res_tx, res_rx) = channel::<Response>();
@@ -64,12 +64,12 @@ pub fn run(
     {
         let tx = res_tx.clone();
         std::thread::spawn(move || {
-            crate::pricing::refresh_pricing_blocking();
+            cctop_core::pricing::refresh_pricing_blocking();
             let _ = tx.send(Response::PricingReady);
         });
     }
     spawn_quota_poller(res_tx.clone());
-    let hosts = crate::fleet::Host::collect(hosts);
+    let hosts = cctop_core::fleet::Host::collect(hosts);
     for host in &hosts {
         spawn_host_poller(host.clone(), res_tx.clone());
     }
@@ -78,9 +78,9 @@ pub fn run(
     // the binary stays behind an explicit `--update`. A build output is told
     // nothing at all — the hint's whole call to action is `--update`, which
     // refuses on a file cargo is keeping books on.
-    if !crate::update::built_by_cargo() {
+    if !cctop_core::update::built_by_cargo() {
         std::thread::spawn(move || {
-            if let Some(version) = crate::update::available_update() {
+            if let Some(version) = cctop_core::update::available_update() {
                 let _ = res_tx.send(Response::UpdateAvailable(version));
             }
         });
@@ -99,7 +99,7 @@ pub fn run(
     app.remote_hosts = hosts;
     // And PROFILE, which most machines have exactly one of. A column repeating
     // `default` down every row is a column that answers nothing.
-    if crate::config::profile_count() <= 1 {
+    if cctop_core::config::profile_count() <= 1 {
         app.hidden_columns.push(ColumnId::Profile);
     }
     // Ahead of the first walk, so the first table already attributes processes
@@ -176,18 +176,18 @@ pub fn run(
 
     // Established before the loop so the first tick already has it; `None` just
     // means discovery falls back to the periodic walk.
-    let watch = crate::watch::Watch::start();
-    app.listener = crate::hook::Listener::start();
-    app.yolo = crate::yolo::Auto::new(true);
+    let watch = cctop_core::watch::Watch::start();
+    app.listener = cctop_core::hook::Listener::start();
+    app.yolo = cctop_core::yolo::Auto::new(true);
     // A hook naming a cctop that has since been moved or deleted fires nothing
     // at all, so it is repointed here rather than left to look installed while
     // reporting nothing. Anything narrower than that is left for the panel.
-    for fixed in crate::hook::repair(app.hook_project().as_deref()) {
+    for fixed in cctop_core::hook::repair(app.hook_project().as_deref()) {
         app.set_status(&fixed);
     }
     // Once per launch: the Cost panel's "today" reading $0.00 for work done
     // this morning is the symptom, and nothing on it says the clock is why.
-    if let Some(why) = crate::util::unzoned_over_ssh() {
+    if let Some(why) = cctop_core::util::unzoned_over_ssh() {
         app.set_status(why);
     }
     // What repair deliberately would not touch: an install registering fewer
@@ -227,7 +227,7 @@ pub fn run(
     // one from this run, and the line below is the only thing that tells anyone
     // they are there at all.
     let left_running = match had_tabs {
-        true => crate::rmux::sessions(),
+        true => cctop_core::rmux::sessions(),
         // Nothing here ever touched rmux, so nothing here is owed an account of
         // what is in it.
         false => Vec::new(),
@@ -258,7 +258,7 @@ pub fn run(
     let _ = worker.join();
     // The ssh masters the directory field started, unless a launch tab is
     // still working over one — that one lets go of it when it ends.
-    crate::ssh_master::release_all();
+    cctop_core::ssh_master::release_all();
     app.save_prefs();
     result
 }
@@ -314,9 +314,9 @@ fn restore_terminal() {
 /// A thread rather than a slot in the worker's queue: an ssh round trip can
 /// take seconds or hang until its timeout, and the worker is what answers the
 /// keyboard's refresh. One wedged host must cost only itself.
-fn spawn_host_poller(host: crate::fleet::Host, tx: Sender<Response>) {
+fn spawn_host_poller(host: cctop_core::fleet::Host, tx: Sender<Response>) {
     std::thread::spawn(move || {
-        let mut handshake = crate::fleet::Handshake::default();
+        let mut handshake = cctop_core::fleet::Handshake::default();
         loop {
             let snapshot = host.poll();
             // Asked of the snapshot before it is sent away, and the probe sent
@@ -334,9 +334,9 @@ fn spawn_host_poller(host: crate::fleet::Host, tx: Sender<Response>) {
                 return;
             }
             let probe = match ask {
-                crate::fleet::Ask::Nothing => None,
-                crate::fleet::Ask::Probe => Some(host.probe()),
-                crate::fleet::Ask::Missing => Some(crate::fleet::Probe::Missing),
+                cctop_core::fleet::Ask::Nothing => None,
+                cctop_core::fleet::Ask::Probe => Some(host.probe()),
+                cctop_core::fleet::Ask::Missing => Some(cctop_core::fleet::Probe::Missing),
             };
             if let Some(probe) = probe {
                 let _ = tx.send(Response::RemoteVersion {
@@ -344,7 +344,7 @@ fn spawn_host_poller(host: crate::fleet::Host, tx: Sender<Response>) {
                     probe,
                 });
             }
-            std::thread::sleep(crate::fleet::POLL);
+            std::thread::sleep(cctop_core::fleet::POLL);
         }
     });
 }
@@ -355,18 +355,18 @@ fn spawn_host_poller(host: crate::fleet::Host, tx: Sender<Response>) {
 /// a signed-out or throttled account has nothing to record, and recording a
 /// zero for it would look exactly like an account that used none of its
 /// allowance.
-fn record_burn(log: &mut crate::burn::Log, quota: &Quota) -> bool {
-    let at = crate::util::now_ms() / 1000;
+fn record_burn(log: &mut cctop_core::burn::Log, quota: &Quota) -> bool {
+    let at = cctop_core::util::now_ms() / 1000;
     let mut stored = false;
     for (provider, profiles) in [("claude", &quota.claude), ("codex", &quota.codex)] {
         for profile in profiles {
-            let crate::quota::ProviderStatus::Ok(q) = &profile.status else {
+            let cctop_core::quota::ProviderStatus::Ok(q) = &profile.status else {
                 continue;
             };
             for window in &q.windows {
                 stored |= log.record(
-                    crate::burn::key(provider, &profile.profile, window.label),
-                    crate::burn::Sample {
+                    cctop_core::burn::key(provider, &profile.profile, window.label),
+                    cctop_core::burn::Sample {
                         at,
                         pct: window.pct,
                         resets_at: window.resets_at,
@@ -387,7 +387,7 @@ fn spawn_quota_poller(tx: Sender<Response>) {
         // place that is true — so it is where they get written down. A window
         // that resets takes its own history with it, and nothing else in cctop
         // sees a figure before that happens.
-        let mut burn = crate::burn::Log::load();
+        let mut burn = cctop_core::burn::Log::load();
 
         loop {
             let now = Instant::now();
@@ -398,16 +398,16 @@ fn spawn_quota_poller(tx: Sender<Response>) {
             // An account just added is asked about now; the cache answers
             // for the others, so this is one request.
             if now >= claude_due
-                || crate::quota::NUDGE.swap(false, std::sync::atomic::Ordering::Relaxed)
+                || cctop_core::quota::NUDGE.swap(false, std::sync::atomic::Ordering::Relaxed)
             {
                 // Each profile is its own account with its own limits, so each
                 // is asked separately — and paced separately, by the usage
                 // cache, which answers for any account that is not due yet.
-                quota.claude = crate::config::accounts_for(Provider::Claude)
+                quota.claude = cctop_core::config::accounts_for(Provider::Claude)
                     .iter()
-                    .map(|profile| crate::quota::ProfileQuota {
+                    .map(|profile| cctop_core::quota::ProfileQuota {
                         profile: profile.name.clone(),
-                        status: crate::quota::fetch_claude(profile),
+                        status: cctop_core::quota::fetch_claude(profile),
                         source: profile.source,
                     })
                     .collect();
@@ -426,11 +426,11 @@ fn spawn_quota_poller(tx: Sender<Response>) {
             if now >= codex_due {
                 // Per account for the same reason as Claude's, and paced the
                 // same way.
-                quota.codex = crate::config::accounts_for(Provider::Codex)
+                quota.codex = cctop_core::config::accounts_for(Provider::Codex)
                     .iter()
-                    .map(|profile| crate::quota::ProfileQuota {
+                    .map(|profile| cctop_core::quota::ProfileQuota {
                         profile: profile.name.clone(),
-                        status: crate::quota::fetch_codex(profile),
+                        status: cctop_core::quota::fetch_codex(profile),
                         source: profile.source,
                     })
                     .collect();
@@ -466,8 +466,8 @@ fn event_loop(
     terminal: &mut ratatui::DefaultTerminal,
     res_rx: &Receiver<Response>,
     req_tx: &Sender<Request>,
-    watch: Option<&crate::watch::Watch>,
-    mut hosted: Option<&mut crate::shim::Hosted>,
+    watch: Option<&cctop_core::watch::Watch>,
+    mut hosted: Option<&mut cctop_core::shim::Hosted>,
 ) -> anyhow::Result<i32> {
     let mut last_refresh = Instant::now();
     let mut last_full_walk = Instant::now();
@@ -491,7 +491,7 @@ fn event_loop(
                 Ok(Response::Discovered(sessions)) => {
                     app.sessions = sessions;
                     app.loaded = true;
-                    app.stats = crate::loader::compute_stats(&app.sessions);
+                    app.stats = cctop_core::loader::compute_stats(&app.sessions);
                     app.refilter();
                     app.merge_remotes();
                     rows_changed = true;
@@ -525,7 +525,7 @@ fn event_loop(
                     app.merge_remotes();
                     app.push_history();
                     app.refilter();
-                    crate::elog::event(
+                    cctop_core::elog::event(
                         "scan",
                         "refresh",
                         serde_json::json!({"sessions": app.sessions.len(), "kind": "full"}),
@@ -552,7 +552,7 @@ fn event_loop(
                     app.loaded = true;
                     app.push_history();
                     app.refilter();
-                    crate::elog::event(
+                    cctop_core::elog::event(
                         "scan",
                         "refresh",
                         serde_json::json!({"sessions": app.sessions.len(), "kind": "live"}),
@@ -584,7 +584,7 @@ fn event_loop(
                     app.quota = *q;
                     // The poller has just written whatever this reading added,
                     // so this is the one moment the log is known to have moved.
-                    app.burn = crate::burn::Log::load();
+                    app.burn = cctop_core::burn::Log::load();
                     app.needs_redraw = true;
                 }
                 Ok(Response::Location(answer)) => app.got_location(answer),
@@ -625,7 +625,7 @@ fn event_loop(
                         Ok(()) => {
                             app.sessions.retain(|session| session.key() != session_key);
                             app.marked.remove(&session_key);
-                            app.stats = crate::loader::compute_stats(&app.sessions);
+                            app.stats = cctop_core::loader::compute_stats(&app.sessions);
                             app.refilter();
                             app.set_status("Deleted session");
                         }
@@ -640,7 +640,7 @@ fn event_loop(
                 },
                 Ok(Response::Remote { host, snapshot }) => {
                     match snapshot {
-                        crate::fleet::Snapshot::Rows(rows) => {
+                        cctop_core::fleet::Snapshot::Rows(rows) => {
                             app.remote_errors.remove(&host);
                             app.remotes.insert(host, rows);
                         }
@@ -648,7 +648,7 @@ fn event_loop(
                         // dropped ssh connection has not stopped those agents,
                         // and an empty machine is a stronger claim than a stale
                         // one. The footer says the reading is old.
-                        crate::fleet::Snapshot::Failed(why) => {
+                        cctop_core::fleet::Snapshot::Failed(why) => {
                             app.remote_errors.insert(host, why);
                         }
                     }
@@ -690,7 +690,7 @@ fn event_loop(
             // After the hooks, because a row's liveness is what decides whether
             // it can still race anyone, and cheap enough to redo wholesale:
             // it compares paths already in memory and reads no transcript.
-            app.collisions = crate::collide::apply(&mut app.sessions);
+            app.collisions = cctop_core::collide::apply(&mut app.sessions);
             app.hear_ultracode();
         }
         // Before the bells: a YOLO prompt answered here is one nobody needs
@@ -701,7 +701,7 @@ fn event_loop(
         if annotated_rows_changed {
             // A burst can contain hundreds of rows. Recompute and sort once
             // after draining it rather than once per transcript.
-            app.stats = crate::loader::compute_stats(&app.sessions);
+            app.stats = cctop_core::loader::compute_stats(&app.sessions);
             app.refilter();
         }
         if rows_changed {
@@ -755,7 +755,7 @@ fn event_loop(
             .iter_mut()
             .fold(false, |any, tab| tab.reap(&mut saved) | any);
         for (path, finished) in &saved {
-            app.set_status(crate::cast::stopped_message(path, finished));
+            app.set_status(cctop_core::cast::stopped_message(path, finished));
         }
         if closed {
             app.drop_empty_tabs();
@@ -773,7 +773,7 @@ fn event_loop(
 
         // Hook events arrive whenever an agent hits one, which is not on any
         // tick of ours, so they are drained here alongside everything else.
-        if let Some(events) = app.listener.as_ref().map(crate::hook::Listener::drain) {
+        if let Some(events) = app.listener.as_ref().map(cctop_core::hook::Listener::drain) {
             let (changed, lifecycle) = app.apply_hooks(events);
             app.needs_redraw |= changed;
             // A session that has just begun or ended is a row to find or forget
@@ -898,7 +898,7 @@ fn event_loop(
             .min(idle_wait);
         if event::poll(wait)? {
             let event = event::read()?;
-            crate::elog::tui(&event);
+            cctop_core::elog::tui(&event);
             match event {
                 Event::Key(key) => app.on_key(key),
                 Event::Paste(text) => app.on_paste(&text),
@@ -931,7 +931,8 @@ fn event_loop(
             // number running now. So the fast tick updates the running rows and
             // the walk — the only thing that can notice a *new* session — runs on
             // its own slower cadence.
-            let watched_change = watch.is_some_and(crate::watch::Watch::took_structural_change);
+            let watched_change =
+                watch.is_some_and(cctop_core::watch::Watch::took_structural_change);
             // A transcript is created before it is summarizable — the model name
             // only arrives with the first assistant message — so the walk the
             // create earned can find nothing. Keep walking, at a cadence between

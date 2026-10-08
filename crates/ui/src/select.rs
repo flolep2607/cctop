@@ -43,7 +43,7 @@ impl App {
     }
 
     /// The highlighted subagent, when the cursor is on a child row.
-    pub fn selected_subagent(&self) -> Option<&crate::session::Subagent> {
+    pub fn selected_subagent(&self) -> Option<&cctop_core::session::Subagent> {
         match self.selected_row()? {
             Row::Session(_) | Row::Group(_) => None,
             Row::Subagent { parent, index } => self.sessions.get(parent)?.subagents.get(index),
@@ -169,7 +169,7 @@ impl App {
         // Found among the session's transcripts rather than rebuilt from the
         // id: a workflow's agents sit a run directory further down.
         stand_in.data_file = session.data_file.as_ref().and_then(|f| {
-            crate::session::transcript_files(f)
+            cctop_core::session::transcript_files(f)
                 .into_iter()
                 .skip(1)
                 .find(|t| t.file_stem().is_some_and(|s| *s == *sub.agent_id))
@@ -179,7 +179,7 @@ impl App {
         stand_in.last_active = stand_in
             .data_file
             .as_ref()
-            .map(|f| crate::util::ms_to_rfc3339(crate::config::file_mtime_ms(f) as i64))
+            .map(|f| cctop_core::util::ms_to_rfc3339(cctop_core::config::file_mtime_ms(f) as i64))
             .unwrap_or_default();
         Some(stand_in)
     }
@@ -408,7 +408,7 @@ impl App {
                 .unwrap_or_else(|| s.session_id.clone()),
         };
         render::copy_to_clipboard(&text);
-        self.set_status(format!("Copied: {}", crate::util::truncate(&text, 60)));
+        self.set_status(format!("Copied: {}", cctop_core::util::truncate(&text, 60)));
     }
 
     /// Half the visible table height, used by Ctrl+U/Ctrl+D. Falls back to a
@@ -421,12 +421,12 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ui::tests::{session, test_app};
+    use crate::tests::{session, test_app};
     fn with_subagents(id: &str, names: &[&str]) -> Session {
         let mut s = session(id, true, id);
         s.subagents = names
             .iter()
-            .map(|n| crate::session::Subagent {
+            .map(|n| cctop_core::session::Subagent {
                 agent_id: format!("agent-{n}"),
                 agent_type: "general-purpose".into(),
                 description: (*n).into(),
@@ -434,7 +434,7 @@ mod tests {
                 started_at: None,
                 last_active: None,
                 duration_ms: 0,
-                status: crate::session::SubagentStatus::Running,
+                status: cctop_core::session::SubagentStatus::Running,
                 cost: 0.0,
                 tool_count: 0,
                 tool_use_id: None,
@@ -568,7 +568,7 @@ mod tests {
             app.sessions[0]
                 .subagents
                 .iter()
-                .all(|s| s.status == crate::session::SubagentStatus::Running)
+                .all(|s| s.status == cctop_core::session::SubagentStatus::Running)
         );
 
         // The hook names the bare id; the transcript is stored as `agent-<id>`.
@@ -576,10 +576,10 @@ mod tests {
         app.apply_finished_agents();
 
         let status = |i: usize| app.sessions[0].subagents[i].status;
-        assert_eq!(status(0), crate::session::SubagentStatus::Done);
+        assert_eq!(status(0), cctop_core::session::SubagentStatus::Done);
         assert_eq!(
             status(1),
-            crate::session::SubagentStatus::Running,
+            cctop_core::session::SubagentStatus::Running,
             "only the subagent named may be retired"
         );
     }

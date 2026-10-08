@@ -8,7 +8,7 @@ use super::render::Layout;
 use super::share;
 use super::theme;
 use super::{AGE_OPTIONS, AccountKind, App, BatchKind, LaunchInto, tabs};
-use crate::util;
+use cctop_core::util;
 use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::Rect;
@@ -505,8 +505,8 @@ pub(super) fn draw_help(frame: &mut Frame, area: Rect, app: &mut App) {
 /// bumped at a release: every build between two of them says the same number,
 /// and "which one is this" is the question the number cannot answer.
 pub(super) fn build_label() -> String {
-    let version = crate::update::current_version();
-    match crate::update::current_commit() {
+    let version = cctop_core::update::current_version();
+    match cctop_core::update::current_commit() {
         "" => format!("cctop {version}"),
         commit => format!("cctop {version} ({commit})"),
     }
@@ -520,7 +520,7 @@ pub(super) fn build_label() -> String {
 /// page was written by hand, and what keeps a pair inside the key column. An
 /// action nothing is bound to reads `unbound`, rather than the page quietly
 /// naming a key that now does something else or nothing at all.
-fn bound_keys(template: &str, keymap: &crate::settings::Keymap) -> String {
+fn bound_keys(template: &str, keymap: &cctop_core::settings::Keymap) -> String {
     let mut out = String::new();
     let mut rest = template;
     // The modifiers of the key just written, while nothing but ` / ` has
@@ -533,7 +533,7 @@ fn bound_keys(template: &str, keymap: &crate::settings::Keymap) -> String {
         let between = &rest[..open];
         let label = keymap
             .key_of(&rest[open + 1..close])
-            .map(crate::settings::key_label)
+            .map(cctop_core::settings::key_label)
             .unwrap_or_else(|| "unbound".to_string());
         let mods = label
             .rfind('+')
@@ -787,7 +787,7 @@ fn settings_lines(
     lines.push(Line::from(vec![
         Span::styled("  File ", theme::dim()),
         Span::raw(super::render::elide(
-            &crate::util::tildify(&crate::config::CONFIG_FILE.to_string_lossy()),
+            &cctop_core::util::tildify(&cctop_core::config::CONFIG_FILE.to_string_lossy()),
             width.saturating_sub(8),
         )),
     ]));
@@ -861,7 +861,7 @@ fn settings_lines(
         lines.push(section("config.toml · [settings]"));
         for (at, entry) in rows.iter().enumerate() {
             let Item::Setting(i) = entry else { continue };
-            let (name, _, what) = crate::settings::SETTINGS[*i];
+            let (name, _, what) = cctop_core::settings::SETTINGS[*i];
             let (value, set) = app.settings.value_of(name);
             row(&mut lines, at, name, value, set, what);
         }
@@ -884,7 +884,7 @@ fn settings_lines(
         lines.push(section("config.toml · [keys], on the session table"));
         for (at, entry) in rows.iter().enumerate() {
             let Item::Key(i) = entry else { continue };
-            let (action, default, what) = crate::settings::BINDINGS[*i];
+            let (action, default, what) = cctop_core::settings::BINDINGS[*i];
             let key = app.settings.key_for(action).to_string();
             let set = key != *default;
             row(&mut lines, at, action, key, set, what);
@@ -963,7 +963,7 @@ pub(super) fn draw_search(frame: &mut Frame, area: Rect, app: &App) {
     };
     lines.push(Line::from(vec![
         Span::styled(format!(" {marker} "), style),
-        Span::styled(crate::util::truncate(&text, text_w), style),
+        Span::styled(cctop_core::util::truncate(&text, text_w), style),
     ]));
 
     // The matching line from the selected session's transcript. Without it a
@@ -972,7 +972,7 @@ pub(super) fn draw_search(frame: &mut Frame, area: Rect, app: &App) {
         lines.push(Line::from(Span::styled(
             // Less the three-space indent: the paragraph wraps, and a snippet
             // spilling onto a second line resizes the modal as you type.
-            format!("   {}", crate::util::truncate(snippet, text_w - 3)),
+            format!("   {}", cctop_core::util::truncate(snippet, text_w - 3)),
             theme::value(),
         )));
     }
@@ -1004,7 +1004,7 @@ pub(super) fn draw_resume_confirm(frame: &mut Frame, area: Rect, app: &App, layo
         Line::from(Span::styled(
             format!(
                 " {} is still running.",
-                crate::util::truncate(session.display_label(), 40)
+                cctop_core::util::truncate(session.display_label(), 40)
             ),
             Style::default().fg(theme::colors().cost_mid),
         )),
@@ -1015,7 +1015,7 @@ pub(super) fn draw_resume_confirm(frame: &mut Frame, area: Rect, app: &App, layo
         Line::from(Span::raw(" which neither of them will know about.")),
         Line::default(),
         Line::from(Span::styled(
-            format!("   {}", crate::util::truncate(&command, 56)),
+            format!("   {}", cctop_core::util::truncate(&command, 56)),
             theme::value(),
         )),
         Line::default(),
@@ -1059,7 +1059,7 @@ pub(super) fn draw_rmux_install(frame: &mut Frame, area: Rect, app: &App) {
         )),
         Line::default(),
         Line::from(Span::styled(
-            format!("   {}", crate::util::truncate(command, 56)),
+            format!("   {}", cctop_core::util::truncate(command, 56)),
             theme::value(),
         )),
     ];
@@ -1195,7 +1195,7 @@ pub(super) fn draw_serve(frame: &mut Frame, area: Rect, app: &App) {
     if let Some(error) = &app.serve_error {
         lines.push(Line::default());
         lines.push(Line::from(Span::styled(
-            format!(" {}", crate::util::truncate(error, 58)),
+            format!(" {}", cctop_core::util::truncate(error, 58)),
             Style::default().fg(theme::colors().cost_high),
         )));
     }
@@ -1273,7 +1273,7 @@ pub(super) fn draw_share_qr(frame: &mut Frame, area: Rect, app: &App, layout: &m
     };
     let mut lines = vec![
         Line::from(Span::styled(
-            format!(" {}", crate::util::truncate(&share.label, 50)),
+            format!(" {}", cctop_core::util::truncate(&share.label, 50)),
             theme::value(),
         )),
         Line::default(),
@@ -1412,7 +1412,7 @@ pub(super) fn draw_age_filter(frame: &mut Frame, area: Rect, app: &App) {
 /// The last `width` characters of `s`, elided at the front.
 ///
 /// For a field being typed into, where the end is the part that is moving.
-/// [`truncate`](crate::util::truncate) keeps the head, which is the right
+/// [`truncate`](cctop_core::util::truncate) keeps the head, which is the right
 /// answer for a label and the wrong one for a cursor.
 fn tail(s: &str, width: usize) -> String {
     let count = s.chars().count();
@@ -1496,7 +1496,7 @@ pub(super) fn draw_row_menu(
             Span::styled(
                 format!(
                     "{:>right_w$} ",
-                    crate::util::truncate(&trailing(item), MAX_REASON)
+                    cctop_core::util::truncate(&trailing(item), MAX_REASON)
                 ),
                 theme::dim(),
             ),
@@ -1507,7 +1507,7 @@ pub(super) fn draw_row_menu(
     // menu floating over a table of seventy rows has to say which one it means.
     let subject = app
         .selected_session()
-        .map(|s| crate::util::truncate(s.display_label(), width.saturating_sub(4) as usize))
+        .map(|s| cctop_core::util::truncate(s.display_label(), width.saturating_sub(4) as usize))
         .unwrap_or_default();
 
     // Wrapped rows, not lines. The paragraph below wraps, so a box sized to the
@@ -1570,7 +1570,7 @@ pub(super) fn draw_launch(
         .filter_map(|c| c.cwd())
         .map(|d| d.to_string_lossy().into_owned())
         .collect();
-    let mut short = crate::util::abbreviate_paths(&dirs).into_iter();
+    let mut short = cctop_core::util::abbreviate_paths(&dirs).into_iter();
 
     // The list on its own, kept apart from the two lines under it: it is the
     // part that scrolls, and they are the part that must stay on screen.
@@ -1677,15 +1677,15 @@ pub(super) fn draw_launch(
         rows.push(Line::from(vec![
             Span::styled(format!(" {dot} "), Style::default().fg(dot_color)),
             Span::styled(
-                format!("{:<NAME$}", crate::util::truncate(&name, NAME)),
+                format!("{:<NAME$}", cctop_core::util::truncate(&name, NAME)),
                 style,
             ),
             Span::styled(
-                format!("{:<WHERE$}", crate::util::truncate(&at, WHERE - 1)),
+                format!("{:<WHERE$}", cctop_core::util::truncate(&at, WHERE - 1)),
                 theme::dim(),
             ),
             Span::styled(
-                format!("{:<STATE$}", crate::util::truncate(&state, STATE)),
+                format!("{:<STATE$}", cctop_core::util::truncate(&state, STATE)),
                 Style::default().fg(state_color),
             ),
         ]));
@@ -1788,7 +1788,7 @@ pub(super) fn draw_launch(
                     let target = app.launch_remote.as_ref().expect("checked");
                     format!(
                         " in {}{}  (c to change)",
-                        crate::util::truncate(&target.spelled(), WIDTH as usize - 34),
+                        cctop_core::util::truncate(&target.spelled(), WIDTH as usize - 34),
                         match target.unchecked {
                             Some(_) => " (unchecked)",
                             None => "",
@@ -1797,8 +1797,8 @@ pub(super) fn draw_launch(
                 }
                 (_, Some(dir)) => format!(
                     " in {}  (c to change)",
-                    crate::util::truncate(
-                        &crate::util::tildify(&dir.to_string_lossy()),
+                    cctop_core::util::truncate(
+                        &cctop_core::util::tildify(&dir.to_string_lossy()),
                         WIDTH as usize - 22
                     )
                 ),
@@ -1839,7 +1839,7 @@ pub(super) fn draw_launch(
         };
         let room_for = (WIDTH as usize - 8).saturating_sub(aside.chars().count().min(34));
         let shown = tail(&text, room_for);
-        let aside = crate::util::truncate(&aside, WIDTH as usize - 8 - shown.chars().count());
+        let aside = cctop_core::util::truncate(&aside, WIDTH as usize - 8 - shown.chars().count());
         let unusable = matches!(
             hit,
             super::location::Hit::Remote {
@@ -1875,7 +1875,7 @@ pub(super) fn draw_launch(
     }
     if let Some((text, warn)) = &note {
         lines.push(Line::from(Span::styled(
-            format!(" {}", crate::util::truncate(text, WIDTH as usize - 4)),
+            format!(" {}", cctop_core::util::truncate(text, WIDTH as usize - 4)),
             Style::default().fg(match warn {
                 true => theme::colors().cost_mid,
                 false => theme::colors().dim,
@@ -1977,7 +1977,7 @@ pub(super) fn draw_hooks(frame: &mut Frame, area: Rect, app: &App) {
         };
         lines.push(Line::from(vec![
             Span::styled(format!(" {marker}"), style),
-            Span::styled(crate::util::truncate(&text, text_w), style),
+            Span::styled(cctop_core::util::truncate(&text, text_w), style),
         ]));
     }
 
@@ -1996,7 +1996,7 @@ pub(super) fn draw_hooks(frame: &mut Frame, area: Rect, app: &App) {
         for (project, state) in reporting.iter().take(6) {
             lines.push(Line::from(vec![
                 Span::styled(
-                    format!("   {:<24}", crate::util::truncate(project, 24)),
+                    format!("   {:<24}", cctop_core::util::truncate(project, 24)),
                     theme::value(),
                 ),
                 Span::styled(*state, theme::dim()),
@@ -2018,7 +2018,7 @@ pub(super) fn draw_hooks(frame: &mut Frame, area: Rect, app: &App) {
         match app.hook_project() {
             Some(dir) => format!(
                 " p / P  install / remove in {}",
-                crate::util::truncate(&dir.display().to_string(), text_w.saturating_sub(30))
+                cctop_core::util::truncate(&dir.display().to_string(), text_w.saturating_sub(30))
             ),
             None => " p / P  install / remove for the selected project".into(),
         },
@@ -2231,7 +2231,7 @@ pub(super) fn draw_remote_update_confirm(
         return;
     };
     let theirs = match app.remote_versions.get(&host.target) {
-        Some(crate::fleet::Probe::Version(v)) => v.clone(),
+        Some(cctop_core::fleet::Probe::Version(v)) => v.clone(),
         _ => "an unknown version".to_string(),
     };
     let lines = vec![
@@ -2239,7 +2239,7 @@ pub(super) fn draw_remote_update_confirm(
         Line::from(Span::styled(
             format!(
                 "  runs cctop {theirs}; this one is {}",
-                crate::update::current_version()
+                cctop_core::update::current_version()
             ),
             theme::dim(),
         )),
@@ -3086,7 +3086,7 @@ pub(super) fn draw_add_account(frame: &mut Frame, area: Rect, app: &mut App, lay
 
 /// `optimize` or `compare`, drawn over the table.
 ///
-/// The text arrives already laid out from [`crate::insight`], so this only has
+/// The text arrives already laid out from [`cctop_core::insight`], so this only has
 /// to frame and scroll it — the alternative was a second implementation of the
 /// same tables that could drift from the one the command prints.
 pub(super) fn draw_insight(frame: &mut Frame, area: Rect, app: &App) {
@@ -3186,15 +3186,15 @@ mod tests {
             "s".repeat(70)
         );
         let draw = |with_link: bool| {
-            let mut app = crate::ui::tests::test_app();
-            let mut pane = crate::ui::tabs::Pane::for_test("claude");
+            let mut app = crate::tests::test_app();
+            let mut pane = crate::tabs::Pane::for_test("claude");
             pane.view.parser.process(
                 format!(
                     "Browser didn't open? Use the url below:\r\n\r\n{link}\r\n\r\nPaste code > "
                 )
                 .as_bytes(),
             );
-            app.add_account = crate::ui::AddAccount {
+            app.add_account = crate::AddAccount {
                 name: "work".into(),
                 kind: Some(AccountKind::Token),
                 named: true,
@@ -3276,7 +3276,7 @@ mod tests {
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
 
-        let mut app = crate::ui::tests::test_app();
+        let mut app = crate::tests::test_app();
         let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("backend");
         terminal
             .draw(|frame| draw_help(frame, frame.area(), &mut app))
@@ -3295,11 +3295,11 @@ mod tests {
     /// what says so; on a screen it fits, there is no bar to misread.
     #[test]
     fn the_help_has_a_scrollbar_only_when_it_overflows() {
-        use crate::ui::scrollbar::tests::thumb_cells;
+        use crate::scrollbar::tests::thumb_cells;
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
 
-        let mut app = crate::ui::tests::test_app();
+        let mut app = crate::tests::test_app();
         let mut short = Terminal::new(TestBackend::new(100, 20)).expect("backend");
         short
             .draw(|frame| draw_help(frame, frame.area(), &mut app))
@@ -3320,11 +3320,11 @@ mod tests {
     /// frame caught up.
     #[test]
     fn the_settings_page_shows_the_cursor_in_the_frame_that_moved_it() {
-        use crate::ui::settings::Item;
+        use crate::settings::Item;
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
 
-        let mut app = crate::ui::tests::test_app();
+        let mut app = crate::tests::test_app();
         app.settings_open = true;
         let mut terminal = Terminal::new(TestBackend::new(100, 15)).expect("backend");
         let mut frame_text = |app: &mut App| {
@@ -3343,7 +3343,7 @@ mod tests {
         let Some(Item::Key(last)) = rows.last() else {
             panic!("the page no longer ends on a keybind")
         };
-        let last = crate::settings::BINDINGS[*last].0;
+        let last = cctop_core::settings::BINDINGS[*last].0;
         app.settings_cursor = rows.len() - 1;
         let text = frame_text(&mut app);
         assert!(text.contains(last), "End did not bring {last} on screen");
@@ -3377,9 +3377,9 @@ mod tests {
     /// and Esc takes the filter off before it takes the page away.
     #[test]
     fn slash_filters_the_help() {
-        use crate::ui::tests::key;
-        let mut app = crate::ui::tests::test_app();
-        app.mode = crate::ui::Mode::Help;
+        use crate::tests::key;
+        let mut app = crate::tests::test_app();
+        app.mode = crate::Mode::Help;
         app.on_key(key(KeyCode::Char('/')));
         assert!(app.help_typing);
         // `j` and `k` are letters of the query now, not the scroll.
@@ -3418,21 +3418,21 @@ mod tests {
         app.on_key(key(KeyCode::Enter));
         assert!(!app.help_typing);
         app.on_key(key(KeyCode::Char('j')));
-        assert_eq!(app.mode, crate::ui::Mode::Help, "j closed the help");
+        assert_eq!(app.mode, crate::Mode::Help, "j closed the help");
         assert_eq!(app.help_filter, "tab");
         // Esc: the filter, then the page.
         app.on_key(key(KeyCode::Esc));
-        assert_eq!(app.mode, crate::ui::Mode::Help);
+        assert_eq!(app.mode, crate::Mode::Help);
         assert!(app.help_filter.is_empty());
         app.on_key(key(KeyCode::Esc));
-        assert_eq!(app.mode, crate::ui::Mode::List);
+        assert_eq!(app.mode, crate::Mode::List);
 
         // Esc while typing clears it and stays, too.
-        app.mode = crate::ui::Mode::Help;
+        app.mode = crate::Mode::Help;
         app.on_key(key(KeyCode::Char('/')));
         app.on_key(key(KeyCode::Char('x')));
         app.on_key(key(KeyCode::Esc));
-        assert_eq!(app.mode, crate::ui::Mode::Help);
+        assert_eq!(app.mode, crate::Mode::Help);
         assert!(!app.help_typing && app.help_filter.is_empty());
     }
 
@@ -3441,7 +3441,7 @@ mod tests {
     fn the_help_shows_the_keys_as_bound() {
         // A row as `item` lays it out: the key padded to its column.
         let row = |k: &str, d: &str| format!("  {k:<16} {d}");
-        let mut app = crate::ui::tests::test_app();
+        let mut app = crate::tests::test_app();
         let text = help_text(&mut app);
         // And which build is saying so, on its top border.
         let top = text.lines().find(|l| l.contains("╭ Help")).unwrap_or("");
@@ -3451,10 +3451,10 @@ mod tests {
         assert!(text.contains("Shift+Home / End"), "{text}");
         assert!(text.contains("↑/k  ↓/j"), "{text}");
 
-        let s = crate::settings::Settings::parse(
+        let s = cctop_core::settings::Settings::parse(
             "[keys]\nterminate = \"ctrl+t\"\nhelp = \"H\"\nfollow = \"b\"\n",
         );
-        app.keymap = crate::settings::Keymap::build(&s).0;
+        app.keymap = cctop_core::settings::Keymap::build(&s).0;
         let text = help_text(&mut app);
         assert!(text.contains(&row("Ctrl+T", "Terminate it")), "{text}");
         assert!(text.contains("H  F1"), "{text}");
@@ -3507,12 +3507,12 @@ mod tests {
     /// top of the border first, at the bottom once scrolled to the end.
     #[test]
     fn a_long_report_has_a_scrollbar_that_follows_the_scroll() {
-        use crate::ui::scrollbar::{THUMB, tests::thumb_cells};
+        use crate::scrollbar::{THUMB, tests::thumb_cells};
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
 
-        let mut app = crate::ui::tests::test_app();
-        app.mode = crate::ui::Mode::Insight;
+        let mut app = crate::tests::test_app();
+        app.mode = crate::Mode::Insight;
         let draw = |app: &App| {
             let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("backend");
             terminal
@@ -3547,12 +3547,12 @@ mod tests {
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
 
-        let mut app = crate::ui::tests::test_app();
+        let mut app = crate::tests::test_app();
         app.rename_was = "claude-4".to_string();
         app.rename_color = Some(theme::Hue::Cyan);
 
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("backend");
-        let mut layout = crate::ui::render::Layout::default();
+        let mut layout = crate::render::Layout::default();
         terminal
             .draw(|frame| draw_rename_tab(frame, frame.area(), &app, &mut layout))
             .expect("draw");
@@ -3585,8 +3585,8 @@ mod tests {
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
 
-        let mut app = crate::ui::tests::test_app();
-        app.mode = crate::ui::Mode::Insight;
+        let mut app = crate::tests::test_app();
+        app.mode = crate::Mode::Insight;
         app.insight = None;
 
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("backend");
@@ -3619,8 +3619,8 @@ mod tests {
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
 
-        let shared = |name: &str, signal: Option<crate::hook::Signal>| {
-            tabs::Tab::for_agent(&crate::rmux::Running {
+        let shared = |name: &str, signal: Option<cctop_core::hook::Signal>| {
+            tabs::Tab::for_agent(&cctop_core::rmux::Running {
                 name: format!("cctop-{name}"),
                 pid: None,
                 cwd: None,
@@ -3629,9 +3629,9 @@ mod tests {
                 label: Some(name.to_string()),
                 profile: None,
                 order: None,
-                state: signal.map(|signal| crate::rmux::State {
+                state: signal.map(|signal| cctop_core::rmux::State {
                     signal,
-                    at: crate::rmux::now_secs(),
+                    at: cctop_core::rmux::now_secs(),
                 }),
                 color: None,
                 tab: None,
@@ -3641,15 +3641,15 @@ mod tests {
             })
         };
 
-        let mut app = crate::ui::tests::test_app();
+        let mut app = crate::tests::test_app();
         app.tabs = vec![
             shared("claude", None),
-            shared("blocked", Some(crate::hook::Signal::NeedsInput)),
+            shared("blocked", Some(cctop_core::hook::Signal::NeedsInput)),
         ];
-        app.mode = crate::ui::Mode::SwitchTab;
+        app.mode = crate::Mode::SwitchTab;
 
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("backend");
-        let mut layout = crate::ui::render::Layout::default();
+        let mut layout = crate::render::Layout::default();
         terminal
             .draw(|frame| draw_switch_tab(frame, frame.area(), &app, &mut layout))
             .expect("draw");
@@ -3673,7 +3673,7 @@ mod tests {
         // A filter that matches nothing says so rather than listing air.
         app.switch_filter = "zzz".into();
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("backend");
-        let mut layout = crate::ui::render::Layout::default();
+        let mut layout = crate::render::Layout::default();
         terminal
             .draw(|frame| draw_switch_tab(frame, frame.area(), &app, &mut layout))
             .expect("draw");
@@ -3687,7 +3687,7 @@ mod tests {
         assert!(text.contains("No tab by that name"), "silence: {text}");
 
         // Under a state filter, the title and the empty line both say which.
-        app.switch_state = crate::ui::panes::SwitchState::NeedsYou;
+        app.switch_state = crate::panes::SwitchState::NeedsYou;
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("backend");
         terminal
             .draw(|frame| draw_switch_tab(frame, frame.area(), &app, &mut layout))

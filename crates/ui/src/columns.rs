@@ -1,7 +1,7 @@
 //! Session-table column definitions: rendering, sorting, and tooltips.
 
-use crate::session::{ActivityState, Session, Subagent, SubagentStatus};
-use crate::util;
+use cctop_core::session::{ActivityState, Session, Subagent, SubagentStatus};
+use cctop_core::util;
 use chrono::{DateTime, Utc};
 use std::borrow::Cow;
 use std::cmp::Ordering;
@@ -302,7 +302,7 @@ pub fn parse_hidden(list: &str) -> Vec<ColumnId> {
 /// How many users' sessions are in `sessions`, this user counting as one.
 ///
 /// What decides whether USER is drawn and whether the tree gets a user level.
-/// Asked of the data rather than of [`crate::config::OTHER_HOMES`], because a
+/// Asked of the data rather than of [`cctop_core::config::OTHER_HOMES`], because a
 /// root that reads eight homes, of which only one holds any sessions, has one
 /// user on screen — and a column naming that one on every row answers nothing.
 pub fn users_in_view<'a>(sessions: impl IntoIterator<Item = &'a Session>) -> usize {
@@ -519,8 +519,8 @@ pub fn render_cell<'a>(id: ColumnId, s: &'a Session, now: &DateTime<Utc>) -> Cow
         // Blank rather than a dash for the ordinary case. This column is a
         // warning light, and a light that is on in every row is off.
         ColumnId::Conflict => match s.conflict {
-            Some(crate::collide::Overlap::File) => Borrowed("⚠"),
-            Some(crate::collide::Overlap::Directory) => Borrowed("·"),
+            Some(cctop_core::collide::Overlap::File) => Borrowed("⚠"),
+            Some(cctop_core::collide::Overlap::Directory) => Borrowed("·"),
             None => Borrowed(""),
         },
         // The marker leads rather than trails: the column is ten cells wide
@@ -528,26 +528,26 @@ pub fn render_cell<'a>(id: ColumnId, s: &'a Session, now: &DateTime<Utc>) -> Cow
         // with it. Only a host that is behind is marked — it is the one with
         // something to do, from the row's menu.
         ColumnId::Host => match &s.remote {
-            Some(r) if matches!(r.skew, Some(crate::fleet::Skew::Older(_))) => {
+            Some(r) if matches!(r.skew, Some(cctop_core::fleet::Skew::Older(_))) => {
                 Owned(format!("↑{}", r.host))
             }
             Some(r) => Borrowed(r.host.as_str()),
             // Running here, working there: the arrows say both at once, and
             // trail because the host is the part worth keeping when cut.
             None => match &s.sandbox {
-                Some(sandbox) => Owned(format!("{}⇄", crate::sandbox::host_of(sandbox))),
+                Some(sandbox) => Owned(format!("{}⇄", cctop_core::sandbox::host_of(sandbox))),
                 None => Borrowed("local"),
             },
         },
         // Named for your own rows too. The column is only drawn once a second
         // user is in view (see `users_in_view`), and there a blank reads as
         // "nobody" rather than "you" — root's own rows most of all.
-        ColumnId::User => Borrowed(crate::config::user_label(s.owner.as_deref())),
+        ColumnId::User => Borrowed(cctop_core::config::user_label(s.owner.as_deref())),
         // Blank rather than a dash for a provider with no profiles: the column
         // is about Claude's config directories, and every other harness is not
         // missing one so much as not having the idea.
         ColumnId::Profile => Borrowed(s.profile.as_deref().unwrap_or_default()),
-        ColumnId::Branch => match crate::branch::branch_of(s) {
+        ColumnId::Branch => match cctop_core::branch::branch_of(s) {
             Some(branch) => Owned(branch),
             None => Borrowed("─"),
         },
@@ -649,8 +649,8 @@ pub fn render_subagent_cell(
 /// sort puts the sessions asking least at the top. An unhooked session sorts
 /// below every known mode rather than among them — it is an absence, not a
 /// setting.
-fn permission_rank(s: &crate::session::Session) -> u8 {
-    use crate::hook::Permission;
+fn permission_rank(s: &cctop_core::session::Session) -> u8 {
+    use cctop_core::hook::Permission;
     if s.yolo.is_some() {
         return 5;
     }
@@ -665,21 +665,21 @@ fn permission_rank(s: &crate::session::Session) -> u8 {
 
 /// Sort order for the conflict column: a shared file outranks a shared
 /// repository, which outranks a session nobody is racing.
-fn conflict_rank(s: &crate::session::Session) -> u8 {
+fn conflict_rank(s: &cctop_core::session::Session) -> u8 {
     match s.conflict {
         None => 0,
-        Some(crate::collide::Overlap::Directory) => 1,
-        Some(crate::collide::Overlap::File) => 2,
+        Some(cctop_core::collide::Overlap::Directory) => 1,
+        Some(cctop_core::collide::Overlap::File) => 2,
     }
 }
 
 /// Sort key for the host column, putting this machine before every other.
-fn host_key(s: &crate::session::Session) -> (bool, &str) {
+fn host_key(s: &cctop_core::session::Session) -> (bool, &str) {
     match (&s.remote, &s.sandbox) {
         (Some(r), _) => (true, r.host.as_str()),
         // Beside that host's own rows: what it is working on is the same
         // machine's, wherever the agent happens to run.
-        (None, Some(sandbox)) => (true, crate::sandbox::host_of(sandbox)),
+        (None, Some(sandbox)) => (true, cctop_core::sandbox::host_of(sandbox)),
         (None, None) => (false, ""),
     }
 }
@@ -764,7 +764,7 @@ pub fn compare(id: ColumnId, a: &Session, b: &Session, now: &DateTime<Utc>) -> O
         ColumnId::User => a.owner.cmp(&b.owner),
         ColumnId::Profile => a.profile.cmp(&b.profile),
         // Sessions outside a repository sort together, below every branch.
-        ColumnId::Branch => crate::branch::cmp_branch(a, b),
+        ColumnId::Branch => cctop_core::branch::cmp_branch(a, b),
         ColumnId::Project => cmp_folded(a.display_label(), b.display_label()),
     }
     // Stable tiebreak so rows never swap places between identical refreshes.
@@ -775,7 +775,7 @@ pub fn compare(id: ColumnId, a: &Session, b: &Session, now: &DateTime<Utc>) -> O
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pricing::Provider;
+    use cctop_core::pricing::Provider;
 
     fn session(id: &str) -> Session {
         let mut s = Session::new(Provider::Claude, id.into());
@@ -897,7 +897,7 @@ mod tests {
         assert_eq!(render_cell(ColumnId::User, &theirs, &now), "winshen");
         assert_eq!(
             render_cell(ColumnId::User, &mine, &now),
-            crate::config::MY_USER.as_str()
+            cctop_core::config::MY_USER.as_str()
         );
     }
 
@@ -928,13 +928,13 @@ mod tests {
         let now = Utc::now();
         let mut a = session("a");
         a.inferred_running = true;
-        a.context = Some(crate::session::ContextUsage {
+        a.context = Some(cctop_core::session::ContextUsage {
             used: 10,
             max: 200_000,
             compacted: true,
         });
         let mut b = session("b");
-        b.context = Some(crate::session::ContextUsage {
+        b.context = Some(cctop_core::session::ContextUsage {
             used: 199_000,
             max: 200_000,
             compacted: false,
@@ -988,14 +988,15 @@ mod tests {
     /// mount that went away with the agent.
     #[test]
     fn a_sandboxed_row_names_its_host_and_no_stale_branch() {
-        let mut s = crate::session::Session::new(crate::pricing::Provider::Claude, "s".into());
+        let mut s =
+            cctop_core::session::Session::new(cctop_core::pricing::Provider::Claude, "s".into());
         s.sandbox = Some("procdb:/home/f/x".into());
         // The checkout this test runs in has a branch; a stopped sandboxed
         // row at the same path must not report it.
         s.label_source = env!("CARGO_MANIFEST_DIR").into();
         let cell = render_cell(ColumnId::Host, &s, &chrono::Utc::now());
         assert_eq!(cell, "procdb⇄");
-        assert_eq!(crate::branch::branch_of(&s), None);
+        assert_eq!(cctop_core::branch::branch_of(&s), None);
     }
 
     #[test]
@@ -1035,13 +1036,13 @@ mod tests {
         let now = Utc::now();
         let mut s = session("a");
         s.inferred_running = true;
-        s.context = Some(crate::session::ContextUsage {
+        s.context = Some(cctop_core::session::ContextUsage {
             used: 0,
             max: 200_000,
             compacted: true,
         });
         assert_eq!(render_cell(ColumnId::Context, &s, &now), "COMPCT");
-        s.context = Some(crate::session::ContextUsage {
+        s.context = Some(cctop_core::session::ContextUsage {
             used: 400_000,
             max: 200_000,
             compacted: false,
@@ -1057,7 +1058,7 @@ mod tests {
     fn a_stopped_session_that_compacted_no_longer_claims_to_be_compacting() {
         let now = Utc::now();
         let mut stopped = session("a");
-        stopped.context = Some(crate::session::ContextUsage {
+        stopped.context = Some(cctop_core::session::ContextUsage {
             used: 100_000,
             max: 200_000,
             compacted: true,
@@ -1066,7 +1067,7 @@ mod tests {
 
         let mut live = session("b");
         live.inferred_running = true;
-        live.context = Some(crate::session::ContextUsage {
+        live.context = Some(cctop_core::session::ContextUsage {
             used: 199_000,
             max: 200_000,
             compacted: false,

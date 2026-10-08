@@ -4,9 +4,9 @@ use super::App;
 use super::columns::{self, ColumnId};
 use super::render::{Layout, panel_block};
 use super::theme;
-use crate::pricing::Provider;
-use crate::session::Surface;
-use crate::util;
+use cctop_core::pricing::Provider;
+use cctop_core::session::Surface;
+use cctop_core::util;
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
@@ -43,7 +43,7 @@ fn provider_search_paths() -> Vec<(&'static str, String)> {
 /// directory are two halves of one fact, and a hand-written pair of them is a
 /// pair that can go out of step.
 fn provider_root(provider: Provider) -> &'static std::path::Path {
-    use crate::config;
+    use cctop_core::config;
     match provider {
         Provider::Claude => &config::CLAUDE_PROJECTS_ROOT,
         Provider::Codex => &config::CODEX_SESSIONS_ROOT,
@@ -59,7 +59,7 @@ fn provider_root(provider: Provider) -> &'static std::path::Path {
 #[cfg(test)]
 /// Every provider must name itself here, or an empty screen quietly implies
 /// cctop cannot see a tool it can in fact read.
-fn provider_is_listed(p: crate::pricing::Provider) -> bool {
+fn provider_is_listed(p: cctop_core::pricing::Provider) -> bool {
     let listed = provider_search_paths();
     listed
         .iter()
@@ -246,7 +246,7 @@ pub(super) fn draw_table(frame: &mut Frame, area: Rect, app: &mut App, layout: &
                 .unwrap_or("");
             let Some(at) = row.session() else {
                 return match row {
-                    crate::ui::Row::Group(g) => match app.groups.get(g) {
+                    crate::Row::Group(g) => match app.groups.get(g) {
                         Some(g) => group_row(g, &cols, &widths, selected, indent, &now),
                         None => Line::default(),
                     },
@@ -256,8 +256,8 @@ pub(super) fn draw_table(frame: &mut Frame, area: Rect, app: &mut App, layout: &
             let s = &app.sessions[at];
             let key = s.key_into(&mut key);
             match row {
-                crate::ui::Row::Group(_) => Line::default(),
-                crate::ui::Row::Session(_) => session_row(
+                crate::Row::Group(_) => Line::default(),
+                crate::Row::Session(_) => session_row(
                     s,
                     &cols,
                     &widths,
@@ -284,7 +284,7 @@ pub(super) fn draw_table(frame: &mut Frame, area: Rect, app: &mut App, layout: &
                     },
                     &now,
                 ),
-                crate::ui::Row::Subagent { index, .. } => match s.subagents.get(index) {
+                crate::Row::Subagent { index, .. } => match s.subagents.get(index) {
                     Some(sub) => subagent_row(
                         sub,
                         &cols,
@@ -351,7 +351,7 @@ struct RowState<'a> {
     /// This session rang the bell a moment ago.
     rang: bool,
     /// The loudest `alert_*` threshold this session is still past.
-    alert: Option<crate::alert::Kind>,
+    alert: Option<cctop_core::alert::Kind>,
     /// Its turn ended while you were not looking — see [`seen`](super::seen).
     done: bool,
     /// Its deletion has been accepted but not yet confirmed.
@@ -365,7 +365,7 @@ struct RowState<'a> {
 }
 
 fn session_row(
-    s: &crate::session::Session,
+    s: &cctop_core::session::Session,
     cols: &[&'static columns::Column],
     widths: &[u16],
     row: &RowState,
@@ -438,7 +438,7 @@ fn session_row(
             // Red for a loop, which is money spent on nothing; amber for the
             // rest, which are only worth a look.
             let color = match kind {
-                crate::alert::Kind::Errors => theme::colors().cost_high,
+                cctop_core::alert::Kind::Errors => theme::colors().cost_high,
                 _ => theme::colors().cost_mid,
             };
             base.fg(color).add_modifier(Modifier::BOLD)
@@ -488,7 +488,7 @@ fn session_row(
 /// one block with a heading rather than as several peers: the child rows are
 /// detail about the row above them, not more sessions.
 fn subagent_row(
-    sub: &crate::session::Subagent,
+    sub: &cctop_core::session::Subagent,
     cols: &[&'static columns::Column],
     widths: &[u16],
     selected: bool,
@@ -496,7 +496,7 @@ fn subagent_row(
     indent: &str,
     now: &chrono::DateTime<chrono::Utc>,
 ) -> Line<'static> {
-    let running = matches!(sub.status, crate::session::SubagentStatus::Running);
+    let running = matches!(sub.status, cctop_core::session::SubagentStatus::Running);
     let base = if selected {
         theme::selected()
     } else {
@@ -611,19 +611,19 @@ fn group_row(
     Line::from(spans)
 }
 
-fn cell_color(id: ColumnId, s: &crate::session::Session, age_secs: Option<i64>) -> Color {
+fn cell_color(id: ColumnId, s: &cctop_core::session::Session, age_secs: Option<i64>) -> Color {
     match id {
         ColumnId::Status => match s.activity_state {
             // Three states, three colours, loudest first: an agent blocked on a
             // question is the one costing you time, a finished turn is merely
             // your move, and work in progress is calm.
-            crate::session::ActivityState::Asking => theme::colors().cost_high,
-            crate::session::ActivityState::WaitingForInput => theme::colors().cost_mid,
-            crate::session::ActivityState::ApiError => theme::colors().cost_high,
-            crate::session::ActivityState::Working if s.is_running() => {
+            cctop_core::session::ActivityState::Asking => theme::colors().cost_high,
+            cctop_core::session::ActivityState::WaitingForInput => theme::colors().cost_mid,
+            cctop_core::session::ActivityState::ApiError => theme::colors().cost_high,
+            cctop_core::session::ActivityState::Working if s.is_running() => {
                 theme::running_dot_color(age_secs)
             }
-            crate::session::ActivityState::Working => theme::colors().dim,
+            cctop_core::session::ActivityState::Working => theme::colors().dim,
         },
         ColumnId::Last => theme::age_color(age_secs, s.is_running()),
         ColumnId::Model => theme::model_color(&s.model),
@@ -710,7 +710,7 @@ fn cell_color(id: ColumnId, s: &crate::session::Session, age_secs: Option<i64>) 
         ColumnId::Host => match &s.remote {
             // Amber, the colour of something to get round to: an old cctop
             // over there is not failing, only missing what came since.
-            Some(r) if matches!(r.skew, Some(crate::fleet::Skew::Older(_))) => {
+            Some(r) if matches!(r.skew, Some(cctop_core::fleet::Skew::Older(_))) => {
                 theme::colors().cost_mid
             }
             Some(_) => theme::colors().accent,
@@ -720,8 +720,8 @@ fn cell_color(id: ColumnId, s: &crate::session::Session, age_secs: Option<i64>) 
         // hot once two agents have written the same file, amber while they are
         // merely in the same repository and have not met yet.
         ColumnId::Conflict => match s.conflict {
-            Some(crate::collide::Overlap::File) => theme::colors().cost_high,
-            Some(crate::collide::Overlap::Directory) => theme::colors().cost_mid,
+            Some(cctop_core::collide::Overlap::File) => theme::colors().cost_high,
+            Some(cctop_core::collide::Overlap::Directory) => theme::colors().cost_mid,
             None => Color::Reset,
         },
         _ => Color::Reset,
@@ -741,14 +741,14 @@ mod tests {
     /// as fit leaves the border as it was.
     #[test]
     fn the_table_has_a_scrollbar_only_when_it_overflows() {
-        use crate::ui::scrollbar::tests::thumb_cells;
+        use crate::scrollbar::tests::thumb_cells;
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
 
         let draw = |count: usize| {
-            let mut app = crate::ui::tests::test_app();
+            let mut app = crate::tests::test_app();
             app.sessions = (0..count)
-                .map(|i| crate::ui::tests::session(&format!("s{i}"), false, "x"))
+                .map(|i| crate::tests::session(&format!("s{i}"), false, "x"))
                 .collect();
             app.loaded = true;
             app.refilter();
@@ -766,7 +766,7 @@ mod tests {
     /// The first scan's placeholder turns, so a slow cold parse reads as work.
     #[test]
     fn the_first_scan_turns_a_spinner() {
-        let app = crate::ui::tests::test_app();
+        let app = crate::tests::test_app();
         assert!(!app.loaded);
         let text: String = empty_lines(&app)
             .iter()
@@ -804,7 +804,7 @@ mod tests {
     /// session's ordinary hollow dot is exactly what it must not look like.
     #[test]
     fn the_session_that_rang_wears_its_own_marker() {
-        let mut s = crate::session::Session::new(Provider::Claude, "a".into());
+        let mut s = cctop_core::session::Session::new(Provider::Claude, "a".into());
         s.last_active = chrono::Utc::now().to_rfc3339();
         let now = chrono::Utc::now();
         let cols = all_columns();
@@ -833,10 +833,10 @@ mod tests {
     /// which has money on it.
     #[test]
     fn a_turn_that_ended_unseen_wears_a_check() {
-        let mut s = crate::session::Session::new(Provider::Claude, "a".into());
+        let mut s = cctop_core::session::Session::new(Provider::Claude, "a".into());
         s.last_active = chrono::Utc::now().to_rfc3339();
-        s.process = Some(crate::proc::ProcInfo::default());
-        s.activity_state = crate::session::ActivityState::WaitingForInput;
+        s.process = Some(cctop_core::proc::ProcInfo::default());
+        s.activity_state = cctop_core::session::ActivityState::WaitingForInput;
         let now = chrono::Utc::now();
         let cols = all_columns();
         let widths = column_widths(&cols, 200);
@@ -856,7 +856,7 @@ mod tests {
         let unseen = session_row(&s, &cols, &widths, &row(true, None), &now);
         assert_eq!(unseen.spans[0].content, "✓ ");
         assert_eq!(unseen.spans[0].style.fg, Some(theme::colors().accent));
-        let both = row(true, Some(crate::alert::Kind::Cost));
+        let both = row(true, Some(cctop_core::alert::Kind::Cost));
         let line = session_row(&s, &cols, &widths, &both, &now);
         assert_eq!(line.spans[0].content, "$ ");
     }
@@ -865,7 +865,7 @@ mod tests {
     /// well as colour — and gives way to the bell, which is the fresher news.
     #[test]
     fn a_session_under_an_alert_wears_its_glyph() {
-        let mut s = crate::session::Session::new(Provider::Claude, "a".into());
+        let mut s = cctop_core::session::Session::new(Provider::Claude, "a".into());
         s.last_active = chrono::Utc::now().to_rfc3339();
         let now = chrono::Utc::now();
         let cols = all_columns();
@@ -881,14 +881,14 @@ mod tests {
             expand: None,
             indent: "",
         };
-        let looping = row(false, Some(crate::alert::Kind::Errors));
+        let looping = row(false, Some(cctop_core::alert::Kind::Errors));
         let line = session_row(&s, &cols, &widths, &looping, &now);
         assert_eq!(line.spans[0].content, "! ");
         assert_eq!(line.spans[0].style.fg, Some(theme::colors().cost_high));
-        let spent = row(false, Some(crate::alert::Kind::Cost));
+        let spent = row(false, Some(cctop_core::alert::Kind::Cost));
         let line = session_row(&s, &cols, &widths, &spent, &now);
         assert_eq!(line.spans[0].content, "$ ");
-        let both = row(true, Some(crate::alert::Kind::Stall));
+        let both = row(true, Some(cctop_core::alert::Kind::Stall));
         let line = session_row(&s, &cols, &widths, &both, &now);
         assert_eq!(line.spans[0].content, "◉ ");
     }
@@ -931,7 +931,7 @@ mod tests {
         let now = chrono::Utc::now();
         let cols = all_columns();
         let widths = column_widths(&cols, 200);
-        let mut s = crate::session::Session::new(Provider::Claude, "a".into());
+        let mut s = cctop_core::session::Session::new(Provider::Claude, "a".into());
         s.last_active = now.to_rfc3339();
         let parent = session_row(
             &s,
@@ -951,7 +951,7 @@ mod tests {
             &now,
         );
 
-        let sub = crate::session::Subagent {
+        let sub = cctop_core::session::Subagent {
             agent_id: "sub-1".into(),
             agent_type: "general-purpose".into(),
             description: "Review performance".into(),
@@ -959,7 +959,7 @@ mod tests {
             started_at: None,
             last_active: None,
             duration_ms: 0,
-            status: crate::session::SubagentStatus::Done,
+            status: cctop_core::session::SubagentStatus::Done,
             cost: 0.0,
             tool_count: 0,
             tool_use_id: None,
@@ -992,7 +992,7 @@ mod tests {
         let now = chrono::Utc::now();
         let cols = all_columns();
         let widths = column_widths(&cols, 200);
-        let sub = crate::session::Subagent {
+        let sub = cctop_core::session::Subagent {
             agent_id: "sub-1".into(),
             agent_type: "general-purpose".into(),
             description: "Review performance".into(),
@@ -1000,7 +1000,7 @@ mod tests {
             started_at: None,
             last_active: None,
             duration_ms: 0,
-            status: crate::session::SubagentStatus::Done,
+            status: cctop_core::session::SubagentStatus::Done,
             cost: 0.0,
             tool_count: 0,
             tool_use_id: None,
@@ -1022,7 +1022,7 @@ mod tests {
         let now = chrono::Utc::now();
         let cols = all_columns();
         let widths = column_widths(&cols, 200);
-        let g = crate::ui::tree::Group {
+        let g = crate::tree::Group {
             key: "repo:/r/.git".into(),
             label: "~/r".into(),
             sessions: 3,
@@ -1032,7 +1032,7 @@ mod tests {
             ..Default::default()
         };
         let heading = group_row(&g, &cols, &widths, false, "", &now);
-        let s = crate::session::Session::new(Provider::Claude, "a".into());
+        let s = cctop_core::session::Session::new(Provider::Claude, "a".into());
         let row = session_row(
             &s,
             &cols,

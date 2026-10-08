@@ -25,9 +25,9 @@ const PEEK_EVERY: Duration = Duration::from_secs(1);
 /// saying "busy" about a session nobody is running — but for the stall alert
 /// that silence is the finding, not a reason to stop looking. The row's own
 /// state, which does honour the lapse, is checked beside it.
-fn stall_view(reports: &crate::hook::Reports, session_id: &str) -> crate::alert::Hooked {
-    use crate::alert::Hooked;
-    use crate::hook::Signal;
+fn stall_view(reports: &cctop_core::hook::Reports, session_id: &str) -> cctop_core::alert::Hooked {
+    use cctop_core::alert::Hooked;
+    use cctop_core::hook::Signal;
     match reports.report(session_id).map(|r| r.signal) {
         None => Hooked::Unknown,
         Some(Signal::Busy | Signal::Started) => Hooked::Working,
@@ -56,7 +56,7 @@ impl App {
     ///
     /// Called from the event loop only when the rows actually moved, which
     /// then rings once for the whole pass with
-    /// [`Notifier::ring_pending`](crate::notify::Notifier::ring_pending). That
+    /// [`Notifier::ring_pending`](cctop_core::notify::Notifier::ring_pending). That
     /// has to run on this thread: the bell and the OSC 9 sequence go straight
     /// to stdout, which ratatui owns, and only here is it certain that no
     /// frame is halfway through being flushed.
@@ -85,13 +85,13 @@ impl App {
     ///
     /// One clause, as with the sessions that finish together: three rings in
     /// a row is noise, and the toasts already name every one.
-    fn announce_alerts(&mut self, fired: Vec<crate::alert::Fired>) {
+    fn announce_alerts(&mut self, fired: Vec<cctop_core::alert::Fired>) {
         let Some(first) = fired.first() else {
             return;
         };
         self.notify.chime(&first.text, fired.len() - 1);
         for alert in fired {
-            crate::elog::event(
+            cctop_core::elog::event(
                 "alert",
                 alert.kind_name(),
                 serde_json::json!({ "text": alert.text, "session": alert.key }),
@@ -108,7 +108,7 @@ impl App {
     /// spend again" is the one event a monitor of agent spend owes a person
     /// who has stepped away.
     pub(super) fn announce_quota_freed(&mut self, text: &str) {
-        crate::elog::event("quota", "freed", serde_json::json!({ "text": text }));
+        cctop_core::elog::event("quota", "freed", serde_json::json!({ "text": text }));
         self.notify.post_event("quota-freed", text);
         self.notify.chime(text, 0);
         self.set_status(text.to_string());
@@ -234,12 +234,12 @@ impl App {
     /// Returns whether anything arrived, and whether the set of sessions itself
     /// changed — one that has just started or just ended is a row to go and
     /// find or forget now, rather than at the next poll.
-    pub(super) fn apply_hooks(&mut self, events: Vec<crate::hook::Event>) -> (bool, bool) {
+    pub(super) fn apply_hooks(&mut self, events: Vec<cctop_core::hook::Event>) -> (bool, bool) {
         let changed = !events.is_empty();
         let mut lifecycle = false;
         let mut moved = false;
         for event in events {
-            crate::elog::event(
+            cctop_core::elog::event(
                 "hook",
                 "recv",
                 serde_json::json!({
@@ -285,7 +285,7 @@ impl App {
     /// replacement cannot drift from what this cctop believes the way a stream
     /// of deltas could.
     fn note_hook_pids(&self) {
-        crate::hook::save_claims(&self.reports.claims);
+        cctop_core::hook::save_claims(&self.reports.claims);
         let _ = self.tx.send(super::worker::Request::HookClaims(
             self.reports.claims.clone(),
         ));
@@ -327,12 +327,12 @@ impl App {
     }
 
     /// Switch YOLO for the selected row, through the same check the page's
-    /// switch goes through — see [`crate::serve::actions::yolo`].
+    /// switch goes through — see [`cctop_serve::actions::yolo`].
     pub(super) fn toggle_yolo(&mut self) {
         let Some(session) = self.selected_session() else {
             return;
         };
-        let said = match crate::serve::actions::yolo(session, session.yolo.is_none()) {
+        let said = match cctop_serve::actions::yolo(session, session.yolo.is_none()) {
             Ok(done) => done.message,
             Err((_, why)) => why,
         };
@@ -360,7 +360,7 @@ impl App {
     /// The detached sweep wins, as it did when its answers were copied over the
     /// pane reads into one map — a pid it can name is a pane rmux owns the
     /// screen of, not one this process has a parser for.
-    fn screened(&self, pid: u32) -> Option<&crate::peek::Screened> {
+    fn screened(&self, pid: u32) -> Option<&cctop_core::peek::Screened> {
         self.peeked.get(&pid).or_else(|| self.screen_read.get(&pid))
     }
 
@@ -388,7 +388,7 @@ impl App {
             self.peeked_listing = None;
             return had;
         }
-        let read: HashMap<u32, crate::peek::Screened> = self
+        let read: HashMap<u32, cctop_core::peek::Screened> = self
             .tabs
             .iter_mut()
             .flat_map(|tab| tab.panes.iter_mut())
@@ -428,7 +428,7 @@ impl App {
                 // the draw loop: a slow rmux delays the reading, never the frame.
                 let peeked = names
                     .into_iter()
-                    .filter_map(|(pid, name)| Some((pid, crate::peek::named(&name)?)))
+                    .filter_map(|(pid, name)| Some((pid, cctop_core::peek::named(&name)?)))
                     .collect();
                 let _ = tx.send(peeked);
             });
@@ -457,14 +457,14 @@ impl App {
                 // The hook names the bare id; the transcript is `agent-<id>`.
                 let id = sub.agent_id.strip_prefix("agent-").unwrap_or(&sub.agent_id);
                 if self.finished_agents.contains(id) {
-                    sub.status = crate::session::SubagentStatus::Done;
+                    sub.status = cctop_core::session::SubagentStatus::Done;
                 }
             }
         }
     }
 
     /// What a session's own hooks last said about it, if it has any.
-    pub(super) fn hooked_signal(&self, session_id: &str) -> Option<crate::hook::Signal> {
+    pub(super) fn hooked_signal(&self, session_id: &str) -> Option<cctop_core::hook::Signal> {
         // Checked here as well as in the sweep: the sweep runs when an event
         // arrives, and a session that has gone silent is precisely the one that
         // sends none — so between events the map still holds the stale claim.
@@ -484,7 +484,7 @@ impl App {
     /// Scans the table rather than keeping an index: there are a handful of
     /// panes and this runs once per frame, so a map would be state to keep
     /// correct in exchange for nothing measurable.
-    pub(super) fn pane_signal(&self, pid: u32) -> Option<crate::hook::Signal> {
+    pub(super) fn pane_signal(&self, pid: u32) -> Option<cctop_core::hook::Signal> {
         let screen = self.screened(pid).map(|read| read.signal);
         screen.or_else(|| self.reported_by(pid)).or_else(|| {
             self.sessions
@@ -494,11 +494,11 @@ impl App {
                     match session.activity_state {
                         // Both of the row's waiting states are a tab worth
                         // colouring; which colour is the caller's business.
-                        crate::session::ActivityState::Asking => {
-                            Some(crate::hook::Signal::NeedsInput)
+                        cctop_core::session::ActivityState::Asking => {
+                            Some(cctop_core::hook::Signal::NeedsInput)
                         }
-                        crate::session::ActivityState::WaitingForInput => {
-                            Some(crate::hook::Signal::Idle)
+                        cctop_core::session::ActivityState::WaitingForInput => {
+                            Some(cctop_core::hook::Signal::Idle)
                         }
                         _ => None,
                     }
@@ -513,7 +513,7 @@ impl App {
     /// transcript reading is one every cctop on the machine can take for
     /// itself, off the same files, so recording one would be publishing a guess
     /// that the reader could already have made.
-    pub(super) fn reported_by(&self, pid: u32) -> Option<crate::hook::Signal> {
+    pub(super) fn reported_by(&self, pid: u32) -> Option<cctop_core::hook::Signal> {
         self.sessions
             .iter()
             .filter(|session| session.root_pid() == Some(pid))
@@ -525,7 +525,7 @@ impl App {
     /// The other direction of [`Shared::recorded`](tabs::Shared): every cctop
     /// reads these, so somebody has to write them, and the one that heard the
     /// event is the only one that can. It is not the hook that writes — see
-    /// [`rmux::set_state`](crate::rmux::set_state) for why the agent's deadline
+    /// [`rmux::set_state`](cctop_core::rmux::set_state) for why the agent's deadline
     /// must not pay for this.
     ///
     /// Driven off `running` rather than off the tabs, so a session no tab of
@@ -538,9 +538,9 @@ impl App {
     /// [`SHARE_EVERY`] and a turn is mostly the same signal repeated. An
     /// expired one reads as saying nothing, so a working claim this cctop still
     /// believes is rewritten rather than allowed to lapse.
-    pub(super) fn publish_states(&self, running: &[crate::rmux::Running]) {
-        for (name, signal) in self.states_to_publish(running, crate::rmux::now_secs()) {
-            crate::rmux::set_state(&name, signal);
+    pub(super) fn publish_states(&self, running: &[cctop_core::rmux::Running]) {
+        for (name, signal) in self.states_to_publish(running, cctop_core::rmux::now_secs()) {
+            cctop_core::rmux::set_state(&name, signal);
         }
     }
 
@@ -549,9 +549,9 @@ impl App {
     /// tested without a daemon to write to.
     pub(super) fn states_to_publish(
         &self,
-        running: &[crate::rmux::Running],
+        running: &[cctop_core::rmux::Running],
         now: u64,
-    ) -> Vec<(String, crate::hook::Signal)> {
+    ) -> Vec<(String, cctop_core::hook::Signal)> {
         if self.reports.hooked.is_empty() {
             return Vec::new();
         }
@@ -582,7 +582,7 @@ impl App {
     /// source of state and the thing that would otherwise correct this.
     ///
     /// A tool call in flight is overwritten too, even though it is a working
-    /// state: [`Signal::Acting`](crate::hook::Signal::Acting) plus a still
+    /// state: [`Signal::Acting`](cctop_core::hook::Signal::Acting) plus a still
     /// screen is how a held permission prompt is recognised, and the keystroke
     /// that answered it is the only sign the prompt is gone.
     pub(super) fn mark_answered(&mut self, pid: u32) {
@@ -596,7 +596,7 @@ impl App {
             if let Some(reported) = self.reports.hooked.get_mut(&id)
                 && reported.signal.awaits_you()
             {
-                reported.signal = crate::hook::Signal::Busy;
+                reported.signal = cctop_core::hook::Signal::Busy;
             }
         }
     }
@@ -643,7 +643,10 @@ impl App {
     /// names says which agents exist; this says which one is stuck on a question
     /// and which finished ten minutes ago, from the same hooks the dashboard
     /// reads — so choosing which to go back to is a decision rather than a guess.
-    pub fn waiting_state(&self, agent: &crate::rmux::Running) -> Option<crate::hook::Signal> {
+    pub fn waiting_state(
+        &self,
+        agent: &cctop_core::rmux::Running,
+    ) -> Option<cctop_core::hook::Signal> {
         self.pane_signal(agent.pid?)
     }
 
@@ -655,7 +658,7 @@ impl App {
     /// and a uuid that no two rows differ in until well past the width of the
     /// column. The agent's pid finds its row, and the row already knows what the
     /// dashboard calls it — which is the name the user recognises.
-    pub fn waiting_label(&self, agent: &crate::rmux::Running) -> Option<String> {
+    pub fn waiting_label(&self, agent: &cctop_core::rmux::Running) -> Option<String> {
         let pid = agent.pid?;
         self.sessions
             .iter()
@@ -669,11 +672,11 @@ mod tests {
     use super::*;
 
     /// One hook event for session `a`, from `agent` when it is a subagent's.
-    fn heard(signal: crate::hook::Signal, agent: Option<&str>) -> crate::hook::Event {
-        crate::hook::Event {
+    fn heard(signal: cctop_core::hook::Signal, agent: Option<&str>) -> cctop_core::hook::Event {
+        cctop_core::hook::Event {
             session_id: "a".into(),
             pids: Vec::new(),
-            reported: crate::hook::Reported {
+            reported: cctop_core::hook::Reported {
                 signal,
                 cwd: "/w/proj".into(),
                 permission: None,
@@ -694,7 +697,7 @@ mod tests {
     /// up. The question stands until the subagent that asked it moves on.
     #[test]
     fn a_subagents_question_outlives_what_its_sibling_does_next() {
-        use crate::hook::Signal::{Acting, Busy, Idle, NeedsInput};
+        use cctop_core::hook::Signal::{Acting, Busy, Idle, NeedsInput};
         let mut app = test_app();
         let now = |app: &App| app.reports.hooked.get("a").map(|r| r.signal);
 
@@ -723,7 +726,7 @@ mod tests {
         assert_eq!(now(&app), Some(Idle), "a dismissed question stayed up");
         assert!(!app.reports.asking_agents.contains_key("a"));
     }
-    use crate::ui::tests::{session, test_app};
+    use crate::tests::{session, test_app};
     /// What gets written onto a session, and — mostly — what does not.
     ///
     /// The sweep runs every [`SHARE_EVERY`] and a turn is largely the same
@@ -732,7 +735,7 @@ mod tests {
     /// doing one per sweep per tab would make the tab bar pay for the feature.
     #[test]
     fn a_session_is_only_written_to_when_it_is_out_of_date() {
-        let agent = |state| crate::rmux::Running {
+        let agent = |state| cctop_core::rmux::Running {
             name: "cctop-a".into(),
             pid: Some(4321),
             cwd: None,
@@ -750,7 +753,7 @@ mod tests {
         };
         let now = 1_700_000_000;
         let recorded = |signal, ago: u64| {
-            Some(crate::rmux::State {
+            Some(cctop_core::rmux::State {
                 signal,
                 at: now - ago,
             })
@@ -758,7 +761,7 @@ mod tests {
 
         let mut app = test_app();
         let mut row = session("a", true, "proj");
-        row.process.as_mut().unwrap().process_list = vec![crate::proc::ProcEntry {
+        row.process.as_mut().unwrap().process_list = vec![cctop_core::proc::ProcEntry {
             pid: 4321,
             is_root: true,
             ghost: false,
@@ -771,11 +774,11 @@ mod tests {
         // Nothing heard yet: nothing to say, whatever the session claims.
         assert!(app.states_to_publish(&[agent(None)], now).is_empty());
 
-        app.apply_hooks(vec![crate::hook::Event {
+        app.apply_hooks(vec![cctop_core::hook::Event {
             session_id: "a".into(),
             pids: Vec::new(),
-            reported: crate::hook::Reported {
-                signal: crate::hook::Signal::NeedsInput,
+            reported: cctop_core::hook::Reported {
+                signal: cctop_core::hook::Signal::NeedsInput,
                 cwd: "/w/proj".into(),
                 permission: None,
                 ask: None,
@@ -790,16 +793,19 @@ mod tests {
 
         assert_eq!(
             app.states_to_publish(&[agent(None)], now),
-            vec![("cctop-a".to_string(), crate::hook::Signal::NeedsInput)],
+            vec![("cctop-a".to_string(), cctop_core::hook::Signal::NeedsInput)],
             "a session saying nothing is told"
         );
         assert!(
-            app.states_to_publish(&[agent(recorded(crate::hook::Signal::NeedsInput, 30))], now)
-                .is_empty(),
+            app.states_to_publish(
+                &[agent(recorded(cctop_core::hook::Signal::NeedsInput, 30))],
+                now
+            )
+            .is_empty(),
             "a session already saying it is left alone"
         );
         assert_eq!(
-            app.states_to_publish(&[agent(recorded(crate::hook::Signal::Busy, 30))], now)
+            app.states_to_publish(&[agent(recorded(cctop_core::hook::Signal::Busy, 30))], now)
                 .len(),
             1,
             "a session saying something else is corrected"
@@ -808,7 +814,7 @@ mod tests {
         // somebody else's report.
         assert!(
             app.states_to_publish(
-                &[crate::rmux::Running {
+                &[cctop_core::rmux::Running {
                     pid: Some(9999),
                     ..agent(None)
                 }],
@@ -822,11 +828,11 @@ mod tests {
         // is the one case where the session and the report agree and a write
         // happens anyway — without it, a long quiet turn would go dark at
         // fifteen minutes for every cctop but this one.
-        app.apply_hooks(vec![crate::hook::Event {
+        app.apply_hooks(vec![cctop_core::hook::Event {
             session_id: "a".into(),
             pids: Vec::new(),
-            reported: crate::hook::Reported {
-                signal: crate::hook::Signal::Busy,
+            reported: cctop_core::hook::Reported {
+                signal: cctop_core::hook::Signal::Busy,
                 cwd: "/w/proj".into(),
                 permission: None,
                 ask: None,
@@ -839,13 +845,13 @@ mod tests {
             agent: None,
         }]);
         assert!(
-            app.states_to_publish(&[agent(recorded(crate::hook::Signal::Busy, 30))], now)
+            app.states_to_publish(&[agent(recorded(cctop_core::hook::Signal::Busy, 30))], now)
                 .is_empty(),
             "a fresh agreement needs no write"
         );
         assert_eq!(
             app.states_to_publish(
-                &[agent(recorded(crate::hook::Signal::Busy, 3 * 3_600))],
+                &[agent(recorded(cctop_core::hook::Signal::Busy, 3 * 3_600))],
                 now
             )
             .len(),
@@ -861,10 +867,10 @@ mod tests {
     /// both. Only the report can tell the three apart.
     #[test]
     fn a_row_learns_from_its_hooks_what_a_transcript_cannot_say() {
-        let event = |signal| crate::hook::Event {
+        let event = |signal| cctop_core::hook::Event {
             session_id: "a".into(),
             pids: Vec::new(),
-            reported: crate::hook::Reported {
+            reported: cctop_core::hook::Reported {
                 provisional: false,
                 signal,
                 cwd: "/w/proj".into(),
@@ -880,29 +886,29 @@ mod tests {
         let mut app = test_app();
         app.sessions = vec![session("a", true, "proj")];
         // What the walk left behind: a tool call in flight.
-        app.sessions[0].activity_state = crate::session::ActivityState::Working;
+        app.sessions[0].activity_state = cctop_core::session::ActivityState::Working;
 
-        app.apply_hooks(vec![event(crate::hook::Signal::NeedsInput)]);
+        app.apply_hooks(vec![event(cctop_core::hook::Signal::NeedsInput)]);
         assert_eq!(
             app.sessions[0].activity_state,
-            crate::session::ActivityState::Asking
+            cctop_core::session::ActivityState::Asking
         );
 
-        app.apply_hooks(vec![event(crate::hook::Signal::Idle)]);
+        app.apply_hooks(vec![event(cctop_core::hook::Signal::Idle)]);
         assert_eq!(
             app.sessions[0].activity_state,
-            crate::session::ActivityState::WaitingForInput,
+            cctop_core::session::ActivityState::WaitingForInput,
             "a finished turn is the quieter of the two waits"
         );
 
         // A working report leaves the row alone rather than overwriting it: the
         // transcript reads work correctly and is the only one of the two that
         // can see an API error.
-        app.sessions[0].activity_state = crate::session::ActivityState::ApiError;
-        app.apply_hooks(vec![event(crate::hook::Signal::Busy)]);
+        app.sessions[0].activity_state = cctop_core::session::ActivityState::ApiError;
+        app.apply_hooks(vec![event(cctop_core::hook::Signal::Busy)]);
         assert_eq!(
             app.sessions[0].activity_state,
-            crate::session::ActivityState::ApiError
+            cctop_core::session::ActivityState::ApiError
         );
     }
 
@@ -912,7 +918,7 @@ mod tests {
     #[test]
     fn a_tab_is_read_off_its_screen_when_asked() {
         use super::tabs::{Pane, Tab};
-        use crate::hook::Signal;
+        use cctop_core::hook::Signal;
         let footer = " Do you want to proceed?\r\n \u{276f} 1. Yes\r\n\r\n Esc to cancel \u{b7} Tab to amend";
         let tab = |label: &str, text: &str| {
             let mut pane = Pane::for_test(label);
@@ -951,11 +957,11 @@ mod tests {
     /// leaves the hook's word standing.
     #[test]
     fn the_screen_outranks_a_stale_report() {
-        use crate::hook::Signal;
-        use crate::session::ActivityState;
+        use cctop_core::hook::Signal;
+        use cctop_core::session::ActivityState;
         let mut app = test_app();
         let mut row = session("a", true, "proj");
-        row.process.as_mut().unwrap().process_list = vec![crate::proc::ProcEntry {
+        row.process.as_mut().unwrap().process_list = vec![cctop_core::proc::ProcEntry {
             pid: 4321,
             is_root: true,
             ghost: false,
@@ -964,10 +970,10 @@ mod tests {
             args: String::new(),
         }];
         app.sessions = vec![row];
-        app.apply_hooks(vec![crate::hook::Event {
+        app.apply_hooks(vec![cctop_core::hook::Event {
             session_id: "a".into(),
             pids: Vec::new(),
-            reported: crate::hook::Reported {
+            reported: cctop_core::hook::Reported {
                 signal: Signal::Idle,
                 cwd: "/w/proj".into(),
                 permission: None,
@@ -989,7 +995,7 @@ mod tests {
         // A permission prompt the hook has not announced yet.
         app.screen_read.insert(
             4321,
-            crate::peek::Screened {
+            cctop_core::peek::Screened {
                 signal: Signal::NeedsInput,
                 ask: None,
                 question: false,
@@ -1002,7 +1008,7 @@ mod tests {
         // Answered, and back to work: the waiting state goes with it.
         app.screen_read.insert(
             4321,
-            crate::peek::Screened {
+            cctop_core::peek::Screened {
                 signal: Signal::Busy,
                 ask: None,
                 question: false,
@@ -1025,12 +1031,12 @@ mod tests {
     /// walk, so the two have to survive arriving in either order.
     #[test]
     fn the_permission_mode_survives_the_rows_being_rebuilt() {
-        let reported = |mode: Option<crate::hook::Permission>| crate::hook::Event {
+        let reported = |mode: Option<cctop_core::hook::Permission>| cctop_core::hook::Event {
             session_id: "a".into(),
             pids: Vec::new(),
-            reported: crate::hook::Reported {
+            reported: cctop_core::hook::Reported {
                 provisional: false,
-                signal: crate::hook::Signal::Busy,
+                signal: cctop_core::hook::Signal::Busy,
                 cwd: "/w/proj".into(),
                 permission: mode,
                 ask: None,
@@ -1045,14 +1051,14 @@ mod tests {
 
         // Reported before the row exists, which is the ordinary order: a
         // `SessionStart` beats the walk that discovers its transcript.
-        app.apply_hooks(vec![reported(Some(crate::hook::Permission::Bypass))]);
+        app.apply_hooks(vec![reported(Some(cctop_core::hook::Permission::Bypass))]);
         app.sessions = vec![session("a", true, "proj")];
         assert_eq!(app.sessions[0].permission, None, "not stamped yet");
 
         app.apply_reports();
         assert_eq!(
             app.sessions[0].permission,
-            Some(crate::hook::Permission::Bypass),
+            Some(cctop_core::hook::Permission::Bypass),
             "a row discovered after the report still picks it up"
         );
 
@@ -1061,14 +1067,14 @@ mod tests {
         app.apply_hooks(vec![reported(None)]);
         assert_eq!(
             app.sessions[0].permission,
-            Some(crate::hook::Permission::Bypass)
+            Some(cctop_core::hook::Permission::Bypass)
         );
 
         // A real change is followed.
-        app.apply_hooks(vec![reported(Some(crate::hook::Permission::Plan))]);
+        app.apply_hooks(vec![reported(Some(cctop_core::hook::Permission::Plan))]);
         assert_eq!(
             app.sessions[0].permission,
-            Some(crate::hook::Permission::Plan)
+            Some(cctop_core::hook::Permission::Plan)
         );
     }
 
@@ -1077,10 +1083,10 @@ mod tests {
     /// ones that only change a state do not.
     #[test]
     fn a_reported_state_is_kept_until_the_session_ends() {
-        let event = |id: &str, signal: crate::hook::Signal| crate::hook::Event {
+        let event = |id: &str, signal: cctop_core::hook::Signal| cctop_core::hook::Event {
             session_id: id.into(),
             pids: Vec::new(),
-            reported: crate::hook::Reported {
+            reported: cctop_core::hook::Reported {
                 provisional: false,
                 signal,
                 cwd: "/w/proj".into(),
@@ -1104,24 +1110,24 @@ mod tests {
 
         // A start is a row to go and find now.
         assert_eq!(
-            app.apply_hooks(vec![event("a", crate::hook::Signal::Started)]),
+            app.apply_hooks(vec![event("a", cctop_core::hook::Signal::Started)]),
             (true, true)
         );
         // Ordinary state changes are not worth a rescan of the disk.
         assert_eq!(
             app.apply_hooks(vec![
-                event("a", crate::hook::Signal::Busy),
-                event("a", crate::hook::Signal::Idle),
+                event("a", cctop_core::hook::Signal::Busy),
+                event("a", cctop_core::hook::Signal::Idle),
             ]),
             (true, false)
         );
-        assert_eq!(app.hooked_signal("a"), Some(crate::hook::Signal::Idle));
+        assert_eq!(app.hooked_signal("a"), Some(cctop_core::hook::Signal::Idle));
         assert_eq!(app.reporting(), vec![("proj".to_string(), "idle")]);
 
         // And an ended session is forgotten rather than left claiming its last
         // state forever — which is also a rescan, since the row is going.
         assert_eq!(
-            app.apply_hooks(vec![event("a", crate::hook::Signal::Ended)]),
+            app.apply_hooks(vec![event("a", cctop_core::hook::Signal::Ended)]),
             (true, true)
         );
         assert!(app.hooked_signal("a").is_none());
@@ -1138,10 +1144,10 @@ mod tests {
     /// read as a permission prompt waiting for an answer.
     #[test]
     fn a_working_claim_nothing_confirms_is_dropped() {
-        let stale = |id: &str, signal: crate::hook::Signal| crate::hook::Event {
+        let stale = |id: &str, signal: cctop_core::hook::Signal| cctop_core::hook::Event {
             session_id: id.into(),
             pids: Vec::new(),
-            reported: crate::hook::Reported {
+            reported: cctop_core::hook::Reported {
                 provisional: false,
                 signal,
                 cwd: "/w/proj".into(),
@@ -1158,7 +1164,7 @@ mod tests {
 
         // An hour-old tool call in flight: the tool is not coming back, and
         // reading it as a held question is how a dead tab keeps blinking.
-        app.apply_hooks(vec![stale("gone", crate::hook::Signal::Acting)]);
+        app.apply_hooks(vec![stale("gone", cctop_core::hook::Signal::Acting)]);
         assert!(app.hooked_signal("gone").is_none());
         assert!(
             app.reporting().is_empty(),
@@ -1167,10 +1173,10 @@ mod tests {
 
         // A question that old is still a question: it is waiting on a person,
         // and people take longer than an hour.
-        app.apply_hooks(vec![stale("asking", crate::hook::Signal::NeedsInput)]);
+        app.apply_hooks(vec![stale("asking", cctop_core::hook::Signal::NeedsInput)]);
         assert_eq!(
             app.hooked_signal("asking"),
-            Some(crate::hook::Signal::NeedsInput)
+            Some(cctop_core::hook::Signal::NeedsInput)
         );
     }
 
@@ -1182,12 +1188,12 @@ mod tests {
     #[test]
     fn a_gemini_event_finds_the_chat_file_it_belongs_to() {
         let mut app = test_app();
-        app.apply_hooks(vec![crate::hook::Event {
+        app.apply_hooks(vec![cctop_core::hook::Event {
             session_id: "79709c93-1111-4111-8111-111111111111".into(),
             pids: Vec::new(),
-            reported: crate::hook::Reported {
+            reported: cctop_core::hook::Reported {
                 provisional: false,
-                signal: crate::hook::Signal::Idle,
+                signal: cctop_core::hook::Signal::Idle,
                 cwd: "/w/proj".into(),
                 permission: None,
                 ask: None,
@@ -1201,7 +1207,7 @@ mod tests {
 
         assert_eq!(
             app.hooked_signal("session-2026-05-14T17-34-79709c93"),
-            Some(crate::hook::Signal::Idle)
+            Some(cctop_core::hook::Signal::Idle)
         );
         // And only that one: a stem whose tail belongs to another session, or an
         // id that is not shaped like Gemini's at all, must not borrow it.
@@ -1211,11 +1217,11 @@ mod tests {
         );
         assert!(app.hooked_signal("79709c93").is_none());
         assert_eq!(
-            crate::hook::gemini_id_tail("session-2026-05-14T17-34-79709c93"),
+            cctop_core::hook::gemini_id_tail("session-2026-05-14T17-34-79709c93"),
             Some("79709c93")
         );
         assert_eq!(
-            crate::hook::gemini_id_tail("019fda22-5315-7580-84de-033e4f6835b5"),
+            cctop_core::hook::gemini_id_tail("019fda22-5315-7580-84de-033e4f6835b5"),
             None
         );
     }
@@ -1226,7 +1232,7 @@ mod tests {
     fn typing_into_a_pane_settles_the_question_it_answers() {
         let mut app = test_app();
         let mut session = session("a", true, "proj");
-        session.process.as_mut().unwrap().process_list = vec![crate::proc::ProcEntry {
+        session.process.as_mut().unwrap().process_list = vec![cctop_core::proc::ProcEntry {
             pid: 7,
             is_root: true,
             ghost: false,
@@ -1241,12 +1247,12 @@ mod tests {
         app.mark_answered(7);
         assert!(app.hooked_signal("a").is_none());
 
-        app.apply_hooks(vec![crate::hook::Event {
+        app.apply_hooks(vec![cctop_core::hook::Event {
             session_id: "a".into(),
             pids: Vec::new(),
-            reported: crate::hook::Reported {
+            reported: cctop_core::hook::Reported {
                 provisional: false,
-                signal: crate::hook::Signal::NeedsInput,
+                signal: cctop_core::hook::Signal::NeedsInput,
                 cwd: "/w/proj".into(),
                 permission: None,
                 ask: None,
@@ -1259,20 +1265,20 @@ mod tests {
         }]);
         assert_eq!(
             app.hooked_signal("a"),
-            Some(crate::hook::Signal::NeedsInput)
+            Some(cctop_core::hook::Signal::NeedsInput)
         );
 
         // The keystroke is the answer, so the agent is working again.
         app.mark_answered(7);
-        assert_eq!(app.hooked_signal("a"), Some(crate::hook::Signal::Busy));
+        assert_eq!(app.hooked_signal("a"), Some(cctop_core::hook::Signal::Busy));
 
         // A different agent's keys settle nothing here.
-        app.apply_hooks(vec![crate::hook::Event {
+        app.apply_hooks(vec![cctop_core::hook::Event {
             session_id: "a".into(),
             pids: Vec::new(),
-            reported: crate::hook::Reported {
+            reported: cctop_core::hook::Reported {
                 provisional: false,
-                signal: crate::hook::Signal::NeedsInput,
+                signal: cctop_core::hook::Signal::NeedsInput,
                 cwd: "/w/proj".into(),
                 permission: None,
                 ask: None,
@@ -1286,7 +1292,7 @@ mod tests {
         app.mark_answered(8);
         assert_eq!(
             app.hooked_signal("a"),
-            Some(crate::hook::Signal::NeedsInput)
+            Some(cctop_core::hook::Signal::NeedsInput)
         );
     }
 
@@ -1298,7 +1304,7 @@ mod tests {
     /// nothing — only the first knows what the prompt is about.
     #[test]
     fn a_questions_detail_survives_its_followup_notification() {
-        use crate::hook::{Event, Reported, Signal};
+        use cctop_core::hook::{Event, Reported, Signal};
 
         let raised = |signal: Signal, ask: Option<&str>| Event {
             session_id: "a".to_string(),
@@ -1340,8 +1346,8 @@ mod tests {
     /// call — the surest way to teach someone to ignore the bell.
     #[test]
     fn a_held_prompt_becomes_news_only_if_nothing_answers_it() {
-        use crate::hook::{Event, Reported, Signal};
-        use crate::session::ActivityState;
+        use cctop_core::hook::{Event, Reported, Signal};
+        use cctop_core::session::ActivityState;
 
         let raised = |signal: Signal, provisional: bool| Event {
             session_id: "a".to_string(),
@@ -1379,7 +1385,7 @@ mod tests {
         app.apply_hooks(vec![raised(Signal::NeedsInput, true)]);
         let held = app.reports.hooked.get_mut("a").expect("the report");
         held.at = std::time::Instant::now()
-            - (crate::hook::PERMISSION_GRACE + std::time::Duration::from_secs(1));
+            - (cctop_core::hook::PERMISSION_GRACE + std::time::Duration::from_secs(1));
         assert!(app.promote_matured_prompts(), "the grace never ran out");
         app.apply_reports();
         assert_eq!(app.sessions[0].activity_state, ActivityState::Asking);
@@ -1397,10 +1403,10 @@ mod tests {
         app.sessions = vec![session("a", true, "/x/a"), session("b", true, "/x/b")];
         app.refilter();
         let target = app.sessions[1].key();
-        app.notify.record_for_test(crate::notify::Rang {
+        app.notify.record_for_test(cctop_core::notify::Rang {
             key: target.clone(),
             label: "b".into(),
-            reason: crate::notify::Reason::NeedsInput,
+            reason: cctop_core::notify::Reason::NeedsInput,
             at: Instant::now(),
         });
 
@@ -1424,7 +1430,7 @@ mod tests {
     #[test]
     fn an_alert_crossing_is_toasted_once_and_marked_while_it_holds() {
         let mut app = test_app();
-        app.settings = crate::settings::Settings::parse("[settings]\nalert_cost = 5\n");
+        app.settings = cctop_core::settings::Settings::parse("[settings]\nalert_cost = 5\n");
         app.sessions = vec![session("a", true, "proj")];
         app.sessions[0].total_cost = Some(1.0);
         app.check_bells();
@@ -1438,12 +1444,12 @@ mod tests {
             "{said:?}"
         );
         let key = app.sessions[0].key();
-        assert_eq!(app.alerts.marker(&key), Some(crate::alert::Kind::Cost));
+        assert_eq!(app.alerts.marker(&key), Some(cctop_core::alert::Kind::Cost));
 
         app.toasts = toast::Toasts::default();
         app.check_bells();
         assert_eq!(app.toasts.latest(), None, "still over is not news");
-        assert_eq!(app.alerts.marker(&key), Some(crate::alert::Kind::Cost));
+        assert_eq!(app.alerts.marker(&key), Some(cctop_core::alert::Kind::Cost));
     }
 
     /// A session finishing its turn on the same refresh an alert fires is one
@@ -1453,21 +1459,21 @@ mod tests {
     fn a_crossing_and_an_alert_on_one_refresh_ring_once() {
         let mut app = test_app();
         app.notify.enabled = true;
-        app.settings = crate::settings::Settings::parse("[settings]\nalert_cost = 5\n");
+        app.settings = cctop_core::settings::Settings::parse("[settings]\nalert_cost = 5\n");
         app.sessions = vec![session("a", true, "api"), session("b", true, "web")];
         app.sessions[1].total_cost = Some(1.0);
         app.check_bells();
         app.notify.ring_pending();
         assert!(
-            crate::notify::take_rung().is_empty(),
+            cctop_core::notify::take_rung().is_empty(),
             "nothing has happened"
         );
 
-        app.sessions[0].activity_state = crate::session::ActivityState::WaitingForInput;
+        app.sessions[0].activity_state = cctop_core::session::ActivityState::WaitingForInput;
         app.sessions[1].total_cost = Some(6.0);
         app.check_bells();
         app.notify.ring_pending();
-        let rung = crate::notify::take_rung();
+        let rung = cctop_core::notify::take_rung();
         assert_eq!(rung.len(), 1, "one refresh, one bell: {rung:?}");
         assert!(
             rung[0].starts_with("cctop: ") && rung[0].contains("waiting for input · "),
@@ -1478,16 +1484,16 @@ mod tests {
         // And the next pass, with nothing new, is silent.
         app.check_bells();
         app.notify.ring_pending();
-        assert!(crate::notify::take_rung().is_empty());
+        assert!(cctop_core::notify::take_rung().is_empty());
     }
 
     /// The stall alert reads the hooks' last word even once the row has
     /// stopped believing it, and a finished turn is never a stall.
     #[test]
     fn a_stall_reads_the_last_hook_report_however_old() {
-        use crate::alert::Hooked;
-        use crate::hook::Signal;
-        let report = |signal, age| crate::hook::Reported {
+        use cctop_core::alert::Hooked;
+        use cctop_core::hook::Signal;
+        let report = |signal, age| cctop_core::hook::Reported {
             signal,
             cwd: String::new(),
             permission: None,
@@ -1496,7 +1502,7 @@ mod tests {
             at: Instant::now() - std::time::Duration::from_secs(age),
             provisional: false,
         };
-        let mut reports = crate::hook::Reports::default();
+        let mut reports = cctop_core::hook::Reports::default();
         assert_eq!(stall_view(&reports, "a"), Hooked::Unknown);
         reports
             .hooked

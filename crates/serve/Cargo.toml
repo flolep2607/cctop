@@ -1,0 +1,36 @@
+[package]
+name = "cctop-serve"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Internal to cctop: the web server and the conversation model it shares with the dashboard. No stable API; use the cctop binary."
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[lib]
+# No doc comment in cctop is an example meant to run, and without this every
+# `cargo test` hands each crate to rustdoc again to find that out.
+doctest = false
+
+[features]
+# Off by default and never enabled for a release: compiles in `src/debug.rs`,
+# which can make the server fail on demand. See CONTRIBUTING.md.
+debug = ["cctop-core/debug"]
+
+[dependencies]
+cctop-core.workspace = true
+anyhow.workspace = true
+brotli.workspace = true
+chrono.workspace = true
+dirs.workspace = true
+flate2.workspace = true
+libc.workspace = true
+pulldown-cmark.workspace = true
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+
+[dev-dependencies]
+cctop-core = { workspace = true, features = ["test-support"] }

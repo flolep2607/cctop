@@ -80,7 +80,7 @@ impl Torn {
         };
         match shape(&spell(after)) {
             Shape::Report => {
-                crate::elog::event("tui", "torn-mouse-report", serde_json::json!({}));
+                cctop_core::elog::event("tui", "torn-mouse-report", serde_json::json!({}));
                 self.held.clear();
                 self.since = None;
                 Vec::new()

@@ -11,11 +11,11 @@
 //! # Why the data and the drawing are separate
 //!
 //! The terminal has shown most of this for a long time, in
-//! [`crate::ui::panels`], as styled lines built straight from the filesystem.
+//! [`cctop_ui::panels`], as styled lines built straight from the filesystem.
 //! A browser cannot use styled lines, and re-reading the same files a second
 //! way is how two surfaces come to disagree about which MCP servers exist. So
 //! the readers live here and return values; the panel renders them, and so does
-//! [`crate::serve`].
+//! [`cctop_serve`].
 //!
 //! # It reports the files, not the truth
 //!

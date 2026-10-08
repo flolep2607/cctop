@@ -1,10 +1,10 @@
 //! `/api/search` — the dashboard's two search tiers, over the wire.
 //!
 //! The same search the TUI's `s` runs, not a third implementation of one: the
-//! literal tier is [`crate::session::search`]'s byte scan over the transcripts,
-//! and the topical tier is the same [`crate::embed`] index, on the same terms —
+//! literal tier is [`cctop_core::session::search`]'s byte scan over the transcripts,
+//! and the topical tier is the same [`cctop_core::embed`] index, on the same terms —
 //! same floor, same limit, same gate on when a query is worth widening. The
-//! constants below are copies of `src/ui/worker.rs`'s, which are private there;
+//! constants below are copies of `crates/ui/src/worker.rs`'s, which are private there;
 //! the two must agree or the page and the terminal answer the same question
 //! differently, so they are pinned here by the same assertions and comments.
 //!
@@ -15,8 +15,8 @@
 //! that needs the index to answer at all is a search that breaks when it is
 //! absent.
 
-use crate::session::Session;
-use crate::session::search::{Query, Target};
+use cctop_core::session::Session;
+use cctop_core::session::search::{Query, Target};
 use serde::Serialize;
 use std::sync::Mutex;
 
@@ -34,12 +34,12 @@ pub const MIN_CHARS: usize = 3;
 const LIMIT: usize = 25;
 
 /// A word count at which a query is a question, not a keyword — see
-/// [`worth_widening`]. Mirrors `TOPICAL_WORDS` in `src/ui/worker.rs`.
+/// [`worth_widening`]. Mirrors `TOPICAL_WORDS` in `crates/ui/src/worker.rs`.
 const TOPICAL_WORDS: usize = 4;
 
 /// How close a chunk has to be to count as being about the query.
 ///
-/// Mirrors `TOPICAL_FLOOR` in `src/ui/worker.rs`: cosine over mean-pooled
+/// Mirrors `TOPICAL_FLOOR` in `crates/ui/src/worker.rs`: cosine over mean-pooled
 /// static vectors puts a right answer around 0.35–0.5 and unrelated text
 /// around 0.05 on a real corpus, so this sits below the answers and well above
 /// the noise.
@@ -48,7 +48,7 @@ const TOPICAL_FLOOR: f32 = 0.22;
 const _: () = assert!(TOPICAL_FLOOR > 0.10 && TOPICAL_FLOOR < 0.35);
 
 /// At most this many sessions the topical tier may add — mirrors
-/// `TOPICAL_LIMIT` in `src/ui/worker.rs`, so a vague query widens the answer
+/// `TOPICAL_LIMIT` in `crates/ui/src/worker.rs`, so a vague query widens the answer
 /// rather than replacing it with everything on the machine.
 const TOPICAL_LIMIT: usize = 10;
 
@@ -69,8 +69,8 @@ fn worth_widening(no_hits: bool, needle: &str) -> bool {
 /// re-check the filesystem on every query.
 #[derive(Default)]
 pub struct Topics {
-    model: Option<crate::embed::Model>,
-    index: Option<crate::embed::index::Index>,
+    model: Option<cctop_core::embed::Model>,
+    index: Option<cctop_core::embed::index::Index>,
     absent: bool,
 }
 
@@ -101,7 +101,7 @@ pub fn run(topics: &Mutex<Topics>, sessions: &[Session], needle: &str) -> Vec<Hi
     let mut hits: Vec<Hit> = targets
         .iter()
         .filter_map(|target| {
-            crate::session::search::find_query(target, &query).map(|found| Hit {
+            cctop_core::session::search::find_query(target, &query).map(|found| Hit {
                 key: target.key.clone(),
                 session_id: target.session_id.clone(),
                 snippet: found.snippet,
@@ -121,7 +121,7 @@ pub fn run(topics: &Mutex<Topics>, sessions: &[Session], needle: &str) -> Vec<Hi
 
 /// Add sessions that are *about* the query to the literal hits.
 ///
-/// The mirror of `topical` in `src/ui/worker.rs`, kept identical in substance:
+/// The mirror of `topical` in `crates/ui/src/worker.rs`, kept identical in substance:
 /// same lazily-loaded model and index, same refresh-and-save, same floor and
 /// limit, and the same rule that a session the literal tier found keeps the
 /// snippet showing its words — the more precise answer.
@@ -130,11 +130,11 @@ fn widen(topics: &mut Topics, needle: &str, targets: &[Target], hits: &mut Vec<H
         return;
     }
     if topics.model.is_none() {
-        if !crate::embed::fetch::present() {
+        if !cctop_core::embed::fetch::present() {
             topics.absent = true;
             return;
         }
-        match crate::embed::Model::load(&crate::embed::fetch::model_dir()) {
+        match cctop_core::embed::Model::load(&cctop_core::embed::fetch::model_dir()) {
             Ok(m) => topics.model = Some(m),
             Err(_) => {
                 // A model that will not load is the same as no model here:
@@ -151,15 +151,16 @@ fn widen(topics: &mut Topics, needle: &str, targets: &[Target], hits: &mut Vec<H
     };
 
     let index = topics.index.get_or_insert_with(|| {
-        crate::embed::index::Index::load(&crate::config::EMBEDDING_INDEX_FILE).unwrap_or_default()
+        cctop_core::embed::index::Index::load(&cctop_core::config::EMBEDDING_INDEX_FILE)
+            .unwrap_or_default()
     });
     if index.refresh(model, targets) > 0 {
         // Best effort: an index that cannot be written is rebuilt next time,
         // which costs a second, and is not worth failing a search over.
-        let _ = index.save(&crate::config::EMBEDDING_INDEX_FILE);
+        let _ = index.save(&cctop_core::config::EMBEDDING_INDEX_FILE);
     }
 
-    let query = model.embed(&crate::embed::topic_of(needle));
+    let query = model.embed(&cctop_core::embed::topic_of(needle));
     for (key, snippet, score) in index.search(&query, TOPICAL_FLOOR, TOPICAL_LIMIT) {
         if hits.iter().any(|h| h.key == key) {
             continue;

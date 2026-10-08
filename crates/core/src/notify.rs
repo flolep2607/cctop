@@ -230,8 +230,8 @@ impl Notifier {
 
     /// Put a session on the queue as though it had just crossed — for the
     /// UI tests, which exercise `b` and the marker rather than the machine.
-    #[cfg(test)]
-    pub(crate) fn record_for_test(&mut self, rang: Rang) {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn record_for_test(&mut self, rang: Rang) {
         self.recent.push_back(rang);
     }
 
@@ -399,7 +399,7 @@ fn reason_for(state: State) -> Option<Reason> {
 ///
 /// Both waiting states arrive from the row, which is where a hook report has
 /// already been stamped — see
-/// [`App::apply_reports`](crate::ui::App::apply_reports). That matters most for
+/// [`App::apply_reports`](cctop_ui::App::apply_reports). That matters most for
 /// the permission prompt: it is the moment an agent is most obviously blocked
 /// and the one a transcript cannot see at all, so before the hooks it read as
 /// ordinary work and never rang.
@@ -460,9 +460,9 @@ pub(crate) fn ring(text: &str) {
     // test` is the developer's terminal: without this the suite beeps at them
     // and leaves escape sequences among the results. What would have been
     // written is kept instead, so a test can count the bells.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     RUNG.with(|rung| rung.borrow_mut().push(text.to_string()));
-    #[cfg(not(test))]
+    #[cfg(not(any(test, feature = "test-support")))]
     {
         use std::io::Write;
         let mut out = std::io::stdout();
@@ -476,11 +476,12 @@ pub(crate) fn ring(text: &str) {
 /// The text carries a session label, which is a directory name the user chose.
 /// A BEL in it would terminate the notification and hand the remainder to the
 /// terminal as commands; an ESC would do worse.
+#[cfg_attr(feature = "test-support", allow(dead_code))]
 fn sanitize(text: &str) -> String {
     text.chars().filter(|c| !c.is_control()).collect()
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     /// What [`ring`] would have written, for the tests that count bells.
     /// Per thread, because the test harness runs tests side by side.
@@ -488,8 +489,8 @@ thread_local! {
 }
 
 /// Every bell rung on this thread since the last call, emptied as it is read.
-#[cfg(test)]
-pub(crate) fn take_rung() -> Vec<String> {
+#[cfg(any(test, feature = "test-support"))]
+pub fn take_rung() -> Vec<String> {
     RUNG.with(|rung| std::mem::take(&mut *rung.borrow_mut()))
 }
 

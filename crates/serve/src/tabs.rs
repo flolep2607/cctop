@@ -2,7 +2,7 @@
 //!
 //! A tab in the TUI is an agent in one of cctop's rmux sessions, and rmux
 //! keeps the tab bar's arrangement on the sessions themselves — the label, the
-//! order, which tab a split belongs to (see [`crate::rmux::Running`]). So this
+//! order, which tab a split belongs to (see [`cctop_core::rmux::Running`]). So this
 //! reads the bar from rmux rather than from a TUI: a `cctop serve` with no
 //! dashboard anywhere shows the same tabs, in the same order, as the one that
 //! opened them.
@@ -12,8 +12,8 @@
 //! read-only; opening a terminal is an action, and goes through the same guards
 //! as every other one.
 
-use crate::rmux::Running;
-use crate::session::Session;
+use cctop_core::rmux::Running;
+use cctop_core::session::Session;
 use serde::Serialize;
 
 /// How long a tab's window may sit unchanged before the agent in it counts
@@ -73,7 +73,7 @@ pub fn build(running: Vec<Running>, sessions: &[Session], now: u64) -> Vec<Tab> 
 fn state_of(r: &Running, now: u64) -> &'static str {
     if let Some(state) = r.state.filter(|s| s.is_current(now)) {
         return match state.signal {
-            crate::hook::Signal::NeedsInput => "needs-input",
+            cctop_core::hook::Signal::NeedsInput => "needs-input",
             signal if signal.is_working() => "working",
             _ => "idle",
         };
@@ -123,13 +123,13 @@ mod tests {
     /// order, and reads as working only while its window is printing.
     #[test]
     fn tabs_keep_their_order_and_find_their_sessions() {
-        let mut session = Session::new(crate::pricing::Provider::Claude, "abc".into());
-        session.process = Some(crate::proc::ProcInfo {
+        let mut session = Session::new(cctop_core::pricing::Provider::Claude, "abc".into());
+        session.process = Some(cctop_core::proc::ProcInfo {
             pids: 1,
             cpu: 0.0,
             memory: 0,
             command: "claude".into(),
-            process_list: vec![crate::proc::ProcEntry {
+            process_list: vec![cctop_core::proc::ProcEntry {
                 pid: 42,
                 cpu: 0.0,
                 memory: 0,

@@ -47,7 +47,7 @@ pub(super) const TAB_LABEL_CHARS: usize = 24;
 /// at it.
 ///
 /// Only reached by a harness that takes no opening prompt on its command line —
-/// everything in [`handoff::opening_argv`](crate::handoff::opening_argv) is
+/// everything in [`handoff::opening_argv`](cctop_serve::handoff::opening_argv) is
 /// handed the brief as an argument instead, because no delay is long enough to
 /// win that race reliably. Too short and the line is lost; too long and the user
 /// is left looking at an idle agent wondering whether the handoff worked.
@@ -103,14 +103,14 @@ impl Restart {
 /// path.
 fn resume_under_profile(
     session: &Session,
-) -> Option<(Vec<String>, Option<&'static crate::config::Profile>)> {
+) -> Option<(Vec<String>, Option<&'static cctop_core::config::Profile>)> {
     let argv = session.resume_argv()?;
     let profile = session
         .profile
         .as_deref()
-        .and_then(|name| crate::config::profile_named(session.provider, name));
+        .and_then(|name| cctop_core::config::profile_named(session.provider, name));
     let argv = match profile {
-        Some(profile) => crate::config::argv_under_profile(argv, profile),
+        Some(profile) => cctop_core::config::argv_under_profile(argv, profile),
         None => argv,
     };
     Some((argv, profile))
@@ -164,7 +164,7 @@ impl App {
         // account) pair on this machine but the one the session is on. The
         // page's menu is the same list, so the two pickers never disagree
         // about where a session may be sent.
-        let targets = crate::handoff::targets(&session);
+        let targets = cctop_serve::handoff::targets(&session);
         if targets.is_empty() {
             self.set_status(
                 "Nowhere to hand this session — no other agent or account on this machine",
@@ -179,8 +179,8 @@ impl App {
             true => self.panel_data.as_ref(),
             false => None,
         };
-        let brief = crate::handoff::build(&session, data);
-        let path = match crate::handoff::write(&brief) {
+        let brief = cctop_serve::handoff::build(&session, data);
+        let path = match cctop_serve::handoff::write(&brief) {
             Ok(path) => path,
             Err(error) => {
                 self.set_status(format!("Could not write the handoff brief: {error}"));
@@ -214,7 +214,7 @@ impl App {
     /// and it picks an account with `p`, which cannot leave out the one the
     /// session is already on. Each line here is an (agent, account) pair, so the
     /// account is chosen where the agent is and the session's own is absent.
-    pub(super) fn open_handoff(&mut self, targets: Vec<crate::handoff::Target>) {
+    pub(super) fn open_handoff(&mut self, targets: Vec<cctop_serve::handoff::Target>) {
         self.launch_offer = targets.into_iter().map(tabs::Choice::Handoff).collect();
         self.launch_into = LaunchInto::Tab;
         self.launch_cursor = 0;
@@ -270,7 +270,7 @@ impl App {
             return;
         }
         self.handoff_send = None;
-        match crate::inject::send_line(pid, &line) {
+        match cctop_core::inject::send_line(pid, &line) {
             Ok(()) => self.set_status("Handed the brief over"),
             // The brief is on disk either way, so the failure is recoverable by
             // hand — say where it is rather than only that this did not work.
@@ -303,7 +303,7 @@ impl App {
             ));
             return;
         };
-        if !crate::shim::is_command(&argv[0]) {
+        if !cctop_core::shim::is_command(&argv[0]) {
             self.set_status(format!("{} is not installed on this machine", argv[0]));
             return;
         }
@@ -334,11 +334,12 @@ impl App {
         let label = format!(
             "{} · {}",
             argv[0],
-            crate::util::truncate(session.display_label(), TAB_LABEL_CHARS)
+            cctop_core::util::truncate(session.display_label(), TAB_LABEL_CHARS)
         );
         // Named after the session, so resuming it a second time reattaches to
         // the agent already doing it rather than starting a rival.
-        let rmux = crate::rmux::name_for_session(session.provider.as_str(), &session.session_id);
+        let rmux =
+            cctop_core::rmux::name_for_session(session.provider.as_str(), &session.session_id);
 
         // Already on screen: switch to it. rmux would attach a second client to
         // the same agent, which works but leaves two panes fighting over one
@@ -370,7 +371,7 @@ impl App {
         // Reattaching is not resuming: the agent was never gone, so saying
         // "resumed" would misdescribe what just happened.
         let verb = match &own {
-            tabs::Own::Tmux(name) if crate::rmux::exists(name) => "Reattached to",
+            tabs::Own::Tmux(name) if cctop_core::rmux::exists(name) => "Reattached to",
             _ => "Resumed",
         };
         self.open_tab(
@@ -615,7 +616,7 @@ impl App {
         if let Some(sandbox) = &session.sandbox {
             return Restart::Declined(format!(
                 "{label} works on {} through cctop sandbox, which a restart would leave behind",
-                crate::sandbox::host_of(sandbox)
+                cctop_core::sandbox::host_of(sandbox)
             ));
         }
         let Some((argv, profile)) = resume_under_profile(&session) else {
@@ -624,7 +625,7 @@ impl App {
                 session.provider.as_str()
             ));
         };
-        if !crate::shim::is_command(&argv[0]) {
+        if !cctop_core::shim::is_command(&argv[0]) {
             return Restart::Declined(format!("{} is not installed on this machine", argv[0]));
         }
         // Mid-turn, a restart throws the turn away. Asked once through the
@@ -643,7 +644,8 @@ impl App {
             }
         }
 
-        let resumed = crate::rmux::name_for_session(session.provider.as_str(), &session.session_id);
+        let resumed =
+            cctop_core::rmux::name_for_session(session.provider.as_str(), &session.session_id);
         let cwd = session.work_dir();
         let profile = profile.map(|p| p.name.clone());
         if detached {
@@ -724,25 +726,25 @@ impl App {
         let Some(old) = self.tabs[at].shared.clone() else {
             return Restart::Declined("That tab has closed".into());
         };
-        if let Err(error) = crate::rmux::kill(&old.name) {
+        if let Err(error) = cctop_core::rmux::kill(&old.name) {
             return Restart::Failed(format!("Could not stop {label}: {error}"));
         }
-        if let Err(error) = crate::rmux::start_detached(argv, &resumed, cwd) {
+        if let Err(error) = cctop_core::rmux::start_detached(argv, &resumed, cwd) {
             // The session is gone and nothing replaced it; the next sweep
             // retires the tab, as it does for any agent that ended.
             return Restart::Failed(format!(
                 "Stopped {label}, but could not start it again: {error}"
             ));
         }
-        crate::rmux::quiet(&resumed);
-        crate::rmux::mouse(&resumed);
-        crate::rmux::set_label(&resumed, &label);
+        cctop_core::rmux::quiet(&resumed);
+        cctop_core::rmux::mouse(&resumed);
+        cctop_core::rmux::set_label(&resumed, &label);
         if let Some(profile) = &profile {
-            crate::rmux::set_profile(&resumed, profile);
+            cctop_core::rmux::set_profile(&resumed, profile);
         }
         let tab = &mut self.tabs[at];
         tab.shared = Some(tabs::Shared {
-            pid: crate::rmux::agent_pid(&resumed),
+            pid: cctop_core::rmux::agent_pid(&resumed),
             name: resumed,
             label: label.clone(),
             // Nothing has been read off the new session yet; the next sweep
@@ -776,7 +778,7 @@ impl App {
         deferred: Deferred,
         name: impl FnOnce() -> String,
     ) -> Option<tabs::Own> {
-        if crate::rmux::available() {
+        if cctop_core::rmux::available() {
             return Some(tabs::Own::Tmux(name()));
         }
         // Asked in this order so that installing rmux in another window still
@@ -789,7 +791,7 @@ impl App {
         // this is the plain fallback rather than a refusal: `?` here would
         // return `None`, which the caller reads as "the launch is waiting on an
         // answer" — and no answer would ever come, so the tab never opened.
-        let Some(install) = crate::rmux::installer() else {
+        let Some(install) = cctop_core::rmux::installer() else {
             return Some(tabs::Own::Cctop);
         };
         self.rmux_install = Some(install);
@@ -838,7 +840,7 @@ impl App {
         let Some(pid) = self.rmux_installing else {
             return;
         };
-        if crate::rmux::available() {
+        if cctop_core::rmux::available() {
             self.rmux_installing = None;
             self.set_status("rmux installed");
             self.run_deferred_launch();
@@ -877,7 +879,7 @@ impl App {
         let Some(path) = self.settings_file.clone() else {
             return;
         };
-        if let Err(e) = crate::settings::ensure_template(&path) {
+        if let Err(e) = cctop_core::settings::ensure_template(&path) {
             self.set_status(format!("Could not write the config file: {e}"));
             return;
         }
@@ -939,7 +941,7 @@ impl App {
         self.tabs.push(tabs::Tab::new(pane));
         self.go_to_tab(self.tabs.len());
         let where_ = cwd
-            .map(|dir| format!(" in {}", crate::util::tildify(&dir.to_string_lossy())))
+            .map(|dir| format!(" in {}", cctop_core::util::tildify(&dir.to_string_lossy())))
             .unwrap_or_default();
         self.set_status(format!("{verb} {what}{where_}{kept}"));
     }
@@ -969,13 +971,13 @@ impl App {
     fn handover_target(&mut self, session: &Session) -> Option<std::path::PathBuf> {
         let transcript = session.data_file.as_deref();
         match transcript {
-            Some(path) if crate::convert::convertible_session(session) => {
+            Some(path) if cctop_core::convert::convertible_session(session) => {
                 self.pending_provider = session.provider;
                 Some(path.to_path_buf())
             }
             // A Claude-to-Claude fork does not read the transcript at all, so a
             // session `convertible_session` rejects can still be copied whole.
-            _ => crate::handoff::forkable(session).map(std::path::Path::to_path_buf),
+            _ => cctop_serve::handoff::forkable(session).map(std::path::Path::to_path_buf),
         }
     }
 
@@ -987,7 +989,7 @@ impl App {
     /// transcript is *copied*, so nothing is lost; between two harnesses that
     /// keep a file of JSON lines it is *converted*, which carries the
     /// conversation and drops the sending harness's own accounting — see
-    /// [`crate::convert`]. Everything else gets the brief, which is the only
+    /// [`cctop_core::convert`]. Everything else gets the brief, which is the only
     /// form that agent can read.
     ///
     /// The copy lands in the *receiving* account's directory, which is not
@@ -1000,18 +1002,18 @@ impl App {
     pub(super) fn fork_pending(
         &mut self,
         argv: &[String],
-        account: Option<&'static crate::config::Profile>,
+        account: Option<&'static cctop_core::config::Profile>,
     ) -> Option<Vec<String>> {
         let transcript = self.pending_fork.clone()?;
         // `argv` may carry an `env VAR=value` prefix when a profile was chosen,
         // so the command is read off it by name rather than taken as argv[0].
-        let target = crate::pricing::Provider::parse(crate::handoff::command_of(argv)?)?;
+        let target = cctop_core::pricing::Provider::parse(cctop_serve::handoff::command_of(argv)?)?;
         match target {
             // Claude to Claude: a byte-for-byte copy, so it is tried first and
             // keeps everything a conversion drops.
             Provider::Claude if self.pending_provider == Provider::Claude => {
                 let config_dir = Self::store_of(target, account);
-                match crate::handoff::fork(&transcript, &config_dir) {
+                match cctop_serve::handoff::fork(&transcript, &config_dir) {
                     Ok(id) => Some(Self::resume_argv(target, &id, account)),
                     Err(error) => {
                         self.set_status(format!("Could not copy the transcript: {error}"));
@@ -1024,7 +1026,7 @@ impl App {
             // rollout as written once it is in that login's store.
             Provider::Codex if self.pending_provider == Provider::Codex => {
                 let home = Self::store_of(target, account);
-                match crate::handoff::fork_codex(&transcript, &home) {
+                match cctop_serve::handoff::fork_codex(&transcript, &home) {
                     Ok(id) => Some(Self::resume_argv(target, &id, account)),
                     Err(error) => {
                         self.set_status(format!("Could not copy the rollout: {error}"));
@@ -1032,10 +1034,10 @@ impl App {
                     }
                 }
             }
-            _ if crate::convert::convertible(self.pending_provider, target) => {
+            _ if cctop_core::convert::convertible(self.pending_provider, target) => {
                 let home = Self::store_of(target, account);
                 let written =
-                    crate::convert::convert(self.pending_provider, &transcript, target, &home);
+                    cctop_core::convert::convert(self.pending_provider, &transcript, target, &home);
                 match written {
                     Some(written) => {
                         self.set_status(format!(
@@ -1060,17 +1062,17 @@ impl App {
     ///
     /// A copied or converted session is written for whoever resumes it, so the
     /// account picked is the one to write into — the same reason
-    /// [`crate::handoff::fork`] takes the receiving profile rather than the
+    /// [`cctop_serve::handoff::fork`] takes the receiving profile rather than the
     /// conventional directory.
     fn store_of(
         target: Provider,
-        account: Option<&'static crate::config::Profile>,
+        account: Option<&'static cctop_core::config::Profile>,
     ) -> std::path::PathBuf {
         match account {
             Some(profile) => profile.dir.clone(),
             None => match target {
-                Provider::Claude => crate::config::CLAUDE_CONFIG_DIR.clone(),
-                _ => crate::config::CODEX_HOME.clone(),
+                Provider::Claude => cctop_core::config::CLAUDE_CONFIG_DIR.clone(),
+                _ => cctop_core::config::CODEX_HOME.clone(),
             },
         }
     }
@@ -1079,14 +1081,14 @@ impl App {
     fn resume_argv(
         target: Provider,
         id: &str,
-        account: Option<&'static crate::config::Profile>,
+        account: Option<&'static cctop_core::config::Profile>,
     ) -> Vec<String> {
         let argv = match target {
             Provider::Codex => vec!["codex".to_string(), "resume".to_string(), id.to_string()],
             _ => vec!["claude".to_string(), "--resume".to_string(), id.to_string()],
         };
         match account {
-            Some(profile) => crate::config::argv_under_profile(argv, profile),
+            Some(profile) => cctop_core::config::argv_under_profile(argv, profile),
             None => argv,
         }
     }
@@ -1121,7 +1123,7 @@ impl App {
         // the `env VAR=value` prefix a profile is passed through.
         let starting = match &choice {
             tabs::Choice::Start(argv) => Self::profile_provider(argv),
-            tabs::Choice::Handoff(target) => crate::pricing::Provider::parse(&target.agent),
+            tabs::Choice::Handoff(target) => cctop_core::pricing::Provider::parse(&target.agent),
             tabs::Choice::Waiting(_) => None,
         };
         // The account a fresh agent starts under: the one `p` picked for a bare
@@ -1145,7 +1147,7 @@ impl App {
             // rather than a derived one.
             tabs::Choice::Start(argv) => {
                 let own = self.own_preferring_rmux(Deferred::Launch, || {
-                    crate::rmux::free_name(&tabs::label_of(argv))
+                    cctop_core::rmux::free_name(&tabs::label_of(argv))
                 });
                 // The offer went up instead. This runs again from the top when
                 // it is answered, and the launcher's snapshot is still here to
@@ -1155,7 +1157,7 @@ impl App {
             }
             tabs::Choice::Handoff(target) => {
                 let own = self.own_preferring_rmux(Deferred::Launch, || {
-                    crate::rmux::free_name(&target.agent)
+                    cctop_core::rmux::free_name(&target.agent)
                 });
                 let Some(own) = own else { return };
                 (target.argv(vec![target.agent.clone()]), own)
@@ -1166,7 +1168,7 @@ impl App {
         // at once — a tab that flickers and vanishes, where the truth is simply
         // that the agent ended while being looked at.
         if let tabs::Choice::Waiting(agent) = &choice
-            && !crate::rmux::exists(&agent.name)
+            && !cctop_core::rmux::exists(&agent.name)
         {
             self.set_status(format!("{} has ended", choice.label()));
             return;
@@ -1189,12 +1191,12 @@ impl App {
             true => self.pending_brief.clone(),
             false => None,
         };
-        let line = brief.as_deref().map(crate::handoff::prompt_for);
+        let line = brief.as_deref().map(cctop_serve::handoff::prompt_for);
         // Handed over in the argv wherever the harness takes an opening prompt;
         // `opening_argv` says why that is not the same as typing it.
         let opening = line
             .as_deref()
-            .and_then(|line| crate::handoff::opening_argv(&argv, line));
+            .and_then(|line| cctop_serve::handoff::opening_argv(&argv, line));
         let argv = &argv;
         let mut pane =
             match tabs::Pane::launch(opening.as_ref().unwrap_or(argv), cwd.as_deref(), own) {
@@ -1223,7 +1225,7 @@ impl App {
         } else if carrying_conversation {
             // The agent the copy was resumed in, which a conversion makes a
             // different harness from the one handed over.
-            pane.label = crate::handoff::command_of(argv)
+            pane.label = cctop_serve::handoff::command_of(argv)
                 .unwrap_or("claude")
                 .to_string();
         }
@@ -1272,13 +1274,13 @@ impl App {
                 let at = agent
                     .cwd
                     .as_ref()
-                    .map(|dir| format!(" in {}", crate::util::tildify(&dir.to_string_lossy())))
+                    .map(|dir| format!(" in {}", cctop_core::util::tildify(&dir.to_string_lossy())))
                     .unwrap_or_default();
                 format!("Reattached to {label}{at} — it was never gone")
             }
             tabs::Choice::Start(_) | tabs::Choice::Handoff(_) => {
                 let where_ = cwd
-                    .map(|dir| format!(" in {}", crate::util::tildify(&dir.to_string_lossy())))
+                    .map(|dir| format!(" in {}", cctop_core::util::tildify(&dir.to_string_lossy())))
                     .unwrap_or_default();
                 // Only for a fresh Codex, and only where its hooks are waiting
                 // to be trusted. A reattached one is deliberately left out: it
@@ -1286,7 +1288,7 @@ impl App {
                 // the answer for it is a restart rather than a keystroke.
                 let trust = match starting {
                     Some(Provider::Codex) => self.codex_trust_hint(
-                        crate::hook::codex_hooks_installed(self.hook_project().as_deref()),
+                        cctop_core::hook::codex_hooks_installed(self.hook_project().as_deref()),
                     ),
                     _ => "",
                 };
@@ -1312,7 +1314,8 @@ impl App {
         // that `R` afterwards finds the agent already on screen instead of
         // starting a second one on one transcript — `a` and `R` reach the same
         // agent by different routes, and only this makes them agree.
-        let resumed = crate::rmux::name_for_session(session.provider.as_str(), &session.session_id);
+        let resumed =
+            cctop_core::rmux::name_for_session(session.provider.as_str(), &session.session_id);
         let Some(pid) = session.root_pid() else {
             self.set_status("Selected session has no local process");
             return;
@@ -1323,7 +1326,7 @@ impl App {
         // Started by cctop and then handed to rmux. Without this the message
         // below would say cctop did not start an agent cctop started, and send
         // the user to relaunch something that is already running.
-        if let Some(name) = crate::rmux::holding(pid) {
+        if let Some(name) = cctop_core::rmux::holding(pid) {
             // A second client onto one session leaves the two panes arguing over
             // one window's size, so an agent already on screen is switched to.
             if let Some(at) = self
@@ -1489,7 +1492,7 @@ pub(super) fn add_worktree(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ui::tests::test_app;
+    use crate::tests::test_app;
 
     /// Against a real repository, because what is being tested is what git
     /// accepts: a new branch forks, a taken one is refused with git's reason,
@@ -1544,7 +1547,7 @@ mod tests {
     /// ending an agent somebody else is responsible for is not a restart.
     #[test]
     fn a_pane_cctop_does_not_own_is_not_restarted() {
-        let (mut child, pid) = crate::shim::test_session(&["sh", "-c", "sleep 30"], (80, 24));
+        let (mut child, pid) = cctop_core::shim::test_session(&["sh", "-c", "sleep 30"], (80, 24));
         let pane = tabs::Pane::view_of(pid, "claude".into()).expect("attach");
         let mut app = test_app();
         app.tabs.push(tabs::Tab::new(pane));
@@ -1559,7 +1562,7 @@ mod tests {
 
         let _ = child.kill();
         let _ = child.wait();
-        let _ = crate::shim::socket_path(pid).map(std::fs::remove_file);
+        let _ = cctop_core::shim::socket_path(pid).map(std::fs::remove_file);
     }
 
     /// An agent with no session row yet has nothing to resume onto, so it is
@@ -1595,7 +1598,7 @@ mod tests {
 
     /// A tab standing for a rmux session nobody here is attached to.
     fn detached(name: &str, pid: u32) -> tabs::Tab {
-        tabs::Tab::for_agent(&crate::rmux::Running {
+        tabs::Tab::for_agent(&cctop_core::rmux::Running {
             name: name.to_string(),
             pid: Some(pid),
             cwd: None,
@@ -1663,8 +1666,8 @@ mod tests {
 
         let mut app = test_app();
         app.tabs.push(tabs::Tab::new(pane));
-        let mut row = crate::ui::tests::session("abc", true, "/repo");
-        row.process.as_mut().unwrap().process_list = vec![crate::proc::ProcEntry {
+        let mut row = crate::tests::session("abc", true, "/repo");
+        row.process.as_mut().unwrap().process_list = vec![cctop_core::proc::ProcEntry {
             pid: u32::MAX - 1,
             is_root: true,
             ghost: false,
@@ -1698,16 +1701,18 @@ mod tests {
 
     #[test]
     fn resuming_a_session_already_in_a_tab_goes_to_that_tab() {
-        let (mut child, pid) = crate::shim::test_session(&["sh", "-c", "sleep 30"], (80, 24));
+        let (mut child, pid) = cctop_core::shim::test_session(&["sh", "-c", "sleep 30"], (80, 24));
         let mut pane = tabs::Pane::view_of(pid, "claude".into()).expect("attach");
         // What a resumed tab records regardless of who carries the agent. The
         // pane has no rmux, standing in for a machine without it.
-        pane.resumed = Some(crate::rmux::name_for_session("claude", "abc"));
+        pane.resumed = Some(cctop_core::rmux::name_for_session("claude", "abc"));
         assert!(pane.rmux.is_none());
 
         let mut app = test_app();
-        app.sessions
-            .push(crate::session::Session::new(Provider::Claude, "abc".into()));
+        app.sessions.push(cctop_core::session::Session::new(
+            Provider::Claude,
+            "abc".into(),
+        ));
         app.visible = vec![Row::Session(0)];
         app.selected = 0;
         app.tabs.push(tabs::Tab::new(pane));
@@ -1726,7 +1731,7 @@ mod tests {
 
         let _ = child.kill();
         let _ = child.wait();
-        let _ = crate::shim::socket_path(pid).map(std::fs::remove_file);
+        let _ = cctop_core::shim::socket_path(pid).map(std::fs::remove_file);
     }
 
     /// The three ways the ownership decision can go, since only one of them is
@@ -1736,7 +1741,7 @@ mod tests {
     fn ownership_asks_only_when_rmux_could_actually_be_installed() {
         let mut app = test_app();
         let own = app.own_preferring_rmux(Deferred::Launch, || "cctop-x".into());
-        match (crate::rmux::available(), crate::rmux::installer()) {
+        match (cctop_core::rmux::available(), cctop_core::rmux::installer()) {
             (true, _) => assert!(matches!(own, Some(tabs::Own::Tmux(_)))),
             (false, Some(_)) => {
                 assert!(own.is_none(), "the launch waits for the answer");
@@ -1763,7 +1768,7 @@ mod tests {
     fn declining_the_offer_releases_the_launch() {
         let mut app = test_app();
         app.mode = Mode::TmuxInstall;
-        app.rmux_install = Some(crate::rmux::Install {
+        app.rmux_install = Some(cctop_core::rmux::Install {
             manager: "apt",
             argv: vec!["sh".into(), "-c".into(), "apt-get install -y rmux".into()],
         });

@@ -531,10 +531,10 @@ mod tests {
     /// does not lose the rest of the code.
     #[test]
     fn the_code_is_heard_away_from_the_table() {
-        let mut app = crate::ui::tests::test_app();
+        let mut app = crate::tests::test_app();
         app.mode = Mode::Help;
         for code in CODE {
-            app.on_key(crate::ui::tests::key(code));
+            app.on_key(crate::tests::key(code));
         }
         assert!(app.raving());
     }
@@ -606,21 +606,21 @@ mod tests {
     /// with the code is not undone by the same switch being read again.
     #[test]
     fn ultracode_starts_the_party_once() {
-        let mut app = crate::ui::tests::test_app();
-        let mut before = crate::session::Session::new(Provider::Claude, "old".into());
+        let mut app = crate::tests::test_app();
+        let mut before = cctop_core::session::Session::new(Provider::Claude, "old".into());
         before.ultracode_at = Some("2020-01-01T00:00:00.000Z".into());
         app.sessions.push(before);
         app.hear_ultracode();
         assert!(!app.raving(), "a switch from before cctop started");
 
-        let mut now = crate::session::Session::new(Provider::Codex, "new".into());
+        let mut now = cctop_core::session::Session::new(Provider::Codex, "new".into());
         now.ultracode_at = Some(chrono::Utc::now().to_rfc3339());
         app.sessions.push(now);
         app.hear_ultracode();
         assert!(app.raving() || theme::no_color());
 
         for code in CODE {
-            app.on_key(crate::ui::tests::key(code));
+            app.on_key(crate::tests::key(code));
         }
         assert!(!app.raving());
         app.hear_ultracode();
@@ -635,9 +635,9 @@ mod tests {
             return;
         }
         let at = |secs: i64| (chrono::Utc::now() + chrono::Duration::seconds(secs)).to_rfc3339();
-        let mut app = crate::ui::tests::test_app();
+        let mut app = crate::tests::test_app();
         for id in ["a", "b"] {
-            let mut s = crate::session::Session::new(Provider::Claude, id.into());
+            let mut s = cctop_core::session::Session::new(Provider::Claude, id.into());
             s.ultracode_at = Some(at(1));
             app.sessions.push(s);
         }
@@ -657,7 +657,7 @@ mod tests {
         app.hear_ultracode();
         assert!(app.raving());
         for code in CODE.into_iter().chain(CODE) {
-            app.on_key(crate::ui::tests::key(code));
+            app.on_key(crate::tests::key(code));
         }
         assert!(app.raving());
         app.sessions[0].ultracode_off_at = Some(at(4));
@@ -673,8 +673,8 @@ mod tests {
         if theme::no_color() {
             return;
         }
-        let mut app = crate::ui::tests::test_app();
-        let mut s = crate::session::Session::new(Provider::Claude, "a".into());
+        let mut app = crate::tests::test_app();
+        let mut s = cctop_core::session::Session::new(Provider::Claude, "a".into());
         s.ultracode_at = Some((chrono::Utc::now() + chrono::Duration::seconds(1)).to_rfc3339());
         app.sessions.push(s);
         app.hear_ultracode();

@@ -67,7 +67,7 @@ struct Entry {
 /// since, so storing a new version is a single insert with nothing to search
 /// for first.
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) struct DiskId {
+pub struct DiskId {
     /// The map key: the transcript, plus the session inside it for the one
     /// provider that keeps many sessions in one file.
     origin: String,
@@ -815,7 +815,7 @@ impl UiPrefs {
         // Every key a test presses that changes a preference ends here, and
         // `CACHE_DIR` is the developer's real one: the suite was overwriting
         // their `ui-prefs.json` with defaults on every run.
-        if cfg!(test) {
+        if cfg!(any(test, feature = "test-support")) {
             return;
         }
         let _ = std::fs::create_dir_all(&*config::CACHE_DIR);

@@ -234,6 +234,10 @@ pub mod frame {
         }
 
         /// The next complete frame as `(kind, payload)`.
+        ///
+        /// Not `Iterator::next`: `None` means "not yet", and the same decoder
+        /// is asked again once more bytes have been pushed.
+        #[allow(clippy::should_implement_trait)]
         pub fn next(&mut self) -> Option<(u8, Vec<u8>)> {
             if self.lost || self.buf.len() < HEADER {
                 return None;
@@ -404,8 +408,8 @@ impl Attach {
 
     /// An `Attach` with a sink where its socket would be, for tests elsewhere
     /// that need a pane without a shim behind it.
-    #[cfg(test)]
-    pub(crate) fn for_test() -> Self {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn for_test() -> Self {
         Attach {
             input: Box::new(std::io::sink()),
             close: Box::new(|| {}),

@@ -15,15 +15,15 @@
 //! turns that changed. Only a new width lays out everything again, which it
 //! has to.
 //!
-//! [`chat::build`]: crate::serve::chat::build
+//! [`chat::build`]: cctop_serve::chat::build
 
 use super::hyperlink;
 use super::markdown::Link;
 use super::share;
 use super::theme;
 use super::{App, ChatView, Mode};
-use crate::serve::chat::{Conversation, ToolUse, Turn};
-use crate::session::Session;
+use cctop_core::session::Session;
+use cctop_serve::chat::{Conversation, ToolUse, Turn};
 use chrono::{DateTime, Local, Utc};
 use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -566,7 +566,7 @@ fn turn_block(
 ) -> Block {
     let mut out: Vec<Line<'static>> = Vec::new();
     let mut links = Vec::new();
-    let ts = crate::util::parse_ts(&turn.ts);
+    let ts = cctop_core::util::parse_ts(&turn.ts);
     let has_tools = !turn.tools.is_empty();
 
     if turn.kind.as_ref() == "compaction" {
@@ -686,9 +686,12 @@ fn tool_lines(tool: &ToolUse, width: usize, open: bool, out: &mut Vec<Line<'stat
     };
     let head = format!("  {fold} {mark} {}", tool.name);
     let room = width.saturating_sub(
-        crate::util::cells(&head) + crate::util::cells(&counts) + crate::util::cells(&tail) + 2,
+        cctop_core::util::cells(&head)
+            + cctop_core::util::cells(&counts)
+            + cctop_core::util::cells(&tail)
+            + 2,
     );
-    let detail = crate::util::truncate(
+    let detail = cctop_core::util::truncate(
         super::ansi::strip(&tool.detail)
             .lines()
             .next()
@@ -885,7 +888,10 @@ pub(super) fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
             && let Some(ts) = block.ts
         {
             line.spans.push(Span::styled(
-                format!(" · {}", crate::util::relative_age(&ts.to_rfc3339(), &now)),
+                format!(
+                    " · {}",
+                    cctop_core::util::relative_age(&ts.to_rfc3339(), &now)
+                ),
                 theme::dim(),
             ));
         }
@@ -969,7 +975,7 @@ fn footer(view: &ChatView) -> Line<'static> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::serve::chat::Conversation;
+    use cctop_serve::chat::Conversation;
 
     fn turn(seq: usize, role: &'static str, text: &str) -> Turn {
         Turn {
@@ -984,8 +990,8 @@ mod tests {
     }
 
     fn open_with(turns: Vec<Turn>) -> App {
-        let mut app = crate::ui::tests::test_app();
-        app.sessions = vec![crate::ui::tests::session("a", true, "/repo")];
+        let mut app = crate::tests::test_app();
+        app.sessions = vec![crate::tests::session("a", true, "/repo")];
         app.refilter();
         app.selected = 0;
         app.open_conversation();
@@ -1124,7 +1130,7 @@ mod tests {
     }
 
     fn press(app: &mut App, code: KeyCode) {
-        app.on_key(crate::ui::tests::key(code));
+        app.on_key(crate::tests::key(code));
     }
 
     fn typed(app: &mut App, text: &str) {

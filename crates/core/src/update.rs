@@ -862,7 +862,7 @@ fn managed_by_cargo() -> bool {
 }
 
 /// Whether the running executable is a cargo build output.
-pub(crate) fn built_by_cargo() -> bool {
+pub fn built_by_cargo() -> bool {
     std::env::current_exe()
         .map(|exe| is_build_output(&exe))
         .unwrap_or(false)

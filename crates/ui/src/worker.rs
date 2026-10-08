@@ -7,8 +7,8 @@
 //! the thread that serves them live together and away from `App`.
 
 use super::*;
-use crate::loader::Loader;
-use crate::loader::Stats;
+use cctop_core::loader::Loader;
+use cctop_core::loader::Stats;
 use std::sync::Arc;
 use std::sync::mpsc::Receiver;
 
@@ -39,7 +39,7 @@ pub(super) enum Request {
     /// session longer than one window.
     Chat {
         session: Box<Session>,
-        host: Option<crate::fleet::Host>,
+        host: Option<cctop_core::fleet::Host>,
         before: Option<usize>,
     },
     /// What the agents' own hooks have said about which processes they run
@@ -50,7 +50,7 @@ pub(super) enum Request {
     /// Look for `query` inside every listed session's transcript.
     Scan {
         query: String,
-        targets: Vec<crate::session::search::Target>,
+        targets: Vec<cctop_core::session::search::Target>,
     },
     /// The git repositories under the home directory, for the launcher's
     /// directory field.
@@ -61,7 +61,7 @@ pub(super) enum Request {
     /// behind it.
     Repos,
     /// Run `cctop --update` on a remote machine, which the user has confirmed.
-    UpdateRemote(crate::fleet::Host),
+    UpdateRemote(cctop_core::fleet::Host),
     /// Something the launcher's directory field wants to know about an ssh
     /// host: a connection, a listing, the repositories, a directory's state.
     Location(super::location::Ask),
@@ -105,19 +105,19 @@ pub(super) enum Response {
     /// One remote machine's snapshot, or why it could not be read.
     Remote {
         host: String,
-        snapshot: crate::fleet::Snapshot,
+        snapshot: cctop_core::fleet::Snapshot,
     },
     /// What a host's `cctop --version` said. Sent once per connection by its
     /// poll thread, and again after an update there, which is the one time
     /// the answer is known to have changed.
     RemoteVersion {
         host: String,
-        probe: crate::fleet::Probe,
+        probe: cctop_core::fleet::Probe,
     },
     /// How a confirmed `--update` on a host went.
     RemoteUpdated {
         host: String,
-        result: Result<String, crate::fleet::UpdateFailure>,
+        result: Result<String, cctop_core::fleet::UpdateFailure>,
     },
     /// A finished transcript scan: session key -> the text around its match.
     /// The query comes back with it, because the user has usually typed more by
@@ -137,7 +137,7 @@ pub(super) enum Response {
     Chat {
         key: String,
         before: Option<usize>,
-        result: Result<Box<crate::serve::chat::Conversation>, String>,
+        result: Result<Box<cctop_serve::chat::Conversation>, String>,
     },
 }
 
@@ -207,8 +207,8 @@ fn worth_widening(no_hits: bool, needle: &str) -> bool {
 /// The topical tier's state, built at most once per worker.
 #[derive(Default)]
 struct Topics {
-    model: Option<crate::embed::Model>,
-    index: Option<crate::embed::index::Index>,
+    model: Option<cctop_core::embed::Model>,
+    index: Option<cctop_core::embed::index::Index>,
     /// Set once the model has been looked for and not found, so a machine
     /// without one does not re-check the filesystem on every keystroke.
     absent: bool,
@@ -230,7 +230,7 @@ struct Topics {
 fn topical(
     topics: &mut Topics,
     needle: &str,
-    targets: &[crate::session::search::Target],
+    targets: &[cctop_core::session::search::Target],
     hits: &mut HashMap<String, String>,
 ) {
     if !worth_widening(hits.is_empty(), needle) {
@@ -240,11 +240,11 @@ fn topical(
         return;
     }
     if topics.model.is_none() {
-        if !crate::embed::fetch::present() {
+        if !cctop_core::embed::fetch::present() {
             topics.absent = true;
             return;
         }
-        match crate::embed::Model::load(&crate::embed::fetch::model_dir()) {
+        match cctop_core::embed::Model::load(&cctop_core::embed::fetch::model_dir()) {
             Ok(m) => topics.model = Some(m),
             Err(_) => {
                 // A model that will not load is the same as no model here: the
@@ -260,15 +260,16 @@ fn topical(
     };
 
     let index = topics.index.get_or_insert_with(|| {
-        crate::embed::index::Index::load(&crate::config::EMBEDDING_INDEX_FILE).unwrap_or_default()
+        cctop_core::embed::index::Index::load(&cctop_core::config::EMBEDDING_INDEX_FILE)
+            .unwrap_or_default()
     });
     if index.refresh(model, targets) > 0 {
         // Best effort: an index that cannot be written is rebuilt next time,
         // which costs a second, and is not worth failing a search over.
-        let _ = index.save(&crate::config::EMBEDDING_INDEX_FILE);
+        let _ = index.save(&cctop_core::config::EMBEDDING_INDEX_FILE);
     }
 
-    let query = model.embed(&crate::embed::topic_of(needle));
+    let query = model.embed(&cctop_core::embed::topic_of(needle));
     for (key, snippet, score) in index.search(&query, TOPICAL_FLOOR, TOPICAL_LIMIT) {
         // A session the literal search already found keeps the snippet that
         // shows the words it matched; that is the more precise answer, and
@@ -280,16 +281,16 @@ fn topical(
 
 fn scan(
     cache: &mut ScanCache,
-    targets: &[crate::session::search::Target],
+    targets: &[cctop_core::session::search::Target],
     needle: &str,
 ) -> HashMap<String, String> {
     use rayon::prelude::*;
     // Parsed once rather than per session: every target is matched against the
     // same terms, and splitting and folding them again for each would be the
     // only allocation in the parallel hot path.
-    let query = crate::session::search::Query::parse(needle);
+    let query = cctop_core::session::search::Query::parse(needle);
     let narrower = narrowed(cache, needle);
-    let found: Vec<(&crate::session::search::Target, Option<String>)> = targets
+    let found: Vec<(&cctop_core::session::search::Target, Option<String>)> = targets
         .par_iter()
         .filter(|target| !skippable(&narrower, target))
         .map(|target| {
@@ -300,7 +301,7 @@ fn scan(
                 Some(remembered) => (target, remembered.clone()),
                 None => (
                     target,
-                    crate::session::search::find_query(target, &query).map(|hit| hit.snippet),
+                    cctop_core::session::search::find_query(target, &query).map(|hit| hit.snippet),
                 ),
             }
         })
@@ -351,7 +352,7 @@ fn narrowed<'c>(cache: &'c ScanCache, needle: &str) -> Option<&'c HashMap<String
 /// grow, so an answer about one is only ever true of the moment it was taken.
 fn skippable(
     narrower: &Option<&HashMap<String, Option<String>>>,
-    target: &crate::session::search::Target,
+    target: &cctop_core::session::search::Target,
 ) -> bool {
     if target.running {
         return false;
@@ -407,7 +408,7 @@ pub(super) fn spawn_worker(
                             }
                         },
                     );
-                    let stats = crate::loader::compute_stats(&sessions);
+                    let stats = cctop_core::loader::compute_stats(&sessions);
                     // The light path needs its own copy to carry forward; one clone
                     // per full walk replaces one per refresh.
                     live_rows = sessions.clone();
@@ -427,7 +428,7 @@ pub(super) fn spawn_worker(
                         continue;
                     }
                     let moved = loader.refresh_live(plan, &mut live_rows);
-                    let stats = crate::loader::compute_stats(&live_rows);
+                    let stats = cctop_core::loader::compute_stats(&live_rows);
                     if tx
                         .send(Response::LiveRows(Box::new((moved, stats))))
                         .is_err()
@@ -469,22 +470,21 @@ pub(super) fn spawn_worker(
                 }
                 Request::Delete(session) => {
                     let result = match session.provider {
-                        Provider::Claude => crate::session::claude::delete(&session)
+                        Provider::Claude => cctop_core::session::claude::delete(&session)
                             .map_err(|error| error.to_string()),
-                        Provider::Codex => crate::session::codex::delete(&session)
+                        Provider::Codex => cctop_core::session::codex::delete(&session)
                             .map_err(|error| error.to_string()),
-                        Provider::Cursor => crate::session::cursor::delete(&session)
+                        Provider::Cursor => cctop_core::session::cursor::delete(&session)
                             .map_err(|error| error.to_string()),
-                        Provider::Devin => crate::session::devin::delete(&session)
+                        Provider::Devin => cctop_core::session::devin::delete(&session)
                             .map_err(|error| error.to_string()),
-                        Provider::Gemini => crate::session::gemini::delete(&session)
+                        Provider::Gemini => cctop_core::session::gemini::delete(&session)
                             .map_err(|error| error.to_string()),
-                        Provider::OpenCode => crate::session::opencode::delete(&session)
+                        Provider::OpenCode => cctop_core::session::opencode::delete(&session)
                             .map_err(|error| error.to_string()),
-                        Provider::Pi => {
-                            crate::session::pi::delete(&session).map_err(|error| error.to_string())
-                        }
-                        Provider::Windsurf => crate::session::windsurf::delete(&session)
+                        Provider::Pi => cctop_core::session::pi::delete(&session)
+                            .map_err(|error| error.to_string()),
+                        Provider::Windsurf => cctop_core::session::windsurf::delete(&session)
                             .map_err(|error| error.to_string()),
                     };
                     if result.is_ok() {
@@ -501,7 +501,7 @@ pub(super) fn spawn_worker(
                     }
                 }
                 Request::Terminate { session_key, pid } => {
-                    let result = crate::proc::terminate(pid);
+                    let result = cctop_core::proc::terminate(pid);
                     if tx
                         .send(Response::Terminated {
                             session_key,
@@ -513,7 +513,7 @@ pub(super) fn spawn_worker(
                     }
                 }
                 Request::SendKeys { pid, text } => {
-                    let result = crate::inject::send_line(pid, &text);
+                    let result = cctop_core::inject::send_line(pid, &text);
                     if tx.send(Response::KeysSent { result }).is_err() {
                         break;
                     }
@@ -528,11 +528,11 @@ pub(super) fn spawn_worker(
                     let sessions = loader.load(plan);
                     let store = loader.store();
                     let text = loader.gently(|| {
-                        let found = crate::insight::from_store(&sessions, store);
-                        let all: Vec<&crate::insight::Analysis> = found.iter().collect();
+                        let found = cctop_core::insight::from_store(&sessions, store);
+                        let all: Vec<&cctop_core::insight::Analysis> = found.iter().collect();
                         match which {
-                            "optimize" => crate::insight::optimize::report(&all),
-                            _ => crate::insight::compare::report(&all),
+                            "optimize" => cctop_core::insight::optimize::report(&all),
+                            _ => cctop_core::insight::compare::report(&all),
                         }
                     });
                     if tx.send(Response::Insight(text)).is_err() {
@@ -573,7 +573,7 @@ pub(super) fn spawn_worker(
                                     })
                                 })
                             }
-                            None => Ok(crate::serve::chat::build(&session, before)),
+                            None => Ok(cctop_serve::chat::build(&session, before)),
                         };
                         let _ = tx.send(Response::Chat {
                             key: session.key(),
@@ -595,7 +595,7 @@ pub(super) fn spawn_worker(
                     // milliseconds measured, but it is a `stat` per directory and
                     // this loop is what every refresh and every keystroke's work
                     // queues behind.
-                    let home = crate::config::HOME.clone();
+                    let home = cctop_core::config::HOME.clone();
                     let found = loader.gently(move || super::dirs::repos_under(&home));
                     if tx.send(Response::Repos(found)).is_err() {
                         break;
@@ -627,9 +627,10 @@ pub(super) fn spawn_worker(
                 Request::Location(ask) => {
                     let tx = tx.clone();
                     std::thread::spawn(move || {
-                        let connect = |host: &str| crate::ssh_master::connect(host).map(|_| ());
+                        let connect =
+                            |host: &str| cctop_core::ssh_master::connect(host).map(|_| ());
                         let answer =
-                            super::location::answer(ask, &crate::ssh_master::Ssh, &connect);
+                            super::location::answer(ask, &cctop_core::ssh_master::Ssh, &connect);
                         let _ = tx.send(Response::Location(answer));
                     });
                 }
@@ -660,10 +661,12 @@ mod tests {
             path
         };
         let target = |name: &str, path: &std::path::Path, running: bool| {
-            let mut s =
-                crate::session::Session::new(crate::pricing::Provider::Claude, name.to_string());
+            let mut s = cctop_core::session::Session::new(
+                cctop_core::pricing::Provider::Claude,
+                name.to_string(),
+            );
             s.data_file = Some(path.to_path_buf());
-            let mut t = crate::session::search::Target::of(&s);
+            let mut t = cctop_core::session::search::Target::of(&s);
             t.running = running;
             t
         };

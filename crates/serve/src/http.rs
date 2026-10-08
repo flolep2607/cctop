@@ -4,7 +4,7 @@
 //! `POST`, a path, a query string, and a body in each direction. No routing
 //! DSL, no middleware, no keep-alive negotiation. That is a few
 //! hundred lines here against a web framework and its transitive tree in
-//! `Cargo.toml` — the same bargain [`crate::mcp`] took with JSON-RPC, for the
+//! `Cargo.toml` — the same bargain `mcp` took with JSON-RPC, for the
 //! same reason: a monitoring tool people `cargo install` should not pull in a
 //! runtime to draw a table.
 //!
@@ -810,7 +810,7 @@ fn not_modified(stream: &mut TcpStream, request: &Request, etag: &str, cache: &s
     head.push_str("\r\n");
     let _ = stream.write_all(head.as_bytes());
     let _ = stream.flush();
-    crate::elog::event(
+    cctop_core::elog::event(
         "http",
         "response",
         serde_json::json!({
@@ -876,7 +876,7 @@ fn write_response(
     let _ = stream.write_all(&buf);
     let _ = stream.flush();
 
-    crate::elog::event(
+    cctop_core::elog::event(
         "http",
         "response",
         match request {
@@ -993,7 +993,7 @@ impl<'a> EventStream<'a> {
         // failure this stream exists to survive, and the send that failed is
         // the only record of when it happened.
         let sent = self.sink.event(frame.as_bytes());
-        crate::elog::event(
+        cctop_core::elog::event(
             "sse",
             "send",
             serde_json::json!({ "event": event, "bytes": frame.len(), "ok": sent.is_ok() }),

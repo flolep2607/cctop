@@ -332,7 +332,7 @@ pub fn peers_of<'a>(
 
 /// How long a repository root is trusted.
 ///
-/// The same bargain [`crate::ui::columns`] makes for the branch name: a
+/// The same bargain [`cctop_ui::columns`] makes for the branch name: a
 /// checkout moves rarely, and walking the filesystem once per session per frame
 /// to prove it hasn't is the cost that actually shows up.
 const ROOT_TTL: Duration = Duration::from_secs(60);

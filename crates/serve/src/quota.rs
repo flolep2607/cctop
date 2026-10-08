@@ -6,7 +6,7 @@
 //! — so the route serves whatever the last poll left behind, including an
 //! empty pair of lists before the first one lands.
 
-use crate::quota::{ProfileQuota, ProviderStatus, Quota};
+use cctop_core::quota::{ProfileQuota, ProviderStatus, Quota};
 
 /// The document `/api/quota` serves before the first poll has answered.
 ///
@@ -84,13 +84,13 @@ fn profile(p: &ProfileQuota) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::quota::{ProviderQuota, Window};
+    use cctop_core::quota::{ProviderQuota, Window};
 
     fn profile_quota(status: ProviderStatus) -> ProfileQuota {
         ProfileQuota {
             profile: "default".into(),
             status,
-            source: crate::config::AccountSource::Directory,
+            source: cctop_core::config::AccountSource::Directory,
         }
     }
 

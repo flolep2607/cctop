@@ -257,7 +257,7 @@ impl App {
         // keyboard could not. Both ask the screen first, so an agent in
         // fullscreen still gets these keys for its own scrolling.
         let scrolled = match pane.rmux.as_deref() {
-            Some(name) => key.modifiers.is_empty() && crate::rmux::scroll_key(name, key.code),
+            Some(name) => key.modifiers.is_empty() && cctop_core::rmux::scroll_key(name, key.code),
             None => pane.view.scroll_key(key),
         };
         if scrolled {
@@ -292,7 +292,7 @@ impl App {
     /// spells.
     ///
     /// Inside a pane it belongs to the agent and goes down the pty in one write;
-    /// see [`Attach::send_paste`](crate::attach::Attach::send_paste) for what
+    /// see [`Attach::send_paste`](cctop_core::attach::Attach::send_paste) for what
     /// happens to it on the way. Everywhere else the only thing on screen that
     /// can hold text is whichever one-line input is open, so a paste is typing
     /// into that and nothing at all when none is open. It is deliberately not a
@@ -320,8 +320,8 @@ impl App {
         // typed on and no helper on this side can see it. What is pasted is a
         // file here, and what the agent is given is its path — the same as F9,
         // by a different road.
-        if let Some(image) = crate::clipboard::image_from_paste(text) {
-            match crate::clipboard::write_image(&image) {
+        if let Some(image) = cctop_core::clipboard::image_from_paste(text) {
+            match cctop_core::clipboard::write_image(&image) {
                 Ok(path) => {
                     let shown = path
                         .file_name()
@@ -449,7 +449,7 @@ impl App {
     /// machine with no helper installed — are things the user can act on.
     fn image_paste(&mut self) -> Option<String> {
         self.needs_redraw = true;
-        match crate::clipboard::image_to_file(true) {
+        match cctop_core::clipboard::image_to_file(true) {
             Ok(path) => {
                 let shown = path
                     .file_name()
@@ -517,7 +517,7 @@ impl App {
         // No terminal ask on this path: Ctrl+V is pressed for whatever is on
         // the clipboard, usually text, and a clipboard-read escape plus a wait
         // on every paste would stall the common case for the rare one.
-        let Ok(path) = crate::clipboard::image_to_file(false) else {
+        let Ok(path) = cctop_core::clipboard::image_to_file(false) else {
             return false;
         };
         self.needs_redraw = true;
@@ -770,11 +770,11 @@ impl App {
                 self.mode = Mode::List;
                 self.hooks = None;
             }
-            KeyCode::Char('i') => self.set_hooks(crate::hook::Scope::User, true),
-            KeyCode::Char('x') => self.set_hooks(crate::hook::Scope::User, false),
+            KeyCode::Char('i') => self.set_hooks(cctop_core::hook::Scope::User, true),
+            KeyCode::Char('x') => self.set_hooks(cctop_core::hook::Scope::User, false),
             KeyCode::Char('p') | KeyCode::Char('P') => match self.hook_project() {
                 Some(dir) => self.set_hooks(
-                    crate::hook::Scope::Project(dir),
+                    cctop_core::hook::Scope::Project(dir),
                     key.code == KeyCode::Char('p'),
                 ),
                 None => self.set_status("The selected session has no project directory here"),
@@ -801,7 +801,7 @@ impl App {
                 false => self.set_status("A QR code is for the tunnel's link — t opens one"),
             },
             KeyCode::Char('o') => match self.serving.as_ref().map(|s| s.best().to_string()) {
-                Some(link) => match crate::serve::open_in_browser(&link) {
+                Some(link) => match cctop_serve::open_in_browser(&link) {
                     true => self.set_status("Opening the page in your browser"),
                     false => self.set_status("No browser to open it with — y copies the link"),
                 },
@@ -809,7 +809,7 @@ impl App {
             },
             KeyCode::Char('y') => match self.serving.as_ref().map(|s| s.best().to_string()) {
                 Some(link) => {
-                    crate::ui::render::copy_to_clipboard(&link);
+                    crate::render::copy_to_clipboard(&link);
                     // The token is in the link, so this is a credential leaving
                     // the process. Said plainly rather than a silent "copied".
                     self.set_status("Link copied — it carries the token that opens it");
@@ -1363,7 +1363,7 @@ impl App {
                         render::copy_to_clipboard(&link);
                         // Over ssh a browser opened here is on the wrong
                         // machine, so the clipboard is the whole answer.
-                        let opened = !render::over_ssh() && crate::serve::open_in_browser(&link);
+                        let opened = !render::over_ssh() && cctop_serve::open_in_browser(&link);
                         self.set_status(match opened {
                             true => "Copied the sign-in link, and asked the browser to open it",
                             false => "Copied the sign-in link — paste it into your browser",
@@ -1911,7 +1911,7 @@ impl App {
             return;
         }
         if let Some(link) = self.serving.as_ref().and_then(|s| s.public.clone()) {
-            match crate::serve::open_in_browser(&link) {
+            match cctop_serve::open_in_browser(&link) {
                 true => self.set_status("Opening the shared page in your browser"),
                 false => self.set_status("No browser to open it with — B then y copies the link"),
             }
@@ -2149,14 +2149,20 @@ impl App {
             // click is written: an agent that asked gets its right-click, and
             // a pane that did not keeps the menu out of reach.
             let button = |b| match b {
-                MouseButton::Left => Some(crate::attach::MouseButton::Left),
-                MouseButton::Middle => Some(crate::attach::MouseButton::Middle),
-                MouseButton::Right => Some(crate::attach::MouseButton::Right),
+                MouseButton::Left => Some(cctop_core::attach::MouseButton::Left),
+                MouseButton::Middle => Some(cctop_core::attach::MouseButton::Middle),
+                MouseButton::Right => Some(cctop_core::attach::MouseButton::Right),
             };
             let action = match ev.kind {
-                MouseEventKind::Down(b) => button(b).map(|b| (crate::attach::MouseKind::Press, b)),
-                MouseEventKind::Up(b) => button(b).map(|b| (crate::attach::MouseKind::Release, b)),
-                MouseEventKind::Drag(b) => button(b).map(|b| (crate::attach::MouseKind::Drag, b)),
+                MouseEventKind::Down(b) => {
+                    button(b).map(|b| (cctop_core::attach::MouseKind::Press, b))
+                }
+                MouseEventKind::Up(b) => {
+                    button(b).map(|b| (cctop_core::attach::MouseKind::Release, b))
+                }
+                MouseEventKind::Drag(b) => {
+                    button(b).map(|b| (cctop_core::attach::MouseKind::Drag, b))
+                }
                 _ => None,
             };
             if let Some((kind, b)) = action {
@@ -2165,7 +2171,7 @@ impl App {
                     // clicking a pane means everywhere else. Only a press: a
                     // release ending a drag that wandered out of the pane it
                     // started in must not hand focus to whatever it landed on.
-                    if kind == crate::attach::MouseKind::Press
+                    if kind == cctop_core::attach::MouseKind::Press
                         && let Some(tab) = self.active_tab()
                     {
                         tab.focus = i;
@@ -2176,9 +2182,9 @@ impl App {
                         // pane menu this guard exists to keep away. A pane with
                         // no multiplexer behind it has no menu to raise —
                         // `encode_mouse` already gates on the agent's own mode.
-                        let wanted = b != crate::attach::MouseButton::Right
+                        let wanted = b != cctop_core::attach::MouseButton::Right
                             || match &pane.rmux {
-                                Some(name) => crate::rmux::mouse_wanted(name),
+                                Some(name) => cctop_core::rmux::mouse_wanted(name),
                                 None => true,
                             };
                         // A failed send means that agent has gone, which the
@@ -2307,9 +2313,9 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pricing::{Plan, Provider};
-    use crate::ui::tests::{key, session, test_app};
-    use crate::ui::{Row, menu, panels};
+    use crate::tests::{key, session, test_app};
+    use crate::{Row, menu, panels};
+    use cctop_core::pricing::{Plan, Provider};
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use std::sync::mpsc::channel;
 
@@ -2463,8 +2469,10 @@ mod tests {
     fn home_and_end_jump_to_the_first_and_last_row() {
         let mut app = test_app();
         for id in ["a", "b", "c"] {
-            app.sessions
-                .push(crate::session::Session::new(Provider::Claude, id.into()));
+            app.sessions.push(cctop_core::session::Session::new(
+                Provider::Claude,
+                id.into(),
+            ));
         }
         app.visible = vec![Row::Session(0), Row::Session(1), Row::Session(2)];
         app.selected = 1;
@@ -2487,8 +2495,10 @@ mod tests {
     fn the_wheel_scrolls_the_settings_page() {
         let mut app = test_app();
         for id in ["a", "b", "c"] {
-            app.sessions
-                .push(crate::session::Session::new(Provider::Claude, id.into()));
+            app.sessions.push(cctop_core::session::Session::new(
+                Provider::Claude,
+                id.into(),
+            ));
         }
         app.visible = vec![Row::Session(0), Row::Session(1), Row::Session(2)];
         app.goto_settings();
@@ -2516,8 +2526,10 @@ mod tests {
     fn the_search_box_leaves_the_table_its_mouse() {
         let mut app = test_app();
         for id in ["a", "b", "c"] {
-            app.sessions
-                .push(crate::session::Session::new(Provider::Claude, id.into()));
+            app.sessions.push(cctop_core::session::Session::new(
+                Provider::Claude,
+                id.into(),
+            ));
         }
         app.visible = vec![Row::Session(0), Row::Session(1), Row::Session(2)];
         // What `draw_search` leaves behind: no rectangle, so no claim.
@@ -2555,7 +2567,7 @@ mod tests {
         use ratatui::layout::Rect;
         let mut app = test_app();
         for i in 0..30 {
-            app.sessions.push(crate::session::Session::new(
+            app.sessions.push(cctop_core::session::Session::new(
                 Provider::Claude,
                 format!("s{i}"),
             ));

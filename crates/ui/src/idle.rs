@@ -15,8 +15,8 @@
 //! other eleven holding memory.
 
 use super::*;
-use crate::session::ActivityState;
-use crate::util;
+use cctop_core::session::ActivityState;
+use cctop_core::util;
 
 /// Process-tree CPU, in percent of one core, above which a session that has
 /// written nothing is still taken to be doing something.
@@ -88,7 +88,7 @@ pub(super) fn quiet_since(s: &Session) -> &str {
 
 /// How long the session has been quiet.
 pub(super) fn quiet_ms(s: &Session, now_ms: i64) -> Option<i64> {
-    crate::util::parse_ts(quiet_since(s)).map(|d| now_ms - d.timestamp_millis())
+    cctop_core::util::parse_ts(quiet_since(s)).map(|d| now_ms - d.timestamp_millis())
 }
 
 /// `6h`, `90m`, `2d` — the threshold as a badge spells it.
@@ -127,7 +127,7 @@ impl App {
             return Some(Keep::NoProcess);
         }
         match self.hooked_signal(&s.session_id) {
-            Some(crate::hook::Signal::NeedsInput) => return Some(Keep::Asking),
+            Some(cctop_core::hook::Signal::NeedsInput) => return Some(Keep::Asking),
             Some(signal) if signal.is_working() => return Some(Keep::Working),
             _ => {}
         }
@@ -274,7 +274,7 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ui::tests::{session, test_app};
+    use crate::tests::{session, test_app};
 
     const MB: u64 = 1024 * 1024;
 
@@ -285,7 +285,7 @@ mod tests {
         s.started_at = s.last_active.clone();
         let p = s.process.as_mut().unwrap();
         p.memory = mb * MB;
-        p.process_list = vec![crate::proc::ProcEntry {
+        p.process_list = vec![cctop_core::proc::ProcEntry {
             pid: 4000 + mb as u32,
             cpu: 0.0,
             memory: mb * MB,
@@ -328,7 +328,7 @@ mod tests {
     #[test]
     fn the_threshold_comes_from_settings() {
         let mut app = test_app();
-        app.settings = crate::settings::Settings::parse("[settings]\nidle_after = 0.5\n");
+        app.settings = cctop_core::settings::Settings::parse("[settings]\nidle_after = 0.5\n");
         app.sessions = vec![live("a", 1, 100)];
         app.idle_only = true;
         app.refilter();
@@ -356,7 +356,7 @@ mod tests {
         let mut busy = live("busy", 10, 300);
         busy.process.as_mut().unwrap().cpu = 40.0;
         let mut far = live("far", 10, 400);
-        far.remote = Some(crate::session::Remote {
+        far.remote = Some(cctop_core::session::Remote {
             host: "box".into(),
             branch: None,
             ..Default::default()
@@ -392,9 +392,9 @@ mod tests {
         app.sessions = vec![live("mid", 10, 500)];
         app.reports.hooked.insert(
             "mid".into(),
-            crate::hook::Reported {
+            cctop_core::hook::Reported {
                 provisional: false,
-                signal: crate::hook::Signal::Acting,
+                signal: cctop_core::hook::Signal::Acting,
                 cwd: "/x".into(),
                 permission: None,
                 ask: None,
@@ -458,7 +458,7 @@ mod tests {
     /// the two must not leak into each other.
     #[test]
     fn capital_i_opens_the_view_and_k_in_it_asks_about_all_of_it() {
-        use crate::ui::tests::key;
+        use crate::tests::key;
         use ratatui::crossterm::event::KeyCode;
         let mut app = test_app();
         app.sessions = vec![live("a", 10, 100), live("b", 10, 200)];

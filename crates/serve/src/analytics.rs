@@ -9,8 +9,8 @@
 //! under a provider that records no rates, has no dollars to graph but burned
 //! tokens all the same.
 
-use crate::pricing::{Plan, Provider};
-use crate::session::{ActivityState, Session, Surface};
+use cctop_core::pricing::{Plan, Provider};
+use cctop_core::session::{ActivityState, Session, Surface};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::path::Path;
@@ -142,11 +142,11 @@ pub struct AnalyticsSession {
     /// has always been — this document is one row per session, and the copy it
     /// used to make of each session's history was the largest thing in building
     /// it.
-    #[serde(with = "crate::session::arc_as_map")]
-    pub by_day: std::sync::Arc<crate::session::CostBuckets>,
+    #[serde(with = "cctop_core::session::arc_as_map")]
+    pub by_day: std::sync::Arc<cctop_core::session::CostBuckets>,
     /// `YYYY-MM-DDTHH` -> model -> USD.
-    #[serde(with = "crate::session::arc_as_map")]
-    pub by_hour: std::sync::Arc<crate::session::CostBuckets>,
+    #[serde(with = "cctop_core::session::arc_as_map")]
+    pub by_hour: std::sync::Arc<cctop_core::session::CostBuckets>,
     /// `YYYY-MM-DD` -> model -> billed tokens.
     ///
     /// Lives on `SessionData`, which the wire format has no field for, so a
@@ -160,7 +160,7 @@ pub struct AnalyticsSession {
 
 /// Build the document for the sessions the snapshot currently holds.
 ///
-/// Extractions come from [`Store::session_data`](crate::cache::Store::session_data),
+/// Extractions come from [`Store::session_data`](cctop_core::cache::Store::session_data),
 /// the cached read — not `session_data_fresh`. Nothing below wants the fields
 /// only a fresh parse restores (the tool history, the context series), and a
 /// full re-parse of every transcript per request is precisely the cost the
@@ -170,14 +170,14 @@ pub struct AnalyticsSession {
 /// for one, because its `data_file` names a path on another machine, but
 /// everything the wire carried — the cost buckets, the subagent figures, the
 /// identity fields — lives on [`Session`] itself.
-pub fn build(sessions: &[Session], plan: Plan, store: &crate::cache::Store) -> Analytics {
+pub fn build(sessions: &[Session], plan: Plan, store: &cctop_core::cache::Store) -> Analytics {
     // Each of these is a file read that cannot change inside a request, so it
     // happens once rather than per row.
-    let claude_account = crate::quota::claude_account();
-    let codex_account = crate::quota::codex_account();
+    let claude_account = cctop_core::quota::claude_account();
+    let codex_account = cctop_core::quota::codex_account();
 
     Analytics {
-        generated: crate::util::ms_to_rfc3339(crate::util::now_ms()),
+        generated: cctop_core::util::ms_to_rfc3339(cctop_core::util::now_ms()),
         plan: plan.as_str(),
         sessions: sessions
             .iter()
@@ -189,9 +189,9 @@ pub fn build(sessions: &[Session], plan: Plan, store: &crate::cache::Store) -> A
 fn row(
     s: &Session,
     plan: Plan,
-    store: &crate::cache::Store,
-    claude_account: &Option<crate::quota::Account>,
-    codex_account: &Option<crate::quota::Account>,
+    store: &cctop_core::cache::Store,
+    claude_account: &Option<cctop_core::quota::Account>,
+    codex_account: &Option<cctop_core::quota::Account>,
 ) -> AnalyticsSession {
     let data = store.session_data(s);
     let included = s.cost_available && plan.includes(s.provider);
@@ -229,7 +229,7 @@ fn row(
         profile: s.profile.clone(),
         account,
         host: s.remote.as_ref().map(|r| r.host.clone()),
-        branch: crate::branch::branch_of(s),
+        branch: cctop_core::branch::branch_of(s),
         started: s.started_at.clone(),
         last_active: s.last_active.clone(),
         running: s.is_running(),
@@ -297,13 +297,13 @@ fn row(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::session::Remote;
+    use cctop_core::session::Remote;
 
     /// Sessions with no `data_file` keep the test hermetic: `session_data`
     /// returns the empty default before the cache is ever consulted, so every
     /// figure below came off the row itself.
     fn row_of(s: Session, plan: Plan) -> AnalyticsSession {
-        let store = crate::cache::Store::new();
+        let store = cctop_core::cache::Store::new();
         build(&[s], plan, &store)
             .sessions
             .into_iter()

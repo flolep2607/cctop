@@ -573,7 +573,7 @@ fn pty_size(master: &File) -> (u16, u16) {
 ///
 /// Only the tests still want it: `run` goes through [`run_in`], which has an
 /// environment to pass and so calls [`spawn_on_pty_at_env`] itself.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn spawn_on_pty(
     argv: &[String],
     cwd: Option<&std::path::Path>,
@@ -582,7 +582,7 @@ fn spawn_on_pty(
 }
 
 /// [`spawn_on_pty`] at `(cols, rows)` rather than the size of this terminal.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn spawn_on_pty_at(
     argv: &[String],
     cwd: Option<&std::path::Path>,
@@ -692,8 +692,8 @@ fn spawn_on_pty_at_env(
 ///
 /// Here rather than in the tests that use it because everything it touches is
 /// private to this module, and one of those tests lives in the UI.
-#[cfg(test)]
-pub(crate) fn test_session(argv: &[&str], local: (u16, u16)) -> (std::process::Child, u32) {
+#[cfg(any(test, feature = "test-support"))]
+pub fn test_session(argv: &[&str], local: (u16, u16)) -> (std::process::Child, u32) {
     let argv: Vec<String> = argv.iter().map(|s| (*s).to_string()).collect();
     let (child, master) = spawn_on_pty(&argv, None).expect("pty child");
     let pid = child.id();

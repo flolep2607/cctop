@@ -5,7 +5,7 @@
 //! are the ones the row deliberately does not carry — every tool call with its
 //! arguments, its duration and whether it failed, and the window measured at
 //! every request — so it is built from a
-//! [`session_data_fresh`](crate::cache::Store::session_data_fresh) parse rather
+//! [`session_data_fresh`](cctop_core::cache::Store::session_data_fresh) parse rather
 //! than off the cache. That is a full transcript read per report, which is why
 //! this happens on request for one session and never for all of them.
 //!
@@ -27,9 +27,9 @@
 //! the table it was opened from, so any figure both show comes from the same
 //! field rather than from a second calculation that can drift.
 
-use crate::pricing::Plan;
-use crate::session::{CtxPoint, Session, SessionData, Subagent, Tokens};
-use crate::util;
+use cctop_core::pricing::Plan;
+use cctop_core::session::{CtxPoint, Session, SessionData, Subagent, Tokens};
+use cctop_core::util;
 use serde::Serialize;
 use std::collections::HashMap;
 
@@ -63,7 +63,7 @@ const MAX_SLOWEST: usize = 10;
 /// than a ranking of what was slow.
 ///
 /// Spelled in the variants the harnesses use, the way
-/// [`EDIT_TOOLS`](crate::session::EDIT_TOOLS) is: a name known here but not
+/// [`EDIT_TOOLS`](cctop_core::session::EDIT_TOOLS) is: a name known here but not
 /// there would quietly let one back into the list.
 const HUMAN_WAIT_TOOLS: &[&str] = &[
     "AskUserQuestion",
@@ -86,7 +86,7 @@ const MAX_DIFF_FILES: usize = 40;
 
 /// How many diff lines one file's entry carries.
 ///
-/// Each edit contributes at most [`MAX_DIFF_LINES`](crate::config::MAX_DIFF_LINES);
+/// Each edit contributes at most [`MAX_DIFF_LINES`](cctop_core::config::MAX_DIFF_LINES);
 /// a file edited twenty times would otherwise arrive as twelve hundred lines
 /// nobody scrolls through.
 const MAX_HUNKS_PER_FILE: usize = 300;
@@ -198,7 +198,7 @@ pub struct ReportBreakdown {
     pub attachments: u64,
     pub user_text: u64,
     pub assistant_text: u64,
-    /// Signed, and deliberately so — see [`crate::session::ContextBreakdown::unaccounted`].
+    /// Signed, and deliberately so — see [`cctop_core::session::ContextBreakdown::unaccounted`].
     pub unaccounted: i64,
     pub after_compaction: bool,
     pub superseded: bool,
@@ -226,7 +226,7 @@ pub struct ReportActivity {
     /// Every call the extraction still holds, newest first.
     ///
     /// Not every call the session made: the transcript's tool history is
-    /// trimmed to [`MAX_SESSION_TOOL_DETAILS`](crate::config::MAX_SESSION_TOOL_DETAILS)
+    /// trimmed to [`MAX_SESSION_TOOL_DETAILS`](cctop_core::config::MAX_SESSION_TOOL_DETAILS)
     /// newest, which is why `tool_count` above can be larger. The page says so
     /// rather than presenting this as the whole record — a log that silently
     /// stopped short would be read as a session that stopped doing things.
@@ -259,7 +259,7 @@ pub struct ReportCall {
     pub failed: bool,
     /// How much the window grew after this call's turn — in all but the awkward
     /// cases, the size of its result. See
-    /// [`ToolDetail::window_growth`](crate::session::ToolDetail::window_growth).
+    /// [`ToolDetail::window_growth`](cctop_core::session::ToolDetail::window_growth).
     pub window_growth: Option<u64>,
     /// How many calls that turn issued, when it issued more than one. The growth
     /// above belongs to all of them together, and a page that showed the figure
@@ -288,7 +288,7 @@ pub fn build(session: &Session, data: &SessionData, plan: Plan) -> Report {
             .or_else(|| data.title.clone())
             .or_else(|| session.title.clone()),
         project: (!session.label_source.is_empty()).then(|| util::tildify(&session.label_source)),
-        branch: crate::branch::branch_of(session),
+        branch: cctop_core::branch::branch_of(session),
         profile: session.profile.clone(),
         model: (!session.model.is_empty()).then(|| session.model.clone()),
         models: data.models.clone(),
@@ -300,12 +300,15 @@ pub fn build(session: &Session, data: &SessionData, plan: Plan) -> Report {
         // pid belongs to another machine, and an agent not in the multiplexer
         // is on no terminal a second viewer can be pointed at.
         terminal: session.remote.is_none()
-            && session.root_pid().and_then(crate::rmux::holding).is_some(),
+            && session
+                .root_pid()
+                .and_then(cctop_core::rmux::holding)
+                .is_some(),
         state: match session.activity_state {
-            crate::session::ActivityState::Working => "working",
-            crate::session::ActivityState::WaitingForInput => "waiting",
-            crate::session::ActivityState::Asking => "asking",
-            crate::session::ActivityState::ApiError => "error",
+            cctop_core::session::ActivityState::Working => "working",
+            cctop_core::session::ActivityState::WaitingForInput => "waiting",
+            cctop_core::session::ActivityState::Asking => "asking",
+            cctop_core::session::ActivityState::ApiError => "error",
         },
         plan: plan.as_str(),
         error: data.error.clone(),
@@ -629,7 +632,7 @@ fn slowest(data: &SessionData) -> Vec<ReportCall> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::session::{Metrics, ToolDetail};
+    use cctop_core::session::{Metrics, ToolDetail};
 
     fn failed_call(detail: &str, ts: &str) -> ToolDetail {
         ToolDetail {
@@ -724,7 +727,7 @@ mod tests {
 
     #[test]
     fn edits_to_one_file_become_one_diff_in_the_order_they_landed() {
-        use crate::session::Delta;
+        use cctop_core::session::Delta;
         let edit = |file: &str, ts: &str, added, removed, hunk: &str| ToolDetail {
             d: file.to_string(),
             ts: ts.to_string(),
@@ -762,7 +765,7 @@ mod tests {
     /// tails, not by forty identical leading characters.
     #[test]
     fn diff_file_names_are_abbreviated_against_each_other() {
-        use crate::session::Delta;
+        use cctop_core::session::Delta;
         let edit = |file: &str| ToolDetail {
             d: file.to_string(),
             ts: "2026-08-19T10:00:00Z".into(),

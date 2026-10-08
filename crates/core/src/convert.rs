@@ -1,11 +1,11 @@
 //! Carry a session from one harness's store into another's, in the shape the
 //! receiving harness reads back itself.
 //!
-//! [`crate::handoff`] hands work over as a brief: a few hundred tokens of
+//! [`cctop_serve::handoff`] hands work over as a brief: a few hundred tokens of
 //! markdown summarising what a session was for, which files it touched, what it
 //! ran. That is the right trade for a harness that cannot read another's
 //! transcripts, and the module there says so. This is the other trade, the one
-//! [`crate::handoff::fork`] already makes between two Claudes: transcode the
+//! [`cctop_serve::handoff::fork`] already makes between two Claudes: transcode the
 //! conversation itself and let the receiving agent resume onto it, so it starts
 //! knowing everything the first one knew rather than everything a summary could
 //! carry.
@@ -878,7 +878,7 @@ pub fn convert(
 
 /// Whether a pair of harnesses can be converted between at all.
 ///
-/// Claude to Claude is deliberately absent: that is [`crate::handoff::fork`],
+/// Claude to Claude is deliberately absent: that is [`cctop_serve::handoff::fork`],
 /// which copies the file rather than reading and rewriting it, so it keeps
 /// everything a conversion drops.
 pub fn convertible(source: Provider, target: Provider) -> bool {
@@ -932,7 +932,7 @@ fn free_id_codex(home: &Path, wanted: &str) -> (String, bool) {
     (new_uuid(), false)
 }
 
-pub(crate) fn codex_id_taken(home: &Path, id: &str) -> bool {
+pub fn codex_id_taken(home: &Path, id: &str) -> bool {
     let sessions = home.join("sessions");
     walk(&sessions, 0, &mut |path| {
         // The stem, not the name: the trailing 36 bytes of `…-<uuid>.jsonl` are

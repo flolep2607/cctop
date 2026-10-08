@@ -41,4 +41,4 @@ terminal inside a frame.
 
 Run `pull.sh` from this directory, read the diff, and update the table. The
 script's file names carry content hashes, so a new rmux release usually
-renames them; `src/serve/term.rs` names them too.
+renames them; `crates/serve/src/term.rs` names them too.

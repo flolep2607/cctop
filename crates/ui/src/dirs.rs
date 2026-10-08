@@ -77,7 +77,7 @@ fn children(parent: &Path, fragment: &str) -> Vec<PathBuf> {
 /// directory tree it sits in.
 pub(super) fn suggest(typed: &str, known: &[PathBuf]) -> Vec<PathBuf> {
     let typed = typed.trim();
-    let expanded = crate::util::untildify(typed);
+    let expanded = cctop_core::util::untildify(typed);
     match split(&expanded) {
         Some((parent, fragment)) => children(&parent, &fragment)
             .into_iter()
@@ -104,11 +104,11 @@ pub(super) fn suggest(typed: &str, known: &[PathBuf]) -> Vec<PathBuf> {
 /// add, so Tab on an already-complete field does nothing rather than redrawing
 /// it identically.
 pub(super) fn complete(typed: &str, hits: &[PathBuf]) -> Option<String> {
-    let expanded = crate::util::untildify(typed.trim());
+    let expanded = cctop_core::util::untildify(typed.trim());
     let filled = match hits {
         [] => return None,
         [one] => {
-            let mut s = crate::util::tildify(&one.to_string_lossy());
+            let mut s = cctop_core::util::tildify(&one.to_string_lossy());
             s.push('/');
             s
         }
@@ -117,7 +117,7 @@ pub(super) fn complete(typed: &str, hits: &[PathBuf]) -> Option<String> {
             if shared.chars().count() <= expanded.chars().count() {
                 return None;
             }
-            crate::util::tildify(&shared)
+            cctop_core::util::tildify(&shared)
         }
     };
     let sep = std::path::MAIN_SEPARATOR;
@@ -229,7 +229,7 @@ pub(super) fn repos_under(home: &Path) -> Vec<PathBuf> {
                 // candidate rather than of every entry, so a link costs one here
                 // and a plain directory costs none.
                 if path.join(".git").exists() {
-                    found.push((crate::config::file_mtime_ms(&path.join(".git")), path));
+                    found.push((cctop_core::config::file_mtime_ms(&path.join(".git")), path));
                     // Not descended into: a repository's own subdirectories are
                     // its business, and this is a list of repositories.
                 } else {
