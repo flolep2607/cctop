@@ -1,17 +1,22 @@
-# The version lives here, once, for every crate in the workspace — and before
-# anything else in the file, because the release workflow reads the first
-# `version` line of this file as the version to tag.
+# The release version — the binary's, and the tag's — and before anything else
+# in the file, because the release workflow reads the first `version` line of
+# this file as the version to tag. Only the root `cctop` package inherits it:
+# cctop-core, cctop-serve and cctop-ui each carry their own in crates/*/, and a
+# release bumps one of those only when that crate changed since the last tag
+# (see "Every crate is published" below, and tools/release-plan.sh).
 #
 # 0.23.0 is cut from the commit that touches this file: the first attempt failed verify, so nothing was tagged.
 #
-# The commit that bumps this must bump `Cargo.lock` with it, in the same commit,
-# and the three `=` requirements on the internal crates under
-# `[workspace.dependencies]` with it — cargo refuses to resolve the moment one
-# of them disagrees, so a forgotten one fails loudly rather than shipping.
+# The commit that bumps a version must bump `Cargo.lock` with it, in the same
+# commit, and for an internal crate its `=` requirement under
+# `[workspace.dependencies]` too — cargo refuses to resolve the moment one of
+# them disagrees, so a forgotten one fails loudly rather than shipping.
 # `verify / package` runs `cargo publish --dry-run`, which refuses a dirty tree,
 # and cargo rewrites the lock the moment it reads a version that disagrees with
 # it — so a bump on its own leaves one file changed and fails the release before
-# anything is tagged. 0.26.2 shipped that way once.
+# anything is tagged. 0.26.2 shipped that way once. `tools/bump.sh` makes all of
+# these edits, but it is a convenience: by hand it is one `version` line per
+# bumped crate, its pin, the root version and the lock.
 [workspace.package]
 version = "0.28.3"
 edition = "2024"
@@ -49,11 +54,25 @@ homepage = "https://github.com/flolep2607/cctop"
 #   above it — the git branch of a row, the screen-footer table, the clipboard,
 #   the tunnel, the webhook POST — moved down, because each had a user below.
 #
-# Every crate is published, at this one version, because `cargo install cctop`
-# builds from crates.io and a crates.io package can only depend on others
-# that are there too. The internal ones are not meant to be used on their own
-# and promise no API between versions; the `=` pins below are what keeps a
-# `cargo install cctop@x` from ever pairing it with another version's core.
+# Every crate is published, because `cargo install cctop` builds from
+# crates.io and a crates.io package can only depend on others that are there
+# too. The internal ones are not meant to be used on their own and promise no
+# API between versions; the `=` pins below are what keeps a `cargo install
+# cctop@x` from ever pairing it with another version's core.
+#
+# Each has its own version, and a release bumps (and publishes) only the ones
+# that changed since the last tag, plus the root every time. Changed means:
+#
+#   1. a file under its directory changed;
+#   2. its packaged manifest changed without one — a `[workspace.dependencies]`
+#      entry it uses, or a `[workspace.package]` field it inherits;
+#   3. an internal crate it depends on was bumped. This follows from the `=`
+#      pins: a published cctop-ui@0.28.3 requires cctop-core =0.28.3, so a
+#      cctop wanting core 0.28.4 beside it would resolve two cores and fail to
+#      build. A core change therefore bumps all four.
+#
+# `verify` enforces this on a release commit (tools/release-plan.sh check), and
+# `publish-crate` skips whatever crates.io already has.
 [workspace]
 members = ["crates/core", "crates/serve", "crates/ui"]
 # Everything, so that a bare `cargo test` or `cargo clippy` at the root checks
