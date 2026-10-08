@@ -20,6 +20,7 @@
 //! `tool-outputs/` directory holding a file per tool call — which its own
 //! discovery deliberately does not descend into, and neither does this.
 
+use crate::pricing::Provider;
 use std::path::{Path, PathBuf};
 
 /// How long the newest write in the corpus stays a reason to wait.
@@ -180,30 +181,52 @@ pub fn compute_corpus_fingerprint() -> Corpus {
 
 /// Every provider's session root that is present on this machine.
 ///
-/// This is the same list [`crate::watch`] watches, plus the one provider it
-/// does not — Windsurf, whose sessions arrive as writes into an existing
-/// database rather than as the creates a watch sees. A root missing here is not
-/// a missed notification, as it is there, but a session whose changes the fingerprint
-/// cannot see: the table would keep serving rows from before it was written.
-/// So the list errs wide, and so does the walk below.
+/// Built from [`Provider::ALL`] through [`provider_roots`], whose match has no
+/// wildcard arm, so a provider added to the enum does not compile until someone
+/// has said where its sessions live. Devin is why: it was added after this list
+/// was written out by hand, was never put on it, and its sessions froze in the
+/// table until some other harness happened to write a file.
+///
+/// A root missing here is not a missed notification, as it is in
+/// [`crate::watch`], but a session whose changes the fingerprint cannot see: the
+/// table would keep serving rows from before it was written. So the list errs
+/// wide, and so does the walk below.
 fn roots() -> Vec<PathBuf> {
-    let mut roots = crate::config::claude_projects_roots();
-    roots.extend(crate::config::codex_sessions_roots());
-    roots.extend(crate::config::cursor_projects_roots());
-    roots.extend(crate::config::pi_sessions_roots());
-    roots.extend(crate::config::opencode_data_roots());
-    roots.extend(crate::config::gemini_chats_roots());
-    roots.extend(crate::config::windsurf_workspace_roots());
-    roots.extend(crate::config::claude_mac_roots(
-        &crate::config::CLAUDE_MAC_COWORK_ROOT,
-        "local-agent-mode-sessions",
-    ));
-    roots.extend(crate::config::claude_mac_roots(
-        &crate::config::CLAUDE_MAC_CODE_ROOT,
-        "claude-code-sessions",
-    ));
+    let mut roots: Vec<PathBuf> = Provider::ALL.into_iter().flat_map(provider_roots).collect();
     roots.retain(|r| r.is_dir());
     roots
+}
+
+/// Where `provider` writes anything a session row is read from, across homes.
+///
+/// A superset of what [`crate::watch`] watches. The watch wants creates, so it
+/// leaves out what changes by being rewritten in place — Windsurf's databases,
+/// Devin's `sessions.db` — while the fingerprint reads writes and takes all of
+/// it: Devin's whole CLI directory, database and journal included, because a
+/// running session's turns and state move there as well as in its transcript.
+fn provider_roots(provider: Provider) -> Vec<PathBuf> {
+    use crate::config;
+    match provider {
+        Provider::Claude => {
+            let mut roots = config::claude_projects_roots();
+            roots.extend(config::claude_mac_roots(
+                &config::CLAUDE_MAC_COWORK_ROOT,
+                "local-agent-mode-sessions",
+            ));
+            roots.extend(config::claude_mac_roots(
+                &config::CLAUDE_MAC_CODE_ROOT,
+                "claude-code-sessions",
+            ));
+            roots
+        }
+        Provider::Codex => config::codex_sessions_roots(),
+        Provider::Cursor => config::cursor_projects_roots(),
+        Provider::Devin => config::devin_cli_dirs(),
+        Provider::Gemini => config::gemini_chats_roots(),
+        Provider::OpenCode => config::opencode_data_roots(),
+        Provider::Pi => config::pi_sessions_roots(),
+        Provider::Windsurf => config::windsurf_workspace_roots(),
+    }
 }
 
 /// Directory names never descended into.
@@ -352,6 +375,58 @@ mod tests {
         let two = fingerprint_of(dir.path());
         std::fs::remove_file(&file).unwrap();
         assert_ne!(two.hash, fingerprint_of(dir.path()).hash);
+    }
+
+    /// Every provider has somewhere the fingerprint looks. The match in
+    /// [`provider_roots`] already refuses to compile without an arm for a new
+    /// provider; this catches the arm that answers with nothing, which would
+    /// freeze that provider's rows the way Devin's once were.
+    #[test]
+    fn every_provider_has_a_fingerprinted_root() {
+        for provider in Provider::ALL {
+            assert!(
+                !provider_roots(provider).is_empty(),
+                "{provider:?} has no root in the corpus fingerprint, so its sessions would never refresh"
+            );
+        }
+    }
+
+    /// Devin's root is its whole CLI directory, in every home, so the database
+    /// half of a session is seen as well as the transcript half.
+    #[test]
+    fn devin_is_fingerprinted_by_its_cli_directory() {
+        assert_eq!(
+            provider_roots(Provider::Devin),
+            crate::config::devin_cli_dirs()
+        );
+    }
+
+    /// A write to either half of a Devin session — the row in `sessions.db` or
+    /// its transcript — changes the hash, and so does a new session's
+    /// transcript appearing. A dummy CLI directory, laid out as Devin lays out
+    /// its own.
+    #[test]
+    fn a_devin_write_changes_the_hash() {
+        let cli = tempfile::tempdir().unwrap();
+        let transcripts = cli.path().join("transcripts");
+        std::fs::create_dir(&transcripts).unwrap();
+        let db = cli.path().join("sessions.db");
+        std::fs::write(&db, b"dummy").unwrap();
+        let transcript = transcripts.join("dummy-session.json");
+        std::fs::write(&transcript, b"{}").unwrap();
+        let before = fingerprint_of(cli.path());
+        assert_eq!(before.files, 2);
+
+        std::fs::write(&db, b"dummy, one more turn").unwrap();
+        let after_db = fingerprint_of(cli.path());
+        assert_ne!(before.hash, after_db.hash, "a sessions.db write must count");
+
+        std::fs::write(&transcript, b"{\"steps\": []}").unwrap();
+        let after_transcript = fingerprint_of(cli.path());
+        assert_ne!(after_db.hash, after_transcript.hash);
+
+        std::fs::write(transcripts.join("another-session.json"), b"{}").unwrap();
+        assert_ne!(after_transcript.hash, fingerprint_of(cli.path()).hash);
     }
 
     /// The walk records each file's own modification time, and it is the same
