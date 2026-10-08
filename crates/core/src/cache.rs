@@ -1232,8 +1232,17 @@ mod tests {
         // The transcript grew, but the entry is inside its re-parse bound, so
         // the panel gets the parse it already paid for rather than a second
         // one — before this, the fresh path re-read the whole file every time.
-        std::thread::sleep(std::time::Duration::from_millis(20));
+        let written = std::fs::metadata(&transcript).unwrap().modified().unwrap();
         std::fs::write(&transcript, format!("{body}\n{}", assistant("r2", 50))).unwrap();
+        // A growth a coarse clock could stamp with the same mtime would be
+        // the cache's other path, so the change is made unmistakable rather
+        // than waited for.
+        std::fs::File::options()
+            .write(true)
+            .open(&transcript)
+            .unwrap()
+            .set_modified(written + std::time::Duration::from_secs(1))
+            .unwrap();
         let second = store.session_data_fresh(&s);
         assert_eq!(
             second.tokens.output, 5,

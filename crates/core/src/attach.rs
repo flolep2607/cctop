@@ -1542,13 +1542,9 @@ mod tests {
         let mut attach = crate::attach::attach(hosted.pid).expect("attach to the shim");
         // The shim serves the socket before returning, but the child has not
         // necessarily been scheduled yet, so this polls rather than sleeps.
-        let rang = (0..50).any(|_| {
+        let rang = crate::test_wait::waits_for(|| {
             attach.pump();
-            if attach.rang().is_some() {
-                return true;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(100));
-            false
+            attach.rang().is_some()
         });
         drop(hosted);
         assert!(rang, "the bell never reached the watcher");

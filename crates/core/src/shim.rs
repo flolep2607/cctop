@@ -947,6 +947,7 @@ fn winsize(cols: u16, rows: u16) -> libc::winsize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_wait::{PATIENCE, wait_until, waits_for};
 
     /// A cctop running inside a multiplexer must not hand its own pane to the
     /// agent it launches. rmux sets five variables — its own pair, tmux's pair
@@ -973,12 +974,7 @@ mod tests {
         let (mut child, _master) =
             spawn_on_pty_at_env(&argv, None, (80, 24), &leaked).expect("a pty for the child");
         // `sh` writes the file and exits at once; poll rather than sleep.
-        for _ in 0..200 {
-            if child.try_wait().ok().flatten().is_some() {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(25));
-        }
+        waits_for(|| child.try_wait().ok().flatten().is_some());
         let _ = child.kill();
         let _ = child.wait();
 
@@ -1029,8 +1025,7 @@ mod tests {
         // Through the public entry point, so the socket lookup is covered too.
         let sent = crate::inject::send_line(pid, "continue");
 
-        let text = (0..50).find_map(|_| {
-            std::thread::sleep(std::time::Duration::from_millis(100));
+        let text = wait_until(PATIENCE, || {
             std::fs::read_to_string(&out).ok().filter(|t| !t.is_empty())
         });
         let _ = child.kill();
@@ -1077,13 +1072,18 @@ mod tests {
             };
         }
 
-        // Attach only after the child has spoken, so what arrives can only have
-        // come from the replay buffer.
-        std::thread::sleep(std::time::Duration::from_millis(300));
+        // Attach only once the replay buffer holds what the child said, so
+        // what arrives can only have come from there.
+        let spoke = waits_for(|| {
+            locked(&fan)
+                .recent
+                .windows(b"ALREADY-DRAWN".len())
+                .any(|w| w == b"ALREADY-DRAWN")
+        });
+        assert!(spoke, "the child never drew anything to replay");
         let mut attach = crate::attach::attach(pid).expect("no attach connection");
         let screen = |attach: &mut crate::attach::Attach, want: &str| {
-            (0..50).any(|_| {
-                std::thread::sleep(std::time::Duration::from_millis(100));
+            waits_for(|| {
                 attach.pump();
                 attach.parser.screen().contents().contains(want)
             })
@@ -1137,12 +1137,7 @@ mod tests {
             std::thread::spawn(move || serve(listener, master, fan));
         }
 
-        let settled = |want: (u16, u16)| {
-            (0..50).any(|_| {
-                std::thread::sleep(std::time::Duration::from_millis(100));
-                pty_size(&master) == want
-            })
-        };
+        let settled = |want: (u16, u16)| waits_for(|| pty_size(&master) == want);
         let started_at_local = settled(local);
 
         let mut attach = crate::attach::attach(pid).expect("no attach connection");
@@ -1150,8 +1145,7 @@ mod tests {
         let shrank = settled((60, 20));
         // The agent is told, not just the pty: without SIGWINCH reaching it, a
         // TUI would go on painting at the old width.
-        let agent_told = (0..50).any(|_| {
-            std::thread::sleep(std::time::Duration::from_millis(100));
+        let agent_told = waits_for(|| {
             attach.pump();
             // stty prints rows first.
             attach.parser.screen().contents().contains("20 60")
@@ -1255,14 +1249,10 @@ mod tests {
             return;
         };
         let mut view = crate::attach::attach(hosted.pid).expect("attach to the shim");
-        let seen = (0..50).find_map(|_| {
+        let seen = wait_until(PATIENCE, || {
             view.pump();
             let screen = view.parser.screen().contents();
-            if screen.contains("[?62;22c") {
-                return Some(screen);
-            }
-            std::thread::sleep(std::time::Duration::from_millis(100));
-            None
+            screen.contains("[?62;22c").then_some(screen)
         });
         drop(hosted);
         assert!(

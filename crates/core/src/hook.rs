@@ -217,10 +217,8 @@ pub fn emit(args: &[String]) -> i32 {
 /// answer, and one made before a delivery that wedged is still good.
 ///
 /// The deadline is a parameter rather than [`DEADLINE`] itself so the test can
-/// make the same choice against a shorter wait. Asserting on real time with the
-/// production deadline leaves only two hundred and fifty milliseconds of headroom
-/// for a scheduler that was busy running the rest of the suite, which is a
-/// failure about the machine rather than about this code.
+/// make the same choice against a shorter wait, and costs milliseconds rather
+/// than a quarter of a second per case.
 fn settle(
     done: &std::sync::mpsc::Receiver<()>,
     advice: &std::sync::mpsc::Receiver<Option<String>>,
@@ -4552,8 +4550,6 @@ mod tests {
     /// quietly false.
     #[test]
     fn a_wedged_cctop_does_not_hold_the_agent_up() {
-        use std::os::unix::net::UnixStream;
-
         let dir = scratch("wedge");
         let hooks = dir.join("hooks.d");
         std::fs::create_dir_all(&hooks).unwrap();
@@ -4562,43 +4558,15 @@ mod tests {
         // outside: bound, listening, and not taking anything.
         let listener = listen_with_backlog(&path, 1);
 
-        // Fill the queue by connecting until the connection does not come back.
-        // Deliberately a plain blocking connect rather than the hook's own: a
-        // fixture built with the function under test hangs when that function
-        // loses its bound, and a test that hangs reports nothing at all. This
-        // loop is expected to block, and `FILL_WAIT` is what says it did.
-        let (queued_tx, queued) = std::sync::mpsc::channel::<()>();
-        let filler = std::thread::spawn({
-            let path = path.clone();
-            move || {
-                let mut held = Vec::new();
-                while let Ok(stream) = UnixStream::connect(&path) {
-                    held.push(stream);
-                    if queued_tx.send(()).is_err() {
-                        break;
-                    }
-                }
-                held
-            }
-        });
+        // Fill the queue, and know it is full rather than guess. A
+        // non-blocking connect to a unix socket whose queue has no room fails
+        // with EAGAIN at once, so the fixture asks the kernel instead of
+        // reading a quiet second as the answer. Not the hook's own connect: a
+        // fixture built with the function under test proves nothing about it.
+        let held = fill_queue(&path);
         assert!(
-            queued.recv_timeout(FILL_WAIT).is_ok(),
+            !held.is_empty(),
             "the fixture never reached its own listener"
-        );
-        // How many connections it takes to fill a queue is the kernel's
-        // business rather than this test's, so the wedge is a window with
-        // nothing in it rather than a count.
-        let mut quiet = 0;
-        while quiet < 2 {
-            quiet = if queued.recv_timeout(FILL_WAIT).is_ok() {
-                0
-            } else {
-                quiet + 1
-            };
-        }
-        assert!(
-            !filler.is_finished(),
-            "the fixture gave up rather than wedging"
         );
 
         // On a thread, because a `deliver` that has lost its bound does not come
@@ -4612,7 +4580,10 @@ mod tests {
             let _ = done_tx.send(());
         });
         let started = std::time::Instant::now();
-        let returned = done.recv_timeout(DEADLINE * 4).is_ok();
+        // Patience rather than a few deadlines: a `deliver` that lost its
+        // bound never comes back while the queue is full, so this only says
+        // how long to wait before calling that a hang.
+        let returned = done.recv_timeout(crate::test_wait::PATIENCE).is_ok();
         let waited = started.elapsed();
 
         // The peer is alive and holding the socket it answers on, so the
@@ -4620,25 +4591,23 @@ mod tests {
         // moment, which is a far worse failure than the one being tested.
         assert!(path.exists(), "the hook deleted a live cctop's socket");
 
-        // SAFETY: the fixture's listener, owned by this test, closed once. This
-        // is also what releases the filler thread above, which is inside the
-        // connect it was never going to come back from.
+        // SAFETY: the fixture's listener, owned by this test, closed once.
         unsafe { libc::close(listener) };
-        drop(filler);
+        drop(held);
         let _ = std::fs::remove_dir_all(&dir);
 
         // Whether the connect blocked or not, the caller is released on time.
         // That release is what `emit` turns into an exit-0, and it is the only
         // property the agent cares about.
         //
-        // Three numbers, in order of how long each is allowed to take. The
-        // hang detector above allows four deadlines, because the point of it is
-        // to catch a `deliver` that never returns at all. This allows two,
-        // because `deliver_to` spends up to one deadline by design — it hands
-        // the connect whatever is left of `DEADLINE` — so an assertion at
-        // exactly `DEADLINE` has no room for the scheduler at all and reports on
-        // the machine rather than on the code. Two is still half the hang
-        // bound, so a `deliver` that lost its bound still fails here.
+        // Two numbers. The hang detector above waits as long as it likes,
+        // because the point of it is to catch a `deliver` that never returns at
+        // all. This allows two deadlines, because `deliver_to` may spend up to
+        // one by design — it hands the connect whatever is left of `DEADLINE`
+        // — so an assertion at exactly `DEADLINE` has no room for the scheduler
+        // and reports on the machine rather than on the code. Against a full
+        // queue the connect is refused at once, so what it measures is
+        // ordinarily near nothing.
         assert!(returned, "`deliver` did not come back at all");
         assert!(
             waited < DEADLINE * 2,
@@ -4646,21 +4615,53 @@ mod tests {
         );
     }
 
-    /// How long the fixture's filler may make no connection before the queue
-    /// counts as full rather than the machine counting as slow.
-    const FILL_WAIT: std::time::Duration = std::time::Duration::from_millis(500);
-
-    /// A listener bound at `path` listening on `backlog`, as a raw descriptor.
+    /// Connect to `path` until its queue has no room left, and hold every
+    /// connection made, so that the queue stays full until they are dropped.
     ///
-    /// Hand-rolled because `UnixListener::bind` listens on `SOMAXCONN` and
-    /// offers no other backlog. Two connections fill a backlog of one; the third
-    /// is the one that blocks.
-    fn listen_with_backlog(path: &Path, backlog: i32) -> std::os::fd::RawFd {
+    /// Non-blocking, so the connect that finds the queue full is told so —
+    /// EAGAIN — instead of waiting in it. How many it takes is the kernel's
+    /// business (a backlog of one takes two), which is why this counts nothing
+    /// and asks instead.
+    fn fill_queue(path: &Path) -> Vec<std::os::fd::OwnedFd> {
+        use std::os::fd::FromRawFd;
+
+        let (addr, len) = sockaddr(path);
+        let mut held = Vec::new();
+        loop {
+            // SAFETY: a fresh descriptor, owned from the line below on.
+            let raw = unsafe {
+                libc::socket(
+                    libc::AF_UNIX,
+                    libc::SOCK_STREAM | libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC,
+                    0,
+                )
+            };
+            assert!(raw >= 0, "socket");
+            // SAFETY: just opened, and owned by nothing else.
+            let fd = unsafe { std::os::fd::OwnedFd::from_raw_fd(raw) };
+            // SAFETY: a fully initialised address and its true length.
+            if unsafe { libc::connect(raw, std::ptr::from_ref(&addr).cast(), len) } == 0 {
+                held.push(fd);
+                assert!(held.len() <= 64, "the queue never filled");
+                continue;
+            }
+            let error = std::io::Error::last_os_error();
+            assert_eq!(
+                error.raw_os_error(),
+                Some(libc::EAGAIN),
+                "the queue refused for another reason: {error}"
+            );
+            return held;
+        }
+    }
+
+    /// `path` as the address a unix socket call takes, and its length.
+    fn sockaddr(path: &Path) -> (libc::sockaddr_un, libc::socklen_t) {
         use std::os::unix::ffi::OsStrExt;
 
         let bytes = path.as_os_str().as_bytes();
         // SAFETY: zeroed is a valid `sockaddr_un` once the family and the path
-        // are written, and the length passed covers exactly those bytes.
+        // are written, and the length returned covers exactly those bytes.
         let mut addr: libc::sockaddr_un = unsafe { std::mem::zeroed() };
         addr.sun_family = libc::AF_UNIX as libc::sa_family_t;
         for (slot, byte) in addr.sun_path.iter_mut().zip(bytes) {
@@ -4668,6 +4669,16 @@ mod tests {
         }
         let len = (std::mem::offset_of!(libc::sockaddr_un, sun_path) + bytes.len() + 1)
             as libc::socklen_t;
+        (addr, len)
+    }
+
+    /// A listener bound at `path` listening on `backlog`, as a raw descriptor.
+    ///
+    /// Hand-rolled because `UnixListener::bind` listens on `SOMAXCONN` and
+    /// offers no other backlog. Two connections fill a backlog of one; the third
+    /// is the one that finds no room.
+    fn listen_with_backlog(path: &Path, backlog: i32) -> std::os::fd::RawFd {
+        let (addr, len) = sockaddr(path);
         // SAFETY: each call is given a descriptor this test owns and a fully
         // initialised address; the descriptor is returned for the test to close.
         unsafe {
@@ -4721,23 +4732,23 @@ mod tests {
     /// in time, it survives a delivery that then wedges; still being worked
     /// out at the deadline, it is dropped and the agent hears nothing.
     ///
-    /// The wait is a tenth of the real one and the budget below it is generous,
-    /// which is the whole point of handing `settle` its deadline. Against
-    /// [`DEADLINE`] the assertion had a quarter of a second of headroom over a
-    /// wait it also had to perform, so it reported on the scheduler rather than
-    /// on the code, and went red whenever the rest of the suite ran alongside.
+    /// What is asserted is order, not time: `settle` came back while the
+    /// wedged worker was still wedged — its channels still open, its late
+    /// advice not yet sent. Asserting `elapsed()` against a budget used to
+    /// report on the scheduler rather than on the code, and went red whenever
+    /// the rest of the suite ran alongside. A `settle` that ignored its
+    /// deadline waits for the worker, finds the channel closed, and fails here.
     #[test]
     fn advice_is_kept_only_if_it_beat_the_deadline() {
-        use std::sync::mpsc::channel;
-        use std::time::Instant;
+        use std::sync::mpsc::{TryRecvError, channel};
 
-        // Short enough that the three cases below cost milliseconds, long
-        // enough that a thread which has already sent is not racing the clock.
+        // Short, so the cases below cost milliseconds; the deadline's length
+        // is not what is under test.
         let wait = DEADLINE / 10;
-        let wedged = DEADLINE * 8;
-        // Twenty times the wait, so it is a statement about the order of
-        // magnitude rather than a stopwatch.
-        let budget = wait * 20;
+        // Far longer than any stall, so "still wedged" cannot come untrue
+        // while `settle` is being slow. The thread is never joined, and
+        // sleeping is all it costs.
+        let wedged = std::time::Duration::from_secs(600);
 
         // Advice made, then a delivery that never returns.
         let (done_tx, done) = channel::<()>();
@@ -4747,11 +4758,14 @@ mod tests {
             std::thread::sleep(wedged);
             drop(done_tx);
         });
-        let started = Instant::now();
         assert_eq!(settle(&done, &advice, wait).as_deref(), Some("{}"));
-        assert!(started.elapsed() < budget, "{:?}", started.elapsed());
+        assert_eq!(
+            done.try_recv(),
+            Err(TryRecvError::Empty),
+            "settle waited out the wedged delivery"
+        );
 
-        // A ledger stuck past the deadline: silence, on time.
+        // A ledger stuck past the deadline: silence, before it speaks.
         let (done_tx, done) = channel::<()>();
         let (advice_tx, advice) = channel::<Option<String>>();
         std::thread::spawn(move || {
@@ -4759,9 +4773,12 @@ mod tests {
             let _ = advice_tx.send(Some("late".to_string()));
             drop(done_tx);
         });
-        let started = Instant::now();
         assert_eq!(settle(&done, &advice, wait), None);
-        assert!(started.elapsed() < budget, "{:?}", started.elapsed());
+        assert_eq!(
+            advice.try_recv(),
+            Err(TryRecvError::Empty),
+            "settle waited for the late advice"
+        );
 
         // And a worker that panicked before advising is the ordinary silence.
         let (done_tx, done) = channel::<()>();
@@ -4802,13 +4819,12 @@ mod tests {
         // Filtered by session, because the other tests in this file are still
         // delivering into the address directory.
         let mine = |events: &[Event]| events.iter().any(|e| e.session_id == "shared");
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         let (mut got_a, mut got_b) = (Vec::new(), Vec::new());
-        while std::time::Instant::now() < deadline && !(mine(&got_a) && mine(&got_b)) {
+        crate::test_wait::waits_for(|| {
             got_a.extend(a.drain());
             got_b.extend(b.drain());
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        }
+            mine(&got_a) && mine(&got_b)
+        });
         assert!(mine(&got_a), "the first cctop missed the event");
         assert!(mine(&got_b), "the second cctop missed the event");
     }
@@ -4843,18 +4859,13 @@ mod tests {
         let payload = br#"{"session_id":"tree","hook_event_name":"Stop"}"#;
         deliver(&envelope("", payload, &walked).expect("envelope"));
 
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         let mut got = Vec::new();
-        while std::time::Instant::now() < deadline
-            && !got.iter().any(|e: &Event| e.session_id == "tree")
-        {
+        let event = crate::test_wait::eventually("the event to arrive", || {
             got.extend(listener.drain());
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        }
-        let event = got
-            .iter()
-            .find(|e| e.session_id == "tree")
-            .expect("the event arrived");
+            got.iter()
+                .find(|e: &&Event| e.session_id == "tree")
+                .cloned()
+        });
         assert_eq!(event.pids, walked);
     }
 

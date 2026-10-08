@@ -1915,9 +1915,9 @@ mod tests {
         let dir = std::env::temp_dir();
         start_session(&ours, Some(&dir), &["sh", "-c", "sleep 30"]);
 
-        let before = wait_for(|| running().into_iter().find(|s| s.name == ours));
+        let before = wait_asking(|| running().into_iter().find(|s| s.name == ours));
         set_state(&ours, crate::hook::Signal::NeedsInput);
-        let after = wait_for(|| {
+        let after = wait_asking(|| {
             running()
                 .into_iter()
                 .find(|s| s.name == ours && s.state.is_some())
@@ -1954,9 +1954,9 @@ mod tests {
         let dir = std::env::temp_dir();
         start_session(&ours, Some(&dir), &["sh", "-c", "sleep 30"]);
 
-        let before = wait_for(|| running().into_iter().find(|s| s.name == ours));
+        let before = wait_asking(|| running().into_iter().find(|s| s.name == ours));
         set_order(&ours, 3);
-        let after = wait_for(|| {
+        let after = wait_asking(|| {
             running()
                 .into_iter()
                 .find(|s| s.name == ours && s.order.is_some())
@@ -2125,6 +2125,7 @@ mod tests {
     }
 
     use super::*;
+    use crate::test_wait::{PATIENCE, wait_asking, wait_every};
 
     /// Whatever is offered has to be runnable as offered. An install the user
     /// accepts and then watches fail on a missing `sudo`, or on a script that
@@ -2268,7 +2269,7 @@ mod tests {
             start_session(name, Some(&dir), &["sh", "-c", "sleep 30"]);
         }
 
-        let found = wait_for(|| running().into_iter().find(|s| s.name == ours));
+        let found = wait_asking(|| running().into_iter().find(|s| s.name == ours));
         let pid = agent_pid(&ours);
         let listed = sessions();
         let outsider = running().into_iter().any(|s| s.name == theirs);
@@ -2337,7 +2338,7 @@ mod tests {
         set_profile(&named, "work");
         // Deliberately no label on this one: the label field then reads back
         // empty, and the profile after it must still be the profile.
-        let found = wait_for(|| running().into_iter().find(|s| s.name == named));
+        let found = wait_asking(|| running().into_iter().find(|s| s.name == named));
         let bare = running().into_iter().find(|s| s.name == plain);
         for name in [&named, &plain] {
             end_session(name);
@@ -2365,15 +2366,15 @@ mod tests {
         let ours = format!("cctop-probe-color-{}", std::process::id());
         start_session(&ours, None, &["sh", "-c", "sleep 30"]);
 
-        let before = wait_for(|| running().into_iter().find(|s| s.name == ours));
+        let before = wait_asking(|| running().into_iter().find(|s| s.name == ours));
         set_color(&ours, "violet");
-        let painted = wait_for(|| {
+        let painted = wait_asking(|| {
             running()
                 .into_iter()
                 .find(|s| s.name == ours && s.color.is_some())
         });
         set_color(&ours, "");
-        let cleared = wait_for(|| {
+        let cleared = wait_asking(|| {
             running()
                 .into_iter()
                 .find(|s| s.name == ours && s.color.is_none())
@@ -2415,13 +2416,10 @@ mod tests {
         // is spelled out. `prepare` is best effort by design and says nothing
         // when the daemon it reached was shutting down; asking again is the
         // same cure for the same race.
-        for _ in 0..20 {
+        wait_asking(|| {
             prepare(&argv, &name, Some(&dir));
-            if exists(&name) {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(100));
-        }
+            exists(&name).then_some(())
+        });
         let ask = |fmt: &str| {
             Command::new(BIN)
                 .args(["display-message", "-p", "-t", &name, fmt])
@@ -2429,7 +2427,7 @@ mod tests {
                 .ok()
                 .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
         };
-        let history = wait_for(|| ask("#{history_limit}"));
+        let history = wait_asking(|| ask("#{history_limit}"));
         let windows = ask("#{session_windows}");
         let mouse = ask("#{mouse}");
         let agent = agent_pid(&name);
@@ -2473,7 +2471,7 @@ mod tests {
 
         // The flag lands when the program's DECSET does, and "not yet" reads
         // the same as "never" — so the wanting side is the one waited on.
-        let wanted = wait_for(|| mouse_wanted(&asked).then_some(()));
+        let wanted = wait_asking(|| mouse_wanted(&asked).then_some(()));
         let quiet = mouse_wanted(&asleep);
         end_session(&asked);
         end_session(&asleep);
@@ -2514,7 +2512,7 @@ mod tests {
                 .find(|s| s.name == ours)
                 .and_then(|s| s.activity)
         };
-        let first = wait_for(reading);
+        let first = wait_asking(reading);
 
         // Poll rather than sleep a fixed interval and sample once. Under a
         // loaded `cargo test` the printing loop, the rmux call and even
@@ -2526,24 +2524,16 @@ mod tests {
         // read. `now` is taken before asking, so a slow answer is not held
         // against the reading it returns. A clock that only moves on
         // keystrokes never gets there, however long the deadline.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         let mut last = None;
         let moved = first.and_then(|first| {
-            loop {
+            // The clock moves in seconds, so looking more often than this
+            // only spends the machine the test is waiting on.
+            wait_every(std::time::Duration::from_millis(200), 3 * PATIENCE, || {
                 let asked_at = now();
                 let later = reading();
                 last = later.map(|later| (later, asked_at));
-                if let Some(later) = later
-                    && later >= first + 2
-                    && asked_at.saturating_sub(later) <= 2
-                {
-                    break Some(later);
-                }
-                if std::time::Instant::now() >= deadline {
-                    break None;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(200));
-            }
+                later.filter(|&later| later >= first + 2 && asked_at.saturating_sub(later) <= 2)
+            })
         });
         end_session(&ours);
 
@@ -2565,14 +2555,11 @@ mod tests {
     /// test that has nothing to do with shutdown. There is nothing to wait
     /// *for* here — the dying socket is replaced by the one the next
     /// `new-session` starts — so the cure is to ask again. A call that is
-    /// wrong rather than early fails exactly as it did before, two seconds
-    /// later and carrying rmux's own complaint.
+    /// wrong rather than early fails exactly as it did before, once the wait
+    /// gives up, and carrying rmux's own complaint.
     fn start_session(name: &str, cwd: Option<&Path>, command: &[&str]) {
         let mut last = String::new();
-        for attempt in 0..20 {
-            if attempt > 0 {
-                std::thread::sleep(std::time::Duration::from_millis(100));
-            }
+        let started = wait_asking(|| {
             let mut rmux = Command::new(BIN);
             rmux.args(["new-session", "-d", "-s", name]);
             if let Some(dir) = cwd {
@@ -2580,12 +2567,13 @@ mod tests {
             }
             rmux.arg("--").args(command);
             match rmux.output() {
-                Ok(out) if out.status.success() => return,
+                Ok(out) if out.status.success() => return Some(()),
                 Ok(out) => last = String::from_utf8_lossy(&out.stderr).trim().to_string(),
                 Err(e) => last = e.to_string(),
             }
-        }
-        panic!("could not start {name}: {last}");
+            None
+        });
+        assert!(started.is_some(), "could not start {name}: {last}");
     }
 
     /// End a session and wait for it to actually be gone.
@@ -2600,18 +2588,6 @@ mod tests {
     /// teardown is the one that leaves the next a closing socket.
     fn end_session(name: &str) {
         let _ = kill(name);
-        wait_for(|| (!exists(name)).then_some(()));
-    }
-
-    /// rmux creates sessions and spawns their commands asynchronously, so poll
-    /// rather than guess a sleep long enough for a loaded runner.
-    fn wait_for<T>(mut f: impl FnMut() -> Option<T>) -> Option<T> {
-        for _ in 0..50 {
-            if let Some(v) = f() {
-                return Some(v);
-            }
-            std::thread::sleep(std::time::Duration::from_millis(100));
-        }
-        None
+        wait_asking(|| (!exists(name)).then_some(()));
     }
 }
