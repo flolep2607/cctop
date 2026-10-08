@@ -335,7 +335,7 @@ impl App {
         renamed: &Renamed,
         share: Option<Result<cctop_core::rmux::Share, String>>,
     ) {
-        self.mode = Mode::ShareQr;
+        self.back_from_address(Mode::ShareQr);
         let new = renamed.new.clone().unwrap_or_default();
         if !renamed.changed {
             return self.set_status(format!("{label} stays on {new}"));
@@ -378,7 +378,7 @@ impl App {
     }
 
     fn dashboard_renamed(&mut self, renamed: &Renamed) {
-        self.mode = Mode::Serve;
+        self.back_from_address(Mode::Serve);
         let new = renamed.new.clone().unwrap_or_default();
         match (&renamed.old, renamed.changed) {
             (Some(old), true) => {
@@ -392,6 +392,15 @@ impl App {
                 ));
             }
             _ => self.set_status(format!("The page stays on {new}")),
+        }
+    }
+
+    /// Back to the panel the field was opened from — unless a click put the
+    /// field away while Cloudflare was being asked, in which case the answer
+    /// goes to the status line only and no panel springs back up.
+    fn back_from_address(&mut self, panel: Mode) {
+        if self.mode == Mode::RenameAddress {
+            self.mode = panel;
         }
     }
 
