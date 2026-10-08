@@ -61,6 +61,7 @@ const BAD_GATEWAY: u8 = 1;
 const SLOW: u8 = 2;
 const HTML: u8 = 3;
 const EMPTY: u8 = 4;
+const STALL: u8 = 5;
 
 /// The Cloudflare error page, in the shape the edge actually serves: an HTML
 /// body, an HTML content type, and far longer than anything cctop would send.
@@ -84,6 +85,13 @@ pub fn intercept(stream: &mut TcpStream, request: &Request) -> bool {
     }
     match FAULT.load(Ordering::Relaxed) {
         OFF => false,
+        STALL if request.path == "/api/events" => {
+            stall(stream, request);
+            true
+        }
+        // Only the stream stalls; everything else is answered, which is what
+        // a quick tunnel does and what lets the page fall back to polling.
+        STALL => false,
         BAD_GATEWAY => {
             http::respond(
                 stream,
@@ -124,6 +132,25 @@ pub fn intercept(stream: &mut TcpStream, request: &Request) -> bool {
             true
         }
         _ => false,
+    }
+}
+
+/// An event stream that opens and then says nothing: the head goes out, no
+/// event follows. That is a Cloudflare quick tunnel, which does not carry SSE
+/// and may sit on the bytes, and a half-open connection — the cases the page's
+/// fallback to polling is for.
+///
+/// Held until the fault is lifted, then closed, so the page's next attempt
+/// finds a working stream — which is how switching back is checked. Capped so
+/// a forgotten fault does not keep threads forever.
+fn stall(stream: &mut TcpStream, request: &Request) {
+    let Ok(_held) = http::EventStream::open(stream, request) else {
+        return;
+    };
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(600);
+    while FAULT.load(Ordering::Relaxed) == STALL && std::time::Instant::now() < until {
+        // A poll on a debug switch, not a wait for an event.
+        std::thread::sleep(std::time::Duration::from_millis(250));
     }
 }
 
@@ -182,12 +209,13 @@ pub fn route(shared: &Shared, stream: &mut TcpStream, request: &Request, rest: &
                 "slow" => SLOW,
                 "html" => HTML,
                 "empty" => EMPTY,
+                "stall" => STALL,
                 _ => {
                     http::respond_error(
                         stream,
                         Some(request),
                         400,
-                        "mode must be one of: off, 502, slow, html, empty",
+                        "mode must be one of: off, 502, slow, html, empty, stall",
                     );
                     return true;
                 }
@@ -273,6 +301,7 @@ fn fault_name(mode: u8) -> &'static str {
         SLOW => "slow",
         HTML => "html",
         EMPTY => "empty",
+        STALL => "stall",
         _ => "off",
     }
 }

@@ -1534,11 +1534,14 @@ fn serve_connection(shared: &Shared, stream: &mut TcpStream) {
         ),
         "/api/config" => config_route(shared, stream, &request, access),
         "/api/sessions" => {
+            // Tagged, because a page whose event stream is not getting through
+            // — a quick tunnel, which does not carry SSE — polls this instead,
+            // and an unchanged table should cost it a `304`. Still `no-store`:
+            // the rows carry titles and prompts.
             let snapshot = current(shared);
-            http::respond(
+            http::respond_tagged_unkept(
                 stream,
-                Some(&request),
-                200,
+                &request,
                 "application/json; charset=utf-8",
                 snapshot.json.as_bytes(),
             );
@@ -2411,6 +2414,15 @@ fn events_every(shared: &Shared, stream: &mut TcpStream, request: &Request, keep
         return;
     };
     cctop_core::elog::event("sse", "open", serde_json::json!({}));
+    // A ping before anything else, so the page hears from a stream that
+    // works within a round trip — even a session page whose row is not in
+    // the table, which would otherwise be sent nothing until the first
+    // keepalive. That is how the page tells a stream that delivers from one a
+    // tunnel is holding, and falls back to polling `/api/sessions` within
+    // seconds rather than sitting on a table that never moves.
+    if sse.ping().is_err() {
+        return;
+    }
 
     let mut sent = 0u64;
     let mut wrote = Instant::now();
@@ -3350,7 +3362,7 @@ mod tests {
             true => Box::new(BufReader::new(flate2::read::GzDecoder::new(reader))),
             false => Box::new(reader),
         };
-        let next = move || {
+        let mut next = move || {
             let (mut event, mut data) = (String::new(), String::new());
             loop {
                 let mut line = String::new();
@@ -3368,6 +3380,8 @@ mod tests {
                 }
             }
         };
+        // Every stream opens with a ping, before what it has to say.
+        assert_eq!(next().0, "ping", "a stream opens with a ping");
         (head, next)
     }
 
@@ -3617,6 +3631,32 @@ mod tests {
         // And what holds a transcript is still never kept.
         let (head, _) = exchange(&guarded, "/api/sessions", auth);
         assert_eq!(header(&head, "Cache-Control"), Some("no-store"));
+    }
+
+    /// The table a page polls when its stream is held up is never kept, yet
+    /// an unchanged one is a `304`: the page remembers the tag, not the cache.
+    #[test]
+    fn the_polled_table_is_a_304_when_it_has_not_moved_and_still_not_kept() {
+        let guarded = shared("full", "view");
+        put(&guarded, 1, &[("a", r#"{"a":1}"#)]);
+        let auth = "Authorization: Bearer full\r\n";
+        let (head, body) = exchange(&guarded, "/api/sessions", auth);
+        assert!(head.starts_with("HTTP/1.1 200 "), "{head}");
+        assert_eq!(body, br#"[{"a":1}]"#);
+        let etag = header(&head, "ETag").expect("an ETag").to_string();
+        let held = format!("{auth}If-None-Match: {etag}\r\n");
+
+        let (head, body) = exchange(&guarded, "/api/sessions", &held);
+        assert!(head.starts_with("HTTP/1.1 304 "), "{head}");
+        assert!(body.is_empty(), "a 304 carries no body");
+        assert_eq!(header(&head, "Cache-Control"), Some("no-store"));
+
+        // A table that moved is sent whole, under a new tag.
+        put(&guarded, 2, &[("a", r#"{"a":2}"#)]);
+        let (head, body) = exchange(&guarded, "/api/sessions", &held);
+        assert!(head.starts_with("HTTP/1.1 200 "), "{head}");
+        assert_eq!(body, br#"[{"a":2}]"#);
+        assert_ne!(header(&head, "ETag"), Some(etag.as_str()));
     }
 
     #[test]

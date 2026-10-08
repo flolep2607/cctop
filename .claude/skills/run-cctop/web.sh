@@ -133,6 +133,8 @@ cmd_shot() {
 #   web.sh fault html    a 200 that is not JSON: a captive portal, a proxy
 #   web.sh fault empty   a 200 with no body at all
 #   web.sh fault slow    a request that never arrives in time
+#   web.sh fault stall   /api/events opens and says nothing: a quick tunnel,
+#                        which does not carry SSE; the page polls instead
 #   web.sh fault off
 #
 # Faults apply to `/api/**` and not to the pages, so the page under test still
@@ -202,6 +204,6 @@ case "${1:-}" in
      echo
      echo "usage: web.sh serve [--token|--tunnel] | api <path> | ids | url [path]"
      echo "       web.sh shot <name> [path] [--dead] | chat | smoke | down"
-     echo "       web.sh fault 502|html|empty|slow|off | state   (needs --features debug)"
+     echo "       web.sh fault 502|html|empty|slow|stall|off | state   (needs --features debug)"
      ;;
 esac

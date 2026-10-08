@@ -141,6 +141,7 @@ web.sh fault 502     # a tunnel whose far end has gone: HTML body, 502 status
 web.sh fault html    # a 200 that is not JSON — a captive portal, a proxy
 web.sh fault empty   # a 200 with no body
 web.sh fault slow    # a request that never arrives in time
+web.sh fault stall   # /api/events opens and goes silent — a quick tunnel; the page should say "polling"
 web.sh fault off
 web.sh state         # what the serving process is holding right now
 ```
