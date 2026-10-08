@@ -5071,13 +5071,22 @@ mod tests {
         let wedged = crate::test_wait::PATIENCE;
 
         // Advice made, then a delivery that never returns.
+        //
+        // "Made" is waited for, not assumed: the thread sending it is only
+        // spawned here, and a loaded machine can leave it unscheduled past a
+        // 25 ms `wait`, which read as advice that missed its deadline — once
+        // in 117 runs of the suite with every core busy.
         let (done_tx, done) = channel::<()>();
         let (advice_tx, advice) = channel();
+        let (made_tx, made) = channel::<()>();
         std::thread::spawn(move || {
             let _ = advice_tx.send(Some("{}".to_string()));
+            let _ = made_tx.send(());
             std::thread::sleep(wedged);
             drop(done_tx);
         });
+        made.recv_timeout(wedged)
+            .expect("the advice was never made");
         assert_eq!(settle(&done, &advice, wait).as_deref(), Some("{}"));
         assert_eq!(
             done.try_recv(),
