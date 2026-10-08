@@ -16,7 +16,7 @@ import { StateDot } from "@/components/status";
 import { dotOfTab } from "@/lib/status";
 import { TerminalFrame } from "@/components/terminal";
 import { popOut, type Terminal } from "@/lib/terminal";
-import { useSessions, useStored, useTabs, useTick } from "@/hooks/use-live";
+import { POLL_EVERY, useSessions, useStored, useTabs, useTick } from "@/hooks/use-live";
 import type { Session, Tab } from "@/lib/types";
 import { SessionRow, WantingRow } from "./rows";
 import { Quota } from "./quota";
@@ -59,7 +59,7 @@ function readSeen(): Record<string, { at?: number }> {
 }
 
 export function DashboardPage() {
-  const { sessions, live } = useSessions();
+  const { sessions, feed } = useSessions();
   const [prefs, setPrefs] = useStored<Prefs>("cctop-dash", DEFAULT_PREFS, (v): v is Prefs => !!v && typeof v === "object");
   // Held across renders so `p.pins` and the rest keep their identity until the
   // stored prefs change, which is what the memos below key on.
@@ -327,9 +327,16 @@ export function DashboardPage() {
       {CAN_ACT && picked.size > 0 && <BulkBar picked={picked} byId={byId} onClear={() => setPicked(new Set())} />}
 
       <footer className="text-muted-foreground flex shrink-0 flex-wrap items-center gap-x-3 gap-y-1 border-t px-3 py-1.5 text-xs sm:px-4">
-        <span className="flex items-center gap-1.5">
-          <StateDot state={live ? "working" : sessions ? "error" : "idle"} />
-          {live ? "live" : sessions ? "reconnecting…" : "connecting…"}
+        <span
+          className="flex items-center gap-1.5"
+          title={
+            feed === "polling"
+              ? `The live stream is not getting through — a quick tunnel does not carry it — so the table is fetched every ${POLL_EVERY / 1000} seconds instead. It goes back to live on its own.`
+              : undefined
+          }
+        >
+          <StateDot state={feed === "live" ? "working" : feed === "polling" ? "waiting" : sessions ? "error" : "idle"} />
+          {feed === "live" ? "live" : feed === "polling" ? "polling" : sessions ? "reconnecting…" : "connecting…"}
         </span>
         <span>
           {all.length} sessions · {running} running{shown.length !== all.length ? ` · ${shown.length} shown` : ""}
