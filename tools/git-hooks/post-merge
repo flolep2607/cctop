@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# `git merge` and `git pull` make their commit without running post-commit, so
+# an agent that merges main into its branch would leave the draft PR behind.
+# Same rules as post-commit — agents only, a branch that already tracks the
+# remote, never main — so this only hands over.
+exec "$(dirname "$0")/post-commit"
