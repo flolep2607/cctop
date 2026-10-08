@@ -2961,8 +2961,8 @@ fn link_cells(screen: &vt100::Screen, link: &str) -> Vec<(u16, std::ops::Range<u
 ///
 /// Laid out step by step in the add-account popup's manner, each step a short
 /// paragraph and a line of keys that are also buttons. The first step is
-/// headed by the way in it describes ([`connect::Method`]), so a second way
-/// sits beside it under its own heading without the rest moving.
+/// headed by a row of the ways in ([`connect::Method`]), the chosen one lit,
+/// and the paragraph under it is that way's.
 pub(super) fn draw_connect(frame: &mut Frame, area: Rect, app: &mut App, layout: &mut Layout) {
     use super::connect::Step;
     use cctop_core::cloudflare;
@@ -2995,15 +2995,39 @@ pub(super) fn draw_connect(frame: &mut Frame, area: Rect, app: &mut App, layout:
     let mut qr_at = None;
     let (hint, keys): (String, Vec<(&str, KeyEvent)>) = match &flow.step {
         Step::Start { method, field } => {
+            use super::connect::{METHODS, Method};
             lines.push(text("One address of your own for t and W, so a bookmark"));
             lines.push(text("or a phone shortcut keeps working."));
             lines.push(Line::default());
+            let mut row = vec![Span::raw(" ")];
+            for (i, way) in METHODS.iter().enumerate() {
+                if i > 0 {
+                    row.push(Span::styled(" │ ", theme::dim()));
+                }
+                row.push(match way == method {
+                    true => Span::styled(format!(" {} ", way.label()), theme::selected()),
+                    false => Span::styled(format!(" {} ", way.label()), theme::dim()),
+                });
+            }
+            row.push(Span::styled("  Tab ⇄", theme::dim()));
+            lines.push(Line::from(row));
+            lines.push(Line::default());
             match method {
-                super::connect::Method::Paste => {
-                    lines.push(Line::from(Span::styled(
-                        format!(" {}", method.label()),
-                        theme::title(),
-                    )));
+                Method::Browser => {
+                    lines.push(text("Log in to Cloudflare and pick the domain there:"));
+                    lines.push(text("cctop creates the tunnel and its DNS records."));
+                    lines.push(dim("Nothing to make or paste. Over ssh, the address is"));
+                    lines.push(dim("shown here, to open wherever your browser is."));
+                    (
+                        " [Enter] log in  [Tab] paste a token instead  [Esc] cancel".to_string(),
+                        vec![
+                            ("[Enter]", enter),
+                            ("[Tab]", KeyEvent::from(KeyCode::Tab)),
+                            ("[Esc]", esc),
+                        ],
+                    )
+                }
+                Method::Paste => {
                     lines.push(text("1. Make an API token; the link fills it in:"));
                     let shown = "dash.cloudflare.com/profile/api-tokens";
                     lines.push(Line::from(Span::styled(format!("    {shown}"), accent)));
@@ -3014,12 +3038,43 @@ pub(super) fn draw_connect(frame: &mut Frame, area: Rect, app: &mut App, layout:
                     }
                     lines.push(text("2. Paste it here. A tunnel token works too."));
                     lines.push(masked_line(field.chars().count()));
+                    (
+                        " [Enter] connect  [Ctrl+O] copy link  [Ctrl+Q] QR  [Esc] cancel"
+                            .to_string(),
+                        vec![
+                            ("[Enter]", enter),
+                            ("[Ctrl+O]", ctrl('o')),
+                            ("[Ctrl+Q]", ctrl('q')),
+                            ("[Esc]", esc),
+                        ],
+                    )
                 }
             }
+        }
+        Step::LoggingIn { url, opened } => {
+            match opened {
+                true => {
+                    lines.push(text("Your browser should have opened Cloudflare's login."));
+                    lines.push(text("Log in there and pick the domain for the tunnel."));
+                    lines.push(dim("If it did not open, this is the address:"));
+                }
+                false => {
+                    lines.push(text("Open this address in a browser, log in to"));
+                    lines.push(text("Cloudflare and pick the domain for the tunnel:"));
+                }
+            }
+            // The whole address is a hundred and fifty characters; the
+            // terminal's link, the copy and the code all carry it whole.
+            let shown = "dash.cloudflare.com/argotunnel";
+            lines.push(Line::from(Span::styled(format!("    {shown}"), accent)));
+            links.push((shown.to_string(), url.clone()));
+            if flow.qr {
+                qr_at = Some((lines.len(), qr::encode(url)));
+            }
+            lines.push(dim("cctop waits here for up to ten minutes."));
             (
-                " [Enter] connect  [Ctrl+O] copy link  [Ctrl+Q] QR  [Esc] cancel".to_string(),
+                " [Ctrl+O] copy link  [Ctrl+Q] QR  [Esc] cancel".to_string(),
                 vec![
-                    ("[Enter]", enter),
                     ("[Ctrl+O]", ctrl('o')),
                     ("[Ctrl+Q]", ctrl('q')),
                     ("[Esc]", esc),
@@ -3047,13 +3102,24 @@ pub(super) fn draw_connect(frame: &mut Frame, area: Rect, app: &mut App, layout:
             )
         }
         Step::Hostname { zone, field, .. } => {
-            lines.push(text(&format!("Its address: one name under {},", zone.name)));
-            lines.push(text("which Cloudflare's free certificate covers."));
+            match zone.name.is_empty() {
+                // A login's domain whose name could not be read.
+                true => {
+                    lines.push(text("Logged in. Its address, on the domain you picked:"));
+                    lines.push(text("one name under it, like cctop.example.com."));
+                }
+                false => {
+                    lines.push(text(&format!("Its address: one name under {},", zone.name)));
+                    lines.push(text("which Cloudflare's free certificate covers."));
+                }
+            }
             lines.push(input_line(field));
-            lines.push(dim(&format!(
-                "  W shares go on {} beside it.",
-                cloudflare::share_hostname(field)
-            )));
+            if !field.is_empty() {
+                lines.push(dim(&format!(
+                    "  W shares go on {} beside it.",
+                    cloudflare::share_hostname(field)
+                )));
+            }
             (
                 " [Enter] create  [Esc] cancel".to_string(),
                 vec![("[Enter]", enter), ("[Esc]", esc)],
@@ -3198,6 +3264,18 @@ pub(super) fn draw_connect(frame: &mut Frame, area: Rect, app: &mut App, layout:
     // A call in flight replaces the keys: there is nothing to press but Esc,
     // and the spinner is what says cctop has not hung.
     let (hint, keys) = match &flow.working {
+        // Waiting on the user, who may want the link again or its code.
+        Some(_) if matches!(flow.step, Step::LoggingIn { .. }) => (
+            format!(
+                " {} Waiting for the login  [Ctrl+O] copy  [Ctrl+Q] QR  [Esc] cancel",
+                share::spinner_frame()
+            ),
+            vec![
+                ("[Ctrl+O]", ctrl('o')),
+                ("[Ctrl+Q]", ctrl('q')),
+                ("[Esc]", esc),
+            ],
+        ),
         Some(working) => (
             format!(" {} {}  [Esc] close", share::spinner_frame(), working.what),
             vec![("[Esc]", esc)],

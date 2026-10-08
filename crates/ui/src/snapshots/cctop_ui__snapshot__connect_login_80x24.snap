@@ -7,19 +7,19 @@ expression: screen
 │Live rate         $0.04                               ⡀  Models               │
 │Today             $8.97                               ⡀  Sessions  4 · 2 live │
 │This month        $0.00                               ⡀  Agent CPU   3.2%     │
-│All ╭ Connect your Cloudflare account ───────────────────────────────────╮    │
-╰────│ One address of your own for t and W, so a bookmark                 │────╯
-╭ Ses│ or a phone shortcut keeps working.                                 │────╮
-│   L│                                                                    │    │
-│●   │  Log in with browser  │  Paste a token   Tab ⇄                     │ ch…┃
-│●   │                                                                    │    │
-╰────│ 1. Make an API token; the link fills it in:                        │────╯
-╭ Inf│    dash.cloudflare.com/profile/api-tokens                          │text╮
-│Root│    Tunnel · Edit, DNS · Edit, Zone · Read                          │    │
-│    │ 2. Paste it here. A tunnel token works too.                        │    │
-│   4│ > •••••••••••••••••█  17 characters                                │    │
+│All time         $28.51 $0.00/day this month             Agent mem 592 MB     │
+╰────╭ Connect your Cloudflare account ───────────────────────────────────╮────╯
+╭ Ses│ One address of your own for t and W, so a bookmark                 │────╮
+│   L│ or a phone shortcut keeps working.                                 │    │
+│●   │                                                                    │ ch…┃
+│●   │  Log in with browser  │  Paste a token   Tab ⇄                     │    │
+╰────│                                                                    │────╯
+╭ Inf│ Log in to Cloudflare and pick the domain there:                    │text╮
+│Root│ cctop creates the tunnel and its DNS records.                      │    │
+│    │ Nothing to make or paste. Over ssh, the address is                 │    │
+│   4│ shown here, to open wherever your browser is.                      │    │
 │   4│                                                                    │    │
-│   4│ [Enter] connect  [Ctrl+O] copy link  [Ctrl+Q] QR  [Esc] cancel     │    │
+│   4│ [Enter] log in  [Tab] paste a token instead  [Esc] cancel          │    │
 │    ╰────────────────────────────────────────────────────────────────────╯    │
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ╭ Limits ─────────────────────────────────────────────────────────── + account ╮

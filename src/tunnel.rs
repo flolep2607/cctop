@@ -132,9 +132,6 @@ fn remove() -> i32 {
             }
         }
     }
-    if account.login {
-        println!("{}", cloudflare::login::FORGOTTEN);
-    }
     0
 }
 

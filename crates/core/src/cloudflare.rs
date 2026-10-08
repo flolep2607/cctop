@@ -1149,6 +1149,9 @@ pub(crate) fn remove_with(account: &Account, api: impl Fn(&str) -> Api) -> Lefto
     if let Err(e) = api.delete_tunnel(account_id, tunnel_id) {
         left.push(format!("the tunnel {tunnel_id} ({e})"));
     }
+    if account.login {
+        left.push(login::LEFT.to_string());
+    }
     Leftovers(left)
 }
 
@@ -1937,7 +1940,7 @@ mod tests {
             ..Account::default()
         };
         let left = remove_with(&account, |token| Api::at(&base, token));
-        assert_eq!(left, Leftovers::default());
+        assert_eq!(left, Leftovers(vec![login::LEFT.to_string()]));
         assert_eq!(
             writes(&seen),
             [
@@ -1950,7 +1953,7 @@ mod tests {
         // tunnel; the sentence points at a pasted token, not at a permission.
         let (base, _) = fake_api(login_cloudflare);
         let left = remove_with(&account, |token| Api::at(&base, token));
-        assert_eq!(left.0.len(), 1, "{left:?}");
+        assert_eq!(left.0.len(), 2, "{left:?}");
         assert!(left.0[0].contains("cctop.example.test"), "{left:?}");
         assert!(left.0[0].contains("browser login"), "{left:?}");
     }

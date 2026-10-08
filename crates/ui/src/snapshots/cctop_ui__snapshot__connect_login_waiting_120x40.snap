@@ -15,20 +15,20 @@ expression: screen
 │●     7m     2h     $2.87    29%   0.4 sonnet-4-5     ─          ─        local                ─            api       │
 │○     3h     1h     $0.19      ─     ─ haiku-4-5      ─          ─        local                ─            docs      │
 │○     2d    12h     $7.03      ─     ─ gpt-5-codex    ─          ─        local                ─            infra     │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
 │                        ╭ Connect your Cloudflare account ───────────────────────────────────╮                        │
-│                        │ One address of your own for t and W, so a bookmark                 │                        │
-│                        │ or a phone shortcut keeps working.                                 │                        │
+│                        │ Open this address in a browser, log in to                          │                        │
+│                        │ Cloudflare and pick the domain for the tunnel:                     │                        │
+│                        │    dash.cloudflare.com/argotunnel                                  │                        │
+│                        │ cctop waits here for up to ten minutes.                            │                        │
 │                        │                                                                    │                        │
-│                        │  Log in with browser  │  Paste a token   Tab ⇄                     │                        │
-│                        │                                                                    │                        │
-│                        │ 1. Make an API token; the link fills it in:                        │                        │
-│                        │    dash.cloudflare.com/profile/api-tokens                          │                        │
-│                        │    Tunnel · Edit, DNS · Edit, Zone · Read                          │                        │
-╰────────────────────────│ 2. Paste it here. A tunnel token works too.                        │────────────────────────╯
-╭ Info  Performance  Proc│ > •••••••••••••••••█  17 characters                                │────────────────────────╮
-│Root /usr/bin/claude --m│                                                                    │                        │
-│    PID    CPU%       ME│ [Enter] connect  [Ctrl+O] copy link  [Ctrl+Q] QR  [Esc] cancel     │                        │
-│   4101    9.8%    360.0╰────────────────────────────────────────────────────────────────────╯                        │
+╰────────────────────────│ [Ctrl+O] copy link  [Ctrl+Q] QR  [Esc] cancel                      │────────────────────────╯
+╭ Info  Performance  Proc╰────────────────────────────────────────────────────────────────────╯────────────────────────╮
+│Root /usr/bin/claude --model opus                                                                                     │
+│    PID    CPU%       MEM  COMMAND                                                                                    │
+│   4101    9.8%    360.0M  claude --model opus                                                                        │
 │   4188    2.4%     44.0M  node mcp-server.js                                                                         │
 │   4290    0.3%      8.0M  bash -c npm test                                                                           │
 │                                                                                                                      │

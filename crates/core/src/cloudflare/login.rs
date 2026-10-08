@@ -61,12 +61,11 @@ const WAIT: Duration = Duration::from_secs(600);
 /// The least time between two polls, for a store that answers at once.
 const GAP: Duration = Duration::from_secs(2);
 
-/// What is left once a login's account is removed: the token Cloudflare made
-/// for it, which only the dashboard can revoke — the token cannot delete
-/// itself, and Cloudflare's documentation sends cloudflared users there too.
-pub const FORGOTTEN: &str = "The login's API token is forgotten here but still listed on your \
-     Cloudflare profile; revoke it at https://dash.cloudflare.com/profile/api-tokens if you no \
-     longer want it.";
+/// What a removed login leaves on Cloudflare: the token it made, which only
+/// the dashboard can revoke — a token cannot delete itself, and Cloudflare's
+/// documentation sends cloudflared users to the same page.
+pub const LEFT: &str =
+    "the API token the browser login made: revoke it at dash.cloudflare.com/profile/api-tokens";
 
 /// The largest certificate read; cloudflared's are about 2 KB.
 const CERT_MAX: u64 = 64 * 1024;
@@ -122,6 +121,12 @@ impl Login {
         // cloudflared's query, in the order Go's `url.Values.Encode` sorts it.
         let url = format!("{login}?aud=&callback={}", percent_encode(&store));
         Login { url, store }
+    }
+
+    /// Against a [`fake`] server at `base`, for another crate's tests.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn fake(base: &str) -> Login {
+        Login::at(&format!("{base}/argotunnel"), &format!("{base}/callback/"))
     }
 
     /// The page to open in a browser. Shown to the user and nowhere else.
