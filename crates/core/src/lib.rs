@@ -49,6 +49,7 @@ pub mod paste;
 pub mod peek;
 pub mod pricing;
 pub mod proc;
+pub mod provider_status;
 pub mod quota;
 pub mod remote_fs;
 /// The per-session postmortem: `--report`, and `/api/report`.

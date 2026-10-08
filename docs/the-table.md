@@ -67,6 +67,30 @@ in place of its dot for as long as it stays past it: `$` for its cost or burn
 rate, a red `!` for an error loop, `◌` for a working agent that has written
 nothing for a while. See [alerts](driving-agents.md#alerts-on-spend-error-loops-and-stalls).
 
+### Is it me, or is it them?
+
+A red dot says a request failed. It cannot say why, and the answer is often
+somewhere else: a vendor incident, a dead proxy, an expired credential.
+
+So cctop reads Anthropic's and OpenAI's status pages
+([`status.claude.com`](https://status.claude.com),
+[`status.openai.com`](https://status.openai.com)) every two minutes, in the
+background, and sets what they say against the running sessions that are
+failing. The footer says something only when there is something to say:
+
+- `⚠ Anthropic incident: Elevated errors on Claude Opus — 2 of yours failing · !`
+  when the vendor reports an incident, with the count when it touches yours;
+- `⚠ 2 failing, Anthropic reports all clear: probably this machine · !` when
+  sessions fail while the page says all systems are operational.
+
+`!` opens the vendor's own account: each open incident, where they are with it,
+since when, their latest update, and the components affected. `r` in it checks
+again now. Sessions are matched to a vendor by model first and harness second,
+so a Cursor session running Opus counts against Anthropic, and one running a
+model cctop cannot place is left out rather than blamed on a guess. When a page
+cannot be reached — offline, say — the footer stays silent and the panel says
+the page was unreachable. `footer_hide = "provider"` leaves the line off.
+
 ## `PERM` — how much a session asks
 
 **PERM** is how much a session asks before it acts: `ask`, `edits` (writes files
@@ -457,6 +481,7 @@ reach them was to remember which key pressed which one.
 | `D`, `K` | Delete / terminate all marked sessions (with confirmation); in the idle view `K` stops the idle ones |
 | `U` | Clear all marks |
 | `h` or `F8` | Agent integration: what reports to cctop, and install it |
+| `!` | Provider status: whether a vendor outage explains the failing sessions (see [above](#is-it-me-or-is-it-them)) |
 | `i` | Read the conversation, full-screen (see [Panels](panels.md#reading-the-conversation)) |
 | `y` | Copy resume command or transcript path |
 | `e`, `E` | Show its subagents / show all subagents; on a tree heading, `e` folds and unfolds instead |

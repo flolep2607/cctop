@@ -31,6 +31,7 @@ mod markdown;
 pub mod menu;
 mod modals;
 pub mod note;
+mod outage;
 pub mod panels;
 mod panes;
 mod preview;
@@ -123,6 +124,9 @@ pub enum Mode {
     Hooks,
     /// `cctop optimize` or `cctop compare`, drawn over the table.
     Insight,
+    /// Provider status: what each vendor's status page says is broken, set
+    /// against which of the user's sessions are failing. See [`outage`].
+    ProviderStatus,
     /// The selected session's conversation, read-only — what the report page
     /// shows in a browser, over the table. `i` on a row, or Enter's menu.
     Conversation,
@@ -790,6 +794,8 @@ pub struct App {
     /// reads three files off disk and scans a directory, which is nothing to do
     /// once and wasteful to do sixty times a second behind a closed panel.
     pub hooks: Option<cctop_core::hook::Report>,
+    /// What the vendors' status pages last said, and their panel.
+    pub(crate) outage: outage::Outage,
     /// Readings of each account's rate-limit windows, for the unused-allowance
     /// figure on the Limits pane. Reloaded when a quota response arrives rather
     /// than held by the poller, so the file has exactly one writer.
@@ -1082,6 +1088,7 @@ impl App {
             footer_extra: note::Extra::default(),
             help_scroll: 0,
             help_max_scroll: 0,
+            outage: Default::default(),
             help_filter: Default::default(),
             help_typing: false,
             settings: Default::default(),
