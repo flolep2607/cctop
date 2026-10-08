@@ -336,6 +336,18 @@ pub struct AgentCall {
     pub duration_ms: i64,
     #[serde(skip_serializing_if = "is_zero_u64", default)]
     pub tool_count: u64,
+    /// Replies in the agent's own transcript.
+    #[serde(skip_serializing_if = "is_zero_u64", default)]
+    pub turns: u64,
+    /// What the agent's own requests cost, in dollars at list price. A reader
+    /// on a plan that bundles the provider shows it as included instead, the
+    /// way the report's subagent table does: the plan is the reader's to know,
+    /// not the transcript's.
+    #[serde(skip_serializing_if = "is_zero_f64", default)]
+    pub cost: f64,
+    /// Every token billed to the agent.
+    #[serde(skip_serializing_if = "is_zero_u64", default)]
+    pub tokens: u64,
     /// The transcript was purged; only what the parent recorded survives.
     #[serde(skip_serializing_if = "std::ops::Not::not", default)]
     pub ghost: bool,
@@ -347,10 +359,18 @@ pub struct AgentCall {
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub handback: Option<usize>,
     /// What the agent reported: the hand-back's text, or a foreground call's
-    /// result.
+    /// result — or, when `last_message` is set, what it last said.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub report: Option<String>,
+    /// `report` is not a report: a background agent that never handed back —
+    /// stopped, crashed, or still working — and this is its last message, which
+    /// a reader must not present as the agent's conclusion.
+    #[serde(skip_serializing_if = "std::ops::Not::not", default)]
+    pub last_message: bool,
 }
+
+/// How a reader labels a report that is only an agent's last message.
+pub const LAST_MESSAGE_LABEL: &str = "No hand-back — last message from the agent";
 
 impl AgentCall {
     /// `Explore — map the parser`: which agent, doing what. What names the
@@ -362,9 +382,14 @@ impl AgentCall {
         }
     }
 
-    /// `3 tools · 2m10s`, the size of the work, with whatever is known.
+    /// `12 turns · 3 tools · 2m10s`, the size of the work, with whatever is
+    /// known.
     pub fn size(&self) -> String {
         let mut parts = Vec::new();
+        if self.turns > 0 {
+            let s = if self.turns == 1 { "" } else { "s" };
+            parts.push(format!("{} turn{s}", self.turns));
+        }
         if self.tool_count > 0 {
             let s = if self.tool_count == 1 { "" } else { "s" };
             parts.push(format!("{} tool{s}", self.tool_count));
@@ -382,6 +407,10 @@ fn is_zero_i64(n: &i64) -> bool {
 
 fn is_zero_u64(n: &u64) -> bool {
     *n == 0
+}
+
+fn is_zero_f64(n: &f64) -> bool {
+    *n == 0.0
 }
 
 fn is_zero(n: &u32) -> bool {
@@ -575,6 +604,18 @@ fn join_agents(conversation: &mut Conversation, subagents: &[crate::session::Sub
             .as_deref()
             .is_some_and(|r| r.trim_start().starts_with("Async agent launched"));
         let handback = reports.get(&sa.agent_id);
+        let report = match background {
+            true => handback.map(|(_, text)| text.clone()),
+            false => tool.result.clone().filter(|r| !r.trim().is_empty()),
+        };
+        // A background agent that never handed back still said something, and
+        // the parser kept the last of it; a foreground agent's result is its
+        // report even when empty, since the call is what it answered.
+        let last_message = background && report.is_none() && sa.last_text.is_some();
+        let report = match last_message {
+            true => sa.last_text.clone(),
+            false => report,
+        };
         let status = match (tool.failed, sa.status) {
             (true, _) => "failed",
             (false, crate::session::SubagentStatus::Running) => "running",
@@ -589,13 +630,14 @@ fn join_agents(conversation: &mut Conversation, subagents: &[crate::session::Sub
             last_active: sa.last_active.clone(),
             duration_ms: sa.duration_ms,
             tool_count: sa.tool_count,
+            turns: sa.turns,
+            cost: sa.cost,
+            tokens: sa.tokens,
             ghost: sa.ghost,
             background,
             handback: handback.map(|(seq, _)| *seq),
-            report: match background {
-                true => handback.map(|(_, text)| text.clone()),
-                false => tool.result.clone().filter(|r| !r.trim().is_empty()),
-            },
+            report,
+            last_message,
         });
     }
 }
@@ -3267,6 +3309,59 @@ mod tests {
                 .any(|t| t.text.contains("legacy interleaved")),
             "{:?}",
             chat.turns
+        );
+    }
+
+    /// A background agent that never handed back is shown with what it last
+    /// said, marked as that; one that did keeps its hand-back. Every call
+    /// carries its agent's turns, tokens and cost, and the turn count is the
+    /// replies its own conversation draws.
+    #[test]
+    fn an_agent_with_no_handback_falls_back_to_its_last_message() {
+        let (_dir, session) = two_agents();
+        let main = session.data_file.clone().expect("main transcript");
+        let kept: Vec<String> = std::fs::read_to_string(&main)
+            .expect("read")
+            .lines()
+            .filter(|l| !l.contains("dummy report from A"))
+            .map(str::to_string)
+            .collect();
+        std::fs::write(&main, kept.join("\n") + "\n").expect("rewrite");
+
+        let chat = build(&session, None);
+        let agents: Vec<&AgentCall> = chat
+            .turns
+            .iter()
+            .flat_map(|t| &t.tools)
+            .filter_map(|t| t.agent.as_ref())
+            .collect();
+        let shown: Vec<(&str, bool)> = agents
+            .iter()
+            .map(|a| (a.report.as_deref().unwrap_or(""), a.last_message))
+            .collect();
+        assert_eq!(
+            shown,
+            [
+                ("aaaa0001 working", true),
+                ("dummy report from B", false),
+                ("dummy foreground report", false),
+            ]
+        );
+        for a in &agents {
+            let own = build_agent(&session, &a.id, None).expect("listed");
+            let replies = own
+                .turns
+                .iter()
+                .filter(|t| t.role == "assistant" && t.kind == "message")
+                .count() as u64;
+            assert_eq!(a.turns, replies, "{}", a.id);
+            assert_eq!(a.tokens, 105, "{}", a.id);
+            assert!(a.cost > 0.0, "{}", a.id);
+        }
+        assert!(
+            agents[0].size().starts_with("1 turn"),
+            "{}",
+            agents[0].size()
         );
     }
 

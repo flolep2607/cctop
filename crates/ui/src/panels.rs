@@ -2261,6 +2261,9 @@ mod tests {
             status: SubagentStatus::Done,
             cost,
             tool_count: 3,
+            turns: 0,
+            tokens: 0,
+            last_text: None,
             tool_use_id: None,
             context: Some(ContextUsage {
                 used: 1000,

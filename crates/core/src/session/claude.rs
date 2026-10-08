@@ -420,7 +420,26 @@ struct SubStats {
     last_model: String,
     latest_used: u64,
     latest_used_ts: String,
+    /// The API requests that said or called something, by request key: one
+    /// per reply, the way the conversation view draws them, since a reply is
+    /// written as several records sharing that key.
+    replies: HashSet<String>,
+    /// Replies with no request key, each a record of its own.
+    keyless_replies: u64,
+    /// Every token billed to this agent, after streaming partials are deduped.
+    tokens: u64,
+    /// What the agent said last, and when: the stand-in report for a
+    /// background agent that never handed back. Captured here because this is
+    /// the one pass that already reads every agent's file.
+    last_text: Option<String>,
+    last_text_ts: String,
 }
+
+/// The most of a subagent's last message kept as its stand-in report.
+///
+/// It is cached with every subagent of every session, and shown as a few
+/// lines on a block that opens onto the agent's own turns, where all of it is.
+const MAX_LAST_TEXT_CHARS: usize = 2000;
 
 /// Characters of live-context content, by where it came from.
 ///
@@ -672,6 +691,13 @@ impl Extractor {
         if !is_main && let Some(stats) = self.sub_stats.get_mut(file) {
             stats.cost += call_cost;
             stats.last_model = model.to_string();
+            stats.tokens = stats
+                .tokens
+                .saturating_add(inp)
+                .saturating_add(cache_r)
+                .saturating_add(out)
+                .saturating_add(cw5m)
+                .saturating_add(cw1h);
         }
     }
 
@@ -987,6 +1013,9 @@ impl Extractor {
         if ctx && let Some(key) = &turn_key {
             self.main_requests.insert(key.clone());
         }
+        if !is_main {
+            self.note_sub_reply(message, file, ts, turn_key.as_deref());
+        }
         // Tool scanning runs independently of the token dedup below: a streaming
         // partial and its final entry share a requestId, but each tool_use block
         // carries its own id, so global id dedup is what prevents double-counting.
@@ -1118,6 +1147,54 @@ impl Extractor {
             None => self.accumulate(
                 file, model, input, cache_read, output, cw5m, cw1h, ts, is_main, ctx,
             ),
+        }
+    }
+
+    /// Count a subagent's reply and keep what it last said.
+    fn note_sub_reply(&mut self, message: &Value, file: &Path, ts: &str, key: Option<&str>) {
+        let Some(stats) = self.sub_stats.get_mut(file) else {
+            return;
+        };
+        let blocks = message
+            .get("content")
+            .and_then(Value::as_array)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        let kind = |b: &Value| b.get("type").and_then(Value::as_str).map(str::to_string);
+        let text: Vec<&str> = blocks
+            .iter()
+            .filter(|b| kind(b).as_deref() == Some("text"))
+            .filter_map(|b| b.get("text").and_then(Value::as_str))
+            .filter(|t| !t.trim().is_empty())
+            .collect();
+        let calls = blocks
+            .iter()
+            .any(|b| kind(b).as_deref() == Some("tool_use"));
+        if text.is_empty() && !calls {
+            return;
+        }
+        match key {
+            Some(k) => {
+                if !stats.replies.contains(k) {
+                    stats.replies.insert(k.to_string());
+                }
+            }
+            None => stats.keyless_replies += 1,
+        }
+        if !text.is_empty()
+            && (stats.last_text_ts.is_empty() || !ts_before(ts, &stats.last_text_ts))
+        {
+            let joined = text.join("\n\n");
+            let joined = joined.trim();
+            stats.last_text = Some(match joined.chars().count() > MAX_LAST_TEXT_CHARS {
+                true => {
+                    let mut cut: String = joined.chars().take(MAX_LAST_TEXT_CHARS).collect();
+                    cut.push('…');
+                    cut
+                }
+                false => joined.to_string(),
+            });
+            stats.last_text_ts = ts.to_string();
         }
     }
 
@@ -1574,6 +1651,11 @@ fn build_subagents(files: &[PathBuf], ext: &Extractor) -> Vec<Subagent> {
             status,
             cost: stats.map(|s| s.cost).unwrap_or(0.0),
             tool_count: stats.map(|s| s.tool_count).unwrap_or(0),
+            turns: stats
+                .map(|s| s.replies.len() as u64 + s.keyless_replies)
+                .unwrap_or(0),
+            tokens: stats.map(|s| s.tokens).unwrap_or(0),
+            last_text: stats.and_then(|s| s.last_text.clone()),
             tool_use_id,
             context,
             ghost: false,
@@ -1654,6 +1736,9 @@ fn build_subagents(files: &[PathBuf], ext: &Extractor) -> Vec<Subagent> {
             },
             cost: 0.0,
             tool_count: 0,
+            turns: 0,
+            tokens: 0,
+            last_text: None,
             tool_use_id: Some(id.clone()),
             context: None,
             ghost: true,
@@ -1943,6 +2028,51 @@ mod tests {
         assert_eq!(wf.agent_type, "transcriber");
         assert_eq!(wf.description, "transcribe the first");
         assert_eq!(data.subagents.len(), 2, "{:?}", data.subagents);
+    }
+
+    /// A subagent's own file is read once, for its cost and also for how many
+    /// replies it made, what it was billed, and the last thing it said —
+    /// clipped, because it is cached with every subagent.
+    #[test]
+    fn a_subagent_carries_its_turns_tokens_and_last_words() {
+        let main = temp_path("sub-stats").with_extension("jsonl");
+        let subagents = main.with_extension("").join("subagents");
+        std::fs::create_dir_all(&subagents).expect("subagents dir");
+        let at = |req: &str, ts: &str, content: &str| {
+            assistant(req, 100, content).replace("10:00:00.000Z", &format!("10:00:0{ts}.000Z"))
+        };
+        let long = "w".repeat(MAX_LAST_TEXT_CHARS + 500);
+        let lines = [
+            r#"{"type":"user","isSidechain":true,"timestamp":"2026-08-05T10:00:00.000Z","message":{"role":"user","content":"dummy brief"}}"#.to_string(),
+            // One reply written as two records: its text, then its call.
+            at("req_1", "1", r#"{"type":"text","text":"looking"}"#),
+            at("req_1", "1", r#"{"type":"tool_use","id":"toolu_1","name":"Grep","input":{"pattern":"x"}}"#),
+            at("req_2", "2", r#"{"type":"tool_use","id":"toolu_2","name":"Read","input":{"file_path":"/w/a"}}"#),
+            at("req_3", "3", &format!(r#"{{"type":"text","text":"{long}"}}"#)),
+        ];
+        std::fs::write(
+            subagents.join("agent-a0000000000000001.jsonl"),
+            lines.join("\n") + "\n",
+        )
+        .expect("agent transcript");
+        std::fs::write(
+            &main,
+            assistant("req_main", 100, r#"{"type":"text","text":"ok"}"#) + "\n",
+        )
+        .expect("main transcript");
+
+        let data = extract(&main);
+        let _ = std::fs::remove_dir_all(main.with_extension(""));
+        let _ = std::fs::remove_file(&main);
+
+        let sa = &data.subagents[0];
+        assert_eq!(sa.turns, 3, "one per request, however many records");
+        assert_eq!(sa.tool_count, 2);
+        assert_eq!(sa.tokens, 3 * 105, "streaming partials counted once");
+        assert!(sa.cost > 0.0);
+        let last = sa.last_text.as_deref().expect("its last words");
+        assert_eq!(last.chars().count(), MAX_LAST_TEXT_CHARS + 1);
+        assert!(last.starts_with('w') && last.ends_with('…'));
     }
 
     /// The chart spans the session, not the live segment: a compaction is the

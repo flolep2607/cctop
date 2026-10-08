@@ -1752,6 +1752,17 @@ pub struct Subagent {
     pub status: SubagentStatus,
     pub cost: f64,
     pub tool_count: u64,
+    /// Replies in the agent's own transcript: one per API request that said
+    /// or called something, as the conversation view draws them.
+    #[serde(default)]
+    pub turns: u64,
+    /// Every token billed to the agent, whatever the plan priced them at.
+    #[serde(default)]
+    pub tokens: u64,
+    /// What the agent said last, clipped: the report a background agent that
+    /// never handed back is shown with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_text: Option<String>,
     pub tool_use_id: Option<String>,
     pub context: Option<ContextUsage>,
     /// The on-disk transcript was purged; only parent-side metadata survives.
