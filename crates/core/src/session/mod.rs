@@ -147,6 +147,11 @@ pub struct ContextBreakdown {
     pub tool_input: u64,
     pub attachments: u64,
     pub user_text: u64,
+    /// Messages other agents sent in — a subagent's hand-back, a peer's or a
+    /// coordinator's message — which arrive where a person's prompt goes and
+    /// used to be counted as theirs.
+    #[serde(default)]
+    pub agent_text: u64,
     pub assistant_text: u64,
     /// The segment begins at a compaction summary rather than at the start of
     /// the session, so `startup` carries that summary too.
@@ -194,7 +199,12 @@ pub fn decimate(series: &mut Vec<CtxPoint>) {
 impl ContextBreakdown {
     /// Everything the transcript could be read for, `startup` excluded.
     pub fn estimated(&self) -> u64 {
-        self.tool_output + self.tool_input + self.attachments + self.user_text + self.assistant_text
+        self.tool_output
+            + self.tool_input
+            + self.attachments
+            + self.user_text
+            + self.agent_text
+            + self.assistant_text
     }
 
     /// The window minus everything attributed to it.

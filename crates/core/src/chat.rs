@@ -2139,6 +2139,26 @@ fn author(origin: Option<&Value>, command_mode: Option<&str>, text: &str) -> Aut
     }
 }
 
+/// Who wrote a prompt-shaped message, without the sender's name: what the
+/// context meter needs to file its characters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Speaker {
+    Person,
+    Agent,
+    Harness,
+}
+
+/// [`author`], for the parser: the same decision the conversation view makes,
+/// so the context meter can never file a message under someone the reader
+/// does not show as its writer.
+pub(crate) fn speaker(origin: Option<&Value>, command_mode: Option<&str>, text: &str) -> Speaker {
+    match author(origin, command_mode, text) {
+        Author::Person => Speaker::Person,
+        Author::Agent { .. } => Speaker::Agent,
+        Author::Harness => Speaker::Harness,
+    }
+}
+
 /// Whether a record's `origin` says someone other than the person wrote it.
 ///
 /// For the readers that only need to know whether to trust a record as typed —
@@ -2223,7 +2243,7 @@ fn dedent(text: &str) -> String {
 
 /// A queued message's `prompt`: a string ordinarily, a list of blocks when an
 /// image came with it. Only the words are kept, as for a `user` entry.
-fn prompt_text(prompt: Option<&Value>) -> String {
+pub(crate) fn prompt_text(prompt: Option<&Value>) -> String {
     let mut text = String::new();
     match prompt {
         Some(Value::String(s)) => text.push_str(s),

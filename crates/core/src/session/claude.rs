@@ -5,6 +5,7 @@ use super::{
     ContextBreakdown, ContextUsage, Costs, MacMeta, Metrics, ModelBreakdown, Session, SessionData,
     Subagent, SubagentStatus, Surface, Tokens, transcript_files,
 };
+use crate::chat::Speaker;
 use crate::config::{self, CLAUDE_1M_CTX, CLAUDE_DEFAULT_CTX};
 use crate::pricing::{self, Provider};
 use crate::util;
@@ -431,7 +432,23 @@ struct CtxChars {
     tool_input: u64,
     attachments: u64,
     user_text: u64,
+    /// Messages other agents sent in: a subagent's hand-back, a peer's or a
+    /// coordinator's message.
+    agent_text: u64,
     assistant_text: u64,
+}
+
+impl CtxChars {
+    /// File a prompt-shaped message's characters under whoever wrote it.
+    fn add_said(&mut self, by: Speaker, chars: u64) {
+        match by {
+            Speaker::Person => self.user_text += chars,
+            Speaker::Agent => self.agent_text += chars,
+            // Task notifications and the like are content the harness
+            // splices in, as every other attachment is.
+            Speaker::Harness => self.attachments += chars,
+        }
+    }
 }
 
 /// One stretch of conversation the window was measured over: from a start, or
@@ -796,32 +813,21 @@ impl Extractor {
 
         let content = item.get("message").and_then(|m| m.get("content"));
         let mut texts: Vec<&str> = Vec::new();
+        let mut had_result = false;
         match content {
-            Some(Value::String(s)) => {
-                texts.push(s);
-                if ctx {
-                    self.ctx.chars.user_text += s.len() as u64;
-                }
-            }
+            Some(Value::String(s)) => texts.push(s),
             Some(Value::Array(blocks)) => {
                 for block in blocks {
                     match block {
-                        Value::String(s) => {
-                            texts.push(s);
-                            if ctx {
-                                self.ctx.chars.user_text += s.len() as u64;
-                            }
-                        }
+                        Value::String(s) => texts.push(s),
                         Value::Object(_) => {
                             if let Some(t) = block.get("text").and_then(Value::as_str) {
                                 texts.push(t);
-                                if ctx {
-                                    self.ctx.chars.user_text += t.len() as u64;
-                                }
                             }
                             if block.get("type").and_then(Value::as_str) == Some("tool_result")
                                 && let Some(id) = block.get("tool_use_id").and_then(Value::as_str)
                             {
+                                had_result = true;
                                 if ctx {
                                     self.ctx.chars.tool_output +=
                                         content_chars(block.get("content"));
@@ -845,6 +851,24 @@ impl Extractor {
                 }
             }
             _ => {}
+        }
+
+        // The words go to whoever the conversation view says wrote them: a
+        // subagent's hand-back filed as a `user` entry is many kilobytes of
+        // model output, and counting it as the person's made "Your messages"
+        // larger than anything they typed.
+        let said: u64 = texts.iter().map(|t| t.len() as u64).sum();
+        if ctx && said > 0 {
+            // Joined the way the conversation view joins them, so the
+            // classifier sees the same text in both places.
+            let joined = texts.join("\n\n");
+            // A hook's output riding on a tool result is the harness's, as the
+            // conversation view decides it.
+            let by = match had_result && item.get("isMeta").and_then(Value::as_bool) == Some(true) {
+                true => Speaker::Harness,
+                false => crate::chat::speaker(item.get("origin"), None, &joined),
+            };
+            self.ctx.chars.add_said(by, said);
         }
 
         // In the person's role: not a skill's body or a slash command's
@@ -1139,12 +1163,27 @@ impl Extractor {
             // message, recorded as its own entry rather than inside one.
             Some("attachment") if in_context(item, is_main) => {
                 let attachment = item.get("attachment");
-                // Some kinds carry no `content` and are the payload themselves,
-                // such as the file reference a compaction leaves behind.
-                self.ctx.chars.attachments += match attachment.and_then(|a| a.get("content")) {
-                    Some(content) => content_chars(Some(content)),
-                    None => content_chars(attachment),
-                };
+                let queued = attachment
+                    .filter(|a| a.get("type").and_then(Value::as_str) == Some("queued_command"));
+                if let Some(q) = queued {
+                    // A message that arrived mid-turn. Only its `prompt` reaches
+                    // the model: `origin.body` repeats a peer's report for the
+                    // harness's own use, so sizing the whole object counted
+                    // every report twice, and filed it as an attachment
+                    // whoever wrote it.
+                    let text = crate::chat::prompt_text(q.get("prompt"));
+                    let mode = q.get("commandMode").and_then(Value::as_str);
+                    let by = crate::chat::speaker(q.get("origin"), mode, &text);
+                    self.ctx.chars.add_said(by, text.len() as u64);
+                } else {
+                    // Some kinds carry no `content` and are the payload
+                    // themselves, such as the file reference a compaction
+                    // leaves behind.
+                    self.ctx.chars.attachments += match attachment.and_then(|a| a.get("content")) {
+                        Some(content) => content_chars(Some(content)),
+                        None => content_chars(attachment),
+                    };
+                }
                 if let Some(a) = attachment {
                     self.loadout.note(a);
                 }
@@ -1321,6 +1360,7 @@ pub fn extract(transcript: &Path) -> SessionData {
         tool_input: est(c.tool_input),
         attachments: est(c.attachments),
         user_text: est(c.user_text),
+        agent_text: est(c.agent_text),
         assistant_text: est(c.assistant_text),
         after_compaction: seg.after_compaction,
         superseded,
@@ -1996,6 +2036,62 @@ mod tests {
             "the gap must be the plain remainder"
         );
         assert!(b.unaccounted() > 0);
+    }
+
+    /// Every message that arrives where a person's prompt goes is filed under
+    /// whoever the conversation view says wrote it, and counted once: a
+    /// queued peer report by its `prompt`, never by `origin.body` and the JSON
+    /// around it too.
+    #[test]
+    fn messages_are_counted_once_under_whoever_wrote_them() {
+        let typed = "y".repeat(275);
+        let mid_turn = "h".repeat(550);
+        let handback = "p".repeat(2750);
+        let queued = "q".repeat(1375);
+        let notice = "<task-notification>\n<task-id>a0000000000000001</task-id>\n<summary>dummy finished</summary>\n</task-notification>";
+        let data = extract_lines(
+            "ctx-authors",
+            &[
+                assistant("req_1", 1000, r#"{"type":"text","text":"a"}"#),
+                format!(
+                    r#"{{"type":"user","timestamp":"2026-08-05T10:00:01.000Z","message":{{"role":"user","content":"{typed}"}}}}"#
+                ),
+                format!(
+                    r#"{{"type":"user","timestamp":"2026-08-05T10:00:02.000Z","origin":{{"kind":"peer","from":"a0000000000000001","name":"Explore"}},"message":{{"role":"user","content":[{{"type":"text","text":"{handback}"}}]}}}}"#
+                ),
+                format!(
+                    r#"{{"type":"attachment","timestamp":"2026-08-05T10:00:03.000Z","attachment":{{"type":"queued_command","isMeta":true,"origin":{{"kind":"peer","from":"a0000000000000002","name":"Plan","body":"{queued}"}},"prompt":"{queued}"}}}}"#
+                ),
+                format!(
+                    r#"{{"type":"attachment","timestamp":"2026-08-05T10:00:04.000Z","attachment":{{"type":"queued_command","commandMode":"prompt","origin":{{"kind":"human"}},"prompt":"{mid_turn}"}}}}"#
+                ),
+                serde_json::json!({
+                    "type": "attachment",
+                    "timestamp": "2026-08-05T10:00:05.000Z",
+                    "attachment": {
+                        "type": "queued_command",
+                        "commandMode": "task-notification",
+                        "origin": {"kind": "task-notification"},
+                        "prompt": notice,
+                    },
+                })
+                .to_string(),
+                assistant("req_2", 9000, r#"{"type":"text","text":"b"}"#),
+            ],
+        );
+        let b = data.context_breakdown.expect("a breakdown");
+        assert_eq!(b.user_text, 300, "the typed prompt and the mid-turn one");
+        assert_eq!(
+            b.agent_text, 1500,
+            "each report once, by the text the model was handed"
+        );
+        let est = |n: usize| (n as f64 / CHARS_PER_TOKEN).round() as u64;
+        assert_eq!(b.attachments, est(notice.len()), "the notification");
+        assert_eq!(
+            b.unaccounted(),
+            9000 - 1000 - b.estimated() as i64,
+            "the new category is part of the estimate"
+        );
     }
 
     /// What `cctop optimize` judges "never used" by: the listings the session
