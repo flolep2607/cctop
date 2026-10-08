@@ -791,9 +791,37 @@ pub fn respond_revalidated(
     content_type: &str,
     body: &[u8],
 ) {
+    respond_tagged(stream, request, content_type, body, REVALIDATE);
+}
+
+/// A body tagged like [`respond_revalidated`]'s but never kept: `no-store`, so
+/// no cache holds it, and a `304` only for a client that remembered the tag
+/// itself and sent it back in `If-None-Match`.
+///
+/// For the session table, which a page polls when its event stream is not
+/// getting through. The table carries titles and prompts, so it stays out of
+/// the browser's disk cache as every transcript-bearing route does; the page
+/// holds the copy it already parsed, and an unchanged table costs it a `304`
+/// rather than the whole body again.
+pub fn respond_tagged_unkept(
+    stream: &mut TcpStream,
+    request: &Request,
+    content_type: &str,
+    body: &[u8],
+) {
+    respond_tagged(stream, request, content_type, body, NO_STORE);
+}
+
+fn respond_tagged(
+    stream: &mut TcpStream,
+    request: &Request,
+    content_type: &str,
+    body: &[u8],
+    cache: &str,
+) {
     let etag = etag_of(body);
     if request.holds(&etag) {
-        return not_modified(stream, request, &etag, REVALIDATE, "");
+        return not_modified(stream, request, &etag, cache, "");
     }
     let worth = body.len() >= COMPRESS_FROM && compressible(content_type);
     let packed = (worth && request.accepts_gzip())
@@ -801,7 +829,7 @@ pub fn respond_revalidated(
         .flatten();
     let head = Head {
         content_type,
-        cache: REVALIDATE,
+        cache,
         etag: Some(&etag),
         encoding: packed.as_ref().map(|_| Encoding::Gzip),
         vary: worth,
