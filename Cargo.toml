@@ -217,7 +217,10 @@ rmux-sdk = { package = "cctop-rmux-sdk", version = "0.10.1" }
 # speak. The server keeps its `web` feature, which is the browser share.
 # Server 0.10.1 (with cctop-rmux-core 0.10.1, which does the parsing) answers
 # the Kitty keyboard negotiation, so Shift+Enter reaches a pane as itself.
-rmux-client = { package = "cctop-rmux-client", version = "0.10.0" }
+# Client 0.11 builds on rustix 1.1.5, which made the `rustix::runtime`
+# module 0.10 used private: on 0.10, a fresh resolve (`cargo install`
+# without --locked, cargo-semver-checks) fails to compile.
+rmux-client = { package = "cctop-rmux-client", version = "0.11.0" }
 rmux-proto = { package = "cctop-rmux-proto", version = "0.10.0" }
 rmux-server = { package = "cctop-rmux-server", version = "0.10.1" }
 safetensors = "0.6"
