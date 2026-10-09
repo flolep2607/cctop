@@ -1,4 +1,15 @@
 {
+  "extraKnownMarketplaces": {
+    "claude-issue-loop": {
+      "source": {
+        "source": "github",
+        "repo": "flolep2607/claude-issue-loop"
+      }
+    }
+  },
+  "enabledPlugins": {
+    "issue-loop@claude-issue-loop": true
+  },
   "hooks": {
     "PostModelSwitch": [
       {
