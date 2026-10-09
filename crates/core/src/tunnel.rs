@@ -536,8 +536,10 @@ pub struct Account {
     pub share_names: std::collections::BTreeMap<String, ShareName>,
     /// Cloudflare Access in front of the page, when `cctop tunnel access on`
     /// put it there: who may log in, and the ids of what cctop created for
-    /// it, which `cctop tunnel remove` deletes with the rest.
-    pub access: Option<crate::cloudflare::access::Settings>,
+    /// it, which `cctop tunnel remove` deletes with the rest. Boxed: most
+    /// accounts have none, and an account is carried by value in the
+    /// dashboard's connect steps.
+    pub access: Option<Box<crate::cloudflare::access::Settings>>,
     /// Whether this came from `CCTOP_TUNNEL_TOKEN` rather than the file — and
     /// so is not cctop's to remove.
     pub from_env: bool,
@@ -725,7 +727,8 @@ fn from_table(text: &str) -> Option<Account> {
         access: table
             .get("access")
             .and_then(|v| v.as_table_like())
-            .and_then(access_from_table),
+            .and_then(access_from_table)
+            .map(Box::new),
         from_env: false,
     })
 }
@@ -920,12 +923,12 @@ mod tests {
                 ),
             ]
             .into(),
-            access: Some(crate::cloudflare::access::Settings {
+            access: Some(Box::new(crate::cloudflare::access::Settings {
                 app_id: Some("app1".into()),
                 policy_id: Some("pol1".into()),
                 idp_id: None,
                 ..crate::cloudflare::access::fake::settings()
-            }),
+            })),
             from_env: false,
         }
     }

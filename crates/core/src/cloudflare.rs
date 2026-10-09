@@ -33,6 +33,7 @@ use serde_json::{Value, json};
 use crate::tunnel::{Account, ShareName};
 
 pub mod access;
+pub mod access_setup;
 pub mod login;
 
 /// Cloudflare's API.
@@ -71,8 +72,12 @@ pub const PERMISSIONS: [&str; 3] = [
 /// found; the documentation's table does not list it. If the page opens
 /// without it, the three permissions printed beside the link still say what
 /// to tick.
+///
+/// The two Access keys (`access`, `access_acct`) are on it too, from the
+/// template table's own list: a token made today can put the page behind
+/// Access later without being made again ([`access_setup`]).
 pub fn token_link() -> String {
-    let keys = r#"[{"key":"argotunnel","type":"edit"},{"key":"dns","type":"edit"},{"key":"zone","type":"read"}]"#;
+    let keys = r#"[{"key":"argotunnel","type":"edit"},{"key":"dns","type":"edit"},{"key":"zone","type":"read"},{"key":"access","type":"edit"},{"key":"access_acct","type":"edit"}]"#;
     format!(
         "https://dash.cloudflare.com/profile/api-tokens?permissionGroupKeys={}&accountId=*&zoneId=all&name=cctop",
         percent_encode(keys)
@@ -190,6 +195,8 @@ pub enum Error {
     LoginRefused(&'static str),
     /// The browser login did not complete, in a sentence of its own.
     Login(String),
+    /// The account has no Zero Trust organization, so no Access team.
+    NoTeam,
     /// Network trouble, or Cloudflare said no for its own reason.
     Api(String),
 }
@@ -202,12 +209,32 @@ impl fmt::Display for Error {
                 "That token was refused: check that all of it was pasted, and that it \
                  has not expired or been deleted."
             ),
+            // A token cctop already holds can be given the Access
+            // permissions in place — the dashboard edits a token's
+            // permissions without changing its value — so that is what is
+            // asked for, rather than a new one.
+            Error::MissingPermission(permission)
+                if access_setup::PERMISSIONS.contains(permission) =>
+            {
+                write!(
+                    f,
+                    "The token cctop has lacks the permission \"{permission}\". Add it, and \
+                     \"{}\", to that token at \
+                     https://dash.cloudflare.com/profile/api-tokens (Edit keeps the token the \
+                     same), then run this again.",
+                    access_setup::PERMISSIONS
+                        .iter()
+                        .find(|p| *p != permission)
+                        .unwrap_or(permission)
+                )
+            }
             Error::MissingPermission(permission) => write!(
                 f,
                 "That token lacks the permission \"{permission}\". Make one with all \
                  three from {}",
                 token_link()
             ),
+            Error::NoTeam => f.write_str(access_setup::NO_TEAM),
             Error::NoDomain => write!(
                 f,
                 "A stable tunnel needs a domain whose DNS is on Cloudflare, and this \
@@ -1136,6 +1163,10 @@ pub(crate) fn remove_with(account: &Account, api: impl Fn(&str) -> Api) -> Lefto
         return Leftovers(left);
     };
     let api = api(token).login_if(account.login);
+    // Access first: its application names the hostname about to go.
+    if let Some(access) = &account.access {
+        left.extend(access_setup::disable(&api, account, access));
+    }
     if let Some(zone_id) = &account.zone_id {
         // Agents' own names too, by the ids stored with them, after setup's.
         let named = account
@@ -1272,6 +1303,16 @@ pub mod fake {
                 ("PUT", p) if p.ends_with("/configurations") => ok(json!({})),
                 ("POST", "/zones/zone1/dns_records") => {
                     ok(json!({"id": format!("rec-{}", rand_id())}))
+                }
+                ("GET", "/accounts/acct1/access/organizations") => {
+                    ok(json!({"auth_domain": "made-up-team.cloudflareaccess.com"}))
+                }
+                ("GET", "/accounts/acct1/access/identity_providers") => ok(json!([])),
+                ("POST", "/accounts/acct1/access/identity_providers") => ok(json!({"id": "idp1"})),
+                ("POST", "/accounts/acct1/access/policies") => ok(json!({"id": "pol1"})),
+                ("PUT", p) if p.starts_with("/accounts/acct1/access/policies/") => ok(json!({})),
+                ("POST", "/accounts/acct1/access/apps") => {
+                    ok(json!({"id": "app1", "aud": "made-up-aud"}))
                 }
                 ("DELETE", _) => ok(json!({})),
                 _ => (
