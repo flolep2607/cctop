@@ -541,9 +541,9 @@ dependencies = [
 
 [[package]]
 name = "cctop-rmux-core"
-version = "0.10.0"
+version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f73d4ec15cefee3bc4135715ed16107ed5502d06dea52ed681171844802f05be"
+checksum = "a35fd1ae0b1fe4f22efddc9163f6256d8c6d675670aab615a817c183383b4b70"
 dependencies = [
  "cctop-rmux-proto",
  "chrono",
@@ -621,9 +621,9 @@ dependencies = [
 
 [[package]]
 name = "cctop-rmux-server"
-version = "0.10.0"
+version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "04e21fab47145b64c0239beb346ef697d7aadcb7d408508581a5830ff1c286ff"
+checksum = "40ecd64ee378d536a8cd4be211976d34db77e38cbcab90502861e50c476a1c70"
 dependencies = [
  "async-recursion",
  "base64 0.22.1",
