@@ -575,15 +575,7 @@ fn install(
     let placement = place()?;
 
     println!("Downloading {}…", asset.name);
-    let mut body = Vec::new();
-    agent()
-        .get(&asset.browser_download_url)
-        .call()
-        .context("could not download the release archive")?
-        .body_mut()
-        .as_reader()
-        .read_to_end(&mut body)
-        .context("could not read the release archive")?;
+    let body = download(&asset.browser_download_url, DOWNLOAD_IDLE)?;
 
     let staging = match placement {
         Placement::Beside(staging) => staging,
@@ -600,6 +592,144 @@ fn install(
     // After the replace, so an install that worked is never held up by the
     // network call that only decorates it.
     Ok(show_changes(current, latest))
+}
+
+/// How long the archive may go without a byte arriving before the download
+/// is given up on.
+const DOWNLOAD_IDLE: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// The client for the archive itself.
+///
+/// Not [`agent`]: its fifteen seconds are for the whole call, which suits a
+/// few kilobytes of release JSON and fails a several-megabyte archive on any
+/// link slow enough to need more, however steadily it is arriving. So this
+/// one bounds each step it can wait on — finding the host, connecting,
+/// hearing the response start — and the body is bounded by silence rather
+/// than by length: see [`read_with_progress`].
+fn download_agent() -> ureq::Agent {
+    let step = Some(std::time::Duration::from_secs(15));
+    ureq::Agent::config_builder()
+        .timeout_resolve(step)
+        .timeout_connect(step)
+        .timeout_send_request(step)
+        .timeout_recv_response(Some(DOWNLOAD_IDLE))
+        .user_agent(user_agent())
+        .build()
+        .into()
+}
+
+/// Fetch `url` whole, giving up only when nothing has arrived for `idle`.
+fn download(url: &str, idle: std::time::Duration) -> Result<Vec<u8>> {
+    let response = download_agent()
+        .get(url)
+        .call()
+        .context("could not download the release archive")?;
+    let total = response.body().content_length();
+    read_with_progress(response.into_body().into_reader(), total, idle)
+        .context("could not read the release archive")
+}
+
+/// Read the whole archive, drawing a bar on stderr as it arrives, and fail
+/// once `idle` passes without a byte.
+///
+/// A release is several megabytes, and over a slow link the line that says it
+/// is downloading was all there was to look at for long enough to wonder
+/// whether anything was happening. The bar is drawn only on a terminal: piped,
+/// the carriage returns would be noise in a log.
+///
+/// The reads happen on a thread of their own because a blocking read has no
+/// timeout of its own to give: the HTTP client offers one for the whole body
+/// or none. Waiting on the thread's chunks is what lets silence be measured.
+/// A read still blocked when the wait gives up is left behind, and goes with
+/// the process.
+fn read_with_progress(
+    mut reader: impl Read + Send + 'static,
+    total: Option<u64>,
+    idle: std::time::Duration,
+) -> std::io::Result<Vec<u8>> {
+    use std::io::{IsTerminal, Write};
+    use std::sync::mpsc::{RecvTimeoutError, sync_channel};
+    let (tx, rx) = sync_channel::<std::io::Result<Vec<u8>>>(4);
+    std::thread::spawn(move || {
+        let mut chunk = vec![0u8; 64 * 1024];
+        loop {
+            let read = match reader.read(&mut chunk) {
+                Ok(0) => return,
+                Ok(n) => Ok(chunk[..n].to_vec()),
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(e) => Err(e),
+            };
+            let failed = read.is_err();
+            // The receiver is gone once the download was given up on.
+            if tx.send(read).is_err() || failed {
+                return;
+            }
+        }
+    });
+
+    let draw = std::io::stderr().is_terminal();
+    let mut body = Vec::with_capacity(total.unwrap_or(0).min(64 << 20) as usize);
+    let mut drawn = None;
+    let finish = |drawn: &Option<String>| {
+        if drawn.is_some() {
+            eprintln!();
+        }
+    };
+    loop {
+        match rx.recv_timeout(idle) {
+            Ok(Ok(bytes)) => body.extend_from_slice(&bytes),
+            Ok(Err(e)) => {
+                finish(&drawn);
+                return Err(e);
+            }
+            // The reader returned at the end of the body.
+            Err(RecvTimeoutError::Disconnected) => break,
+            Err(RecvTimeoutError::Timeout) => {
+                finish(&drawn);
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    format!(
+                        "nothing arrived for {}s, {} bytes in",
+                        idle.as_secs(),
+                        body.len()
+                    ),
+                ));
+            }
+        }
+        if draw {
+            let line = progress_line(body.len() as u64, total);
+            // Redrawn only when it reads differently, not once per chunk.
+            if drawn.as_ref() != Some(&line) {
+                eprint!("\r{line}");
+                let _ = std::io::stderr().flush();
+                drawn = Some(line);
+            }
+        }
+    }
+    finish(&drawn);
+    Ok(body)
+}
+
+/// `[██████░░░░░░░░░░░░░░]  31%  2.1/6.8 MB`, or just the megabytes so far
+/// when the server did not say how many there are.
+fn progress_line(done: u64, total: Option<u64>) -> String {
+    const WIDTH: u64 = 30;
+    let mb = |b: u64| b as f64 / 1_000_000.0;
+    match total.filter(|&t| t > 0) {
+        Some(total) => {
+            let done = done.min(total);
+            let filled = (done * WIDTH / total) as usize;
+            format!(
+                "[{}{}] {:>3}%  {:.1}/{:.1} MB",
+                "█".repeat(filled),
+                "░".repeat(WIDTH as usize - filled),
+                done * 100 / total,
+                mb(done),
+                mb(total)
+            )
+        }
+        None => format!("{:.1} MB", mb(done)),
+    }
 }
 
 /// Set on the process that replaces this one, so the new binary knows it has
@@ -1497,6 +1627,143 @@ fn confirm(dir: &Path, exe: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn the_download_bar_fills_with_the_bytes() {
+        assert_eq!(
+            progress_line(0, Some(4_000_000)),
+            format!("[{}]   0%  0.0/4.0 MB", "░".repeat(30))
+        );
+        assert_eq!(
+            progress_line(2_000_000, Some(4_000_000)),
+            format!("[{}{}]  50%  2.0/4.0 MB", "█".repeat(15), "░".repeat(15))
+        );
+        assert_eq!(
+            progress_line(4_000_000, Some(4_000_000)),
+            format!("[{}] 100%  4.0/4.0 MB", "█".repeat(30))
+        );
+        // No length from the server: what has arrived, and no bar to lie with.
+        assert_eq!(progress_line(1_500_000, None), "1.5 MB");
+        assert_eq!(progress_line(1_500_000, Some(0)), "1.5 MB");
+    }
+
+    /// A local server that answers one request with `body`, written in
+    /// `chunks` pieces `gap` apart, after `stall` of silence halfway through.
+    fn trickle(
+        body: Vec<u8>,
+        chunks: usize,
+        gap: std::time::Duration,
+        stall: std::time::Duration,
+    ) -> String {
+        use std::io::Write;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let url = format!(
+            "http://{}/archive.tar.gz",
+            listener.local_addr().expect("addr")
+        );
+        std::thread::spawn(move || {
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
+            };
+            // The request is read only as far as its end, which is all a
+            // server owes a GET before answering.
+            let mut seen = Vec::new();
+            let mut byte = [0u8; 1];
+            while !seen.ends_with(b"\r\n\r\n") {
+                match stream.read(&mut byte) {
+                    Ok(1) => seen.push(byte[0]),
+                    _ => return,
+                }
+            }
+            let head = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = stream.write_all(head.as_bytes());
+            let size = body.len().div_ceil(chunks);
+            for (i, piece) in body.chunks(size).enumerate() {
+                if i == chunks / 2 {
+                    std::thread::sleep(stall);
+                }
+                if stream
+                    .write_all(piece)
+                    .and_then(|()| stream.flush())
+                    .is_err()
+                {
+                    return;
+                }
+                std::thread::sleep(gap);
+            }
+        });
+        url
+    }
+
+    #[test]
+    fn a_download_reads_every_byte() {
+        let data: Vec<u8> = (0..200_000u32).map(|i| i as u8).collect();
+        let read = read_with_progress(
+            std::io::Cursor::new(data.clone()),
+            Some(data.len() as u64),
+            std::time::Duration::from_secs(5),
+        )
+        .expect("read");
+        assert_eq!(read, data);
+    }
+
+    /// A download that keeps arriving is never cut off for taking long:
+    /// this one takes over twice its idle limit, a piece at a time, and still
+    /// completes.
+    #[test]
+    fn a_slow_download_that_keeps_arriving_completes() {
+        let data: Vec<u8> = (0..50_000u32).map(|i| (i * 7) as u8).collect();
+        // Thirty times the gap between pieces, so a busy machine running the
+        // suite does not read a late piece as silence.
+        let idle = std::time::Duration::from_millis(1500);
+        let url = trickle(
+            data.clone(),
+            70,
+            std::time::Duration::from_millis(50),
+            std::time::Duration::ZERO,
+        );
+        let started = std::time::Instant::now();
+        let read = download(&url, idle).expect("a steady download completes");
+        assert_eq!(read, data);
+        assert!(
+            started.elapsed() > idle * 2,
+            "the trickle was meant to outlast the idle limit twice over"
+        );
+    }
+
+    /// A download that stops arriving is given up on once the silence
+    /// passes the limit, rather than waiting forever.
+    #[test]
+    fn a_download_that_goes_silent_fails() {
+        let data = vec![1u8; 10_000];
+        let idle = std::time::Duration::from_millis(300);
+        let url = trickle(
+            data,
+            4,
+            std::time::Duration::ZERO,
+            std::time::Duration::from_secs(3),
+        );
+        let started = std::time::Instant::now();
+        let error = download(&url, idle).expect_err("silence ends the download");
+        assert!(
+            format!("{error:#}").contains("nothing arrived"),
+            "{error:#}"
+        );
+        assert!(started.elapsed() < std::time::Duration::from_secs(3));
+    }
+
+    /// The archive's client has no limit on the whole call: that is what
+    /// failed a steady download on a slow link.
+    #[test]
+    fn the_archive_client_has_no_overall_deadline() {
+        let timeouts = download_agent().config().timeouts();
+        assert_eq!(timeouts.global, None);
+        assert_eq!(timeouts.recv_body, None);
+        assert!(timeouts.connect.is_some());
+    }
     use super::*;
 
     /// The version the updater compares with releases is the one `main` hands
