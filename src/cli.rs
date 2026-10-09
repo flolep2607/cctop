@@ -48,6 +48,8 @@ Commands:
                           did not use.
   cctop log               Print the event stream CCTOP_LOG writes; -f follows
                           it.
+  cctop yolo on|off       Switch YOLO for the Claude Code session this runs
+                          in — what /yolo does. `status` says which.
   cctop yolo log          Every prompt YOLO allowed and every switch on or
                           off, kept after the session ends. Redacted.
   cctop --trace           Time each stage of a run, for a bug report about
@@ -70,6 +72,7 @@ Each command takes --help for the details.";
                       cctop serve [--bind ADDR] [--port PORT]\n       \
                       cctop tunnel setup | status | remove\n       \
                       cctop optimize | compare | yield | burn | log\n       \
+                      cctop yolo on | off | status\n       \
                       cctop yolo log [--session ID] [--since WHEN] [-n N] [--json] [-f]\n       \
                       cctop recall <query> [--read SESSION PASSAGE]\n       \
                       cctop wait <session> [--until …] [--timeout …]\n       \

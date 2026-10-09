@@ -739,7 +739,10 @@ const MAX_ANCESTRY: usize = 8;
 /// hook cannot tell (each harness stacks its own shells, wrappers and sandboxes
 /// in between), while cctop already knows which pids are agent processes and
 /// need only intersect the two.
-fn ancestry() -> Vec<u32> {
+///
+/// `cctop yolo` walks the same chain for the same reason: the process it
+/// records is the one the YOLO hook will look for among its own ancestors.
+pub(crate) fn ancestry() -> Vec<u32> {
     // Read directly rather than through `sysinfo`, which was measured at 4.2ms
     // against 152us for the identical chain. The hook spends the agent's
     // deadline, so a 28x saving on a fact this small is worth reading `/proc`

@@ -82,6 +82,10 @@ pub enum Via {
 pub enum Origin {
     Tui,
     Web,
+    /// From inside the session itself: `/yolo`, or `cctop yolo` run there.
+    /// One word for both, because nothing can tell them apart — see
+    /// [`crate::yolo::command`].
+    Session,
 }
 
 /// The tool a permission prompt was for, and what it was asked to touch, as the
@@ -504,10 +508,15 @@ pub fn call_of(body: &serde_json::Value) -> Option<Call> {
 // ---------------------------------------------------------------------------
 
 const HELP: &str = "\
-cctop yolo — what YOLO mode allowed
+cctop yolo — switch YOLO from inside a session, and what it allowed
 
 Usage:
+  cctop yolo on | off | status
   cctop yolo log [--session <id>] [--since <when>] [-n <count>] [--json] [-f]
+
+`on`, `off` and `status` act on the Claude Code session they run inside, so
+they are for that session's own shell — which is what /yolo in Claude Code
+runs. `on` lasts until the session's process ends.
 
 Every prompt YOLO allowed, by the hook or by a key press, and every time it was
 switched on or off, is appended to ~/.local/share/cctop/yolo-log.jsonl (rotated
@@ -524,16 +533,17 @@ Commands and paths are redacted on a best-effort basis before they are written:
 treat the file as sensitive.
 ";
 
-/// `cctop yolo …`. Only `log` so far; anything else, or nothing, is the help.
+/// `cctop yolo …`: the switch, the log, or — given nothing — the help.
 pub fn run(argv: &[String]) -> i32 {
     match argv.first().map(String::as_str) {
         Some("log") => run_log(&Log::default(), &argv[1..], &mut std::io::stdout()),
+        Some("on" | "off" | "status" | "--slash") => crate::yolo::command(argv),
         Some("-h" | "--help" | "help") | None => {
             print!("{HELP}");
             0
         }
         Some(other) => {
-            eprintln!("cctop yolo: no command {other:?} (try `cctop yolo log`)");
+            eprintln!("cctop yolo: no command {other:?} (try `cctop yolo --help`)");
             2
         }
     }
@@ -674,6 +684,7 @@ fn render(line: &Line) -> String {
             let from = match line.from {
                 Some(Origin::Tui) => " from the TUI",
                 Some(Origin::Web) => " from the web",
+                Some(Origin::Session) => " from inside the session",
                 None => "",
             };
             let pid = line.pid.map(|p| format!(" pid {p}")).unwrap_or_default();
