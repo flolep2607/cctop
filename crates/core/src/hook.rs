@@ -4930,6 +4930,246 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A whole Claude Code install at `exe`, in a form an older cctop might
+    /// have written: every event and the deciding entry there, each wrapper
+    /// carrying a matcher and every command a timeout this version does not
+    /// write — the shape of a hook whose invocation changed under an update.
+    fn old_form_install(exe: &str) -> serde_json::Value {
+        let hooks: serde_json::Map<String, serde_json::Value> = CLAUDE_EVENTS
+            .iter()
+            .map(|e| {
+                let mut commands = vec![hook_command(exe, e)];
+                if CLAUDE_DECIDING.contains(e) {
+                    commands.push(yolo_hook_command(exe, e));
+                }
+                let entries = commands
+                    .into_iter()
+                    .map(|c| {
+                        serde_json::json!({"matcher": "*", "hooks": [{"type": "command",
+                            "command": c, "timeout": 5}]})
+                    })
+                    .collect();
+                ((*e).to_string(), serde_json::Value::Array(entries))
+            })
+            .collect();
+        serde_json::json!({ "hooks": hooks })
+    }
+
+    /// The issue's case: an update changed how a hook is written, and the
+    /// entries an older cctop wrote — every event present, nothing missing —
+    /// are rewritten into this version's form without anyone reinstalling.
+    /// The user's own hooks, in the same event and in the same wrapper as
+    /// cctop's, come through untouched.
+    #[test]
+    fn an_install_in_an_older_form_is_refreshed_and_the_users_hooks_survive() {
+        let dir = scratch("outdated");
+        let scope = Scope::Project(dir.clone());
+        let path = Harness::Claude.config_file(&scope).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let own = own_exe().unwrap();
+
+        let mut doc = old_form_install(&own);
+        let stop = doc["hooks"]["Stop"].as_array_mut().unwrap();
+        // The user's own entry, beside cctop's.
+        stop.push(
+            serde_json::json!({"hooks": [{"type": "command", "command": "notify-send done"}]}),
+        );
+        // And one of theirs in the wrapper cctop's sits in.
+        stop[0]["hooks"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({"type": "command", "command": "say stopped"}));
+        // An event this cctop does not register, holding one of theirs.
+        doc["hooks"]["NotACctopEvent"] =
+            serde_json::json!([{"hooks": [{"type": "command", "command": "beep"}]}]);
+        // And an event an older cctop registered and this one no longer does.
+        doc["hooks"]["Retired"] = serde_json::json!([{"hooks": [{"type": "command",
+            "command": hook_command(&own, "Retired")}]}]);
+        std::fs::write(&path, doc.to_string()).unwrap();
+
+        let health = Harness::Claude.health(&scope).unwrap();
+        assert_eq!(health, Health::Outdated { exe: None });
+        assert!(health.is_problem(), "an old form read as fine");
+
+        let repair = repair_in(std::slice::from_ref(&scope));
+        assert_eq!(
+            repair.fixed,
+            vec!["Claude Code (project): brought up to date"]
+        );
+        assert!(!repair.needs_attention);
+        assert_eq!(Harness::Claude.health(&scope).unwrap(), Health::Installed);
+
+        let root = read_settings(&path).unwrap();
+        // cctop's entries are exactly what an install writes now.
+        let mut fresh = serde_json::Map::new();
+        json_merge(
+            &mut fresh,
+            &path,
+            Shape::Nested,
+            CLAUDE_EVENTS,
+            CLAUDE_DECIDING,
+            &own,
+        )
+        .unwrap();
+        assert_eq!(our_entries(&root), our_entries(&fresh));
+        // Every one of the user's survived, the wrapper's matcher included.
+        let all: Vec<&str> = root["hooks"]
+            .as_object()
+            .unwrap()
+            .values()
+            .flat_map(|list| list.as_array().unwrap())
+            .flat_map(entry_commands)
+            .collect();
+        for theirs in ["notify-send done", "say stopped", "beep"] {
+            assert!(all.contains(&theirs), "{theirs} was lost: {all:?}");
+        }
+        let shared = root["hooks"]["Stop"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| entry_commands(e).any(|c| c == "say stopped"))
+            .unwrap();
+        assert_eq!(shared["matcher"], "*", "the user's wrapper was rewritten");
+        assert!(
+            root["hooks"].get("Retired").is_none(),
+            "a retired event was left"
+        );
+
+        // And the second pass has nothing to do.
+        assert!(repair_in(std::slice::from_ref(&scope)).fixed.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Repair runs at every start, so the ordinary case — everything already
+    /// right — must cost a read and nothing else: no rewrite, so not even the
+    /// mtime moves. The user's formatting is part of what that keeps.
+    #[test]
+    fn an_install_already_up_to_date_is_not_rewritten() {
+        let dir = scratch("up-to-date");
+        let scope = Scope::Project(dir.clone());
+        for harness in HARNESSES {
+            harness.install(&scope, &own_exe().unwrap());
+        }
+        let claude = Harness::Claude.config_file(&scope).unwrap();
+        // Reformatted by hand, and moved after somebody else's entry: neither
+        // is a difference in what fires.
+        let mut root = read_settings(&claude).unwrap();
+        root["hooks"]["Stop"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({"hooks": [{"type": "command", "command": "theirs"}]}));
+        root["hooks"]["Stop"].as_array_mut().unwrap().reverse();
+        std::fs::write(&claude, serde_json::to_string(&root).unwrap()).unwrap();
+
+        let files: Vec<PathBuf> = HARNESSES
+            .iter()
+            .flat_map(|h| h.configs(&scope))
+            .map(|c| c.path().to_path_buf())
+            .collect();
+        let long_ago =
+            std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000);
+        for file in &files {
+            std::fs::File::options()
+                .write(true)
+                .open(file)
+                .unwrap()
+                .set_modified(long_ago)
+                .unwrap();
+        }
+        let before: Vec<Vec<u8>> = files.iter().map(|f| std::fs::read(f).unwrap()).collect();
+
+        let repair = repair_in(std::slice::from_ref(&scope));
+        assert_eq!(
+            repair,
+            Repair::default(),
+            "an up-to-date install was touched"
+        );
+        for (file, bytes) in files.iter().zip(&before) {
+            assert_eq!(
+                &std::fs::read(file).unwrap(),
+                bytes,
+                "{} changed",
+                file.display()
+            );
+            assert_eq!(
+                std::fs::metadata(file).unwrap().modified().unwrap(),
+                long_ago,
+                "{} was rewritten",
+                file.display()
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Another cctop's install in an older form is refreshed *at that cctop*:
+    /// repair keeps its rule of never moving an install between live binaries.
+    #[test]
+    fn another_cctops_outdated_install_is_refreshed_at_its_own_binary() {
+        let dir = scratch("outdated-other");
+        let scope = Scope::Project(dir.clone());
+        let path = Harness::Claude.config_file(&scope).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let theirs = dir.join("their-cctop");
+        std::fs::write(&theirs, "").unwrap();
+        let theirs = theirs.display().to_string();
+        std::fs::write(&path, old_form_install(&theirs).to_string()).unwrap();
+
+        assert_eq!(
+            Harness::Claude.health(&scope).unwrap(),
+            Health::Outdated {
+                exe: Some(theirs.clone())
+            }
+        );
+        assert!(!repair_in(std::slice::from_ref(&scope)).fixed.is_empty());
+        assert_eq!(
+            Harness::Claude.health(&scope).unwrap(),
+            Health::Other {
+                exe: theirs.clone(),
+                missing: Vec::new()
+            },
+            "the form was refreshed, but the install changed hands"
+        );
+        let mut fresh = serde_json::Map::new();
+        json_merge(
+            &mut fresh,
+            &path,
+            Shape::Nested,
+            CLAUDE_EVENTS,
+            CLAUDE_DECIDING,
+            &theirs,
+        )
+        .unwrap();
+        assert_eq!(
+            our_entries(&read_settings(&path).unwrap()),
+            our_entries(&fresh)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The plugin is cctop's file outright, so any difference from what this
+    /// version writes is an older cctop's, even with every event in it.
+    #[test]
+    fn an_opencode_plugin_from_an_older_cctop_is_rewritten() {
+        let dir = scratch("outdated-plugin");
+        let scope = Scope::Project(dir.clone());
+        let path = Harness::OpenCode.config_file(&scope).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let own = own_exe().unwrap();
+        std::fs::write(
+            &path,
+            format!("{}\n// an older cctop\n", plugin_source(&own)),
+        )
+        .unwrap();
+
+        assert_eq!(
+            Harness::OpenCode.health(&scope).unwrap(),
+            Health::Outdated { exe: None }
+        );
+        assert!(!repair_in(std::slice::from_ref(&scope)).fixed.is_empty());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), plugin_source(&own));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// Recognising our own entries has to survive the binary being called
     /// something other than exactly `cctop`.
     ///
