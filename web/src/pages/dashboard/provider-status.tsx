@@ -9,7 +9,21 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } f
 // this page and the TUI's footer cannot say two different things.
 type Level = "operational" | "maintenance" | "minor" | "major" | "critical";
 type Tone = "outage" | "warning" | "quiet";
-type Incident = { name: string; stage: string; level: Level; started_at: number | null; update: string | null; components: string[] };
+// "live" counts towards the line; "stale" has sat in monitoring too long to
+// explain anything; "other" is on something agents never touch (the Console,
+// billing, images). Core decides, so both screens file them alike.
+type Standing = "live" | "stale" | "other";
+type Incident = {
+  name: string;
+  stage: string;
+  level: Level;
+  started_at: number | null;
+  update: string | null;
+  components: string[];
+  standing: Standing;
+  note?: string;
+};
+type Component = { name: string; level: Level; standing: Standing };
 type PageDoc = {
   page: string;
   label: string;
@@ -20,7 +34,7 @@ type PageDoc = {
   level?: Level;
   description?: string;
   incidents?: Incident[];
-  degraded?: string[];
+  degraded?: Component[];
 };
 type Doc = { pages: PageDoc[]; line: { text: string; tone: Tone } | null; verdict: { text: string; detail: string | null; tone: Tone } };
 
@@ -122,6 +136,10 @@ function PageSection({ page: p }: { page: PageDoc }) {
     : p.description || "";
   const incidents = p.incidents ?? [];
   const degraded = p.degraded ?? [];
+  const counted = incidents.filter((i) => i.standing !== "other");
+  const other = incidents.filter((i) => i.standing === "other");
+  const affected = degraded.filter((c) => c.standing !== "other");
+  const otherComponents = degraded.filter((c) => c.standing === "other");
   return (
     <section className="space-y-2 border-t pt-3 first:border-t-0 first:pt-0">
       <div className="flex flex-wrap items-baseline gap-x-2">
@@ -132,29 +150,53 @@ function PageSection({ page: p }: { page: PageDoc }) {
           {p.site.replace(/^https?:\/\//, "")} <ExternalLink className="size-3" aria-hidden />
         </a>
       </div>
-      {incidents.map((i, n) => {
-        const meta = [i.stage, i.started_at ? since(i.started_at) : ""].filter(Boolean).join(" · ");
-        return (
-          <div key={n} className={cn("space-y-1 border-l-2 pl-3", i.level === "major" || i.level === "critical" ? "border-destructive" : "border-warning")}>
-            <div className="font-medium">{i.name}</div>
-            {meta && <div className="text-muted-foreground text-xs">{meta}</div>}
-            {i.update && <p className="text-foreground/90">{i.update}</p>}
-            {i.components.length > 0 && (
-              <p className="text-xs">
-                <span className="text-muted-foreground">on </span>
-                {i.components.join(", ")}
-              </p>
-            )}
-          </div>
-        );
-      })}
-      {degraded.length > 0 && (
+      {counted.map((i, n) => (
+        <IncidentBlock key={n} incident={i} />
+      ))}
+      {affected.length > 0 && (
         <p className="text-xs">
           <span className="text-muted-foreground">affected </span>
-          <span className="text-warning">{degraded.join(", ")}</span>
+          <span className="text-warning">{affected.map((c) => c.name).join(", ")}</span>
         </p>
+      )}
+      {(other.length > 0 || otherComponents.length > 0) && (
+        <div className="space-y-2">
+          <h4 className="text-muted-foreground text-xs font-medium">other, not affecting agents</h4>
+          {other.map((i, n) => (
+            <IncidentBlock key={n} incident={i} />
+          ))}
+          {otherComponents.length > 0 && (
+            <p className="text-muted-foreground text-xs">affected {otherComponents.map((c) => c.name).join(", ")}</p>
+          )}
+        </div>
       )}
       {p.state === "ok" && incidents.length === 0 && degraded.length === 0 && <p className="text-muted-foreground text-xs">nothing open</p>}
     </section>
+  );
+}
+
+// Live incidents at full strength; stale and unrelated ones dimmed, since they
+// are there to be recognised and dismissed. A stale one is told by its age —
+// "since 21:44" on a two-day-old incident would read as this evening.
+function IncidentBlock({ incident: i }: { incident: Incident }) {
+  const live = i.standing === "live";
+  const meta = i.note ?? [i.stage, i.started_at ? since(i.started_at) : ""].filter(Boolean).join(" · ");
+  return (
+    <div
+      className={cn(
+        "space-y-1 border-l-2 pl-3",
+        !live ? "border-muted text-muted-foreground" : i.level === "major" || i.level === "critical" ? "border-destructive" : "border-warning",
+      )}
+    >
+      <div className="font-medium">{i.name}</div>
+      {meta && <div className="text-muted-foreground text-xs">{meta}</div>}
+      {i.update && <p className={live ? "text-foreground/90" : undefined}>{i.update}</p>}
+      {i.components.length > 0 && (
+        <p className="text-xs">
+          <span className="text-muted-foreground">on </span>
+          {i.components.join(", ")}
+        </p>
+      )}
+    </div>
   );
 }

@@ -6,7 +6,7 @@
 
 use super::theme;
 use super::{App, Mode};
-use cctop_core::provider_status::{self as ps, Alert, Level, Page, PageStatus};
+use cctop_core::provider_status::{self as ps, Alert, Incident, Level, Page, PageStatus, Standing};
 use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use ratatui::layout::Rect;
@@ -125,6 +125,63 @@ fn since(started_at: i64, now: i64) -> String {
     }
 }
 
+/// One incident's lines in the panel: name, stage and start, the vendor's
+/// latest word, and what it names. Live incidents are drawn at full strength;
+/// stale and unrelated ones are dimmed throughout, because they are there to be
+/// recognised and dismissed, not read.
+fn incident_lines(lines: &mut Vec<Line<'static>>, incident: &Incident, now: i64, text_w: usize) {
+    let live = incident.standing == Standing::Live;
+    let (name_style, body_style) = match live {
+        true => (theme::value().add_modifier(Modifier::BOLD), theme::value()),
+        false => (theme::dim(), theme::dim()),
+    };
+    let marker = match live {
+        true => Style::default().fg(level_color(incident.level)),
+        false => theme::dim(),
+    };
+    lines.push(Line::from(vec![
+        Span::styled("   ▸ ", marker),
+        Span::styled(
+            cctop_core::util::truncate(&incident.name, text_w),
+            name_style,
+        ),
+    ]));
+    // A stale incident's age is the point, and "since 21:44" on a two-day-old
+    // one would read as this evening.
+    let mut meta = match &incident.note {
+        Some(note) => vec![note.clone()],
+        None => {
+            let mut m = vec![incident.stage.clone()];
+            if let Some(at) = incident.started_at {
+                m.push(since(at, now));
+            }
+            m
+        }
+    };
+    meta.retain(|m| !m.is_empty());
+    if !meta.is_empty() {
+        lines.push(Line::from(Span::styled(
+            format!("     {}", meta.join(" · ")),
+            theme::dim(),
+        )));
+    }
+    // The update body is the "why": the one thing here the red dot in the
+    // table could never have said.
+    if let Some(update) = &incident.update {
+        for line in super::panels::wrap(update, text_w) {
+            lines.push(Line::from(Span::styled(format!("     {line}"), body_style)));
+        }
+    }
+    if !incident.components.is_empty() {
+        for line in super::panels::wrap(&incident.components.join(", "), text_w - 6) {
+            lines.push(Line::from(vec![
+                Span::styled("     on ", theme::dim()),
+                Span::styled(line, body_style),
+            ]));
+        }
+    }
+}
+
 pub(super) fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
     const WIDTH: u16 = 78;
     // Two for the border, five for the indent the incident lines carry.
@@ -138,14 +195,14 @@ pub(super) fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
     // The answer to "is it me?" comes first, before any of the vendor's detail,
     // because on a bad day it is the only line that gets read.
     let verdict = ps::verdict(&alerts, &erroring);
-    lines.push(Line::from(Span::styled(
-        format!(" {}", verdict.text),
-        match verdict.tone {
-            ps::Tone::Outage => footer_style(Level::Major),
-            ps::Tone::Warning => footer_style(Level::Maintenance),
-            ps::Tone::Quiet => theme::dim(),
-        },
-    )));
+    let verdict_style = match verdict.tone {
+        ps::Tone::Outage => footer_style(Level::Major),
+        ps::Tone::Warning => footer_style(Level::Maintenance),
+        ps::Tone::Quiet => theme::dim(),
+    };
+    for line in super::panels::wrap(&verdict.text, WIDTH as usize - 4) {
+        lines.push(Line::from(Span::styled(format!(" {line}"), verdict_style)));
+    }
     if let Some(detail) = verdict.detail {
         lines.push(Line::from(Span::styled(
             format!("   {detail}"),
@@ -185,50 +242,51 @@ pub(super) fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
         let Some(report) = app.outage.status.get(page).report() else {
             continue;
         };
-        for incident in &report.incidents {
-            lines.push(Line::from(vec![
-                Span::styled("   ▸ ", Style::default().fg(level_color(incident.level))),
-                Span::styled(
-                    cctop_core::util::truncate(&incident.name, text_w),
-                    theme::value().add_modifier(Modifier::BOLD),
-                ),
-            ]));
-            let mut meta = vec![incident.stage.clone()];
-            if let Some(at) = incident.started_at {
-                meta.push(since(at, now));
-            }
-            meta.retain(|m| !m.is_empty());
-            if !meta.is_empty() {
-                lines.push(Line::from(Span::styled(
-                    format!("     {}", meta.join(" · ")),
-                    theme::dim(),
-                )));
-            }
-            // The update body is the "why": the one thing here the red dot in
-            // the table could never have said.
-            if let Some(update) = &incident.update {
-                for line in super::panels::wrap(update, text_w) {
-                    lines.push(Line::from(Span::styled(
-                        format!("     {line}"),
-                        theme::value(),
-                    )));
-                }
-            }
-            if !incident.components.is_empty() {
-                for line in super::panels::wrap(&incident.components.join(", "), text_w - 6) {
-                    lines.push(Line::from(vec![
-                        Span::styled("     on ", theme::dim()),
-                        Span::styled(line, theme::value()),
-                    ]));
-                }
-            }
+        let report = report.for_agents(page, now);
+        // What can explain a failing session first, stale monitoring dimmed
+        // beside it; then, under their own heading, what cannot.
+        let (other, counted): (Vec<_>, Vec<_>) = report
+            .incidents
+            .iter()
+            .partition(|i| i.standing == Standing::Other);
+        for incident in counted {
+            incident_lines(&mut lines, incident, now, text_w);
         }
-        if !report.degraded.is_empty() {
-            for line in super::panels::wrap(&report.degraded.join(", "), text_w - 6) {
+        let affected: Vec<&str> = report
+            .degraded
+            .iter()
+            .filter(|c| c.standing != Standing::Other)
+            .map(|c| c.name.as_str())
+            .collect();
+        if !affected.is_empty() {
+            for line in super::panels::wrap(&affected.join(", "), text_w - 6) {
                 lines.push(Line::from(vec![
                     Span::styled("   affected  ", theme::dim()),
                     Span::styled(line, Style::default().fg(theme::colors().cost_mid)),
                 ]));
+            }
+        }
+        let other_components: Vec<&str> = report
+            .degraded
+            .iter()
+            .filter(|c| c.standing == Standing::Other)
+            .map(|c| c.name.as_str())
+            .collect();
+        if !other.is_empty() || !other_components.is_empty() {
+            lines.push(Line::from(Span::styled(
+                "   other, not affecting agents".to_string(),
+                theme::label(),
+            )));
+            for incident in other {
+                incident_lines(&mut lines, incident, now, text_w);
+            }
+            if !other_components.is_empty() {
+                for line in super::panels::wrap(&other_components.join(", "), text_w - 6) {
+                    lines.push(Line::from(vec![
+                        Span::styled("   affected  ", theme::dim()),
+                        Span::styled(line, theme::dim()),
+                    ]));
+                }
             }
         }
         if report.incidents.is_empty() && report.degraded.is_empty() {
@@ -270,6 +328,7 @@ mod tests {
             erroring,
             level,
             headline: headline.into(),
+            elsewhere: 0,
         }
     }
 
@@ -435,6 +494,35 @@ mod tests {
             footer.contains("Anthropic incident: Elevated errors on Claude Opus"),
             "{footer}"
         );
+    }
+
+    /// A Console incident explains nothing about a failing session: no
+    /// footer line, the "this machine" hint stands, and the panel files the
+    /// incident under its own heading, dimmed.
+    #[test]
+    fn a_console_incident_is_filed_under_other() {
+        let mut app = crate::tests::test_app();
+        app.outage
+            .status
+            .set(Page::Anthropic, ps::parse(fixtures::CONSOLE));
+        assert!(footer_line(&app.provider_alerts()).is_none());
+
+        app.sessions = vec![failing_opus()];
+        let (text, _) = footer_line(&app.provider_alerts()).unwrap();
+        assert!(text.contains("probably this machine"), "{text}");
+
+        let screen = render(&mut app);
+        assert!(
+            screen.contains("but Anthropic reports nothing affecting"),
+            "{screen}"
+        );
+        let heading = screen.find("other, not affecting agents").expect(&screen);
+        let incident = screen
+            .find("Elevated errors on platform.claude.com")
+            .expect(&screen);
+        assert!(heading < incident, "{screen}");
+        // Fixed on 2026-10-07 and still in monitoring: aged, not "since 21:44".
+        assert!(screen.contains("monitoring for "), "{screen}");
     }
 
     #[test]
