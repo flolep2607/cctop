@@ -312,7 +312,7 @@ impl Aggregate {
         );
         out.sample(
             "cctop_build_info",
-            &[("version", env!("CARGO_PKG_VERSION"))],
+            &[("version", cctop_core::update::current_version())],
             1.0,
         );
 
@@ -681,7 +681,7 @@ mod tests {
             find(
                 &samples,
                 "cctop_build_info",
-                &[("version", env!("CARGO_PKG_VERSION"))]
+                &[("version", cctop_core::update::current_version())]
             )
             .is_some()
         );

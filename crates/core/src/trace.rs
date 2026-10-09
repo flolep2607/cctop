@@ -174,7 +174,7 @@ fn render() -> String {
     let mut out = String::new();
     out.push_str(&format!(
         "cctop {} trace\n{} on {} ({} cores)\n",
-        env!("CARGO_PKG_VERSION"),
+        crate::update::current_version(),
         std::env::consts::ARCH,
         std::env::consts::OS,
         std::thread::available_parallelism().map_or(0, |n| n.get()),
@@ -324,7 +324,7 @@ mod tests {
     fn the_report_names_the_version_and_platform() {
         let _guard = exclusive();
         let text = render();
-        assert!(text.contains(env!("CARGO_PKG_VERSION")));
+        assert!(text.contains(crate::update::current_version()));
         assert!(text.contains(std::env::consts::OS));
     }
 }

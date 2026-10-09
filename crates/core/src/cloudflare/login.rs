@@ -141,7 +141,7 @@ impl Login {
         let agent: ureq::Agent = ureq::Agent::config_builder()
             .timeout_global(Some(POLL_TIMEOUT))
             .http_status_as_error(false)
-            .user_agent(concat!("cctop/", env!("CARGO_PKG_VERSION")))
+            .user_agent(crate::update::user_agent())
             .build()
             .into();
         let deadline = Instant::now() + WAIT;

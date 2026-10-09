@@ -97,7 +97,7 @@ impl Drop for Sound {
 fn play(stop: &AtomicBool, player: &Mutex<Option<Child>>) -> Option<()> {
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .timeout_connect(Some(std::time::Duration::from_secs(5)))
-        .user_agent(concat!("cctop/", env!("CARGO_PKG_VERSION")))
+        .user_agent(cctop_core::update::user_agent())
         .build()
         .into();
     let body = agent.get(STREAM).call().ok()?.into_body().into_reader();
