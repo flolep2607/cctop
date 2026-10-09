@@ -1,0 +1,29 @@
+name: Task for an agent
+description: A job small and clear enough for a coding agent to do without asking
+# The label is applied here, so filing this form is the whole hand-off: the
+# `/issues` loop picks it up on its next pass. Forms cannot read
+# .claude/issue-loop.md, so this name is configurable only by editing it here;
+# /issue-loop:setup rewrites it when the project renamed `label_ready`.
+labels: [agent-ready]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What to do
+      description: The change you want, in a few plain sentences
+    validations:
+      required: true
+  - type: textarea
+    id: done
+    attributes:
+      label: Done when
+      description: How you would check it is finished
+      placeholder: |
+        - [ ] ...
+    validations:
+      required: true
+  - type: input
+    id: where
+    attributes:
+      label: Where (optional)
+      description: A file, page, command or area, if you know it
