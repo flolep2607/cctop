@@ -18,6 +18,7 @@
 
 use super::http::{self, Request};
 use super::{Access, Shared, current, find, json, may_act};
+use cctop_core::cloudflare::access_setup::{self, Applied, Change};
 use cctop_core::cloudflare::{self, Renamed};
 use cctop_core::tunnel::Account;
 use std::net::TcpStream;
@@ -37,6 +38,8 @@ pub trait Addresses: Send + Sync {
         agents: &dyn Fn(&str) -> String,
     ) -> Result<Renamed, String>;
     fn name_dashboard(&self, input: &str) -> Result<Renamed, String>;
+    /// An edit to Cloudflare Access, made and saved — [`super::invites`].
+    fn change_access(&self, change: Change) -> Result<Applied, String>;
 }
 
 /// The real thing.
@@ -59,6 +62,9 @@ impl Addresses for Connected {
     }
     fn name_dashboard(&self, input: &str) -> Result<Renamed, String> {
         cloudflare::name_dashboard(input)
+    }
+    fn change_access(&self, change: Change) -> Result<Applied, String> {
+        access_setup::apply(change)
     }
 }
 
@@ -254,6 +260,9 @@ impl Addresses for Nowhere {
     fn name_dashboard(&self, _: &str) -> Result<Renamed, String> {
         Err("nothing connected".into())
     }
+    fn change_access(&self, _: Change) -> Result<Applied, String> {
+        Err("nothing connected".into())
+    }
 }
 
 #[cfg(test)]
@@ -299,6 +308,14 @@ pub mod tests {
             *account = renamed.account.clone();
             *self.page.lock().unwrap() = renamed.new.clone();
             Ok(renamed)
+        }
+        fn change_access(&self, change: Change) -> Result<Applied, String> {
+            let mut account = self.account.lock().unwrap();
+            let api = Api::fake(&self.base, account.api_token.as_deref().unwrap_or_default());
+            let applied =
+                access_setup::apply_with(&api, &account, change).map_err(|e| e.to_string())?;
+            *account = applied.account.clone();
+            Ok(applied)
         }
     }
 

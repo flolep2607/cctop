@@ -81,6 +81,8 @@ mod debug;
 mod http;
 /// A Cloudflare Access login as a way in, beside the tokens.
 mod identity;
+/// `/api/access`: who may log in, changed from the page.
+mod invites;
 /// `/metrics`, the snapshot in Prometheus's text format.
 mod metrics;
 /// The `--notify` webhook. Its send is `cctop_core::notify::post`, which the
@@ -290,6 +292,10 @@ struct Shared {
     /// [`share_host`]. A function rather than the call itself so a test can
     /// name a share host without lending a tunnel.
     is_share_host: fn(&str) -> bool,
+    /// Whether a `Host` is one the account's tunnel routes to the page — the
+    /// dashboard's hostname or the token hostname — for the lock that
+    /// refuses a token through the tunnel while public token links are off.
+    is_tunnel_host: fn(&str) -> bool,
     /// The connected account and its renames, for `/api/address` — see
     /// [`address`]. A trait object so a test can rename against a fake
     /// Cloudflare without touching `config.toml`.
@@ -599,9 +605,20 @@ pub fn start(options: Options) -> anyhow::Result<Serving> {
     // The origin a notification's link is built on: the tunnel's when there is
     // one, since a webhook that names loopback is a link that works only on the
     // machine that sent it.
-    let origin = tunnel
-        .as_ref()
-        .map(|t| t.url.clone())
+    //
+    // Behind Access, a token link goes on the token hostname — the
+    // dashboard's own asks for a login first — and with public links off
+    // there is no token link through the tunnel at all: the page's address
+    // is handed out bare, for whoever can log in.
+    let access = tunnel.as_ref().and_then(|_| tunnel::access_settings());
+    let token_origin: Option<String> = tunnel.as_ref().and_then(|t| match &access {
+        Some(settings) if t.kind == tunnel::Kind::Account => settings.token_origin(&t.url),
+        Some(settings) => settings.public_links.then(|| t.url.clone()),
+        None => Some(t.url.clone()),
+    });
+    let origin = token_origin
+        .clone()
+        .or_else(|| tunnel.as_ref().map(|t| t.url.clone()))
         .unwrap_or_else(|| format!("http://127.0.0.1:{}", addr.port()));
 
     let shared = Arc::new(Shared {
@@ -640,6 +657,7 @@ pub fn start(options: Options) -> anyhow::Result<Serving> {
             .collect(),
         ssh: ssh::Reach::ssh(),
         is_share_host: tunnel::is_share_host,
+        is_tunnel_host: tunnel::is_tunnel_host,
         addresses: Arc::new(address::Connected),
         identities: Arc::new(identity::Configured::new()),
     });
@@ -699,14 +717,19 @@ pub fn start(options: Options) -> anyhow::Result<Serving> {
 
     // The read-only link rides the same origin as whichever link is the one to
     // hand out — public when a tunnel registered, loopback otherwise.
-    let readonly_link = match shared.readonly.is_empty() {
-        true => String::new(),
-        false => format!("{origin}/?t={}", shared.readonly),
-    };
+    let readonly_link =
+        match shared.readonly.is_empty() || (tunnel.is_some() && token_origin.is_none()) {
+            true => String::new(),
+            false => format!("{origin}/?t={}", shared.readonly),
+        };
+    let public = tunnel.as_ref().map(|t| match &token_origin {
+        Some(origin) => format!("{origin}/{query}"),
+        None => format!("{}/", t.url),
+    });
 
     Ok(Serving {
         local: format!("http://127.0.0.1:{}/{query}", addr.port()),
-        public: tunnel.as_ref().map(|t| format!("{}/{query}", t.url)),
+        public,
         tunnel_fallback: tunnel.as_ref().and_then(|t| t.fallback.clone()),
         readonly: readonly_link,
         actions,
@@ -1505,10 +1528,22 @@ fn access_for(shared: &Shared, presented: &str) -> Option<Access> {
     None
 }
 
-/// What a Cloudflare Access login on `request` is worth, or `None` when it
-/// carries none or one that does not check out. A refusal is logged with its
-/// reason, never with the token.
-fn access_login(shared: &Shared, request: &Request) -> Option<Access> {
+/// Whether `request` came in through a Cloudflare tunnel rather than from
+/// this machine: its `Host` is one the account's tunnel routes to the page,
+/// or it carries the headers the edge adds to every request it forwards —
+/// which a quick tunnel's do too. Anything on loopback can write those
+/// headers, but writing them only takes its own token away.
+fn through_tunnel(shared: &Shared, request: &Request) -> bool {
+    (shared.is_tunnel_host)(request.host())
+        || request.headers().iter().any(|(k, _)| {
+            k.eq_ignore_ascii_case("cf-ray") || k.eq_ignore_ascii_case("cf-connecting-ip")
+        })
+}
+
+/// What a Cloudflare Access login on `request` is worth, with whose it is,
+/// or `None` when it carries none or one that does not check out. A refusal
+/// is logged with its reason, never with the token.
+fn access_login(shared: &Shared, request: &Request) -> Option<(Access, String)> {
     let jwt = request
         .headers()
         .iter()
@@ -1516,8 +1551,8 @@ fn access_login(shared: &Shared, request: &Request) -> Option<Access> {
         .map(|(_, v)| v.trim())
         .filter(|v| !v.is_empty())?;
     match shared.identities.check(jwt) {
-        Ok((_, cctop_core::cloudflare::access::Level::Full)) => Some(Access::Full),
-        Ok((_, cctop_core::cloudflare::access::Level::Read)) => Some(Access::ReadOnly),
+        Ok((email, cctop_core::cloudflare::access::Level::Full)) => Some((Access::Full, email)),
+        Ok((email, cctop_core::cloudflare::access::Level::Read)) => Some((Access::ReadOnly, email)),
         // Every request through the edge carries one, so a serve with no
         // Access set up would log every request: only a real refusal is.
         Err(identity::Why::NotSetUp) => None,
@@ -1582,18 +1617,48 @@ fn serve_connection(shared: &Shared, stream: &mut TcpStream) {
     // way in: the cookie only ever repeats a token that was already minted.
     // `Authorization: Bearer` is the same credential again, in the form a
     // script or HTTP client sends rather than a browser.
-    let presented = access_for(shared, request.token())
-        .or_else(|| access_for(shared, request.bearer()))
-        .or_else(|| {
-            access_for(
-                shared,
-                request.cookie(&cookie_name(shared.port)).unwrap_or(""),
-            )
-        });
+    //
+    // With Access on and public token links off, a token that came through
+    // the tunnel is not a way in on any hostname: only a login is. This is
+    // the second lock — the first is that the token hostname's record and
+    // route are gone — and loopback keeps its token.
+    let gate = shared.identities.settings();
+    let tokens_refused =
+        gate.as_ref().is_some_and(|g| !g.public_links) && through_tunnel(shared, &request);
+    let presented = match tokens_refused {
+        true => None,
+        false => access_for(shared, request.token())
+            .or_else(|| access_for(shared, request.bearer()))
+            .or_else(|| {
+                access_for(
+                    shared,
+                    request.cookie(&cookie_name(shared.port)).unwrap_or(""),
+                )
+            }),
+    };
     // A Cloudflare Access login, beside the tokens rather than instead of
     // them: whichever is worth more decides. Only the signed assertion is
     // read — see [`identity`] for why the email header beside it is not.
-    let login = access_login(shared, &request);
+    // Never on the token hostname, which is outside the Access application:
+    // what gets in there is a token and only a token, so nothing a login is
+    // worth can be mixed into it.
+    let on_link_host = gate
+        .as_ref()
+        .is_some_and(|g| g.is_link_host(request.host()));
+    let (login, owner) = match on_link_host {
+        true => (None, false),
+        false => match access_login(shared, &request) {
+            Some((level, email)) => (
+                Some(level),
+                gate.as_ref().is_some_and(|g| g.is_owner(&email)),
+            ),
+            None => (None, false),
+        },
+    };
+    // Who may change who logs in: the full token, or the owner's own login.
+    // A full invite is not enough — it may act on sessions, not hand out
+    // access.
+    let admin = presented == Some(Access::Full) || owner;
     let Some(access) = presented.max(login) else {
         cctop_core::elog::event(
             "http",
@@ -1916,6 +1981,7 @@ fn serve_connection(shared: &Shared, stream: &mut TcpStream) {
             api_act(shared, stream, &request, &path["/api/act/".len()..], access);
         }
         "/api/address" => address::route(shared, stream, &request, "", access),
+        "/api/access" => invites::route(shared, stream, &request, access, admin),
         _ if path.starts_with("/api/address/") => {
             address::route(
                 shared,
@@ -3192,6 +3258,7 @@ mod tests {
             hosts: HashMap::new(),
             ssh: ssh::Reach::nowhere(),
             is_share_host: |_| false,
+            is_tunnel_host: |_| false,
             addresses: Arc::new(address::Nowhere),
             identities: Arc::new(identity::Nowhere),
         }
@@ -3329,6 +3396,195 @@ mod tests {
         let (head, _) = exchange(&shared, "/", &login("owner@example.test"));
         assert!(head.starts_with("HTTP/1.1 200"), "{head}");
         assert_eq!(header(&head, "Set-Cookie"), None, "{head}");
+    }
+
+    /// A serve behind Access with `settings`, on the account's tunnel at
+    /// `cctop.example.test` and `cctop-link.example.test`.
+    fn behind(settings: cctop_core::cloudflare::access::Settings) -> Shared {
+        Shared {
+            identities: Arc::new(identity::Fixed::new(settings)),
+            is_tunnel_host: |host| host.ends_with(".example.test"),
+            ..shared("full", "view")
+        }
+    }
+
+    fn jwt_of(email: &str) -> String {
+        use cctop_core::cloudflare::access::fake;
+        format!(
+            "Cf-Access-Jwt-Assertion: {}\r\n",
+            fake::token(&fake::claims(email))
+        )
+    }
+
+    #[test]
+    fn with_public_links_off_a_token_alone_gets_nothing_through_the_tunnel() {
+        let off = behind(cctop_core::cloudflare::access::Settings {
+            public_links: false,
+            ..cctop_core::cloudflare::access::fake::settings()
+        });
+        for token in ["full", "view"] {
+            for how in [
+                format!("Host: cctop.example.test\r\n{}", bearer_line(token)),
+                format!("Host: cctop-link.example.test\r\n{}", bearer_line(token)),
+                format!("Host: cctop.example.test\r\nCookie: cctop_access_7777={token}\r\n"),
+                // Through a quick tunnel, or any other, the edge's headers say so.
+                format!(
+                    "Host: 127.0.0.1:7777\r\nCf-Ray: 8a1b2c3d-AKL\r\n{}",
+                    bearer_line(token)
+                ),
+            ] {
+                for target in [
+                    "/",
+                    "/api/config",
+                    "/api/sessions",
+                    &format!("/api/config?t={token}"),
+                ] {
+                    assert_eq!(
+                        status_of(&off, "GET", target, &how),
+                        "HTTP/1.1 403 Forbidden",
+                        "{target} with {how}"
+                    );
+                }
+            }
+        }
+        // Loopback keeps its token.
+        let local = format!("Host: 127.0.0.1:7777\r\n{}", bearer_line("full"));
+        assert_eq!(
+            status_of(&off, "GET", "/api/config", &local),
+            "HTTP/1.1 200 OK"
+        );
+        // And a login still gets in from outside.
+        let owner = format!(
+            "Host: cctop.example.test\r\n{}",
+            jwt_of("owner@example.test")
+        );
+        assert_eq!(
+            status_of(&off, "GET", "/api/config", &owner),
+            "HTTP/1.1 200 OK"
+        );
+
+        // On, the same token through the tunnel works as it always did.
+        let on = behind(cctop_core::cloudflare::access::fake::settings());
+        let through = format!("Host: cctop.example.test\r\n{}", bearer_line("full"));
+        assert_eq!(
+            status_of(&on, "GET", "/api/config", &through),
+            "HTTP/1.1 200 OK"
+        );
+    }
+
+    #[test]
+    fn a_login_is_worth_nothing_on_the_token_hostname() {
+        let shared = behind(cctop_core::cloudflare::access::Settings {
+            link_hostname: Some("cctop-link.example.test".into()),
+            link_record_id: Some("rec-link".into()),
+            ..cctop_core::cloudflare::access::fake::settings()
+        });
+        let link = "Host: cctop-link.example.test\r\n";
+        let owner = jwt_of("owner@example.test");
+        assert_eq!(
+            status_of(&shared, "GET", "/api/config", &format!("{link}{owner}")),
+            "HTTP/1.1 403 Forbidden"
+        );
+        // A read-only token there stays read-only, owner's login or not.
+        let (status, read) = config_with(&shared, "/api/config?t=view", &format!("{link}{owner}"));
+        assert_eq!(status, "HTTP/1.1 200 OK");
+        assert_eq!(read["actions"], false);
+        assert_eq!(read["token"], "view");
+        // The token link itself works as today.
+        let (status, full) = config_with(&shared, "/api/config?t=full", link);
+        assert_eq!(status, "HTTP/1.1 200 OK");
+        assert_eq!(full["token"], "full");
+        // And the same login on the dashboard's hostname is the owner's.
+        let (_, there) = config_with(
+            &shared,
+            "/api/config",
+            &format!("Host: cctop.example.test\r\n{owner}"),
+        );
+        assert_eq!(there["actions"], true);
+    }
+
+    #[test]
+    fn only_the_full_token_or_the_owner_may_see_or_change_the_invites() {
+        let (fake, seen) = address::tests::fake();
+        let mut settings = cctop_core::cloudflare::access::fake::settings();
+        settings
+            .invites
+            .push(cctop_core::cloudflare::access::Invite {
+                who: "boss@example.test".into(),
+                level: cctop_core::cloudflare::access::Level::Full,
+            });
+        let shared = Shared {
+            addresses: Arc::new(fake),
+            ..behind(settings)
+        };
+        let invite = r#"{"op":"invite","who":"guest@elsewhere.test","level":"full"}"#;
+        let post_as = |headers: &str, body: &str| {
+            response_of(
+                &shared,
+                "POST",
+                "/api/access",
+                &format!(
+                    "Host: cctop.example.test\r\n{headers}Content-Type: application/json\r\n\
+                     Content-Length: {}\r\n\r\n{body}",
+                    body.len()
+                ),
+            )
+        };
+        // Refused, the list and the edits alike: the read-only token, a
+        // read-only login, and a full invite who is not the owner.
+        for who in [
+            bearer_line("view"),
+            jwt_of("colleague@example.test"),
+            jwt_of("boss@example.test"),
+        ] {
+            let read = response_of(
+                &shared,
+                "GET",
+                "/api/access",
+                &format!("Host: cctop.example.test\r\n{who}"),
+            );
+            assert!(read.starts_with("HTTP/1.1 403"), "{who}: {read}");
+            let edit = post_as(&who, invite);
+            assert!(edit.starts_with("HTTP/1.1 403"), "{who}: {edit}");
+        }
+        assert!(
+            seen.lock().unwrap().is_empty(),
+            "nothing reached Cloudflare"
+        );
+
+        // The full token turns Access on; the owner's login invites.
+        let on = post_as(
+            &bearer_line("full"),
+            r#"{"op":"on","owner":"owner@example.test"}"#,
+        );
+        assert!(on.starts_with("HTTP/1.1 200"), "{on}");
+        assert!(
+            on.contains("\"link_host\":\"cctop-link.example.test\""),
+            "{on}"
+        );
+        let added = post_as(&jwt_of("owner@example.test"), invite);
+        assert!(added.starts_with("HTTP/1.1 200"), "{added}");
+        assert!(added.contains("guest@elsewhere.test"), "{added}");
+        let policy = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .rev()
+            .find(|(m, p, _)| m == "PUT" && p.contains("/access/policies/"))
+            .map(|(_, _, body)| body.clone())
+            .expect("the edge's policy was updated");
+        assert!(policy.contains("guest@elsewhere.test"), "{policy}");
+
+        // The owner turns token links off; the record goes.
+        let off = post_as(
+            &jwt_of("owner@example.test"),
+            r#"{"op":"links","on":false}"#,
+        );
+        assert!(off.contains("\"public_links\":false"), "{off}");
+        assert!(off.contains("\"link_host\":null"), "{off}");
+        // Nonsense is refused by its own sentence.
+        let bad = post_as(&bearer_line("full"), r#"{"op":"promote"}"#);
+        assert!(bad.starts_with("HTTP/1.1 400"), "{bad}");
     }
 
     #[test]
