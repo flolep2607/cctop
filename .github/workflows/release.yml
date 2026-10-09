@@ -2,7 +2,8 @@ name: Release
 
 # Changing the package version on main cuts a release. The workflow derives a
 # `v<version>` tag from Cargo.toml, then builds the tagged commit, attaches the
-# archives and checksums, and publishes the crates. Existing tags can still be
+# archives and checksums to a draft release that it publishes only once they are
+# all there, and publishes the crates. Existing tags can still be
 # released manually, but they must agree with Cargo.toml.
 on:
   push:
@@ -185,10 +186,17 @@ jobs:
             printf '%s\n' "$body"
             echo "CCTOP_RELEASE_NOTES"
           } >> "$GITHUB_OUTPUT"
+      # A draft, which the releases API does not show as `latest`: every cctop
+      # in the world reads that endpoint to decide whether to update, and a
+      # published release with no binaries yet sent each of them to download an
+      # archive that was not there. v0.31.0 sat like that for seven minutes.
+      # `publish` below makes it public once every archive is attached. On a
+      # re-run for a release that already exists, the action keeps whatever
+      # draft state it has.
       - uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ needs.prepare-release.outputs.tag }}
-          draft: false
+          draft: true
           # GitHub puts the generated notes after this, so a release reads as its
           # own summary followed by the pull requests it was made of. An empty
           # body — a bump with nothing written under it — leaves exactly the
@@ -227,6 +235,21 @@ jobs:
           checksum: sha256
           ref: refs/tags/${{ needs.prepare-release.outputs.tag }}
           token: ${{ secrets.GITHUB_TOKEN }}
+
+  # Only once every target's archive and checksum is attached: `build` has
+  # `fail-fast: false`, so a target that failed leaves the release a draft for
+  # someone to look at rather than public and missing a platform.
+  publish:
+    needs: [prepare-release, build]
+    if: needs.prepare-release.outputs.release == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Publish the draft release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ needs.prepare-release.outputs.tag }}
+        run: gh release edit "$RELEASE_TAG" --draft=false
 
   # Beside `build`, not after it: the crate is source, and the binaries are
   # cross-compiles of it, so neither proves anything the other needs. What
