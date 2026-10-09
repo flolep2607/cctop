@@ -121,9 +121,97 @@ pub struct Incident {
     pub level: Level,
     /// Unix seconds.
     pub started_at: Option<i64>,
+    /// Unix seconds of the vendor's last word on it — what decides whether a
+    /// `monitoring` incident is still news. Not serialised: [`Incident::note`]
+    /// says it in words.
+    #[serde(skip)]
+    pub updated_at: Option<i64>,
+    /// Unix seconds since it has been in `monitoring`, when it is.
+    #[serde(skip)]
+    pub monitoring_at: Option<i64>,
     /// Body of the most recent update, which is where the "why" actually lives.
     pub update: Option<String>,
     pub components: Vec<String>,
+    /// Whether it can explain a failing agent session now; see [`Standing`].
+    /// [`parse`] leaves every incident [`Standing::Live`], and
+    /// [`Report::for_agents`] decides.
+    pub standing: Standing,
+    /// Said in place of the stage when the incident has sat in monitoring
+    /// past [`STALE_AFTER`], e.g. "monitoring for 2 days".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+/// How much an incident, or a degraded component, says about the user's
+/// sessions.
+///
+/// A status page reports everything a vendor runs — billing, the console, the
+/// docs — and keeps a fixed incident in `monitoring` for days. Neither explains
+/// a failing agent, and a line that blames one sends the user to the coffee
+/// machine while their proxy is down.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Standing {
+    /// Open, recent, and on something an agent talks to: it counts towards the
+    /// line and towards explaining failing sessions.
+    #[default]
+    Live,
+    /// On something an agent talks to, but only being monitored, and not
+    /// updated for [`STALE_AFTER`]: shown, dimmed, in the panel only.
+    Stale,
+    /// On nothing an agent talks to (the console, billing, image generation):
+    /// in the panel under its own heading, and nowhere else.
+    Other,
+}
+
+/// A component the page reports as not operational.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Component {
+    pub name: String,
+    pub level: Level,
+    /// As for [`Incident::standing`]. Never [`Standing::Stale`] on its own: it
+    /// is stale when the only incident naming it is.
+    pub standing: Standing,
+}
+
+/// How long a `monitoring` incident stays news. Long enough to cover a fix
+/// that has not quite held — the case where the vendor's account is still the
+/// answer — and short enough that a forgotten one stops reading as an outage
+/// the same day. Anthropic left a fixed Console incident in monitoring for two
+/// days (#221).
+pub const STALE_AFTER: i64 = 6 * 3600;
+
+/// Components whose trouble reaches an agent session, matched as lowercase
+/// substrings of the component's name so a rename that keeps the gist ("Claude
+/// API (api.anthropic.com)" becoming "Anthropic API") still matches.
+///
+/// Anthropic: the API every harness calls, Claude Code itself, and claude.ai,
+/// whose login a subscription session authenticates through. Not the Console
+/// (platform.claude.com), which is billing and keys: "API requests are not
+/// affected" is how its incidents usually read.
+const ANTHROPIC_AGENT_COMPONENTS: &[&str] = &[
+    "claude api",
+    "anthropic api",
+    "api.anthropic",
+    "claude code",
+    "claude.ai",
+];
+
+/// OpenAI: the two APIs Codex and other harnesses call, Codex itself, and
+/// Login, which a ChatGPT-plan Codex signs in through. Not ChatGPT's features,
+/// images, audio, fine-tuning or the rest of the platform.
+const OPENAI_AGENT_COMPONENTS: &[&str] = &["responses", "chat completions", "codex", "login"];
+
+impl Page {
+    /// Whether trouble on this component of the page can reach an agent.
+    pub fn affects_agents(self, component: &str) -> bool {
+        let needles = match self {
+            Page::Anthropic => ANTHROPIC_AGENT_COMPONENTS,
+            Page::OpenAi => OPENAI_AGENT_COMPONENTS,
+        };
+        let name = component.to_lowercase();
+        needles.iter().any(|n| name.contains(n))
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
@@ -136,7 +224,75 @@ pub struct Report {
     /// them. OpenAI's page routinely leaves an incident's component list empty
     /// while flagging the components themselves, so this is the only place the
     /// affected surface shows up.
-    pub degraded: Vec<String>,
+    pub degraded: Vec<Component>,
+}
+
+impl Report {
+    /// This report with every incident and component's [`Standing`] decided,
+    /// as of `now` (Unix seconds).
+    ///
+    /// An incident counts by what it names: live if any of its components can
+    /// reach an agent. One that names none — OpenAI's usual — is judged by the
+    /// components the page flags instead: it is "other" only when the page
+    /// flags some and none of them reaches an agent. With nothing to go on it
+    /// counts, because staying quiet through a real outage is the worse error.
+    ///
+    /// Then by stage: a `monitoring` incident not updated for [`STALE_AFTER`]
+    /// is stale, and so is a component only it names — Anthropic leaves the
+    /// component flagged for as long as the incident is monitored.
+    pub fn for_agents(&self, page: Page, now: i64) -> Report {
+        let page_says_other = !self.degraded.is_empty()
+            && !self.degraded.iter().any(|c| page.affects_agents(&c.name));
+        let mut out = self.clone();
+        for i in &mut out.incidents {
+            let relevant = match i.components.is_empty() {
+                true => !page_says_other,
+                false => i.components.iter().any(|c| page.affects_agents(c)),
+            };
+            let quiet_for = i.updated_at.or(i.started_at).map(|at| now - at);
+            let stale = i.stage.eq_ignore_ascii_case("monitoring")
+                && quiet_for.is_some_and(|q| q > STALE_AFTER);
+            i.standing = match (relevant, stale) {
+                (false, _) => Standing::Other,
+                (true, true) => Standing::Stale,
+                (true, false) => Standing::Live,
+            };
+            // Unrelated or not, a long-monitored incident is told by its age:
+            // that is what lets a reader dismiss it at a glance.
+            i.note = stale.then(|| {
+                let since = i.monitoring_at.or(i.updated_at).unwrap_or(now);
+                format!("monitoring for {}", age(now - since))
+            });
+        }
+        for c in &mut out.degraded {
+            c.standing = match page.affects_agents(&c.name) {
+                false => Standing::Other,
+                true => {
+                    let named: Vec<Standing> = out
+                        .incidents
+                        .iter()
+                        .filter(|i| i.components.contains(&c.name))
+                        .map(|i| i.standing)
+                        .collect();
+                    match !named.is_empty() && named.iter().all(|s| *s == Standing::Stale) {
+                        true => Standing::Stale,
+                        false => Standing::Live,
+                    }
+                }
+            };
+        }
+        out
+    }
+}
+
+/// "40m", "7h", "2 days": how long a stale incident has sat, to the precision
+/// that matters for deciding to ignore it.
+fn age(secs: i64) -> String {
+    match secs.max(0) {
+        s if s < 3_600 => format!("{}m", s / 60),
+        s if s < 48 * 3_600 => format!("{}h", s / 3_600),
+        s => format!("{} days", s / 86_400),
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -155,6 +311,15 @@ impl PageStatus {
         match self {
             PageStatus::Ok(r) => Some(r),
             _ => None,
+        }
+    }
+
+    /// The same answer with the report's standings decided; see
+    /// [`Report::for_agents`].
+    pub fn for_agents(&self, page: Page, now: i64) -> PageStatus {
+        match self {
+            PageStatus::Ok(r) => PageStatus::Ok(r.for_agents(page, now)),
+            other => other.clone(),
         }
     }
 }
@@ -262,11 +427,19 @@ pub struct Alert {
     pub page: Page,
     /// Running sessions attributed to this page that are in an API error state.
     pub erroring: usize,
+    /// The worst of what counts: live incidents and the components that reach
+    /// an agent. Not the page's own indicator, which a Console-only incident
+    /// raises as high as an API outage.
     pub level: Level,
-    /// The worst open incident's name when there is one, else the page's own
-    /// description. Timing and update bodies stay in [`Report`], which is what
-    /// the panel reads; a footer line has room for neither.
+    /// The worst live incident's name when there is one, else what is
+    /// degraded, else the page's own description. Timing and update bodies stay
+    /// in [`Report`], which is what the panel reads; a footer line has room for
+    /// neither.
     pub headline: String,
+    /// Incidents and components the page reports that cannot explain a failing
+    /// session — stale, or on something agents do not use. Only the wording
+    /// reads it: "all clear" would be untrue with one open.
+    pub elsewhere: usize,
 }
 
 /// The fields, plus the two verdicts a reader would otherwise recompute — and
@@ -279,6 +452,7 @@ impl Serialize for Alert {
             erroring: usize,
             level: Level,
             headline: &'a str,
+            elsewhere: usize,
             confirmed: bool,
             probably_local: bool,
         }
@@ -287,6 +461,7 @@ impl Serialize for Alert {
             erroring: self.erroring,
             level: self.level,
             headline: &self.headline,
+            elsewhere: self.elsewhere,
             confirmed: self.confirmed(),
             probably_local: self.probably_local(),
         }
@@ -301,47 +476,92 @@ impl Alert {
         self.erroring > 0 && self.level.is_outage()
     }
 
-    /// Sessions fail while the page reports nothing wrong: the cause is most
-    /// likely on this machine — network, proxy, credentials, a model name.
+    /// Sessions fail while the page reports nothing wrong with what they use:
+    /// the cause is most likely on this machine — network, proxy, credentials,
+    /// a model name.
     pub fn probably_local(&self) -> bool {
         self.erroring > 0 && !self.level.is_degraded()
+    }
+
+    /// How the page's answer reads when it explains nothing: plainly all clear,
+    /// or clear of anything that touches an agent.
+    fn clear(&self) -> &'static str {
+        match self.elsewhere {
+            0 => "all clear",
+            _ => "nothing affecting agents",
+        }
     }
 }
 
 /// Pair each page's state with how many of the user's sessions are failing
 /// against it, keeping only the pages worth saying something about, most
-/// pressing first.
+/// pressing first, as of now.
 ///
 /// A page that has not answered — pending or unreachable — yields nothing, even
 /// when sessions are failing against it: cctop not reaching a status page says
 /// nothing about the provider, and on a dead network it would be one more
 /// alarming line about a cause the user can already see.
 pub fn alerts(status: &Status, erroring: &[(Page, usize)]) -> Vec<Alert> {
+    alerts_at(status, erroring, chrono::Utc::now().timestamp())
+}
+
+/// [`alerts`] as of `now` (Unix seconds), which decides what has gone stale.
+///
+/// Only what [`Report::for_agents`] calls live counts: a page whose open
+/// incidents are all on the Console, or all long in monitoring, is a page
+/// reporting nothing that explains a failing session.
+pub fn alerts_at(status: &Status, erroring: &[(Page, usize)], now: i64) -> Vec<Alert> {
     let mut out = Vec::new();
     for page in Page::ALL {
         let Some(report) = status.get(page).report() else {
             continue;
         };
+        let report = report.for_agents(page, now);
         let count = erroring
             .iter()
             .find(|(p, _)| *p == page)
             .map(|(_, n)| *n)
             .unwrap_or(0);
-        if !report.level.is_degraded() && report.incidents.is_empty() && count == 0 {
+        let live: Vec<&Incident> = report
+            .incidents
+            .iter()
+            .filter(|i| i.standing == Standing::Live)
+            .collect();
+        let degraded: Vec<&Component> = report
+            .degraded
+            .iter()
+            .filter(|c| c.standing == Standing::Live)
+            .collect();
+        let elsewhere =
+            report.incidents.len() - live.len() + report.degraded.len() - degraded.len();
+        let level = live
+            .iter()
+            .map(|i| i.level)
+            .chain(degraded.iter().map(|c| c.level))
+            .max()
+            .unwrap_or_default();
+        if !level.is_degraded() && live.is_empty() && count == 0 {
             continue;
         }
         // The worst open incident is the headline; its name is more specific
         // than "Partial System Degradation" and is what the user wants to read.
-        let worst = report.incidents.iter().max_by_key(|i| i.level);
+        let worst = live.iter().max_by_key(|i| i.level);
+        let headline = match worst {
+            Some(i) => i.name.clone(),
+            None if !degraded.is_empty() => {
+                let names: Vec<&str> = degraded.iter().map(|c| c.name.as_str()).collect();
+                format!("{} degraded", names.join(", "))
+            }
+            None if elsewhere > 0 => "nothing affecting agents".into(),
+            None if report.description.is_empty() => "no incident reported".into(),
+            None => report.description.clone(),
+        };
         out.push(Alert {
             page,
             erroring: count,
-            level: report.level.max(worst.map(|i| i.level).unwrap_or_default()),
-            headline: match worst {
-                Some(i) => i.name.clone(),
-                None if report.description.is_empty() => "no incident reported".into(),
-                None => report.description.clone(),
-            },
+            level,
+            headline,
+            elsewhere,
         });
     }
     // Corroborated trouble first, then the "probably local" hint, which explains
@@ -413,9 +633,10 @@ pub fn summary_line(alerts: &[Alert]) -> Option<(String, Level)> {
     };
     let text = match a.probably_local() {
         true => format!(
-            "⚠ {} failing, {} reports all clear: probably this machine",
+            "⚠ {} failing, {} reports {}: probably this machine",
             a.erroring,
-            a.page.label()
+            a.page.label(),
+            a.clear()
         ),
         false => format!(
             "⚠ {} {what}: {}{yours}",
@@ -457,10 +678,11 @@ pub fn verdict(alerts: &[Alert], erroring: &[(Page, usize)]) -> Verdict {
         },
         Some(a) if a.probably_local() => Verdict {
             text: format!(
-                "{} of your sessions {} failing, but {} reports all clear",
+                "{} of your sessions {} failing, but {} reports {}",
                 a.erroring,
                 are(a.erroring),
-                a.page.label()
+                a.page.label(),
+                a.clear()
             ),
             detail: Some(
                 "so suspect this machine: network, proxy, credentials, a model name".into(),
@@ -509,8 +731,19 @@ pub struct Line {
 
 /// Build the [`Document`] for these sessions.
 pub fn document<'a>(status: &Status, sessions: impl IntoIterator<Item = &'a Session>) -> Document {
+    document_at(status, sessions, chrono::Utc::now().timestamp())
+}
+
+/// [`document`] as of `now` (Unix seconds). Each page's incidents and
+/// components carry their [`Standing`], so a reader groups them without
+/// re-deciding what counts.
+pub fn document_at<'a>(
+    status: &Status,
+    sessions: impl IntoIterator<Item = &'a Session>,
+    now: i64,
+) -> Document {
     let erroring = erroring_by_page(sessions);
-    let alerts = alerts(status, &erroring);
+    let alerts = alerts_at(status, &erroring, now);
     let mine = |page: Page| {
         erroring
             .iter()
@@ -525,7 +758,7 @@ pub fn document<'a>(status: &Status, sessions: impl IntoIterator<Item = &'a Sess
                 label: page.label(),
                 site: page.site(),
                 erroring: mine(page),
-                status: status.get(page).clone(),
+                status: status.get(page).for_agents(page, now),
             })
             .collect(),
         line: summary_line(&alerts).map(|(text, level)| Line {
@@ -594,7 +827,19 @@ pub fn parse(text: &str) -> PageStatus {
     let incidents = root
         .get("incidents")
         .and_then(Value::as_array)
-        .map(|a| a.iter().map(parse_incident).collect())
+        .map(|a| {
+            a.iter()
+                .map(parse_incident)
+                // The summary lists only unresolved incidents, but a page that
+                // lags its own status field — or a vendor that keeps a
+                // postmortem open — must not put a finished one on screen.
+                .filter(|i| {
+                    !["resolved", "postmortem", "completed"]
+                        .iter()
+                        .any(|done| i.stage.eq_ignore_ascii_case(done))
+                })
+                .collect()
+        })
         .unwrap_or_default();
 
     PageStatus::Ok(Report {
@@ -615,16 +860,24 @@ fn parse_incident(v: &Value) -> Incident {
     // `started_at` is when it began; `created_at` is when someone opened the
     // record. The former is the honest answer to "since when", and Statuspage
     // omits it often enough to need the fallback.
-    let started_at = ["started_at", "created_at"]
-        .iter()
-        .find_map(|k| v.get(*k).and_then(Value::as_str))
-        .and_then(|ts| util::parse_ts(ts).map(|dt| dt.timestamp()));
+    let ts_at = |key: &str| {
+        v.get(key)
+            .and_then(Value::as_str)
+            .and_then(util::parse_ts)
+            .map(|dt| dt.timestamp())
+    };
+    let started_at = ts_at("started_at").or_else(|| ts_at("created_at"));
+    // The incident's own `updated_at`, else its newest update: either is the
+    // last time the vendor said anything about it.
+    let updated_at = ts_at("updated_at").or_else(|| newest_update_at(v));
 
     Incident {
         name: str_at("name"),
         stage: str_at("status"),
         level: Level::parse(v.get("impact").and_then(Value::as_str)),
         started_at,
+        updated_at,
+        monitoring_at: ts_at("monitoring_at"),
         update: latest_update(v),
         components: v
             .get("components")
@@ -636,7 +889,20 @@ fn parse_incident(v: &Value) -> Incident {
                     .collect()
             })
             .unwrap_or_default(),
+        standing: Standing::Live,
+        note: None,
     }
+}
+
+fn newest_update_at(incident: &Value) -> Option<i64> {
+    incident
+        .get("incident_updates")?
+        .as_array()?
+        .iter()
+        .filter_map(|u| u.get("created_at").and_then(Value::as_str))
+        .filter_map(util::parse_ts)
+        .map(|dt| dt.timestamp())
+        .max()
 }
 
 /// The newest update body. Statuspage lists updates newest-first and incident.io
@@ -659,28 +925,38 @@ fn latest_update(incident: &Value) -> Option<String> {
     }
 }
 
-/// Names of components that are not operational.
+/// Components that are not operational, with how bad each is.
 ///
 /// Group rows are skipped — they aggregate their children, so keeping them
 /// reports the same outage twice under two names. Duplicates are dropped because
 /// OpenAI's page really does list two distinct components both called "Login".
-fn degraded_components(components: Option<&Value>) -> Vec<String> {
+fn degraded_components(components: Option<&Value>) -> Vec<Component> {
     let Some(list) = components.and_then(Value::as_array) else {
         return Vec::new();
     };
-    let mut out: Vec<String> = Vec::new();
+    let mut out: Vec<Component> = Vec::new();
     for c in list {
         if c.get("group").and_then(Value::as_bool) == Some(true) {
             continue;
         }
-        let status = c.get("status").and_then(Value::as_str).unwrap_or("");
-        if status.is_empty() || status == "operational" {
-            continue;
-        }
+        // Statuspage's component states, mapped the way it derives the page's
+        // indicator from them: anything short of a major outage is minor, and
+        // only an incident's impact reaches critical.
+        let level = match c.get("status").and_then(Value::as_str).unwrap_or("") {
+            "under_maintenance" => Level::Maintenance,
+            "degraded_performance" | "partial_outage" => Level::Minor,
+            "major_outage" => Level::Major,
+            // "operational", and a state nobody has defined yet.
+            _ => continue,
+        };
         if let Some(name) = c.get("name").and_then(Value::as_str)
-            && !out.iter().any(|n| n == name)
+            && !out.iter().any(|n| n.name == name)
         {
-            out.push(name.to_string());
+            out.push(Component {
+                name: name.to_string(),
+                level,
+                standing: Standing::Live,
+            });
         }
     }
     out
@@ -697,6 +973,18 @@ pub mod fixtures {
     pub const DEGRADED: &str = include_str!("fixtures/degraded.json");
     /// Anthropic's page in a major incident with a second, minor one open.
     pub const MAJOR: &str = include_str!("fixtures/major.json");
+    /// Anthropic's page as it read on 2026-10-09: a Console-only incident, two
+    /// days in monitoring, that "API requests are not affected" by (#221).
+    pub const CONSOLE: &str = include_str!("fixtures/console.json");
+    /// Anthropic's page with an API incident in monitoring, last updated
+    /// 2026-10-08 15:00 UTC — live or stale depending on when it is read.
+    pub const MONITORING: &str = include_str!("fixtures/monitoring.json");
+    /// Anthropic's page with a Console incident and a Claude Code one, both
+    /// being investigated.
+    pub const MIXED: &str = include_str!("fixtures/mixed.json");
+    /// OpenAI's page with an image-generation incident that, incident.io
+    /// style, names no components; only the flagged component says what it is.
+    pub const OPENAI_OTHER: &str = include_str!("fixtures/openai_other.json");
 }
 
 #[cfg(test)]
@@ -729,7 +1017,7 @@ mod tests {
         assert_eq!(r.incidents.len(), 1);
         let i = &r.incidents[0];
         assert_eq!(i.name, "Increased error rates");
-        assert_eq!(i.stage, "monitoring");
+        assert_eq!(i.stage, "identified");
         // `started_at` wins over `created_at`, and the newest update wins over
         // the first one listed.
         assert_eq!(
@@ -738,10 +1026,13 @@ mod tests {
         );
         assert_eq!(
             i.update.as_deref(),
-            Some("We have applied the mitigation and are monitoring.")
+            Some("We have found the cause and are applying a mitigation.")
         );
         // The group row is dropped and the duplicate name appears once.
-        assert_eq!(r.degraded, vec!["Responses", "Login"]);
+        let names: Vec<&str> = r.degraded.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["Responses", "Login"]);
+        assert_eq!(r.degraded[0].level, Level::Minor);
+        assert_eq!(r.degraded[1].level, Level::Minor);
     }
 
     #[test]
@@ -940,9 +1231,10 @@ mod tests {
         assert!(first["started_at"].is_i64(), "{first}");
         assert_eq!(first["update"], "A bad deploy is being rolled back.");
         assert_eq!(first["components"][1], "Claude Code");
+        assert_eq!(first["standing"], "live");
         assert_eq!(
-            v(parse(DEGRADED))["degraded"],
-            serde_json::json!(["Responses", "Login"])
+            v(parse(DEGRADED))["degraded"][1],
+            serde_json::json!({"name": "Login", "level": "minor", "standing": "live"})
         );
     }
 
@@ -956,6 +1248,7 @@ mod tests {
                 "erroring": 3,
                 "level": "operational",
                 "headline": "All Systems Operational",
+                "elsewhere": 0,
                 "confirmed": false,
                 "probably_local": true,
             })
@@ -1023,5 +1316,159 @@ mod tests {
         assert_eq!(alerts(&s, &[]).len(), 1);
         s.set(Page::Anthropic, parse(OPERATIONAL));
         assert!(alerts(&s, &[]).is_empty());
+    }
+
+    /// Unix seconds for a fixture-relative clock.
+    fn at(ts: &str) -> i64 {
+        util::parse_ts(ts).unwrap().timestamp()
+    }
+
+    fn status_of(page: Page, text: &str) -> Status {
+        let mut s = Status::default();
+        s.set(Page::Anthropic, parse(OPERATIONAL));
+        s.set(Page::OpenAi, parse(OPERATIONAL));
+        s.set(page, parse(text));
+        s
+    }
+
+    fn line_at(s: &Status, erroring: &[(Page, usize)], now: i64) -> Option<String> {
+        summary_line(&alerts_at(s, erroring, now)).map(|(text, _)| text)
+    }
+
+    #[test]
+    fn components_that_reach_an_agent_are_named_per_vendor() {
+        for name in [
+            "Claude API (api.anthropic.com)",
+            "Anthropic API",
+            "Claude Code",
+            "claude.ai",
+        ] {
+            assert!(Page::Anthropic.affects_agents(name), "{name}");
+        }
+        for name in [
+            "Claude Console (platform.claude.com)",
+            "Claude for Government",
+        ] {
+            assert!(!Page::Anthropic.affects_agents(name), "{name}");
+        }
+        for name in ["Responses", "Chat Completions", "Codex", "Login"] {
+            assert!(Page::OpenAi.affects_agents(name), "{name}");
+        }
+        for name in ["Image Generation", "Compliance API", "Voice mode", "Sora"] {
+            assert!(!Page::OpenAi.affects_agents(name), "{name}");
+        }
+    }
+
+    #[test]
+    fn a_console_only_incident_gives_no_line() {
+        let s = status_of(Page::Anthropic, CONSOLE);
+        // Read the day it opened, while it is still being investigated in
+        // all but name: the Console is still not what an agent talks to.
+        let now = at("2026-10-07T14:00:00Z");
+        assert_eq!(line_at(&s, &[], now), None);
+        let r = s.anthropic.for_agents(Page::Anthropic, now);
+        let r = r.report().unwrap();
+        assert_eq!(r.incidents[0].standing, Standing::Other);
+        assert_eq!(r.degraded[0].standing, Standing::Other);
+    }
+
+    #[test]
+    fn failing_sessions_beside_a_console_incident_are_probably_local() {
+        let s = status_of(Page::Anthropic, CONSOLE);
+        let now = at("2026-10-09T20:00:00Z");
+        let a = alerts_at(&s, &[(Page::Anthropic, 2)], now);
+        assert!(a[0].probably_local(), "{a:?}");
+        assert_eq!(a[0].level, Level::Operational);
+        assert_eq!(a[0].elsewhere, 2, "the incident and its component");
+        assert_eq!(
+            line_at(&s, &[(Page::Anthropic, 2)], now).as_deref(),
+            Some("⚠ 2 failing, Anthropic reports nothing affecting agents: probably this machine")
+        );
+        assert_eq!(
+            verdict(&a, &[(Page::Anthropic, 2)]).text,
+            "2 of your sessions are failing, but Anthropic reports nothing affecting agents"
+        );
+    }
+
+    #[test]
+    fn a_monitored_api_incident_counts_until_it_goes_stale() {
+        let s = status_of(Page::Anthropic, MONITORING);
+        // An hour after the last update: the fix may not have held, so it
+        // still explains a failure.
+        let fresh = at("2026-10-08T16:00:00Z");
+        assert_eq!(
+            line_at(&s, &[(Page::Anthropic, 1)], fresh).as_deref(),
+            Some("⚠ Anthropic incident: Elevated errors on the API — 1 of yours failing")
+        );
+        assert!(alerts_at(&s, &[(Page::Anthropic, 1)], fresh)[0].confirmed());
+
+        // Two days on, the panel still lists it, dimmed and aged, but the
+        // footer is silent — and failing sessions point back at this machine.
+        let stale = at("2026-10-10T15:30:00Z");
+        assert_eq!(line_at(&s, &[], stale), None);
+        let doc = document_at(&s, &[], stale);
+        let r = doc.pages[0].status.report().unwrap();
+        assert_eq!(r.incidents[0].standing, Standing::Stale);
+        assert_eq!(
+            r.incidents[0].note.as_deref(),
+            Some("monitoring for 2 days")
+        );
+        // The component it names is flagged only because the incident is open.
+        assert_eq!(r.degraded[0].standing, Standing::Stale);
+        assert!(alerts_at(&s, &[(Page::Anthropic, 1)], stale)[0].probably_local());
+
+        let json = serde_json::to_value(&doc).unwrap();
+        assert_eq!(json["pages"][0]["incidents"][0]["standing"], "stale");
+        assert_eq!(
+            json["pages"][0]["incidents"][0]["note"],
+            "monitoring for 2 days"
+        );
+    }
+
+    #[test]
+    fn an_investigated_api_incident_beside_a_console_one_leads() {
+        let s = status_of(Page::Anthropic, MIXED);
+        let now = at("2026-10-09T09:00:00Z");
+        // The Console incident is the page's worst, and still not the line.
+        assert_eq!(
+            line_at(&s, &[(Page::Anthropic, 3)], now).as_deref(),
+            Some("⚠ Anthropic incident: Claude Code sessions fail to start — 3 of yours failing")
+        );
+        let a = &alerts_at(&s, &[(Page::Anthropic, 3)], now)[0];
+        assert!(a.confirmed());
+        // Claude Code's minor incident, not the Console's major one.
+        assert_eq!(a.level, Level::Minor);
+        let r = s.anthropic.for_agents(Page::Anthropic, now);
+        let standings: Vec<Standing> = r
+            .report()
+            .unwrap()
+            .incidents
+            .iter()
+            .map(|i| i.standing)
+            .collect();
+        assert_eq!(standings, vec![Standing::Other, Standing::Live]);
+    }
+
+    #[test]
+    fn an_openai_incident_naming_nothing_is_judged_by_the_flagged_components() {
+        let now = at("2026-10-09T09:00:00Z");
+        // Only Image Generation is flagged: the incident is about that.
+        let s = status_of(Page::OpenAi, OPENAI_OTHER);
+        assert_eq!(line_at(&s, &[], now), None);
+        assert!(alerts_at(&s, &[(Page::OpenAi, 1)], now)[0].probably_local());
+        // Responses is flagged: the same shape of incident counts.
+        let s = status_of(Page::OpenAi, DEGRADED);
+        assert_eq!(
+            line_at(&s, &[], now).as_deref(),
+            Some("⚠ OpenAI incident: Increased error rates")
+        );
+    }
+
+    #[test]
+    fn a_resolved_incident_never_shows() {
+        let text = MAJOR.replacen(r#""status": "identified""#, r#""status": "resolved""#, 1);
+        let r = report(&text);
+        assert_eq!(r.incidents.len(), 1);
+        assert_eq!(r.incidents[0].name, "Slow responses on claude.ai");
     }
 }

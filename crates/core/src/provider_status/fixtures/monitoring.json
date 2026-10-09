@@ -1,0 +1,27 @@
+{
+  "page": {"id": "tymt9n04zgry", "name": "Claude", "url": "https://status.claude.com", "updated_at": "2026-10-08T15:00:00.000Z"},
+  "components": [
+    {"id": "k8w3r06qmzrp", "name": "Claude API (api.anthropic.com)", "status": "degraded_performance", "group": false},
+    {"id": "yyzkbfz2thpt", "name": "Claude Code", "status": "operational", "group": false}
+  ],
+  "incidents": [
+    {
+      "id": "m0n1t0",
+      "name": "Elevated errors on the API",
+      "status": "monitoring",
+      "impact": "minor",
+      "created_at": "2026-10-08T12:00:00.000Z",
+      "updated_at": "2026-10-08T15:00:00.000Z",
+      "monitoring_at": "2026-10-08T15:00:00.000Z",
+      "started_at": "2026-10-08T11:50:00.000Z",
+      "components": [
+        {"id": "k8w3r06qmzrp", "name": "Claude API (api.anthropic.com)", "status": "degraded_performance"}
+      ],
+      "incident_updates": [
+        {"status": "monitoring", "body": "A fix has been deployed and we are monitoring.", "created_at": "2026-10-08T15:00:00.000Z"}
+      ]
+    }
+  ],
+  "scheduled_maintenances": [],
+  "status": {"indicator": "minor", "description": "Partially Degraded Service"}
+}
