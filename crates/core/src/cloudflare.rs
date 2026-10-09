@@ -1122,9 +1122,9 @@ pub fn name_dashboard(input: &str) -> Result<Renamed, String> {
     Ok(renamed)
 }
 
-/// The connected account and a client for it, or why addresses cannot be
-/// chosen on it.
-fn connected() -> Result<(Account, Api), String> {
+/// The connected account and a client for it, or why cctop cannot write to
+/// it — choosing addresses, and putting the page behind Access.
+pub fn connected() -> Result<(Account, Api), String> {
     let account = crate::tunnel::account().ok_or_else(|| {
         "No Cloudflare account is connected — connect your own domain (a in the serve panel) to \
          choose addresses"
