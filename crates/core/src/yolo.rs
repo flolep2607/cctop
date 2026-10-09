@@ -1762,4 +1762,125 @@ mod tests {
         assert_eq!(allowed.len(), 2);
         let _ = std::fs::remove_file(&path);
     }
+
+    /// An environment holding exactly these variables.
+    fn env_of(vars: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
+        let vars: Vec<(String, String)> = vars
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        move |name: &str| vars.iter().find(|(k, _)| k == name).map(|(_, v)| v.clone())
+    }
+
+    fn from_session() -> Switch {
+        Switch {
+            from: crate::yolo_log::Origin::Session,
+            cwd: Some("/w".into()),
+            harness: Some("claude".into()),
+        }
+    }
+
+    /// The session and the process are both taken from what Claude Code
+    /// sets, and the process only when it really is running the command —
+    /// the test the hook will apply to it.
+    #[test]
+    fn the_session_is_found_from_claude_codes_environment() {
+        let pid = me().to_string();
+        let ancestry = [42, me()];
+        let found = inside(
+            &env_of(&[("CLAUDE_CODE_SESSION_ID", "s1"), ("CLAUDE_PID", &pid)]),
+            &ancestry,
+        );
+        assert_eq!(
+            found,
+            Ok(Inside {
+                session: "s1".into(),
+                agent: me()
+            })
+        );
+        // Outside a session, with no pid, and with a pid that is not an
+        // ancestor: each a refusal, never a guess.
+        assert!(inside(&env_of(&[("CLAUDE_PID", &pid)]), &ancestry).is_err());
+        assert!(
+            inside(
+                &env_of(&[("CLAUDE_CODE_SESSION_ID", " "), ("CLAUDE_PID", &pid)]),
+                &ancestry
+            )
+            .is_err()
+        );
+        assert!(inside(&env_of(&[("CLAUDE_CODE_SESSION_ID", "s1")]), &ancestry).is_err());
+        assert!(
+            inside(
+                &env_of(&[("CLAUDE_CODE_SESSION_ID", "s1"), ("CLAUDE_PID", &pid)]),
+                &[42]
+            )
+            .is_err()
+        );
+    }
+
+    /// Bare `/yolo` is on; bare `cctop yolo` is the help, never a switch.
+    #[test]
+    fn the_words_after_yolo() {
+        let words = |w: &[&str]| w.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(Ask::parse(&words(&[]), true), Some(Ask::On));
+        assert_eq!(Ask::parse(&words(&[]), false), None);
+        assert_eq!(Ask::parse(&words(&["off"]), true), Some(Ask::Off));
+        assert_eq!(Ask::parse(&words(&["status"]), false), Some(Ask::Status));
+        assert_eq!(Ask::parse(&words(&["on"]), false), Some(Ask::On));
+        assert_eq!(Ask::parse(&words(&["on", "now"]), true), None);
+        assert_eq!(Ask::parse(&words(&["yes"]), true), None);
+    }
+
+    /// On, status, off and off again, through the same file the table and
+    /// the hook use — so the hook allows this session's process and nothing
+    /// else, and the lasting record says where each switch came from.
+    #[test]
+    fn on_status_and_off_from_inside_the_session() {
+        let dir = scratch("inside");
+        let log = log_of(&dir);
+        let here = Inside {
+            session: "s1".into(),
+            agent: me(),
+        };
+        let say = |ask| answer_in(&dir, &log, ask, &here, &from_session()).unwrap();
+
+        assert!(say(Ask::Status).starts_with("YOLO is off"));
+        assert!(say(Ask::On).starts_with("YOLO on for this session"));
+        assert!(allows_in(&dir, "s1", &[me()]));
+        assert!(!allows_in(&dir, "s2", &[me()]));
+        assert!(!allows_in(&dir, "s1", &[1234]));
+        assert!(say(Ask::Status).starts_with("YOLO is on for this session"));
+
+        assert!(say(Ask::Off).starts_with("YOLO off for this session"));
+        assert!(!allows_in(&dir, "s1", &[me()]));
+        let lines = log.read();
+        assert_eq!(lines.len(), 2);
+        assert!(
+            lines
+                .iter()
+                .all(|l| l.from == Some(crate::yolo_log::Origin::Session))
+        );
+
+        // Off again writes nothing: no switch was thrown.
+        assert_eq!(say(Ask::Off), "YOLO was not on for this session.");
+        assert_eq!(log.read().len(), 2);
+    }
+
+    /// An entry for an earlier process of the same session — before a
+    /// resume — is one the hook no longer honours, so status does not call
+    /// it on.
+    #[test]
+    fn status_does_not_count_an_earlier_process() {
+        let dir = scratch("inside-earlier");
+        let log = log_of(&dir);
+        // pid 1 is alive and is never this test: an earlier run, for status.
+        set_in(&dir, &log, "s1", Some(1), &from_session()).unwrap();
+        let here = Inside {
+            session: "s1".into(),
+            agent: me(),
+        };
+        let status = answer_in(&dir, &log, Ask::Status, &here, &from_session()).unwrap();
+        assert!(status.starts_with("YOLO is off"), "{status}");
+        assert!(status.contains("earlier run"), "{status}");
+    }
 }

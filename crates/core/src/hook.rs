@@ -3857,15 +3857,21 @@ fn repair_in(scopes: &[Scope]) -> Repair {
                         Some((count, at)) => (
                             at.unwrap_or(&own).to_string(),
                             match config {
-                                Config::Skill { .. } => format!("added {SKILL_LABEL}"),
+                                Config::Skill { .. } => "added".to_string(),
                                 _ => format!("filled in {count} missing hooks"),
                             },
                         ),
                     },
                 };
+                // The skill is named, so its line does not read as a second
+                // rewrite of the settings file beside it.
+                let which = match config {
+                    Config::Skill { .. } => format!(" {SKILL_LABEL}"),
+                    _ => String::new(),
+                };
                 match config.install(&exe) {
                     Ok(_) => repair.fixed.push(format!(
-                        "{} ({}): {what}",
+                        "{} ({}){which}: {what}",
                         harness.label(),
                         scope.label()
                     )),
@@ -6160,5 +6166,191 @@ mod tests {
         assert!(!is_our_command(
             "/usr/bin/other yolo-hook PermissionRequest"
         ));
+    }
+
+    /// The three paths a `/yolo` test touches, in a scratch directory of its
+    /// own: never the machine's own `~/.claude`.
+    fn yolo_paths(name: &str) -> (PathBuf, PathBuf, PathBuf) {
+        let dir = scratch(&format!("yolo-skill-{name}"));
+        (
+            dir.join("skills").join("yolo").join("SKILL.md"),
+            dir.join("commands").join("yolo.md"),
+            dir.join("settings.json"),
+        )
+    }
+
+    /// The `!` line's command, as Claude Code will run it.
+    fn bang_line(text: &str) -> &str {
+        text.lines()
+            .find_map(|l| l.strip_prefix("!`")?.strip_suffix('`'))
+            .expect("a ! line")
+    }
+
+    /// The grant the frontmatter makes, unquoted.
+    fn granted(text: &str) -> String {
+        let line = text
+            .lines()
+            .find_map(|l| l.strip_prefix("allowed-tools: "))
+            .expect("an allowed-tools line");
+        serde_json::from_str(line).expect("quoted as JSON")
+    }
+
+    /// What makes `/yolo` the person's alone: the model cannot invoke it, and
+    /// the one command its grant covers is the `!` line itself, key and all —
+    /// so the plain `cctop yolo --slash on` the model could type in the same
+    /// turn is not covered and gets a prompt. A real session showed the
+    /// unkeyed grant letting `/yolo off` be undone by the model unprompted.
+    #[test]
+    fn the_yolo_skill_is_the_persons_and_grants_only_its_own_line() {
+        let text = skill_source("/usr/bin/cctop", "k3y");
+        assert!(text.starts_with("---\n"));
+        assert!(text.contains("\ndisable-model-invocation: true\n"));
+        let line = bang_line(&text);
+        assert_eq!(line, "/usr/bin/cctop yolo --slash=k3y $ARGUMENTS");
+        let grant = granted(&text);
+        assert_eq!(grant, "Bash(/usr/bin/cctop yolo --slash=k3y *)");
+        let prefix = grant
+            .strip_prefix("Bash(")
+            .and_then(|g| g.strip_suffix(" *)"))
+            .unwrap();
+        assert!(line.starts_with(prefix));
+        assert!(!"/usr/bin/cctop yolo --slash on".starts_with(prefix));
+        assert!(!"/usr/bin/cctop yolo on".starts_with(prefix));
+        assert_eq!(skill_exe(&text).as_deref(), Some("/usr/bin/cctop"));
+        assert_eq!(skill_key(&text).as_deref(), Some("k3y"));
+    }
+
+    /// A path the shell would split, or YAML would misread, is quoted for
+    /// each the way each needs, and read back intact.
+    #[test]
+    fn a_spaced_path_survives_the_shell_and_the_yaml() {
+        let exe = "/opt/my tools/it's/cctop";
+        let text = skill_source(exe, "k");
+        assert_eq!(
+            bang_line(&text),
+            r"'/opt/my tools/it'\''s/cctop' yolo --slash=k $ARGUMENTS"
+        );
+        assert_eq!(
+            granted(&text),
+            r"Bash('/opt/my tools/it'\''s/cctop' yolo --slash=k *)"
+        );
+        assert_eq!(skill_exe(&text).as_deref(), Some(exe));
+    }
+
+    /// Written with a key of its own, and written again only when it would
+    /// change — keeping the key, so a refresh mid-turn does not move the
+    /// command that turn was granted.
+    #[test]
+    fn installing_yolo_twice_keeps_its_key_and_its_bytes() {
+        let (path, commands, _) = yolo_paths("twice");
+        skill_install(&path, &commands, "/usr/bin/cctop").unwrap();
+        let first = std::fs::read_to_string(&path).unwrap();
+        let key = skill_key(&first).expect("a key");
+        assert_eq!(key.len(), 32);
+        assert!(key.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_eq!(first, skill_source("/usr/bin/cctop", &key));
+
+        skill_install(&path, &commands, "/usr/bin/cctop").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), first);
+        // A move of the binary rewrites the file and keeps the key.
+        skill_install(&path, &commands, "/opt/cctop").unwrap();
+        let moved = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(moved, skill_source("/opt/cctop", &key));
+
+        // Another install somewhere else gets a different key.
+        let (other, other_commands, _) = yolo_paths("twice-other");
+        skill_install(&other, &other_commands, "/usr/bin/cctop").unwrap();
+        let other_key = skill_key(&std::fs::read_to_string(&other).unwrap());
+        assert_ne!(other_key.as_deref(), Some(key.as_str()));
+    }
+
+    /// A `/yolo` of the person's own — a skill at the same path, or a command
+    /// file the skill would hide — is reported and never written over.
+    #[test]
+    fn a_yolo_of_the_persons_own_is_left_alone() {
+        let (path, commands, hooks) = yolo_paths("theirs");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "---\ndescription: mine\n---\nhello\n").unwrap();
+        assert!(skill_install(&path, &commands, "/usr/bin/cctop").is_err());
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "---\ndescription: mine\n---\nhello\n"
+        );
+        assert_eq!(
+            skill_health(&path, &commands, &hooks),
+            Health::Foreign(path.clone())
+        );
+        assert!(!skill_health(&path, &commands, &hooks).is_problem());
+        assert!(!skill_remove(&path).unwrap());
+        assert!(path.exists());
+
+        let (path, commands, hooks) = yolo_paths("theirs-command");
+        std::fs::create_dir_all(commands.parent().unwrap()).unwrap();
+        std::fs::write(&commands, "my own /yolo\n").unwrap();
+        assert!(skill_install(&path, &commands, "/usr/bin/cctop").is_err());
+        assert!(!path.exists());
+        assert_eq!(
+            skill_health(&path, &commands, &hooks),
+            Health::Foreign(commands.clone())
+        );
+    }
+
+    /// Missing is "not installed" on a machine without cctop's hooks, and a
+    /// shortfall to fill in on one with them — an install from before /yolo.
+    #[test]
+    fn a_missing_yolo_is_short_only_beside_cctops_hooks() {
+        let (path, commands, hooks) = yolo_paths("missing");
+        assert_eq!(skill_health(&path, &commands, &hooks), Health::Absent);
+        let exe = own_exe().unwrap();
+        json_install(&hooks, Shape::Nested, CLAUDE_EVENTS, CLAUDE_DECIDING, &exe).unwrap();
+        let health = skill_health(&path, &commands, &hooks);
+        assert_eq!(health, Health::Partial(vec![SKILL_LABEL]));
+        assert_eq!(health.shortfall(), Some((1, None)));
+
+        skill_install(&path, &commands, &exe).unwrap();
+        assert_eq!(skill_health(&path, &commands, &hooks), Health::Installed);
+    }
+
+    /// Any difference from what this version writes is an older cctop's,
+    /// and a file without a key is one.
+    #[test]
+    fn an_older_yolo_reads_as_outdated() {
+        let (path, commands, hooks) = yolo_paths("older");
+        let exe = own_exe().unwrap();
+        skill_install(&path, &commands, &exe).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        let key_line = text
+            .lines()
+            .find(|l| l.starts_with(SKILL_KEY))
+            .unwrap()
+            .to_string();
+        std::fs::write(&path, text.replace(&format!("{key_line}\n"), "")).unwrap();
+        assert_eq!(
+            skill_health(&path, &commands, &hooks),
+            Health::Outdated { exe: None }
+        );
+        std::fs::write(&path, text.replace("Repeat that", "Say that")).unwrap();
+        assert_eq!(
+            skill_health(&path, &commands, &hooks),
+            Health::Outdated { exe: None }
+        );
+    }
+
+    /// Uninstall takes cctop's file and its emptied directory, and nothing
+    /// the person put beside it.
+    #[test]
+    fn removing_yolo_takes_only_cctops_file() {
+        let (path, commands, _) = yolo_paths("remove");
+        skill_install(&path, &commands, "/usr/bin/cctop").unwrap();
+        assert!(skill_remove(&path).unwrap());
+        assert!(!path.exists());
+        assert!(!path.parent().unwrap().exists());
+        assert!(!skill_remove(&path).unwrap());
+
+        skill_install(&path, &commands, "/usr/bin/cctop").unwrap();
+        let note = path.parent().unwrap().join("notes.md");
+        std::fs::write(&note, "mine").unwrap();
+        assert!(skill_remove(&path).unwrap());
+        assert!(note.exists());
     }
 }
