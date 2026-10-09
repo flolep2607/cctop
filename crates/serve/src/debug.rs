@@ -239,6 +239,8 @@ pub fn route(shared: &Shared, stream: &mut TcpStream, request: &Request, rest: &
                     "operational" => parse(fixtures::OPERATIONAL),
                     "degraded" => parse(fixtures::DEGRADED),
                     "major" => parse(fixtures::MAJOR),
+                    "console" => parse(fixtures::CONSOLE),
+                    "mixed" => parse(fixtures::MIXED),
                     "unreachable" => PageStatus::Unavailable("connection refused".into()),
                     "pending" => PageStatus::Pending,
                     _ => {
@@ -247,7 +249,7 @@ pub fn route(shared: &Shared, stream: &mut TcpStream, request: &Request, rest: &
                             stream,
                             Some(request),
                             400,
-                            "each page must be one of: operational, degraded, major, unreachable, pending",
+                            "each page must be one of: operational, degraded, major, console, mixed, unreachable, pending",
                         );
                         return true;
                     }
