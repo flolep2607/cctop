@@ -137,6 +137,18 @@ nothing left to respect. The OpenCode plugin is topped up the same way, by
 being rewritten: cctop owns that file outright, and an old copy of it forwards
 fewer events for the same reason an old settings file registers fewer hooks.
 
+The same goes for an install that has every event but not in the form this
+version writes — an older cctop's command line, timeout, matcher, or an event it
+registered and this one no longer does. Those entries are rewritten into the
+current form, at the binary they already name, and only cctop's: your own hooks
+in the same file, in the same event, even in the same wrapper, are left as they
+are. This runs at every start of the dashboard and of `cctop serve`, on a thread
+of its own so nothing waits for it, and after `cctop --update`, run by the new
+binary since only it knows the new form. When everything is already right it
+reads each file once and writes nothing; anything it does change is said once in
+the status line (or on stderr for `serve`). `cctop hook` itself never does this:
+it stays as fast and as silent as below.
+
 Cursor also reads Claude Code's `settings.json` of its own accord, so with both
 installed each moment arrives twice; that costs a process spawn and nothing
 else, since the second event says exactly what the first did. The same goes for
