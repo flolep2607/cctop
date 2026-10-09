@@ -171,6 +171,13 @@ sysinfo = "0.39.6"
 # installs it can check it is the same file. Already in the tree under the TLS
 # stack, so this adds no dependency.
 sha2 = "0.10.9"
+# A Cloudflare Access login is a JWT signed RS256, and the page trusts one only
+# after checking that signature against the team's published keys
+# (`cloudflare::access`). ring is already in the tree under rustls and the
+# tunnel's QUIC, and base64 under the tunnel crate, so neither adds a crate.
+# `alloc` is what RSA needs; the default `dev_urandom_fallback` is not wanted.
+ring = { version = "0.17", default-features = false, features = ["alloc"] }
+base64 = "0.22"
 tar = "0.4.46"
 tempfile = "3.27.0"
 # How many colours the terminal can show, read from the environment the way

@@ -15,8 +15,9 @@
 
 use std::io::{BufRead, IsTerminal, Write};
 
+use cctop_core::cloudflare::access::{self, Invite, Level};
 use cctop_core::cloudflare::login::Login;
-use cctop_core::cloudflare::{self, Api, Pasted};
+use cctop_core::cloudflare::{self, Api, Pasted, access_setup};
 use cctop_core::tunnel::{self, Account};
 
 pub const HELP: &str = "\
@@ -24,9 +25,14 @@ cctop tunnel — your own Cloudflare tunnel, for a link that stays the same
 
 USAGE:
   cctop tunnel setup --browser [--hostname <NAME>]
-  cctop tunnel setup [--zone <DOMAIN>] [--hostname <NAME>]
+  cctop tunnel setup [--zone <DOMAIN>] [--hostname <NAME>] [--access <EMAIL>]
   cctop tunnel status
   cctop tunnel remove
+  cctop tunnel access on --owner <EMAIL>
+  cctop tunnel access off
+  cctop tunnel invite add <EMAIL | @DOMAIN> [--full]
+  cctop tunnel invite remove <EMAIL | @DOMAIN>
+  cctop tunnel invite list
 
 `cctop serve --tunnel` and the dashboard's tunnel use a trycloudflare quick
 tunnel: nothing to set up, but a new address every run, no Server-Sent Events
@@ -42,8 +48,16 @@ setup    With --browser, log in to Cloudflare in the browser and pick the
          A tunnel token from the dashboard works too. Piped, one token is
          read from stdin.
 status   What is connected.
-remove   Delete what setup created on Cloudflare — the DNS records and the
-         tunnel, by the ids it stored, nothing else — and forget it.
+remove   Delete what setup created on Cloudflare — the DNS records, the
+         tunnel and any Access application, by the ids it stored, nothing
+         else — and forget it.
+access   Put the dashboard's hostname behind Cloudflare Access: you open it
+         by logging in with your email (a one-time code is sent to it), and
+         no token is needed. `--access <EMAIL>` on setup does the same.
+         Needs the API token to have the two Access permissions; a token
+         made from the link setup prints has them.
+invite   Who else may log in: an email, or everyone at @a-domain. Read-only
+         unless --full. Nobody invited needs a Cloudflare account.
 
 CCTOP_TUNNEL_TOKEN (a tunnel token) and CCTOP_TUNNEL_HOSTNAME connect a tunnel
 without a config file, for a service; they win over what setup stored.
@@ -54,6 +68,8 @@ pub fn run(argv: &[String]) -> anyhow::Result<i32> {
         Some("setup") => setup(&argv[1..]),
         Some("status") => Ok(status()),
         Some("remove") => Ok(remove()),
+        Some("access") => access(&argv[1..]),
+        Some("invite") => invite(&argv[1..]),
         Some("-h" | "--help") | None => {
             print!("{HELP}");
             Ok(0)
@@ -90,10 +106,211 @@ fn status() -> i32 {
     if let Some(id) = &account.tunnel_id {
         println!("Tunnel: {id}");
     }
+    match tunnel::access_settings() {
+        Some(access) => {
+            println!(
+                "Cloudflare Access: on — log in as {} at the dashboard's hostname",
+                access.owner
+            );
+            for line in invite_lines(&access.invites) {
+                println!("  {line}");
+            }
+        }
+        None => println!(
+            "Cloudflare Access: off — the dashboard is opened with its token link \
+             (`cctop tunnel access on` puts it behind a login)"
+        ),
+    }
     if tunnel::in_use(&account) {
         println!("A cctop on this machine is serving over it now.");
     }
     0
+}
+
+/// The invite list, one line each, or the line saying there is none.
+fn invite_lines(invites: &[Invite]) -> Vec<String> {
+    if invites.is_empty() {
+        return vec!["No one else is invited (`cctop tunnel invite add`).".to_string()];
+    }
+    invites
+        .iter()
+        .map(|invite| {
+            let who = match invite.is_domain() {
+                true => format!("everyone at {}", invite.who),
+                false => invite.who.clone(),
+            };
+            let can = match invite.level {
+                Level::Read => "read-only",
+                Level::Full => "full",
+            };
+            format!("{who}: {can}")
+        })
+        .collect()
+}
+
+/// The account cctop can write to, or `None` after saying why on stderr.
+fn writable() -> Option<(Account, Api)> {
+    if tunnel::account().is_none() {
+        eprintln!("cctop: no Cloudflare account is connected; `cctop tunnel setup` first.");
+        return None;
+    }
+    match cloudflare::connected() {
+        Ok(found) => Some(found),
+        Err(why) => {
+            eprintln!("cctop: {why}");
+            None
+        }
+    }
+}
+
+/// `cctop tunnel access on --owner <EMAIL>` and `access off`.
+fn access(argv: &[String]) -> anyhow::Result<i32> {
+    match argv.first().map(String::as_str) {
+        Some("on") => {
+            let owner = match argv.get(1..) {
+                Some([flag, owner]) if flag == "--owner" => owner.clone(),
+                _ => anyhow::bail!("usage: cctop tunnel access on --owner <EMAIL>"),
+            };
+            let Some((account, api)) = writable() else {
+                return Ok(1);
+            };
+            Ok(turn_on(&account, &api, &owner))
+        }
+        Some("off") => {
+            let Some((mut account, api)) = writable() else {
+                return Ok(1);
+            };
+            let Some(settings) = account.access.take() else {
+                println!("Cloudflare Access is already off.");
+                return Ok(0);
+            };
+            let left = access_setup::disable(&api, &account, &settings);
+            tunnel::save_account(&account)?;
+            match left.is_empty() {
+                true => {
+                    println!("Access is off: the dashboard is opened with its token link again.")
+                }
+                false => {
+                    println!("Access is off, but these are left on Cloudflare to delete by hand:");
+                    for item in &left {
+                        println!("  - {item}");
+                    }
+                }
+            }
+            Ok(0)
+        }
+        _ => anyhow::bail!("usage: cctop tunnel access on --owner <EMAIL> | access off"),
+    }
+}
+
+/// Put `account`'s page behind Access for `owner`, keeping any invites, and
+/// store it. The exit code.
+fn turn_on(account: &Account, api: &Api, owner: &str) -> i32 {
+    eprintln!("Putting the dashboard behind Cloudflare Access…");
+    let invites = account
+        .access
+        .as_ref()
+        .map(|a| a.invites.clone())
+        .unwrap_or_default();
+    let settings = match access_setup::enable(api, account, owner, invites) {
+        Ok(settings) => settings,
+        Err(e) => {
+            eprintln!("cctop: {e}");
+            return 1;
+        }
+    };
+    let host = account.hostname.clone().unwrap_or_default();
+    let owner = settings.owner.clone();
+    let stored = Account {
+        access: Some(Box::new(settings)),
+        ..account.clone()
+    };
+    if let Err(e) = tunnel::save_account(&stored) {
+        // Made on Cloudflare but not remembered: say what to delete, since
+        // `remove` will not find it.
+        eprintln!(
+            "cctop: Access is set up on Cloudflare, but cctop could not remember it ({e}); \
+             delete the application on {host} in the Zero Trust dashboard"
+        );
+        return 1;
+    }
+    eprintln!(
+        "Access is on: open https://{host} and log in as {owner} with the code Cloudflare \
+         emails you. `cctop tunnel invite add` lets others in."
+    );
+    0
+}
+
+/// `cctop tunnel invite add|remove|list`.
+fn invite(argv: &[String]) -> anyhow::Result<i32> {
+    const USAGE: &str = "usage: cctop tunnel invite add <EMAIL | @DOMAIN> [--full] | remove <EMAIL | @DOMAIN> | list";
+    let verb = argv.first().map(String::as_str);
+    if verb == Some("list") {
+        match tunnel::access_settings() {
+            Some(access) => {
+                println!("{} (owner): full", access.owner);
+                for line in invite_lines(&access.invites) {
+                    println!("{line}");
+                }
+            }
+            None => println!(
+                "Cloudflare Access is off; `cctop tunnel access on --owner <EMAIL>` first."
+            ),
+        }
+        return Ok(0);
+    }
+    let (who, level) = match (verb, argv.get(1..).unwrap_or_default()) {
+        (Some("add"), [who]) => (who, Some(Level::Read)),
+        (Some("add"), [who, flag]) | (Some("add"), [flag, who]) if flag == "--full" => {
+            (who, Some(Level::Full))
+        }
+        (Some("add"), [who, flag]) | (Some("add"), [flag, who]) if flag == "--read" => {
+            (who, Some(Level::Read))
+        }
+        (Some("remove"), [who]) => (who, None),
+        _ => anyhow::bail!(USAGE),
+    };
+    let Some(normal) = access::parse_who(who) else {
+        eprintln!("cctop: {who} is neither an email address nor a domain like @company.com");
+        return Ok(1);
+    };
+    let Some((account, api)) = writable() else {
+        return Ok(1);
+    };
+    let Some(mut settings) = account.access.clone() else {
+        eprintln!(
+            "cctop: Cloudflare Access is off; `cctop tunnel access on --owner <EMAIL>` first."
+        );
+        return Ok(1);
+    };
+    match level {
+        Some(level) => {
+            settings.invites = access_setup::with_invite(settings.invites, normal.clone(), level)
+        }
+        None => {
+            let before = settings.invites.len();
+            settings.invites.retain(|i| i.who != normal);
+            if settings.invites.len() == before {
+                println!("{normal} was not invited; nothing changed.");
+                return Ok(0);
+            }
+        }
+    }
+    if let Err(e) = access_setup::update(&api, &account, &settings) {
+        eprintln!("cctop: {e}");
+        eprintln!("Nothing was changed.");
+        return Ok(1);
+    }
+    tunnel::save_account(&Account {
+        access: Some(settings),
+        ..account
+    })?;
+    match level {
+        Some(Level::Full) => println!("Invited {normal}, with full access."),
+        Some(Level::Read) => println!("Invited {normal}, read-only."),
+        None => println!("{normal} can no longer log in."),
+    }
+    Ok(0)
 }
 
 fn remove() -> i32 {
@@ -140,6 +357,7 @@ fn setup(argv: &[String]) -> anyhow::Result<i32> {
     let mut zone_given: Option<String> = None;
     let mut hostname_given: Option<String> = None;
     let mut browser = false;
+    let mut access_owner: Option<String> = None;
     let mut it = argv.iter();
     while let Some(flag) = it.next() {
         let mut value = || {
@@ -151,6 +369,7 @@ fn setup(argv: &[String]) -> anyhow::Result<i32> {
             "--zone" => zone_given = Some(value()?),
             "--hostname" => hostname_given = Some(value()?),
             "--browser" => browser = true,
+            "--access" => access_owner = Some(value()?),
             "-h" | "--help" => {
                 print!("{HELP}");
                 return Ok(0);
@@ -181,7 +400,7 @@ fn setup(argv: &[String]) -> anyhow::Result<i32> {
         let Some(account) = log_in(hostname_given, interactive)? else {
             return Ok(1);
         };
-        return connected(&account);
+        return connected(&account, access_owner.as_deref());
     }
     let pasted = match interactive {
         true => {
@@ -191,9 +410,11 @@ fn setup(argv: &[String]) -> anyhow::Result<i32> {
                  1. Make an API token (the link fills in the permissions and the name):\n\
                  \x20  {}\n\
                  \x20  It needs: {}.\n\
+                 \x20  For logging in with Cloudflare Access later, also: {}.\n\
                  2. Paste it below. A tunnel token from the dashboard works too.\n",
                 cloudflare::token_link(),
-                cloudflare::PERMISSIONS.join(", ")
+                cloudflare::PERMISSIONS.join(", "),
+                access_setup::PERMISSIONS.join(", ")
             );
             eprint!("Token (not shown as you paste): ");
             read_secret()?
@@ -233,18 +454,36 @@ fn setup(argv: &[String]) -> anyhow::Result<i32> {
             None => return Ok(1),
         },
     };
-    connected(&account)
+    connected(&account, access_owner.as_deref())
 }
 
-/// Store `account` and say so.
-fn connected(account: &Account) -> anyhow::Result<i32> {
+/// Store `account` and say so, then put it behind Access for `owner` when
+/// that was asked for. The tunnel is kept whatever Access says: it works
+/// without it, and `cctop tunnel access on` can try again.
+fn connected(account: &Account, owner: Option<&str>) -> anyhow::Result<i32> {
     tunnel::save_account(account)?;
     match &account.hostname {
         Some(host) => eprintln!("Connected: https://{host}"),
         None => eprintln!("Connected; the hostname is learned when the tunnel first connects."),
     }
     eprintln!("`cctop serve --tunnel`, and t in the dashboard's serve panel, now use it.");
-    Ok(0)
+    let Some(owner) = owner else {
+        return Ok(0);
+    };
+    // Through what was just stored, which is what every later command uses.
+    let code = match cloudflare::connected() {
+        Ok((account, api)) => turn_on(&account, &api, owner),
+        Err(why) => {
+            eprintln!("cctop: {why}");
+            1
+        }
+    };
+    if code != 0 {
+        eprintln!(
+            "The tunnel is connected; `cctop tunnel access on --owner {owner}` tries Access again."
+        );
+    }
+    Ok(code)
 }
 
 /// The browser path: the login, then a name on the domain picked there, then

@@ -360,19 +360,65 @@ beside the account tokens it already holds.
 ### Cloudflare Access in front
 
 [Cloudflare Access](https://developers.cloudflare.com/cloudflare-one/policies/access/)
-can put a login — SSO, or a one-time code by email — in front of the hostname.
-Keep cctop's token as well: Access decides *who* may reach the hostname, the
-token decides *which page*, and full versus read-only. Neither replaces the
-other.
+puts a login in front of the dashboard's hostname, so you open it with your
+email instead of a token, and colleagues you invite do the same — none of
+them needs a Cloudflare account. cctop sets it up:
 
-- **Put Access on the page's hostname only**, never on the `-share` one. A
+```bash
+cctop tunnel access on --owner you@example.com   # or `setup --access <email>`
+cctop tunnel invite add @company.com             # everyone there, read-only
+cctop tunnel invite add boss@company.com --full  # one person, full access
+cctop tunnel invite remove @company.com
+cctop tunnel invite list
+cctop tunnel access off                          # delete it again
+```
+
+`access on` creates three things on the account, and remembers their ids in
+`[tunnel.access]` of `config.toml`: an Access application on the dashboard's
+hostname, a policy allowing your email and the invites, and a one-time-PIN
+login (a code emailed to whoever asks) when the account has none of its own.
+`access off` and `cctop tunnel remove` delete exactly those. It needs two more
+permissions on the API token — *Access: Apps and Policies · Edit* and *Access:
+Organizations, Identity Providers, and Groups · Edit*. The link `setup` prints
+asks for them; a token made before can be given them in the dashboard
+(**Edit** keeps the token the same). A tunnel connected by browser login has
+no token Cloudflare lets do this, so connect with an API token for Access. The
+account also needs a Zero Trust team: open
+[one.dash.cloudflare.com](https://one.dash.cloudflare.com) once and pick a
+team name and the free plan.
+
+**Three ways in**, then:
+
+- **You, through Access.** Open `https://<your hostname>` and log in with the
+  code emailed to you. You get full access, with no token in the URL.
+- **An invited colleague, through Access.** The same login, with their email.
+  Read-only unless the invite says `--full`; read-only is exactly what the
+  read-only link gets.
+- **A token link**, as before, for anyone else or a computer without your
+  login. While Access covers the dashboard's hostname the edge asks for a
+  login there first, so a token link works on this machine and on any other
+  road in (`--bind`, a quick tunnel), and on the dashboard hostname only for
+  someone who can also log in.
+
+How cctop knows who logged in: the edge sends a signed `Cf-Access-Jwt-Assertion`
+with every request, and cctop checks its RS256 signature against your team's
+published keys, that it was issued for *this* application (its AUD tag), by
+your team, and is not expired — and then that the email is on cctop's own list,
+so removing an invite takes effect at the next request. The
+`Cf-Access-Authenticated-User-Email` header beside it is never trusted: anything
+that reaches the local port could write it. A page that got in on a login is
+handed no token, since a token would outlive the invite.
+
+- **Access goes on the page's hostname only**, never on the `-share` one. A
   shared terminal opens its socket from rmux's page on another site, Access's
   cookie does not go with it, and the terminal would never connect.
-- **When the Access session expires**, the page's requests get Access's login
-  page instead of cctop's answers, and the page says it cannot reach cctop.
-  Reload it to log in again.
-- The `?t=` in the link should survive Access's login redirect; check it once
-  with your own setup.
+- **When the Access session expires** (after a day), the page's requests get
+  Access's login page instead of cctop's answers, and the page says it cannot
+  reach cctop. Reload it to log in again.
+
+ponytail: the dashboard's Settings and the web page cannot manage invites yet,
+and there is no second, Access-free hostname for public token links with a
+switch to turn them off; those are #225 and #226.
 
 ## The token
 
