@@ -28,6 +28,9 @@ pub const HEADER: &str = "cf-access-jwt-assertion";
 pub trait Identities: Send + Sync {
     /// The login `jwt` proves and the level the list gives it, or why not.
     fn check(&self, jwt: &str) -> Result<(String, Level), Why>;
+    /// The `[tunnel.access]` settings as they are now: who the owner is, and
+    /// whether a token may come through the tunnel at all.
+    fn settings(&self) -> Option<Settings>;
 }
 
 /// Why a JWT bought nothing, for the event log. Carries no token.
@@ -48,6 +51,9 @@ pub struct Nowhere;
 impl Identities for Nowhere {
     fn check(&self, _: &str) -> Result<(String, Level), Why> {
         Err(Why::NotSetUp)
+    }
+    fn settings(&self) -> Option<Settings> {
+        None
     }
 }
 
@@ -125,6 +131,9 @@ impl Identities for Configured {
         // stall every other request's read of the settings.
         self.current().ok_or(Why::NotSetUp)?.check(jwt)
     }
+    fn settings(&self) -> Option<Settings> {
+        self.current().map(|loaded| loaded.settings.clone())
+    }
 }
 
 /// Fixed settings and a verifier that never touches the network: what the
@@ -146,6 +155,9 @@ impl Fixed {
 impl Identities for Fixed {
     fn check(&self, jwt: &str) -> Result<(String, Level), Why> {
         self.0.check(jwt)
+    }
+    fn settings(&self) -> Option<Settings> {
+        Some(self.0.settings.clone())
     }
 }
 

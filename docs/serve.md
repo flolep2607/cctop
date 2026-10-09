@@ -370,13 +370,26 @@ cctop tunnel invite add @company.com             # everyone there, read-only
 cctop tunnel invite add boss@company.com --full  # one person, full access
 cctop tunnel invite remove @company.com
 cctop tunnel invite list
+cctop tunnel access links off                    # token links: login only
 cctop tunnel access off                          # delete it again
 ```
+
+The same list is in the dashboard — `a` on the account in the Cloudflare popup
+(the `cloudflare` row in Settings, or `a` in the serve panel) — and on the web
+page, behind the shield beside the address in the header. The web page shows it
+only to the full link or the owner's own login: a read-only link, a read-only
+login and a full invite who is not the owner all get 403, from the list as well
+as from the edits. A full invite may act on sessions; it may not hand out
+access.
 
 `access on` creates three things on the account, and remembers their ids in
 `[tunnel.access]` of `config.toml`: an Access application on the dashboard's
 hostname, a policy allowing your email and the invites, and a one-time-PIN
 login (a code emailed to whoever asks) when the account has none of its own.
+Beside them it makes the **token hostname**, `cctop-link.<your domain>` — a DNS
+record and an entry in the tunnel's ingress list, outside the Access
+application — which is where token links go from then on (see *public token
+links* below).
 `access off` and `cctop tunnel remove` delete exactly those. It needs two more
 permissions on the API token — *Access: Apps and Policies · Edit* and *Access:
 Organizations, Identity Providers, and Groups · Edit*. The link `setup` prints
@@ -394,11 +407,30 @@ team name and the free plan.
 - **An invited colleague, through Access.** The same login, with their email.
   Read-only unless the invite says `--full`; read-only is exactly what the
   read-only link gets.
-- **A token link**, as before, for anyone else or a computer without your
-  login. While Access covers the dashboard's hostname the edge asks for a
-  login there first, so a token link works on this machine and on any other
-  road in (`--bind`, a quick tunnel), and on the dashboard hostname only for
-  someone who can also log in.
+- **A token link**, for anyone else or a computer without your login, on the
+  token hostname: `https://cctop-link.<your domain>/?t=…`. That hostname asks
+  for no login, and a login is worth nothing there either — only the token is
+  read, so nothing an invite allows is ever mixed into a token link. `cctop
+  serve` and the serve panel print token links on it while Access is on. On
+  the dashboard's own hostname the edge asks for a login first, so a token
+  there helps only someone who can also log in.
+
+**Public token links: on or off.** `public_links` in `[tunnel.access]`, on
+unless turned off; `cctop tunnel access links on|off`, `l` in the dashboard's
+Access popup, or the switch on the web page. Off:
+
+- the token hostname's DNS record and ingress entry are deleted, and the
+  tunnel stops routing it;
+- and cctop refuses a token that came through the tunnel on *any* hostname —
+  the dashboard's, the token hostname, a quick tunnel's — as a second lock. A
+  request came through the tunnel when its `Host` is one the tunnel routes to
+  the page, or it carries the `Cf-Ray` / `Cf-Connecting-Ip` headers the edge
+  adds. Only an Access login gets in from outside.
+
+A token on this machine (`127.0.0.1`) always works. Turning links back on makes
+the token hostname again. A serve already running picks the change up by
+itself: the page's server re-reads `config.toml` at its next request, and the
+tunnel's routing follows within two seconds.
 
 How cctop knows who logged in: the edge sends a signed `Cf-Access-Jwt-Assertion`
 with every request, and cctop checks its RS256 signature against your team's
@@ -416,9 +448,9 @@ handed no token, since a token would outlive the invite.
   Access's login page instead of cctop's answers, and the page says it cannot
   reach cctop. Reload it to log in again.
 
-ponytail: the dashboard's Settings and the web page cannot manage invites yet,
-and there is no second, Access-free hostname for public token links with a
-switch to turn them off; those are #225 and #226.
+ponytail: renaming the dashboard while Access is on moves neither the Access
+application nor the token hostname; turn Access off and on again after a
+rename.
 
 ## The token
 

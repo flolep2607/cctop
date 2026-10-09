@@ -895,6 +895,7 @@ mod tests {
             hosts: HashMap::new(),
             ssh: crate::ssh::Reach::nowhere(),
             is_share_host: |_| false,
+            is_tunnel_host: |_| false,
             addresses: std::sync::Arc::new(crate::address::Nowhere),
             identities: std::sync::Arc::new(crate::identity::Nowhere),
         };

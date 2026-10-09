@@ -30,6 +30,7 @@ USAGE:
   cctop tunnel remove
   cctop tunnel access on --owner <EMAIL>
   cctop tunnel access off
+  cctop tunnel access links on|off
   cctop tunnel invite add <EMAIL | @DOMAIN> [--full]
   cctop tunnel invite remove <EMAIL | @DOMAIN>
   cctop tunnel invite list
@@ -55,7 +56,11 @@ access   Put the dashboard's hostname behind Cloudflare Access: you open it
          by logging in with your email (a one-time code is sent to it), and
          no token is needed. `--access <EMAIL>` on setup does the same.
          Needs the API token to have the two Access permissions; a token
-         made from the link setup prints has them.
+         made from the link setup prints has them. Token links keep
+         working for people who cannot log in, on a hostname of their own
+         beside it (cctop-link.<domain>); `access links off` removes that
+         hostname, and then a token gets nothing through the tunnel — only a
+         login does. A token on this machine (127.0.0.1) always works.
 invite   Who else may log in: an email, or everyone at @a-domain. Read-only
          unless --full. Nobody invited needs a Cloudflare account.
 
@@ -114,6 +119,16 @@ fn status() -> i32 {
             );
             for line in invite_lines(&access.invites) {
                 println!("  {line}");
+            }
+            match (access.public_links, &access.link_hostname) {
+                (true, Some(host)) => {
+                    println!("Public token links: on — at https://{host}")
+                }
+                (true, None) => println!("Public token links: on"),
+                (false, _) => println!(
+                    "Public token links: off — a token gets nothing through the tunnel \
+                     (`cctop tunnel access links on`)"
+                ),
             }
         }
         None => println!(
@@ -199,7 +214,33 @@ fn access(argv: &[String]) -> anyhow::Result<i32> {
             }
             Ok(0)
         }
-        _ => anyhow::bail!("usage: cctop tunnel access on --owner <EMAIL> | access off"),
+        Some("links") => {
+            let on = match argv.get(1).map(String::as_str) {
+                Some("on") => true,
+                Some("off") => false,
+                _ => anyhow::bail!("usage: cctop tunnel access links on|off"),
+            };
+            if tunnel::account().is_none() {
+                eprintln!("cctop: no Cloudflare account is connected; `cctop tunnel setup` first.");
+                return Ok(1);
+            }
+            match access_setup::apply(access_setup::Change::PublicLinks(on)) {
+                Ok(applied) => {
+                    println!("{}", applied.said);
+                    for item in &applied.left {
+                        println!("  left on Cloudflare to delete by hand: {item}");
+                    }
+                    Ok(0)
+                }
+                Err(why) => {
+                    eprintln!("cctop: {why}");
+                    Ok(1)
+                }
+            }
+        }
+        _ => anyhow::bail!(
+            "usage: cctop tunnel access on --owner <EMAIL> | access off | access links on|off"
+        ),
     }
 }
 
@@ -221,6 +262,7 @@ fn turn_on(account: &Account, api: &Api, owner: &str) -> i32 {
     };
     let host = account.hostname.clone().unwrap_or_default();
     let owner = settings.owner.clone();
+    let link = settings.link_hostname.clone();
     let stored = Account {
         access: Some(Box::new(settings)),
         ..account.clone()
@@ -238,6 +280,12 @@ fn turn_on(account: &Account, api: &Api, owner: &str) -> i32 {
         "Access is on: open https://{host} and log in as {owner} with the code Cloudflare \
          emails you. `cctop tunnel invite add` lets others in."
     );
+    if let Some(link) = link {
+        eprintln!(
+            "Token links go on https://{link} from now on; `cctop tunnel access links off` \
+             turns them off."
+        );
+    }
     0
 }
 

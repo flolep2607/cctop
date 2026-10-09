@@ -3141,10 +3141,21 @@ pub(super) fn draw_connect(frame: &mut Frame, area: Rect, app: &mut App, layout:
             if account.from_env {
                 lines.push(dim("From CCTOP_TUNNEL_TOKEN, not from setup."));
             }
+            lines.push(Line::from(vec![
+                Span::raw(" Access  "),
+                match &account.access {
+                    Some(a) => Span::styled(format!("on — {} logs in", a.owner), good),
+                    None => Span::styled("off — opened with its token link", theme::dim()),
+                },
+            ]));
             match confirm {
                 false => (
-                    " [d] disconnect  [Esc] close".to_string(),
-                    vec![("[d]", KeyEvent::from(KeyCode::Char('d'))), ("[Esc]", esc)],
+                    " [a] who may log in  [d] disconnect  [Esc] close".to_string(),
+                    vec![
+                        ("[a]", KeyEvent::from(KeyCode::Char('a'))),
+                        ("[d]", KeyEvent::from(KeyCode::Char('d'))),
+                        ("[Esc]", esc),
+                    ],
                 ),
                 true => {
                     lines.push(Line::default());
@@ -3176,6 +3187,138 @@ pub(super) fn draw_connect(frame: &mut Frame, area: Rect, app: &mut App, layout:
                     )
                 }
             }
+        }
+        Step::Access {
+            account,
+            cursor,
+            field,
+            confirm,
+            said,
+        } => {
+            use super::connect::Typing;
+            let key = |c| KeyEvent::from(KeyCode::Char(c));
+            let typing = field.as_ref().map(|(t, _)| *t);
+            let keys = match &account.access {
+                None => {
+                    lines.push(text("Cloudflare Access: off. The page opens with its"));
+                    lines.push(text("token link, and anyone holding it is in."));
+                    lines.push(dim("On, it asks for a login: a code emailed to you or"));
+                    lines.push(dim(
+                        "whoever you invite. Nobody needs a Cloudflare account.",
+                    ));
+                    if let Some((_, edit)) = field {
+                        lines.push(Line::default());
+                        lines.push(text("Your email — the owner, always full:"));
+                        lines.push(input_line(edit));
+                    }
+                    match typing {
+                        Some(_) => (
+                            " [Enter] turn on  [Esc] cancel".to_string(),
+                            vec![("[Enter]", enter), ("[Esc]", esc)],
+                        ),
+                        None => (
+                            " [o] turn on  [Esc] back".to_string(),
+                            vec![("[o]", key('o')), ("[Esc]", esc)],
+                        ),
+                    }
+                }
+                Some(settings) => {
+                    lines.push(Line::from(vec![
+                        Span::raw(" Access  "),
+                        Span::styled(format!("on — {} owns it", settings.owner), good),
+                    ]));
+                    match (settings.public_links, &settings.link_hostname) {
+                        (true, Some(link)) => {
+                            let url = format!("https://{link}");
+                            lines.push(Line::from(vec![
+                                Span::raw(" Links   "),
+                                Span::styled(url.clone(), accent),
+                            ]));
+                            links.push((url.clone(), url));
+                            lines.push(dim("        token links, for people who cannot log in"));
+                        }
+                        (true, None) => {
+                            lines.push(Line::from(vec![Span::raw(" Links   "), Span::raw("on")]))
+                        }
+                        (false, _) => lines.push(Line::from(vec![
+                            Span::raw(" Links   "),
+                            Span::styled("off — from outside, only a login gets in", warn),
+                        ])),
+                    }
+                    lines.push(Line::default());
+                    match settings.invites.is_empty() {
+                        true => lines.push(dim("No one else is invited yet.")),
+                        false => {
+                            let wide = settings
+                                .invites
+                                .iter()
+                                .map(|i| i.who.chars().count())
+                                .max()
+                                .unwrap_or(0)
+                                .min(40);
+                            for (i, invite) in settings.invites.iter().enumerate() {
+                                let here = i == *cursor && typing.is_none();
+                                let can = match invite.level {
+                                    cloudflare::access::Level::Read => "read-only",
+                                    cloudflare::access::Level::Full => "full",
+                                };
+                                let line = Line::from(Span::raw(format!(
+                                    " {} {:wide$}  {can}",
+                                    if here { "›" } else { " " },
+                                    invite.who,
+                                )));
+                                lines.push(match here {
+                                    true => line.style(theme::selected()),
+                                    false => line,
+                                });
+                            }
+                        }
+                    }
+                    if let Some((Typing::Invite, edit)) = field {
+                        lines.push(Line::default());
+                        lines.push(text("Invite an email, or everyone at @company.com:"));
+                        lines.push(input_line(edit));
+                        lines.push(dim("  read-only; f on it afterwards makes it full"));
+                    }
+                    if *confirm {
+                        lines.push(Line::default());
+                        lines.push(Line::from(Span::styled(
+                            " Take the page out of Access? Its token link opens it",
+                            warn,
+                        )));
+                        lines.push(Line::from(Span::styled(
+                            " again, and the invites are forgotten.",
+                            warn,
+                        )));
+                    }
+                    match (typing, *confirm) {
+                        (Some(_), _) => (
+                            " [Enter] invite  [Esc] cancel".to_string(),
+                            vec![("[Enter]", enter), ("[Esc]", esc)],
+                        ),
+                        (None, true) => (
+                            " [y] turn off  [n] keep".to_string(),
+                            vec![("[y]", key('y')), ("[n]", key('n'))],
+                        ),
+                        (None, false) => (
+                            " [i] invite [x] remove [f] full/read [l] links [o] off [Esc]"
+                                .to_string(),
+                            vec![
+                                ("[i]", key('i')),
+                                ("[x]", key('x')),
+                                ("[f]", key('f')),
+                                ("[l]", key('l')),
+                                ("[o]", key('o')),
+                                ("[Esc]", esc),
+                            ],
+                        ),
+                    }
+                }
+            };
+            for line in said {
+                lines.extend(wrap(line, 0, theme::dim()));
+            }
+            keys
         }
         Step::Disconnected { left, made_here } => {
             match (made_here, left.is_empty()) {
@@ -3246,6 +3389,7 @@ pub(super) fn draw_connect(frame: &mut Frame, area: Rect, app: &mut App, layout:
     let row = wrapped_rows(&lines[..lines.len() - 1], width.saturating_sub(2));
     let title = match flow.step {
         Step::Connected { .. } | Step::Disconnected { .. } => "Your Cloudflare account",
+        Step::Access { .. } => "Who may log in",
         _ => "Connect your Cloudflare account",
     };
     let (outer, inner) = modal(frame, area, title, lines, width);

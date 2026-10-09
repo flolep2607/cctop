@@ -1,0 +1,28 @@
+---
+source: crates/ui/src/snapshot.rs
+expression: screen
+---
+ 1:Dashboard │ + Tab (t) ───────────────────────────────────────────── Settings
+╭ Overview ────────────────────────────────────────────────────────────────────╮
+│Live rate         $0.04                               ⡀  Models               │
+│Today             $8.97                               ⡀  Sessions  4 · 2 live │
+│This month        $0.00                               ⡀  Agent CPU   3.2%     │
+│All time         $28.51 $0.00/day this month             Agent mem 592 MB     │
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭ Ses╭ Who may log in ────────────────────────────────────────────────────╮────╮
+│   L│ Cloudflare Access: off. The page opens with its                    │    │
+│●   │ token link, and anyone holding it is in.                           │ ch…┃
+│●   │ On, it asks for a login: a code emailed to you or                  │    │
+╰────│ whoever you invite. Nobody needs a Cloudflare account.             │────╯
+╭ Inf│                                                                    │text╮
+│Root│ Your email — the owner, always full:                               │    │
+│    │ > owner@example.com█                                               │    │
+│   4│                                                                    │    │
+│   4│ [Enter] turn on  [Esc] cancel                                      │    │
+│   4╰────────────────────────────────────────────────────────────────────╯    │
+│                                                                              │
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭ Limits ─────────────────────────────────────────────────────────── + account ╮
+│Claude checking…                        Codex checking…                       │
+╰──────────────────────────────────────────────────────────────────────────────╯
+↑↓ Move ↵ Actions / Filter Space Mark a Attach R Resume ? Help          ⧉ share

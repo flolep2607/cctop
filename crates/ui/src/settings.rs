@@ -540,10 +540,16 @@ impl App {
     pub(super) fn cloudflare_value(&self) -> String {
         match &self.connected {
             None => "not connected".to_string(),
-            Some(c) => c
-                .hostname
-                .clone()
-                .unwrap_or_else(|| "connected".to_string()),
+            Some(c) => {
+                let host = c
+                    .hostname
+                    .clone()
+                    .unwrap_or_else(|| "connected".to_string());
+                match c.access_owner.is_some() {
+                    true => format!("{host} · Access on"),
+                    false => host,
+                }
+            }
         }
     }
 
