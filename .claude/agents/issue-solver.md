@@ -143,9 +143,14 @@ gh pr checks <pr> --watch
 The title is a release note: what changed for a user, no prefix, no version.
 The final body follows `.github/pull_request_template.md` in place of the Plan
 and Progress: what changed and why (with any choice you made on the user's
-behalf), what was checked by hand, the gate checklist ticked for what you ran,
+behalf), what was checked by hand, the gate checklist with `[x]` for what you ran and `[-]` for items that do not apply to this change (never leave a non-applicable item as `[ ]`, which reads as unfinished, or tick it, which is false),
 and `Fixes #<N>`, then
 `🤖 Generated with [Claude Code](https://claude.com/claude-code)`.
+
+When the PR is ready, update the issue's **Done when** list the same way:
+`[x]` for what the PR delivers, `[-]` with a few words of why for an item that
+turned out not to apply (`gh issue edit <N> --body-file <file>`, changing only
+those boxes), so nothing reads as forgotten.
 
 Fix CI until green. Do not merge and do not bump the version — that is the
 user's call. Remove your worktree when the PR is ready and green

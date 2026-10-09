@@ -16,9 +16,12 @@ phone width, a real remote, … or "nothing beyond the tests" and why. -->
 
 ## Gate
 
+<!-- Tick [x] what you ran, mark [-] what does not apply to this change
+(e.g. no web/ change), and leave [ ] only for what is still to do. -->
+
 - [ ] `cargo fmt --all --check`, `cargo clippy --all-targets`, `cargo test`
 - [ ] Snapshot diffs looked at, and the changed `.snap` files committed
-- [ ] `web/` changed → `npm run build` and the rebuilt `src/serve/assets/app/index.html` committed
+- [ ] `web/` changed → `npm run build` and the rebuilt `crates/serve/src/assets/app/index.html` committed
 - [ ] Docs updated where behaviour changed
 
 Fixes #

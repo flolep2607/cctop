@@ -45,7 +45,7 @@ a design document; detail past that is time the user waited for:
   Quote the user's words when they came with some.
 - **Where** — the files and functions involved, as `path:line`, with one line
   each on their part. Name the snapshot tests that will move if the TUI changes.
-- **Done when** — acceptance criteria a reviewer can check, as a list.
+- **Done when** — acceptance criteria a reviewer can check, as a `- [ ]` list. A solver marks an item `[-]` if it turns out not to apply, rather than leaving it open.
 - **Test plan** — which tests to add or change, and anything that must be
   checked by hand (TUI via `.claude/skills/run-cctop/driver.sh`, web via
   `web.sh shot` in both themes and at phone width).
