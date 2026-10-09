@@ -86,6 +86,42 @@ jobs:
       # so the ordinary clippy run never looks at them.
       - run: cargo clippy --workspace --all-targets --features debug
 
+  # The release binaries are static musl builds for x86_64 and aarch64, and
+  # every other job here builds on glibc. libc's types are not the same across
+  # the two — `pthread_t` is an integer on glibc and a pointer on musl,
+  # `c_char` is signed on x86_64 and unsigned on aarch64 — so code can pass all
+  # of this and still not compile where it ships. 0.32.0 did exactly that: its
+  # crate published and both binary builds failed in cctop-rmux-client. A check
+  # per release target finds such a break on the pull request that causes it.
+  #
+  # `cargo check` links nothing, but ring's build script still compiles C for
+  # the target, so it needs that target's C compiler; setup-cross-toolchain
+  # installs the same musl toolchains the release build gets and points cargo
+  # at the target.
+  musl:
+    name: musl (${{ matrix.target }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-unknown-linux-musl
+          - aarch64-unknown-linux-musl
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref }}
+      - run: rustup toolchain install
+      - uses: taiki-e/setup-cross-toolchain-action@v1
+        with:
+          target: ${{ matrix.target }}
+      - uses: kunobi-ninja/kache-action@v1
+        with:
+          cache-key-prefix: kache-${{ matrix.target }}
+          pr-comment: false
+          runtime-dir: ${{ runner.temp }}/kache
+      - run: cargo check --workspace --target ${{ matrix.target }}
+
   # Fails the build if the README or a Cargo.toml would stop `cargo publish`
   # working — cheaper to catch here than at release time. Every crate of the
   # workspace, because the binary can only be installed from crates.io if the

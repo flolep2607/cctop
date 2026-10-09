@@ -469,7 +469,7 @@ dependencies = [
 
 [[package]]
 name = "cctop"
-version = "0.32.0"
+version = "0.32.1"
 dependencies = [
  "anyhow",
  "cctop-core",
@@ -523,9 +523,9 @@ dependencies = [
 
 [[package]]
 name = "cctop-rmux-client"
-version = "0.11.0"
+version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2f08b3ce3d2ed194af60664731057dfe8b7497b02c8e6844c9c08cd497593ecb"
+checksum = "c4aec9399a10d2f795f8d9139c7809b08b8e520c379b54c74537cf1a13ccff8f"
 dependencies = [
  "cctop-rmux-core",
  "cctop-rmux-ipc",
