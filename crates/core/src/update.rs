@@ -575,14 +575,12 @@ fn install(
     let placement = place()?;
 
     println!("Downloading {}…", asset.name);
-    let mut body = Vec::new();
-    agent()
+    let mut response = agent()
         .get(&asset.browser_download_url)
         .call()
-        .context("could not download the release archive")?
-        .body_mut()
-        .as_reader()
-        .read_to_end(&mut body)
+        .context("could not download the release archive")?;
+    let total = response.body().content_length();
+    let body = read_with_progress(response.body_mut().as_reader(), total)
         .context("could not read the release archive")?;
 
     let staging = match placement {
@@ -600,6 +598,64 @@ fn install(
     // After the replace, so an install that worked is never held up by the
     // network call that only decorates it.
     Ok(show_changes(current, latest))
+}
+
+/// Read the whole archive, drawing a bar on stderr as it arrives.
+///
+/// A release is several megabytes, and over a slow link the line that says it
+/// is downloading was all there was to look at for long enough to wonder
+/// whether anything was happening. Only on a terminal: piped, the carriage
+/// returns would be noise in a log.
+fn read_with_progress(mut reader: impl Read, total: Option<u64>) -> std::io::Result<Vec<u8>> {
+    use std::io::{IsTerminal, Write};
+    let draw = std::io::stderr().is_terminal();
+    let mut body = Vec::with_capacity(total.unwrap_or(0).min(64 << 20) as usize);
+    let mut chunk = [0u8; 64 * 1024];
+    let mut drawn = None;
+    loop {
+        let n = match reader.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        };
+        body.extend_from_slice(&chunk[..n]);
+        if draw {
+            let line = progress_line(body.len() as u64, total);
+            // Redrawn only when it reads differently, not once per chunk.
+            if drawn.as_ref() != Some(&line) {
+                eprint!("\r{line}");
+                let _ = std::io::stderr().flush();
+                drawn = Some(line);
+            }
+        }
+    }
+    if drawn.is_some() {
+        eprintln!();
+    }
+    Ok(body)
+}
+
+/// `[██████░░░░░░░░░░░░░░]  31%  2.1/6.8 MB`, or just the megabytes so far
+/// when the server did not say how many there are.
+fn progress_line(done: u64, total: Option<u64>) -> String {
+    const WIDTH: u64 = 30;
+    let mb = |b: u64| b as f64 / 1_000_000.0;
+    match total.filter(|&t| t > 0) {
+        Some(total) => {
+            let done = done.min(total);
+            let filled = (done * WIDTH / total) as usize;
+            format!(
+                "[{}{}] {:>3}%  {:.1}/{:.1} MB",
+                "█".repeat(filled),
+                "░".repeat(WIDTH as usize - filled),
+                done * 100 / total,
+                mb(done),
+                mb(total)
+            )
+        }
+        None => format!("{:.1} MB", mb(done)),
+    }
 }
 
 /// Set on the process that replaces this one, so the new binary knows it has
@@ -1497,6 +1553,32 @@ fn confirm(dir: &Path, exe: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn the_download_bar_fills_with_the_bytes() {
+        assert_eq!(
+            progress_line(0, Some(4_000_000)),
+            format!("[{}]   0%  0.0/4.0 MB", "░".repeat(30))
+        );
+        assert_eq!(
+            progress_line(2_000_000, Some(4_000_000)),
+            format!("[{}{}]  50%  2.0/4.0 MB", "█".repeat(15), "░".repeat(15))
+        );
+        assert_eq!(
+            progress_line(4_000_000, Some(4_000_000)),
+            format!("[{}] 100%  4.0/4.0 MB", "█".repeat(30))
+        );
+        // No length from the server: what has arrived, and no bar to lie with.
+        assert_eq!(progress_line(1_500_000, None), "1.5 MB");
+        assert_eq!(progress_line(1_500_000, Some(0)), "1.5 MB");
+    }
+
+    #[test]
+    fn a_download_reads_every_byte() {
+        let data: Vec<u8> = (0..200_000u32).map(|i| i as u8).collect();
+        let read = read_with_progress(&data[..], Some(data.len() as u64)).expect("read");
+        assert_eq!(read, data);
+    }
     use super::*;
 
     /// The version the updater compares with releases is the one `main` hands
