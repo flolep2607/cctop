@@ -829,7 +829,7 @@ impl Auto {
 
 /// What `cctop yolo` was asked to do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Ask {
+enum Ask {
     On,
     Off,
     Status,
