@@ -561,6 +561,9 @@ pub struct App {
     pub hidden_footer: Vec<String>,
     /// The user's footer line — a static note, or a command's first line.
     pub footer_extra: note::Extra,
+    /// The start-up hook repair, while it is still running on its own thread.
+    /// See [`App::start_hook_repair`].
+    hook_repair: Option<std::sync::mpsc::Receiver<cctop_core::hook::Repair>>,
 
     /// Scroll offset of the help overlay, which is taller than most terminals.
     pub help_scroll: u16,
@@ -1068,6 +1071,7 @@ impl App {
             hidden_columns: hidden_columns(&prefs),
             hidden_footer: Vec::new(),
             footer_extra: note::Extra::default(),
+            hook_repair: None,
             help_scroll: 0,
             help_max_scroll: 0,
             outage: Default::default(),

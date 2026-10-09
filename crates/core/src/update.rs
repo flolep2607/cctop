@@ -1027,6 +1027,25 @@ fn relaunch() {
     println!("Could not start the new version ({error}); continuing.");
 }
 
+/// Have the binary now at this one's path — the new version, after an update —
+/// bring the hooks in line with the form it writes.
+///
+/// Run as a child and waited for, so its lines land under the update's own.
+/// Its stderr is dropped: a binary older than `--repair-hooks` (a downgrade by
+/// hand) would answer with clap's usage error, which says nothing useful about
+/// an update that worked. Its lines come on stdout for that reason.
+pub fn repair_hooks_with_new_binary() {
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    let _ = std::process::Command::new(on_disk(exe))
+        .arg("--repair-hooks")
+        .env(JUST_UPDATED, "1")
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+}
+
 /// The path a binary was started from, now that it has been replaced.
 ///
 /// `current_exe` reads `/proc/self/exe`, and once the update has renamed the new

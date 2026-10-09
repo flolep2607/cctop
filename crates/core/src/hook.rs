@@ -2441,6 +2441,12 @@ pub fn remove(scope: &Scope) -> Vec<String> {
 /// The file is the user's, and by the time cctop sees it their other tools have
 /// usually put hooks in it — so this merges into the arrays rather than writing
 /// them, and never reorders or reformats what it did not add.
+///
+/// A file that already says exactly this is not written at all. That is what
+/// makes [`repair`] safe to run at every start, from every cctop at once: the
+/// file is read fresh here, after whatever health check sent the caller, so a
+/// second cctop that got there first leaves this one nothing to do, and an
+/// install that is already right keeps its bytes, its formatting and its mtime.
 fn json_install(
     path: &Path,
     shape: Shape,
@@ -2448,7 +2454,26 @@ fn json_install(
     deciding: &[&str],
     exe: &str,
 ) -> anyhow::Result<()> {
-    let mut root = read_settings(path)?;
+    let before = read_settings(path)?;
+    let mut root = before.clone();
+    json_merge(&mut root, path, shape, events, deciding, exe)?;
+    if root == before {
+        return Ok(());
+    }
+    write_settings(path, &root)
+}
+
+/// What [`json_install`] does to a document, without the file around it — so
+/// that [`json_health`] can ask whether an install would change anything by
+/// running the very code that would make the change.
+fn json_merge(
+    root: &mut serde_json::Map<String, serde_json::Value>,
+    path: &Path,
+    shape: Shape,
+    events: &[&str],
+    deciding: &[&str],
+    exe: &str,
+) -> anyhow::Result<()> {
     // Cursor versions its hooks file and ignores one without the field. Only
     // written when absent, so a file that already declares a newer version is
     // not quietly downgraded.
@@ -2463,6 +2488,26 @@ fn json_install(
         .as_object_mut()
         .ok_or_else(|| anyhow::anyhow!("`hooks` in {} is not an object", path.display()))?;
 
+    // An event an older cctop registered and this one no longer wants is
+    // swept as [`json_remove`] sweeps it: left behind, it keeps firing in a
+    // form nothing reads, and it is one of the differences that make an
+    // install outdated.
+    // An array emptied here goes with its key; one the user left empty stays.
+    let mut emptied = Vec::new();
+    for (event, value) in hooks.iter_mut() {
+        if !events.contains(&event.as_str())
+            && let Some(list) = value.as_array_mut()
+            && drop_ours(list) > 0
+            && list.is_empty()
+        {
+            emptied.push(event.clone());
+        }
+    }
+    for event in emptied {
+        // `shift_remove`, as in `json_remove`: the user's key order stays.
+        hooks.shift_remove(&event);
+    }
+
     for event in events {
         let list = hooks
             .entry(*event)
@@ -2473,25 +2518,60 @@ fn json_install(
         // entry left by an older cctop at a path that has since moved is
         // replaced rather than added to.
         drop_ours(list);
-        let mut commands = vec![hook_command(exe, event)];
-        // Its own entry, beside the observer's rather than inside it: the
-        // harness runs an event's hooks in parallel, so the observer reports
-        // exactly as it does without it.
-        if deciding.contains(event) {
-            commands.push(yolo_hook_command(exe, event));
-        }
-        for command in commands {
+        list.extend(our_entries_for(shape, event, deciding, exe));
+    }
+    Ok(())
+}
+
+/// The entries an install writes for one event, in order: the observer, and
+/// beside it the deciding `yolo-hook` where this event has one.
+fn our_entries_for(
+    shape: Shape,
+    event: &str,
+    deciding: &[&str],
+    exe: &str,
+) -> Vec<serde_json::Value> {
+    let mut commands = vec![hook_command(exe, event)];
+    // Its own entry, beside the observer's rather than inside it: the
+    // harness runs an event's hooks in parallel, so the observer reports
+    // exactly as it does without it.
+    if deciding.contains(&event) {
+        commands.push(yolo_hook_command(exe, event));
+    }
+    commands
+        .into_iter()
+        .map(|command| {
             let command = serde_json::json!({
                 "type": "command",
                 "command": command,
             });
-            list.push(match shape {
+            match shape {
                 Shape::Nested => serde_json::json!({ "hooks": [command] }),
                 Shape::Flat => command,
-            });
-        }
-    }
-    write_settings(path, &root)
+            }
+        })
+        .collect()
+}
+
+/// cctop's entries in one settings document, event by event, and nothing else.
+///
+/// Where they sit among the user's entries is left out on purpose. An install
+/// appends, so another tool that appends after it leaves cctop's entry
+/// somewhere other than last, and comparing whole lists would call that
+/// outdated and move it back on every start — a rewrite of the user's file
+/// for a difference that changes nothing about what fires.
+fn our_entries(
+    root: &serde_json::Map<String, serde_json::Value>,
+) -> std::collections::BTreeMap<&str, Vec<&serde_json::Value>> {
+    root.get("hooks")
+        .and_then(|h| h.as_object())
+        .into_iter()
+        .flatten()
+        .filter_map(|(event, value)| {
+            let ours: Vec<_> = value.as_array()?.iter().filter(|e| is_ours(e)).collect();
+            (!ours.is_empty()).then_some((event.as_str(), ours))
+        })
+        .collect()
 }
 
 /// Take cctop's entries out of one JSON settings file, and say how many went.
@@ -2729,6 +2809,11 @@ fn notify_install(path: &Path, exe: &str) -> anyhow::Result<()> {
             "{} already sets notify = {existing:?}; remove it first if you want cctop to have it",
             path.display()
         );
+    }
+
+    // Already this, exactly: nothing to write. See [`json_install`].
+    if codex_notify_argv(&doc).is_some_and(|argv| argv == codex_notify(exe)) {
+        return Ok(());
     }
 
     let mut array = toml_edit::Array::new();
@@ -2987,8 +3072,13 @@ fn plugin_install(path: &Path, exe: &str) -> anyhow::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
+    let source = plugin_source(exe);
+    // Already this, exactly: nothing to write. See [`json_install`].
+    if std::fs::read_to_string(path).is_ok_and(|text| text == source) {
+        return Ok(());
+    }
     let tmp = temp_beside(path, "ts");
-    std::fs::write(&tmp, plugin_source(exe))?;
+    std::fs::write(&tmp, source)?;
     std::fs::rename(&tmp, path)?;
     Ok(())
 }
@@ -3068,7 +3158,17 @@ fn json_health(
         }
         recorded = recorded.or(exe);
     }
-    verdict(recorded, missing)
+    // Every event there and well formed, and still not necessarily what this
+    // version writes: a timeout, a matcher, an event since dropped, a field an
+    // older cctop added. Asked of the installer itself, at the binary the file
+    // already names, so "outdated" can never drift from what an install does.
+    let outdated = missing.is_empty()
+        && recorded.as_deref().is_some_and(|exe| {
+            let mut want = root.clone();
+            json_merge(&mut want, path, shape, events, deciding, exe).is_ok()
+                && our_entries(&want) != our_entries(&root)
+        });
+    verdict(recorded, missing, outdated)
 }
 
 /// What Codex's config has to say.
@@ -3082,7 +3182,11 @@ fn notify_health(path: &Path) -> Health {
                 exe: exe.clone(),
                 missing: Vec::new(),
             },
-            Some([exe, ..]) => verdict(Some(exe.clone()), Vec::new()),
+            Some(argv @ [exe, ..]) => verdict(
+                Some(exe.clone()),
+                Vec::new(),
+                *argv != codex_notify(exe)[..],
+            ),
         },
     }
 }
@@ -3106,21 +3210,38 @@ fn plugin_health(path: &Path) -> Health {
             // forwards nothing, because OpenCode 2 does not load it — it says so
             // in a log line and carries on, and the session looks to cctop like
             // one that is merely quiet.
-            Some(exe) => verdict(Some(exe), plugin_shortfall(&text, crate::opencode::api())),
+            //
+            // A plugin carrying everything is still outdated when it is not
+            // the text this version writes: the file is cctop's outright, so
+            // any difference at all is an older cctop's.
+            Some(exe) => {
+                let outdated = text != plugin_source(&exe);
+                verdict(
+                    Some(exe),
+                    plugin_shortfall(&text, crate::opencode::api()),
+                    outdated,
+                )
+            }
         },
     }
 }
 
-/// Turn "cctop is recorded here, at this path, missing these events" into the
-/// one verdict every harness is reported with.
-fn verdict(recorded: Option<String>, missing: Vec<&'static str>) -> Health {
+/// Turn "cctop is recorded here, at this path, missing these events, in an
+/// older form or not" into the one verdict every harness is reported with.
+///
+/// A shortfall outranks the form: filling it in is the same whole rewrite, so
+/// the report names the more specific of the two.
+fn verdict(recorded: Option<String>, missing: Vec<&'static str>, outdated: bool) -> Health {
+    let own = own_exe().ok();
     match recorded {
         None => Health::Absent,
         Some(exe) if !Path::new(&exe).exists() => Health::Broken(exe),
-        Some(exe) if Some(exe.as_str()) != own_exe().ok().as_deref() => {
-            Health::Other { exe, missing }
-        }
+        Some(exe) if Some(exe.as_str()) != own.as_deref() => match missing.is_empty() && outdated {
+            true => Health::Outdated { exe: Some(exe) },
+            false => Health::Other { exe, missing },
+        },
         Some(_) if !missing.is_empty() => Health::Partial(missing),
+        Some(_) if outdated => Health::Outdated { exe: None },
         Some(_) => Health::Installed,
     }
 }
@@ -3149,6 +3270,16 @@ pub enum Health {
         exe: String,
         missing: Vec<&'static str>,
     },
+    /// Every event registered, but not in the form this version writes: a
+    /// command line, an argument, a timeout, a matcher or any other field an
+    /// older cctop wrote differently. `exe` is the other cctop the entries
+    /// name, and `None` when they name this one.
+    ///
+    /// Its own state rather than a kind of [`Health::Partial`], because nothing
+    /// is missing: every event fires. What it fires may be the old way of
+    /// invoking cctop, which after an update is exactly what nobody would
+    /// notice until something read wrong.
+    Outdated { exe: Option<String> },
     /// Registered at a path that is gone. The hooks are firing nothing at all,
     /// and this is the one case worth fixing without being asked.
     Broken(String),
@@ -3161,7 +3292,10 @@ impl Health {
     /// working install or an absence they chose.
     pub fn is_problem(&self) -> bool {
         match self {
-            Health::Partial(_) | Health::Broken(_) | Health::Unreadable(_) => true,
+            Health::Partial(_)
+            | Health::Outdated { .. }
+            | Health::Broken(_)
+            | Health::Unreadable(_) => true,
             Health::Other { missing, .. } => !missing.is_empty(),
             Health::Absent | Health::Installed => false,
         }
@@ -3349,31 +3483,71 @@ fn describe(health: &Health) -> (String, bool) {
             ),
             true,
         ),
+        Health::Outdated { exe: None } => ("installed, in an older cctop's form".into(), true),
+        Health::Outdated { exe: Some(exe) } => (
+            format!("{exe} is installed here, in an older cctop's form"),
+            true,
+        ),
         Health::Broken(exe) => (format!("points at {exe}, which is gone"), true),
         Health::Unreadable(why) => (why.clone(), true),
     }
 }
 
-/// Fix the two ways an install can look present and deliver less than it
-/// should: a recorded cctop that is gone, and a set of events that is short.
+/// What one pass of [`repair`] did, and what it could not.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct Repair {
+    /// One line per file rewritten, ready for a status line.
+    pub fixed: Vec<String>,
+    /// Whether something is still wrong that repair would not or could not
+    /// fix: a file that will not parse, or a write that failed. Worth one line
+    /// pointing at the panel; everything repair did fix is not.
+    pub needs_attention: bool,
+}
+
+impl Repair {
+    /// The pass as lines for a terminal, for the entry points that have no
+    /// status line of their own to put it on. Empty when there was nothing to
+    /// do, which is the ordinary case and not worth a line.
+    pub fn terminal_lines(&self) -> Vec<String> {
+        let mut lines: Vec<String> = self
+            .fixed
+            .iter()
+            .map(|fixed| format!("cctop: hooks: {fixed}"))
+            .collect();
+        if self.needs_attention {
+            lines.push("cctop: agent hooks need attention — run `cctop --hooks-status`".into());
+        }
+        lines
+    }
+}
+
+/// Fix the three ways an install can look present and deliver less than it
+/// should: a recorded cctop that is gone, a set of events that is short, and
+/// entries in a form an older cctop wrote.
 ///
-/// Both are cases where there is no behaviour to preserve and nothing the user
-/// could have meant. A hook naming a binary that no longer exists fires
+/// All three are cases where there is no behaviour to preserve and nothing the
+/// user could have meant. A hook naming a binary that no longer exists fires
 /// nothing. An install written by an older cctop registers the events *that*
 /// version knew about, so every event added since is one the agent never
 /// mentions — and the states those events close out are exactly the ones that
 /// otherwise stick: a tool call that failed goes on reading as a held question,
-/// a turn that died on an API error goes on reading as work in progress. That
-/// was reported in the panel and nowhere else, so an install could sit half
-/// wired for as long as nobody pressed `h`.
+/// a turn that died on an API error goes on reading as work in progress. And an
+/// entry in an older form invokes cctop the way an older cctop wanted, which
+/// after an update that changed it is a hook nobody would think to reinstall.
 ///
 /// The one thing repair will not do is move an install between binaries. Two
 /// cctops on one machine is a choice, and events are delivered to every cctop
-/// listening whichever binary fires them — so a shortfall in an install another
-/// cctop owns is filled in *at that binary*, leaving its choice alone. Only an
-/// install naming a cctop that is gone is repointed, because there is nothing
-/// left there to respect.
-pub fn repair(cwd: Option<&Path>) -> Vec<String> {
+/// listening whichever binary fires them — so a shortfall or an old form in an
+/// install another cctop owns is fixed *at that binary*, leaving its choice
+/// alone. Only an install naming a cctop that is gone is repointed, because
+/// there is nothing left there to respect.
+///
+/// Meant to run at every start of anything long-lived, off the thread that
+/// draws: when there is nothing to do it is one read per config file and no
+/// write, and each write it does make is re-read, compared and renamed into
+/// place (see [`json_install`]), so two cctops starting at once cannot tear a
+/// file between them.
+pub fn repair(cwd: Option<&Path>) -> Repair {
     let mut scopes = vec![Scope::User];
     if let Some(dir) = cwd {
         scopes.push(Scope::Project(dir.to_path_buf()));
@@ -3386,36 +3560,48 @@ pub fn repair(cwd: Option<&Path>) -> Vec<String> {
 /// Split out for the tests, which must not be able to reach the machine's own
 /// config: repair *writes*, and a test that swept [`Scope::User`] would edit the
 /// settings of whoever ran `cargo test`.
-fn repair_in(scopes: &[Scope]) -> Vec<String> {
+fn repair_in(scopes: &[Scope]) -> Repair {
     let Ok(own) = own_exe() else {
-        return Vec::new();
+        return Repair::default();
     };
-    let mut fixed = Vec::new();
+    let mut repair = Repair::default();
     for harness in HARNESSES {
         for scope in scopes {
             for config in harness.configs(scope) {
                 let health = config.health();
                 // Written whole either way: `install` replaces cctop's entries
-                // for every event it wants, so topping up a short install and
-                // repointing a dead one are the same write with a different
-                // path.
+                // for every event it wants, so topping up a short install,
+                // refreshing an old one and repointing a dead one are the same
+                // write with a different path.
                 let (exe, what) = match &health {
                     Health::Broken(_) => (own.clone(), "repointed at this cctop".to_string()),
+                    Health::Outdated { exe } => (
+                        exe.clone().unwrap_or_else(|| own.clone()),
+                        "brought up to date".to_string(),
+                    ),
                     _ => match health.shortfall() {
-                        None => continue,
+                        None => {
+                            repair.needs_attention |= health.is_problem();
+                            continue;
+                        }
                         Some((count, at)) => (
                             at.unwrap_or(&own).to_string(),
                             format!("filled in {count} missing hooks"),
                         ),
                     },
                 };
-                if config.install(&exe).is_ok() {
-                    fixed.push(format!("{} ({}): {what}", harness.label(), scope.label()));
+                match config.install(&exe) {
+                    Ok(_) => repair.fixed.push(format!(
+                        "{} ({}): {what}",
+                        harness.label(),
+                        scope.label()
+                    )),
+                    Err(_) => repair.needs_attention = true,
                 }
             }
         }
     }
-    fixed
+    repair
 }
 
 #[cfg(test)]
@@ -4308,7 +4494,7 @@ mod tests {
             Harness::OpenCode.health(&scope).unwrap().is_problem(),
             "a plugin missing an event read as fine"
         );
-        assert!(!repair_in(std::slice::from_ref(&scope)).is_empty());
+        assert!(!repair_in(std::slice::from_ref(&scope)).fixed.is_empty());
         assert_eq!(
             Harness::OpenCode.health(&scope).unwrap(),
             Health::Installed,
@@ -4661,7 +4847,7 @@ mod tests {
             Health::Broken(gone.display().to_string())
         );
         assert!(
-            !repair_in(std::slice::from_ref(&scope)).is_empty(),
+            !repair_in(std::slice::from_ref(&scope)).fixed.is_empty(),
             "a dead path was not repaired"
         );
         assert_eq!(Harness::Claude.health(&scope).unwrap(), Health::Installed);
@@ -4672,7 +4858,7 @@ mod tests {
         write_pointing_at(&other);
         let before = std::fs::read_to_string(&path).unwrap();
         assert!(
-            repair_in(std::slice::from_ref(&scope)).is_empty(),
+            repair_in(std::slice::from_ref(&scope)).fixed.is_empty(),
             "somebody else's live install was taken over"
         );
         assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
@@ -4727,7 +4913,7 @@ mod tests {
         );
 
         assert!(
-            !repair_in(std::slice::from_ref(&scope)).is_empty(),
+            !repair_in(std::slice::from_ref(&scope)).fixed.is_empty(),
             "the shortfall was not filled"
         );
         let health = Harness::Claude.health(&scope).unwrap();
@@ -4740,7 +4926,247 @@ mod tests {
             "the events were filled in, but the install changed hands"
         );
         // And nothing left to do the second time.
-        assert!(repair_in(std::slice::from_ref(&scope)).is_empty());
+        assert!(repair_in(std::slice::from_ref(&scope)).fixed.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A whole Claude Code install at `exe`, in a form an older cctop might
+    /// have written: every event and the deciding entry there, each wrapper
+    /// carrying a matcher and every command a timeout this version does not
+    /// write — the shape of a hook whose invocation changed under an update.
+    fn old_form_install(exe: &str) -> serde_json::Value {
+        let hooks: serde_json::Map<String, serde_json::Value> = CLAUDE_EVENTS
+            .iter()
+            .map(|e| {
+                let mut commands = vec![hook_command(exe, e)];
+                if CLAUDE_DECIDING.contains(e) {
+                    commands.push(yolo_hook_command(exe, e));
+                }
+                let entries = commands
+                    .into_iter()
+                    .map(|c| {
+                        serde_json::json!({"matcher": "*", "hooks": [{"type": "command",
+                            "command": c, "timeout": 5}]})
+                    })
+                    .collect();
+                ((*e).to_string(), serde_json::Value::Array(entries))
+            })
+            .collect();
+        serde_json::json!({ "hooks": hooks })
+    }
+
+    /// The issue's case: an update changed how a hook is written, and the
+    /// entries an older cctop wrote — every event present, nothing missing —
+    /// are rewritten into this version's form without anyone reinstalling.
+    /// The user's own hooks, in the same event and in the same wrapper as
+    /// cctop's, come through untouched.
+    #[test]
+    fn an_install_in_an_older_form_is_refreshed_and_the_users_hooks_survive() {
+        let dir = scratch("outdated");
+        let scope = Scope::Project(dir.clone());
+        let path = Harness::Claude.config_file(&scope).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let own = own_exe().unwrap();
+
+        let mut doc = old_form_install(&own);
+        let stop = doc["hooks"]["Stop"].as_array_mut().unwrap();
+        // The user's own entry, beside cctop's.
+        stop.push(
+            serde_json::json!({"hooks": [{"type": "command", "command": "notify-send done"}]}),
+        );
+        // And one of theirs in the wrapper cctop's sits in.
+        stop[0]["hooks"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({"type": "command", "command": "say stopped"}));
+        // An event this cctop does not register, holding one of theirs.
+        doc["hooks"]["NotACctopEvent"] =
+            serde_json::json!([{"hooks": [{"type": "command", "command": "beep"}]}]);
+        // And an event an older cctop registered and this one no longer does.
+        doc["hooks"]["Retired"] = serde_json::json!([{"hooks": [{"type": "command",
+            "command": hook_command(&own, "Retired")}]}]);
+        std::fs::write(&path, doc.to_string()).unwrap();
+
+        let health = Harness::Claude.health(&scope).unwrap();
+        assert_eq!(health, Health::Outdated { exe: None });
+        assert!(health.is_problem(), "an old form read as fine");
+
+        let repair = repair_in(std::slice::from_ref(&scope));
+        assert_eq!(
+            repair.fixed,
+            vec!["Claude Code (project): brought up to date"]
+        );
+        assert!(!repair.needs_attention);
+        assert_eq!(Harness::Claude.health(&scope).unwrap(), Health::Installed);
+
+        let root = read_settings(&path).unwrap();
+        // cctop's entries are exactly what an install writes now.
+        let mut fresh = serde_json::Map::new();
+        json_merge(
+            &mut fresh,
+            &path,
+            Shape::Nested,
+            CLAUDE_EVENTS,
+            CLAUDE_DECIDING,
+            &own,
+        )
+        .unwrap();
+        assert_eq!(our_entries(&root), our_entries(&fresh));
+        // Every one of the user's survived, the wrapper's matcher included.
+        let all: Vec<&str> = root["hooks"]
+            .as_object()
+            .unwrap()
+            .values()
+            .flat_map(|list| list.as_array().unwrap())
+            .flat_map(entry_commands)
+            .collect();
+        for theirs in ["notify-send done", "say stopped", "beep"] {
+            assert!(all.contains(&theirs), "{theirs} was lost: {all:?}");
+        }
+        let shared = root["hooks"]["Stop"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| entry_commands(e).any(|c| c == "say stopped"))
+            .unwrap();
+        assert_eq!(shared["matcher"], "*", "the user's wrapper was rewritten");
+        assert!(
+            root["hooks"].get("Retired").is_none(),
+            "a retired event was left"
+        );
+
+        // And the second pass has nothing to do.
+        assert!(repair_in(std::slice::from_ref(&scope)).fixed.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Repair runs at every start, so the ordinary case — everything already
+    /// right — must cost a read and nothing else: no rewrite, so not even the
+    /// mtime moves. The user's formatting is part of what that keeps.
+    #[test]
+    fn an_install_already_up_to_date_is_not_rewritten() {
+        let dir = scratch("up-to-date");
+        let scope = Scope::Project(dir.clone());
+        for harness in HARNESSES {
+            harness.install(&scope, &own_exe().unwrap());
+        }
+        let claude = Harness::Claude.config_file(&scope).unwrap();
+        // Reformatted by hand, and moved after somebody else's entry: neither
+        // is a difference in what fires.
+        let mut root = read_settings(&claude).unwrap();
+        root["hooks"]["Stop"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({"hooks": [{"type": "command", "command": "theirs"}]}));
+        root["hooks"]["Stop"].as_array_mut().unwrap().reverse();
+        std::fs::write(&claude, serde_json::to_string(&root).unwrap()).unwrap();
+
+        let files: Vec<PathBuf> = HARNESSES
+            .iter()
+            .flat_map(|h| h.configs(&scope))
+            .map(|c| c.path().to_path_buf())
+            .collect();
+        let long_ago =
+            std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000);
+        for file in &files {
+            std::fs::File::options()
+                .write(true)
+                .open(file)
+                .unwrap()
+                .set_modified(long_ago)
+                .unwrap();
+        }
+        let before: Vec<Vec<u8>> = files.iter().map(|f| std::fs::read(f).unwrap()).collect();
+
+        let repair = repair_in(std::slice::from_ref(&scope));
+        assert_eq!(
+            repair,
+            Repair::default(),
+            "an up-to-date install was touched"
+        );
+        for (file, bytes) in files.iter().zip(&before) {
+            assert_eq!(
+                &std::fs::read(file).unwrap(),
+                bytes,
+                "{} changed",
+                file.display()
+            );
+            assert_eq!(
+                std::fs::metadata(file).unwrap().modified().unwrap(),
+                long_ago,
+                "{} was rewritten",
+                file.display()
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Another cctop's install in an older form is refreshed *at that cctop*:
+    /// repair keeps its rule of never moving an install between live binaries.
+    #[test]
+    fn another_cctops_outdated_install_is_refreshed_at_its_own_binary() {
+        let dir = scratch("outdated-other");
+        let scope = Scope::Project(dir.clone());
+        let path = Harness::Claude.config_file(&scope).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let theirs = dir.join("their-cctop");
+        std::fs::write(&theirs, "").unwrap();
+        let theirs = theirs.display().to_string();
+        std::fs::write(&path, old_form_install(&theirs).to_string()).unwrap();
+
+        assert_eq!(
+            Harness::Claude.health(&scope).unwrap(),
+            Health::Outdated {
+                exe: Some(theirs.clone())
+            }
+        );
+        assert!(!repair_in(std::slice::from_ref(&scope)).fixed.is_empty());
+        assert_eq!(
+            Harness::Claude.health(&scope).unwrap(),
+            Health::Other {
+                exe: theirs.clone(),
+                missing: Vec::new()
+            },
+            "the form was refreshed, but the install changed hands"
+        );
+        let mut fresh = serde_json::Map::new();
+        json_merge(
+            &mut fresh,
+            &path,
+            Shape::Nested,
+            CLAUDE_EVENTS,
+            CLAUDE_DECIDING,
+            &theirs,
+        )
+        .unwrap();
+        assert_eq!(
+            our_entries(&read_settings(&path).unwrap()),
+            our_entries(&fresh)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The plugin is cctop's file outright, so any difference from what this
+    /// version writes is an older cctop's, even with every event in it.
+    #[test]
+    fn an_opencode_plugin_from_an_older_cctop_is_rewritten() {
+        let dir = scratch("outdated-plugin");
+        let scope = Scope::Project(dir.clone());
+        let path = Harness::OpenCode.config_file(&scope).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let own = own_exe().unwrap();
+        std::fs::write(
+            &path,
+            format!("{}\n// an older cctop\n", plugin_source(&own)),
+        )
+        .unwrap();
+
+        assert_eq!(
+            Harness::OpenCode.health(&scope).unwrap(),
+            Health::Outdated { exe: None }
+        );
+        assert!(!repair_in(std::slice::from_ref(&scope)).fixed.is_empty());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), plugin_source(&own));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

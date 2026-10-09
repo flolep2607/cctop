@@ -876,6 +876,14 @@ pub fn run(argv: &[String]) -> anyhow::Result<i32> {
         scan: true,
     })?;
     announce(&serving, &bind, no_token);
+    // Hooks brought in line with this binary, as the dashboard does at every
+    // start, and off this thread for the same reason: nothing about serving
+    // waits on five agents' config files. Silent when there was nothing to do.
+    std::thread::spawn(|| {
+        for line in cctop_core::hook::repair(None).terminal_lines() {
+            eprintln!("{line}");
+        }
+    });
     // The masters the web launcher connected to are given back on the way
     // out, as the dashboard gives back its own.
     ssh::release_on_signal();
