@@ -898,6 +898,7 @@ mod tests {
             is_tunnel_host: |_| false,
             addresses: std::sync::Arc::new(crate::address::Nowhere),
             identities: std::sync::Arc::new(crate::identity::Nowhere),
+            peer_secret: String::new(),
         };
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
