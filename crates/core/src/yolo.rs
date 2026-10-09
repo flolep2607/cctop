@@ -894,8 +894,8 @@ fn inside(env: &dyn Fn(&str) -> Option<String>, ancestry: &[u32]) -> Result<Insi
     Ok(Inside { session, agent })
 }
 
-/// `cctop yolo on|off|status`, and `cctop yolo --slash [word]`, which is what
-/// the `/yolo` command runs.
+/// `cctop yolo on|off|status`, and `cctop yolo --slash=<key> [word]`, which
+/// is what the `/yolo` command runs.
 ///
 /// One line out either way, because `/yolo` puts it in front of the model to
 /// repeat. A refusal goes to stderr with a non-zero exit, which makes Claude
@@ -910,8 +910,11 @@ fn inside(env: &dyn Fn(&str) -> Option<String>, ancestry: &[u32]) -> Result<Insi
 /// guard, and the only one — unless Bash is broadly allowed, in which case the
 /// model could as easily have written `yolo.json` itself.
 pub fn command(argv: &[String]) -> i32 {
+    // `--slash=<key>`: the key is the skill's, and only there to make the
+    // command line its grant covers one the model cannot spell — see the
+    // `/yolo` skill in [`crate::hook`]. Nothing here checks it.
     let (slash, words) = match argv.first().map(String::as_str) {
-        Some("--slash") => (true, &argv[1..]),
+        Some(flag) if flag == "--slash" || flag.starts_with("--slash=") => (true, &argv[1..]),
         _ => (false, argv),
     };
     let Some(ask) = Ask::parse(words, slash) else {

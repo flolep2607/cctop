@@ -3168,6 +3168,10 @@ const SKILL_LABEL: &str = "/yolo";
 /// tooling that wrote it.
 const SKILL_MARKER: &str = "  cctop: ";
 
+/// The line of the same map that keeps the skill's key between rewrites. See
+/// [`skill_source`] for what the key is for.
+const SKILL_KEY: &str = "  cctop-key: ";
+
 /// `/yolo`, `/yolo off` and `/yolo status` in Claude Code.
 ///
 /// A skill rather than a file in `commands/`, because the docs mirrored in
@@ -3189,9 +3193,16 @@ const SKILL_MARKER: &str = "  cctop: ";
 ///   against the permission rules and, outside auto mode, aborts the command
 ///   on anything short of allow; in auto mode it would hand the line to the
 ///   model to run instead, which is the one thing this must not do. The grant
-///   lasts for the turn the person typed `/yolo` in and covers only
-///   `cctop yolo --slash`, so within that turn the model could run the same
-///   command unprompted.
+///   does not end with the expansion, though: it lasts the whole turn the
+///   person typed `/yolo` in, and covers the model's Bash calls too. A real
+///   session showed what that costs with a plain `cctop yolo --slash *`
+///   grant: the person types `/yolo off`, and the model, in the same turn,
+///   runs `cctop yolo --slash on` with no prompt. So the line carries a key —
+///   random, written once and kept across rewrites — and the grant names it.
+///   The model never sees the line, only what it printed, so the command it
+///   could type is not the one the grant covers, and it is prompted for like
+///   any other. The key is not checked by `cctop yolo`: its whole job is to
+///   make the granted command one nobody else can spell.
 /// - the marker, so a `/yolo` that is not cctop's is never overwritten.
 ///
 /// What it cannot carry is proof that a person typed it. Claude Code runs an
@@ -3202,8 +3213,8 @@ const SKILL_MARKER: &str = "  cctop: ";
 /// their pids and nothing else. The model's own Bash call is held at a
 /// permission prompt like any other command, and that is the guard; see
 /// [`crate::yolo::command`].
-fn skill_source(exe: &str) -> String {
-    let run = format!("{} yolo --slash", command_word(exe));
+fn skill_source(exe: &str, key: &str) -> String {
+    let run = format!("{} yolo --slash={key}", command_word(exe));
     // YAML's double-quoted strings are a superset of JSON's, so serde's
     // quoting is a correct YAML quoting of any path at all.
     let quote = |text: &str| serde_json::Value::String(text.to_string()).to_string();
@@ -3215,18 +3226,37 @@ fn skill_source(exe: &str) -> String {
          allowed-tools: {allow}\n\
          metadata:\n\
          {SKILL_MARKER}{exe_json}\n\
+         {SKILL_KEY}{key_json}\n\
          ---\n\
+         cctop's answer to /yolo, already carried out:\n\
+         \n\
          !`{run} $ARGUMENTS`\n\
          \n\
-         The line above is cctop's answer to /yolo, and what it says has already been done. \
-         Repeat it to the user exactly as it is, and run nothing because of it.\n",
+         Repeat that answer to the user exactly as it is, and run nothing because of it.\n",
         description = quote(
             "Switch cctop's YOLO on for this session, so every permission prompt \
              is allowed until it ends. /yolo off stops it; /yolo status says which."
         ),
         allow = quote(&format!("Bash({run} *)")),
         exe_json = quote(exe),
+        key_json = quote(key),
     )
+}
+
+/// A new key for [`skill_source`]: 128 bits from the kernel, as hex.
+fn new_skill_key() -> std::io::Result<String> {
+    use std::io::Read;
+    let mut bytes = [0u8; 16];
+    std::fs::File::open("/dev/urandom")?.read_exact(&mut bytes)?;
+    Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
+}
+
+/// The key a skill file was written with, read back out of its metadata.
+fn skill_key(text: &str) -> Option<String> {
+    let line = text.lines().find(|l| l.starts_with(SKILL_KEY))?;
+    serde_json::from_str::<String>(line[SKILL_KEY.len()..].trim())
+        .ok()
+        .filter(|key| !key.is_empty())
 }
 
 /// The binary as the first word of a shell command, quoted only when it has
@@ -3261,9 +3291,16 @@ fn skill_install(path: &Path, commands: &Path, exe: &str) -> anyhow::Result<()> 
             theirs.display()
         );
     }
-    let source = skill_source(exe);
+    let before = std::fs::read_to_string(path).ok();
+    // The key a rewrite keeps, so that refreshing the file does not change
+    // the command a turn in progress was granted.
+    let key = match before.as_deref().and_then(skill_key) {
+        Some(key) => key,
+        None => new_skill_key()?,
+    };
+    let source = skill_source(exe, &key);
     // Already this, exactly: nothing to write. See [`json_install`].
-    if std::fs::read_to_string(path).is_ok_and(|text| text == source) {
+    if before.is_some_and(|text| text == source) {
         return Ok(());
     }
     if let Some(parent) = path.parent() {
@@ -3314,7 +3351,10 @@ fn skill_health(path: &Path, commands: &Path, hooks: &Path) -> Health {
         Err(e) => Health::Unreadable(e.to_string()),
         Ok(text) => {
             let exe = skill_exe(&text);
-            let outdated = exe.as_deref().is_some_and(|exe| text != skill_source(exe));
+            // No key is an older form too: the rewrite gives it one.
+            let outdated = exe.as_deref().is_some_and(|exe| {
+                skill_key(&text).is_none_or(|key| text != skill_source(exe, &key))
+            });
             verdict(exe, Vec::new(), outdated)
         }
     }

@@ -537,7 +537,9 @@ treat the file as sensitive.
 pub fn run(argv: &[String]) -> i32 {
     match argv.first().map(String::as_str) {
         Some("log") => run_log(&Log::default(), &argv[1..], &mut std::io::stdout()),
-        Some("on" | "off" | "status" | "--slash") => crate::yolo::command(argv),
+        Some(word) if matches!(word, "on" | "off" | "status") || word.starts_with("--slash") => {
+            crate::yolo::command(argv)
+        }
         Some("-h" | "--help" | "help") | None => {
             print!("{HELP}");
             0
