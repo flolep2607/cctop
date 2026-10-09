@@ -234,4 +234,65 @@ mod tests {
         app.sessions[0].provider = Provider::Claude;
         assert!(!app.codex_hooks_heard());
     }
+
+    /// Start-up must not wait on the hook repair: a repair that blocks — a
+    /// home on a network mount, a config file on a stalled disk — still lets
+    /// the first frame draw, and its toast arrives when it finishes.
+    #[test]
+    fn a_repair_that_blocks_does_not_hold_up_the_first_frame() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let mut app = test_app();
+        let (release, held) = std::sync::mpsc::channel::<()>();
+        let started = std::time::Instant::now();
+        app.start_hook_repair(move || {
+            let _ = held.recv();
+            cctop_core::hook::Repair {
+                fixed: vec!["Claude Code (user): brought up to date".into()],
+                needs_attention: false,
+            }
+        });
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        terminal
+            .draw(|f| {
+                render::draw(f, &mut app);
+            })
+            .unwrap();
+        assert!(
+            !app.tick_hook_repair(),
+            "an unfinished repair said something"
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(1),
+            "the first frame waited on the repair"
+        );
+
+        release.send(()).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !app.tick_hook_repair() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the repair never reported"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(app.status(), Some("Claude Code (user): brought up to date"));
+    }
+
+    /// A pass with nothing to do — every start, nearly always — says nothing.
+    #[test]
+    fn a_repair_with_nothing_to_do_is_silent() {
+        let mut app = test_app();
+        app.start_hook_repair(cctop_core::hook::Repair::default);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while app.hook_repair.is_some() {
+            assert!(!app.tick_hook_repair(), "an empty repair asked for a frame");
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the repair never finished"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(app.status(), None);
+    }
 }
