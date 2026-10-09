@@ -23,6 +23,13 @@ use std::time::{Duration, Instant};
 /// The ceiling on one fire; see `hook_exits_zero.rs`.
 const PATIENCE: Duration = Duration::from_secs(5);
 
+/// One fire at a time. Each fire starts the whole cctop binary, and a dozen of
+/// those starting together on a loaded machine spent the ceilings above on
+/// process start-up rather than on anything the hook does; a run of these
+/// tests was timing out now and then in parallel and never alone. Serial, the
+/// ceilings measure the hook again.
+static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// The answer, spelled as `cctop_core::hook::YOLO_ALLOW` spells it.
 const ALLOW: &str = r#"{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}}"#;
 
@@ -129,6 +136,10 @@ fn fire_as(dir: &Path, word: &str, event: &str, stdin: &[u8]) -> Fired {
 
 /// [`fire_as`] with these variables set, as Claude Code sets them for a hook.
 fn fire_with(dir: &Path, word: &str, event: &str, stdin: &[u8], vars: &[(&str, &str)]) -> Fired {
+    // A test that panicked while holding it must not fail every later one.
+    let _turn = ONE_AT_A_TIME
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let started = Instant::now();
     let mut cmd = command(dir);
     cmd.env_remove("CLAUDE_PID")
