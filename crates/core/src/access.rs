@@ -672,6 +672,10 @@ fn hooks(session: &Session, cwd: &Path) -> Vec<HookState> {
                 Health::Other { exe, .. } => ("other", Some(format!("installed at {exe}"))),
                 Health::Broken(exe) => ("broken", Some(format!("points at {exe}, which is gone"))),
                 Health::Unreadable(why) => ("unreadable", Some(why.clone())),
+                Health::Foreign(path) => (
+                    "foreign",
+                    Some(format!("{} is the person's own", path.display())),
+                ),
             };
             HookState {
                 harness: status.harness.label().to_string(),
