@@ -269,6 +269,15 @@ pub struct Zone {
     pub active: bool,
 }
 
+/// One of the account's tunnels, as [`Api::tunnels`] lists it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TunnelInfo {
+    pub id: String,
+    pub name: String,
+    /// Whether a connector holds it now.
+    pub up: bool,
+}
+
 /// An authenticated client for Cloudflare's API. Its `Debug` prints no token.
 pub struct Api {
     base: String,
@@ -478,7 +487,58 @@ impl Api {
             .ok_or_else(|| Error::Api("the new tunnel came back without an id".into()))
     }
 
-    fn tunnel_token(&self, account_id: &str, tunnel_id: &str) -> Result<String, Error> {
+    /// The account's tunnels that are not deleted — every machine's, not only
+    /// this one's — for [`crate::peer`] to find its siblings among.
+    ///
+    /// Within a browser login's reach: checked against a real login's token,
+    /// which lists them, reads their ingress, and fetches their tokens.
+    pub fn tunnels(&self, account_id: &str) -> Result<Vec<TunnelInfo>, Error> {
+        let result = self.call(
+            "GET",
+            &format!("/accounts/{account_id}/cfd_tunnel?is_deleted=false&per_page=100"),
+            None,
+            PERMISSIONS[0],
+        )?;
+        Ok(result
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|t| {
+                Some(TunnelInfo {
+                    id: t["id"].as_str()?.to_string(),
+                    name: t["name"].as_str()?.to_string(),
+                    // `healthy` and `degraded` have a connector; `down` and
+                    // `inactive` have none, so nothing would answer there.
+                    up: matches!(t["status"].as_str(), Some("healthy" | "degraded")),
+                })
+            })
+            .collect())
+    }
+
+    /// The hostnames a tunnel's ingress names, in the order it lists them —
+    /// the page's first, which is how [`create`] and every rename write it.
+    pub fn ingress_hostnames(
+        &self,
+        account_id: &str,
+        tunnel_id: &str,
+    ) -> Result<Vec<String>, Error> {
+        let result = self.call(
+            "GET",
+            &format!("/accounts/{account_id}/cfd_tunnel/{tunnel_id}/configurations"),
+            None,
+            PERMISSIONS[0],
+        )?;
+        Ok(result["config"]["ingress"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|rule| rule["hostname"].as_str().map(String::from))
+            .collect())
+    }
+
+    /// A tunnel's connector token: what [`create`] stores for this machine,
+    /// and what [`crate::peer`] signs with to prove itself to another.
+    pub fn tunnel_token(&self, account_id: &str, tunnel_id: &str) -> Result<String, Error> {
         let result = self.call(
             "GET",
             &format!("/accounts/{account_id}/cfd_tunnel/{tunnel_id}/token"),
