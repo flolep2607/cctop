@@ -113,8 +113,9 @@ pub enum Step {
         hostname: Option<String>,
         shares: bool,
     },
-    /// What stopped it, in Cloudflare's or cctop's words.
-    Failed { message: String },
+    /// What stopped it, in Cloudflare's or cctop's words, and the way in
+    /// that Enter starts over at.
+    Failed { message: String, then: Method },
     /// Disconnected, and anything left on Cloudflare to delete by hand.
     Disconnected { left: Vec<String>, made_here: bool },
     /// Cloudflare Access on the connected account: on or off, the invites
@@ -205,9 +206,14 @@ impl Connect {
 
     /// The first step, empty.
     pub fn start(back: Mode) -> Connect {
+        Connect::start_at(back, METHODS[0])
+    }
+
+    /// The first step, empty, with `method` chosen.
+    fn start_at(back: Mode, method: Method) -> Connect {
         Connect::new(
             Step::Start {
-                method: METHODS[0],
+                method,
                 field: LineEdit::default(),
             },
             back,
@@ -287,16 +293,37 @@ impl From<&Account> for Connected {
     }
 }
 
-/// A refusal in the popup's words: Cloudflare's sentence, except that a
-/// missing permission points at the link one Enter away rather than spelling
-/// out its two hundred characters of query string.
+/// A refusal in the popup's words: Cloudflare's sentence, except that one
+/// whose way out is a new token points at the token link one Enter away
+/// rather than spelling out its five hundred characters of query string, which
+/// wrap across the popup's border and cannot be copied or clicked.
 fn said(error: &cloudflare::Error) -> String {
     match error {
         cloudflare::Error::MissingPermission(permission) => format!(
             "That token lacks the permission \"{permission}\". Enter goes back to the \
              link, which makes one with all three."
         ),
+        cloudflare::Error::LoginRefused(permission) => format!(
+            "Cloudflare did not let the browser login do this (it needs \
+             \"{permission}\"). Enter goes to the token link instead, which makes a \
+             token that can."
+        ),
         other => other.to_string(),
+    }
+}
+
+/// The failed step for `error`: back to the token link when a token is the
+/// way out, back to the first way in otherwise.
+fn failed(error: &cloudflare::Error) -> Step {
+    let then = match error {
+        cloudflare::Error::MissingPermission(_) | cloudflare::Error::LoginRefused(_) => {
+            Method::Paste
+        }
+        _ => METHODS[0],
+    };
+    Step::Failed {
+        message: said(error),
+        then,
     }
 }
 
@@ -554,6 +581,7 @@ impl App {
                           it to stop using it, and delete the tunnel in the Cloudflare \
                           dashboard."
                     .to_string(),
+                then: METHODS[0],
             };
             return;
         }
@@ -568,6 +596,7 @@ impl App {
                     message: "Another cctop on this machine is serving over this tunnel. \
                               Stop it first, then disconnect."
                         .to_string(),
+                    then: METHODS[0],
                 };
             }
             return;
@@ -801,6 +830,7 @@ impl App {
                 flow.working = None;
                 flow.step = Step::Failed {
                     message: "The call to Cloudflare gave no answer.".to_string(),
+                    then: METHODS[0],
                 };
                 return true;
             }
@@ -864,7 +894,7 @@ impl App {
             | Answer::Zones(_, Err(e))
             | Answer::Suggested(_, _, Err(e)) => {
                 flow.qr = false;
-                flow.step = Step::Failed { message: said(&e) };
+                flow.step = failed(&e);
             }
             Answer::Created(Ok(account)) => {
                 flow.step = Step::Done {
@@ -882,7 +912,10 @@ impl App {
                 {
                     flow.problem = Some(message);
                 } else {
-                    flow.step = Step::Failed { message };
+                    flow.step = Step::Failed {
+                        message,
+                        then: METHODS[0],
+                    };
                 }
             }
             Answer::Removed(Ok((left, made_here))) => {
@@ -890,7 +923,12 @@ impl App {
                 self.connected = None;
                 self.set_status("Cloudflare account disconnected");
             }
-            Answer::Removed(Err(message)) => flow.step = Step::Failed { message },
+            Answer::Removed(Err(message)) => {
+                flow.step = Step::Failed {
+                    message,
+                    then: METHODS[0],
+                }
+            }
             Answer::Access(Ok(applied)) => {
                 let Step::Access {
                     account,
@@ -1010,12 +1048,12 @@ impl App {
                 KeyCode::Esc | KeyCode::Enter => self.close_connect(),
                 _ => {}
             },
-            Step::Failed { .. } => match key.code {
+            Step::Failed { then, .. } => match key.code {
                 // Back to the start rather than out: the usual next move is
                 // another token, made with the permission that was missing.
                 KeyCode::Enter => {
-                    let back = flow.back;
-                    *flow = Connect::start(back);
+                    let (back, then) = (flow.back, *then);
+                    *flow = Connect::start_at(back, then);
                 }
                 KeyCode::Esc => self.close_connect(),
                 _ => {}
@@ -1172,23 +1210,35 @@ mod tests {
 
     #[test]
     fn each_refusal_ends_on_its_own_sentence() {
-        for error in [
-            cloudflare::Error::NoDomain,
-            cloudflare::Error::ZonePending("example.test".into()),
-            cloudflare::Error::TokenRefused,
-            cloudflare::Error::MissingPermission(cloudflare::PERMISSIONS[0]),
+        // Each with the way in Enter starts over at: the token link when a
+        // token is the way out, the first way in otherwise.
+        for (error, then) in [
+            (cloudflare::Error::NoDomain, METHODS[0]),
+            (
+                cloudflare::Error::ZonePending("example.test".into()),
+                METHODS[0],
+            ),
+            (cloudflare::Error::TokenRefused, METHODS[0]),
+            (
+                cloudflare::Error::MissingPermission(cloudflare::PERMISSIONS[0]),
+                Method::Paste,
+            ),
+            (
+                cloudflare::Error::LoginRefused(cloudflare::PERMISSIONS[0]),
+                Method::Paste,
+            ),
         ] {
             let mut app = app();
             app.connect_answer(Answer::Zones("made-up".into(), Err(error.clone())));
-            let Step::Failed { message } = step(&app) else {
+            let Step::Failed { message, .. } = step(&app) else {
                 panic!("{error:?} did not fail");
             };
             assert_eq!(*message, said(&error));
             assert!(!message.contains("permissionGroupKeys"), "{message}");
-            // Enter starts over, with a fresh field, at the first way in.
             app.on_key_connect(KeyCode::Enter.into());
             assert!(
-                matches!(step(&app), Step::Start { field, method } if field.is_empty() && *method == METHODS[0])
+                matches!(step(&app), Step::Start { field, method } if field.is_empty() && *method == then),
+                "{error:?}"
             );
         }
     }
@@ -1362,7 +1412,9 @@ mod tests {
         app.connect_answer(Answer::LoggedIn(Err(cloudflare::Error::Login(
             "No login arrived within ten minutes; start again.".into(),
         ))));
-        assert!(matches!(step(&app), Step::Failed { message } if message.contains("ten minutes")));
+        assert!(
+            matches!(step(&app), Step::Failed { message, .. } if message.contains("ten minutes"))
+        );
     }
 
     /// The Access step over an account cctop set up, whose edits go to the
@@ -1513,7 +1565,7 @@ mod tests {
         app.on_key_connect(KeyCode::Char('d').into());
         app.on_key_connect(KeyCode::Char('y').into());
         assert!(
-            matches!(step(&app), Step::Failed { message } if message.contains("CCTOP_TUNNEL_TOKEN"))
+            matches!(step(&app), Step::Failed { message, .. } if message.contains("CCTOP_TUNNEL_TOKEN"))
         );
     }
 }

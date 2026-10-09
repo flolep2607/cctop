@@ -3111,7 +3111,7 @@ pub(super) fn draw_connect(frame: &mut Frame, area: Rect, app: &mut App, layout:
                 ],
             )
         }
-        Step::Failed { message } => {
+        Step::Failed { message, .. } => {
             lines.extend(wrap(message, 0, warn));
             lines.push(Line::default());
             lines.push(dim("Quick tunnels still work: t in the serve panel."));

@@ -672,6 +672,7 @@ fn connect_popup() {
 
     let mut app = open(Step::Failed {
         message: Error::NoDomain.to_string(),
+        then: super::connect::Method::Browser,
     });
     snap("connect_no_domain", &mut app);
 
