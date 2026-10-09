@@ -823,6 +823,176 @@ impl Auto {
     }
 }
 
+// ---------------------------------------------------------------------------
+// From inside the session: `cctop yolo on|off|status`, and `/yolo`
+// ---------------------------------------------------------------------------
+
+/// What `cctop yolo` was asked to do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Ask {
+    On,
+    Off,
+    Status,
+}
+
+impl Ask {
+    /// The words after `cctop yolo`, or — `slash` — after `/yolo`, where
+    /// nothing at all means on, because that is what typing the bare command
+    /// is for.
+    fn parse(words: &[String], slash: bool) -> Option<Ask> {
+        match words {
+            [] if slash => Some(Ask::On),
+            [word] => match word.as_str() {
+                "on" => Some(Ask::On),
+                "off" => Some(Ask::Off),
+                "status" => Some(Ask::Status),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+}
+
+/// The Claude Code session a command is running inside, named the way the
+/// YOLO hook will name it: the session id its payloads carry, and the agent
+/// process that is one of its ancestors.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Inside {
+    session: String,
+    agent: u32,
+}
+
+/// Find the session from what Claude Code puts in the environment of every
+/// command it runs: `CLAUDE_CODE_SESSION_ID`, documented as matching the
+/// `session_id` its hooks are given and following `/clear`, and `CLAUDE_PID`,
+/// its own pid (2.1.214 and later).
+///
+/// `CLAUDE_PID` is only believed when it is one of this process's ancestors.
+/// That is the test the hook applies to the recorded process, so a pid that
+/// failed it here would be a switch that answers nothing; and an environment
+/// inherited by something that has since left the agent — a daemon started
+/// from a session — names a process that is not running it.
+fn inside(env: &dyn Fn(&str) -> Option<String>, ancestry: &[u32]) -> Result<Inside, String> {
+    let session = env("CLAUDE_CODE_SESSION_ID").filter(|s| !s.trim().is_empty());
+    let Some(session) = session else {
+        return Err("this is not running inside a Claude Code session, and \
+                    `cctop yolo` switches the session it runs in: type /yolo in \
+                    the session, or switch it from cctop's table"
+            .into());
+    };
+    let Some(agent) = env("CLAUDE_PID").and_then(|p| p.trim().parse::<u32>().ok()) else {
+        return Err("Claude Code did not say which process is running this \
+                    session (CLAUDE_PID, set from Claude Code 2.1.214)"
+            .into());
+    };
+    if !ancestry.contains(&agent) {
+        return Err(format!(
+            "CLAUDE_PID says {agent}, which is not running this command, so \
+             there is no process to give the permission to"
+        ));
+    }
+    Ok(Inside { session, agent })
+}
+
+/// `cctop yolo on|off|status`, and `cctop yolo --slash=<key> [word]`, which
+/// is what the `/yolo` command runs.
+///
+/// One line out either way, because `/yolo` puts it in front of the model to
+/// repeat. A refusal goes to stderr with a non-zero exit, which makes Claude
+/// Code abort the command and show the person the reason without the model
+/// seeing it at all.
+///
+/// Nothing here can tell the person typing `/yolo` from the model running the
+/// same command through its Bash tool: Claude Code runs a command file's
+/// shell lines through that same tool, with the same environment and the same
+/// process tree (see the `/yolo` command in [`crate::hook`]). The model's
+/// Bash call is held at a permission prompt like any other — which is the
+/// guard, and the only one — unless Bash is broadly allowed, in which case the
+/// model could as easily have written `yolo.json` itself.
+pub fn command(argv: &[String]) -> i32 {
+    // `--slash=<key>`: the key is the skill's, and only there to make the
+    // command line its grant covers one the model cannot spell — see the
+    // `/yolo` skill in [`crate::hook`]. Nothing here checks it.
+    let (slash, words) = match argv.first().map(String::as_str) {
+        Some(flag) if flag == "--slash" || flag.starts_with("--slash=") => (true, &argv[1..]),
+        _ => (false, argv),
+    };
+    let Some(ask) = Ask::parse(words, slash) else {
+        eprintln!("cctop yolo: expected on, off or status");
+        return 2;
+    };
+    let env = |name: &str| std::env::var(name).ok();
+    let answer = inside(&env, &crate::hook::ancestry()).and_then(|inside| {
+        let how = Switch {
+            from: crate::yolo_log::Origin::Session,
+            cwd: std::fs::read_link(format!("/proc/{}/cwd", inside.agent))
+                .ok()
+                .or_else(|| std::env::current_dir().ok())
+                .map(|p| p.display().to_string()),
+            harness: Some("claude".into()),
+        };
+        answer_in(&dir(), &crate::yolo_log::Log::default(), ask, &inside, &how)
+    });
+    match answer {
+        Ok(line) => {
+            println!("{line}");
+            0
+        }
+        Err(why) => {
+            eprintln!("cctop yolo: {why}");
+            1
+        }
+    }
+}
+
+/// Do what was asked for the session `inside`, and say what is now true.
+fn answer_in(
+    dir: &Path,
+    log: &crate::yolo_log::Log,
+    ask: Ask,
+    inside: &Inside,
+    how: &Switch,
+) -> Result<String, String> {
+    let entry = read_state(dir).sessions.remove(&inside.session);
+    // On for this very process. An entry for an earlier process of the same
+    // session — before a `claude --resume` — is one the hook no longer
+    // honours, and saying "on" about it would be the lie that matters.
+    let mine = entry.as_ref().is_some_and(|e| {
+        e.agent
+            .is_some_and(|a| a.pid == inside.agent && a.is_alive())
+    });
+    let failed = |e: std::io::Error| format!("could not write the YOLO switch: {e}");
+    match ask {
+        Ask::On => {
+            set_in(dir, log, &inside.session, Some(inside.agent), how).map_err(failed)?;
+            Ok(
+                "YOLO on for this session: every permission prompt is allowed \
+                until it ends. /yolo off stops it."
+                    .into(),
+            )
+        }
+        // Off for a session that is not on writes nothing, so the lasting
+        // record does not gain a switch nobody threw.
+        Ask::Off if entry.is_none() => Ok("YOLO was not on for this session.".into()),
+        Ask::Off => {
+            set_in(dir, log, &inside.session, None, how).map_err(failed)?;
+            Ok("YOLO off for this session: permission prompts wait for you again.".into())
+        }
+        Ask::Status => Ok(match (mine, entry) {
+            (true, Some(entry)) => format!(
+                "YOLO is on for this session, since {}; {} prompt{} allowed.",
+                entry.since,
+                entry.allowed.len(),
+                if entry.allowed.len() == 1 { "" } else { "s" }
+            ),
+            (false, Some(_)) => "YOLO is off for this session: it was switched on \
+                                 for an earlier run of it. /yolo switches it on again."
+                .into(),
+            (_, None) => "YOLO is off for this session.".into(),
+        }),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1591,5 +1761,126 @@ mod tests {
         let allowed = &auto.entries["e2e"].allowed;
         assert_eq!(allowed.len(), 2);
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// An environment holding exactly these variables.
+    fn env_of(vars: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
+        let vars: Vec<(String, String)> = vars
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        move |name: &str| vars.iter().find(|(k, _)| k == name).map(|(_, v)| v.clone())
+    }
+
+    fn from_session() -> Switch {
+        Switch {
+            from: crate::yolo_log::Origin::Session,
+            cwd: Some("/w".into()),
+            harness: Some("claude".into()),
+        }
+    }
+
+    /// The session and the process are both taken from what Claude Code
+    /// sets, and the process only when it really is running the command —
+    /// the test the hook will apply to it.
+    #[test]
+    fn the_session_is_found_from_claude_codes_environment() {
+        let pid = me().to_string();
+        let ancestry = [42, me()];
+        let found = inside(
+            &env_of(&[("CLAUDE_CODE_SESSION_ID", "s1"), ("CLAUDE_PID", &pid)]),
+            &ancestry,
+        );
+        assert_eq!(
+            found,
+            Ok(Inside {
+                session: "s1".into(),
+                agent: me()
+            })
+        );
+        // Outside a session, with no pid, and with a pid that is not an
+        // ancestor: each a refusal, never a guess.
+        assert!(inside(&env_of(&[("CLAUDE_PID", &pid)]), &ancestry).is_err());
+        assert!(
+            inside(
+                &env_of(&[("CLAUDE_CODE_SESSION_ID", " "), ("CLAUDE_PID", &pid)]),
+                &ancestry
+            )
+            .is_err()
+        );
+        assert!(inside(&env_of(&[("CLAUDE_CODE_SESSION_ID", "s1")]), &ancestry).is_err());
+        assert!(
+            inside(
+                &env_of(&[("CLAUDE_CODE_SESSION_ID", "s1"), ("CLAUDE_PID", &pid)]),
+                &[42]
+            )
+            .is_err()
+        );
+    }
+
+    /// Bare `/yolo` is on; bare `cctop yolo` is the help, never a switch.
+    #[test]
+    fn the_words_after_yolo() {
+        let words = |w: &[&str]| w.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(Ask::parse(&words(&[]), true), Some(Ask::On));
+        assert_eq!(Ask::parse(&words(&[]), false), None);
+        assert_eq!(Ask::parse(&words(&["off"]), true), Some(Ask::Off));
+        assert_eq!(Ask::parse(&words(&["status"]), false), Some(Ask::Status));
+        assert_eq!(Ask::parse(&words(&["on"]), false), Some(Ask::On));
+        assert_eq!(Ask::parse(&words(&["on", "now"]), true), None);
+        assert_eq!(Ask::parse(&words(&["yes"]), true), None);
+    }
+
+    /// On, status, off and off again, through the same file the table and
+    /// the hook use — so the hook allows this session's process and nothing
+    /// else, and the lasting record says where each switch came from.
+    #[test]
+    fn on_status_and_off_from_inside_the_session() {
+        let dir = scratch("inside");
+        let log = log_of(&dir);
+        let here = Inside {
+            session: "s1".into(),
+            agent: me(),
+        };
+        let say = |ask| answer_in(&dir, &log, ask, &here, &from_session()).unwrap();
+
+        assert!(say(Ask::Status).starts_with("YOLO is off"));
+        assert!(say(Ask::On).starts_with("YOLO on for this session"));
+        assert!(allows_in(&dir, "s1", &[me()]));
+        assert!(!allows_in(&dir, "s2", &[me()]));
+        assert!(!allows_in(&dir, "s1", &[1234]));
+        assert!(say(Ask::Status).starts_with("YOLO is on for this session"));
+
+        assert!(say(Ask::Off).starts_with("YOLO off for this session"));
+        assert!(!allows_in(&dir, "s1", &[me()]));
+        let lines = log.read();
+        assert_eq!(lines.len(), 2);
+        assert!(
+            lines
+                .iter()
+                .all(|l| l.from == Some(crate::yolo_log::Origin::Session))
+        );
+
+        // Off again writes nothing: no switch was thrown.
+        assert_eq!(say(Ask::Off), "YOLO was not on for this session.");
+        assert_eq!(log.read().len(), 2);
+    }
+
+    /// An entry for an earlier process of the same session — before a
+    /// resume — is one the hook no longer honours, so status does not call
+    /// it on.
+    #[test]
+    fn status_does_not_count_an_earlier_process() {
+        let dir = scratch("inside-earlier");
+        let log = log_of(&dir);
+        // pid 1 is alive and is never this test: an earlier run, for status.
+        set_in(&dir, &log, "s1", Some(1), &from_session()).unwrap();
+        let here = Inside {
+            session: "s1".into(),
+            agent: me(),
+        };
+        let status = answer_in(&dir, &log, Ask::Status, &here, &from_session()).unwrap();
+        assert!(status.starts_with("YOLO is off"), "{status}");
+        assert!(status.contains("earlier run"), "{status}");
     }
 }

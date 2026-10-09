@@ -739,7 +739,10 @@ const MAX_ANCESTRY: usize = 8;
 /// hook cannot tell (each harness stacks its own shells, wrappers and sandboxes
 /// in between), while cctop already knows which pids are agent processes and
 /// need only intersect the two.
-fn ancestry() -> Vec<u32> {
+///
+/// `cctop yolo` walks the same chain for the same reason: the process it
+/// records is the one the YOLO hook will look for among its own ancestors.
+pub(crate) fn ancestry() -> Vec<u32> {
     // Read directly rather than through `sysinfo`, which was measured at 4.2ms
     // against 152us for the identical chain. The hook spends the agent's
     // deadline, so a 28x saving on a fact this small is worth reading `/proc`
@@ -2146,13 +2149,26 @@ enum Config {
     /// A plugin file cctop owns outright and can therefore write and delete
     /// whole, rather than merging into somebody else's document.
     Plugin(PathBuf),
+    /// Claude Code's `/yolo`, a skill file cctop owns outright like the
+    /// plugin. `commands` is where a command file of the same name would
+    /// be, which the skill would hide; `hooks` is the settings file of the
+    /// same scope, whose state decides whether a missing skill is an install
+    /// that is short or no install at all.
+    Skill {
+        path: PathBuf,
+        commands: PathBuf,
+        hooks: PathBuf,
+    },
 }
 
 impl Config {
     /// The file this writes.
     fn path(&self) -> &Path {
         match self {
-            Config::Json { path, .. } | Config::Notify(path) | Config::Plugin(path) => path,
+            Config::Json { path, .. }
+            | Config::Notify(path)
+            | Config::Plugin(path)
+            | Config::Skill { path, .. } => path,
         }
     }
 
@@ -2184,6 +2200,10 @@ impl Config {
                 plugin_install(path, exe)?;
                 Ok(format!("wrote plugin {}", path.display()))
             }
+            Config::Skill { path, commands, .. } => {
+                skill_install(path, commands, exe)?;
+                Ok(format!("added {SKILL_LABEL} at {}", path.display()))
+            }
         }
     }
 
@@ -2202,6 +2222,10 @@ impl Config {
                     false => "nothing of cctop's installed".to_string(),
                 })
             }
+            Config::Skill { path, .. } => Ok(match skill_remove(path)? {
+                true => format!("removed {SKILL_LABEL} from {}", path.display()),
+                false => format!("no {SKILL_LABEL} of cctop's installed"),
+            }),
         }
     }
 
@@ -2216,6 +2240,11 @@ impl Config {
             } => json_health(path, *shape, events, deciding),
             Config::Notify(path) => notify_health(path),
             Config::Plugin(path) => plugin_health(path),
+            Config::Skill {
+                path,
+                commands,
+                hooks,
+            } => skill_health(path, commands, hooks),
         }
     }
 
@@ -2258,17 +2287,38 @@ impl Harness {
             Scope::Project(dir) => Some(dir.as_path()),
         };
         match self {
-            Harness::Claude => vec![Config::Json {
-                // Honours the same `$CLAUDE_CONFIG_DIR` override as the rest of
-                // cctop.
-                path: match project {
+            Harness::Claude => {
+                // Honours the same `$CLAUDE_CONFIG_DIR` override as the rest
+                // of cctop.
+                let hooks = match project {
                     None => crate::config::CLAUDE_CONFIG_DIR.join("settings.json"),
                     Some(dir) => dir.join(".claude").join("settings.json"),
-                },
-                shape: Shape::Nested,
-                events: CLAUDE_EVENTS,
-                deciding: CLAUDE_DECIDING,
-            }],
+                };
+                let settings = Config::Json {
+                    path: hooks.clone(),
+                    shape: Shape::Nested,
+                    events: CLAUDE_EVENTS,
+                    deciding: CLAUDE_DECIDING,
+                };
+                match project {
+                    // `/yolo` is one person's switch for their own sessions,
+                    // so it is theirs alone: a project's `.claude/` is checked
+                    // in, and a command that hands out permission is not one
+                    // to give everyone who clones it.
+                    Some(_) => vec![settings],
+                    None => {
+                        let dir = &*crate::config::CLAUDE_CONFIG_DIR;
+                        vec![
+                            settings,
+                            Config::Skill {
+                                path: dir.join("skills").join("yolo").join("SKILL.md"),
+                                commands: dir.join("commands").join("yolo.md"),
+                                hooks,
+                            },
+                        ]
+                    }
+                }
+            }
             Harness::Gemini => vec![Config::Json {
                 path: match project {
                     None => crate::config::GEMINI_HOME.join("settings.json"),
@@ -3106,6 +3156,211 @@ fn plugin_exe(text: &str) -> Option<String> {
 }
 
 // ---------------------------------------------------------------------------
+// Claude Code's /yolo
+// ---------------------------------------------------------------------------
+
+/// What the panel and the install lines call the skill.
+const SKILL_LABEL: &str = "/yolo";
+
+/// The line of the skill's frontmatter that marks it cctop's and records the
+/// binary it runs, as a JSON string, the way the plugin's marker does.
+/// `metadata` is the map Claude Code documents as free-form and left to the
+/// tooling that wrote it.
+const SKILL_MARKER: &str = "  cctop: ";
+
+/// The line of the same map that keeps the skill's key between rewrites. See
+/// [`skill_source`] for what the key is for.
+const SKILL_KEY: &str = "  cctop-key: ";
+
+/// `/yolo`, `/yolo off` and `/yolo status` in Claude Code.
+///
+/// A skill rather than a file in `commands/`, because the docs mirrored in
+/// `docs/harnesses/claude/skills.md` say command files are the older form and
+/// to prefer a skill for new work; the two behave the same.
+///
+/// The work is done by the `` !`…` `` line, which Claude Code runs while it
+/// expands the command — when the person types it, before the model sees
+/// anything — and replaces with what the command printed. The model receives
+/// only that line, and is told to repeat it.
+///
+/// Three things in the frontmatter carry the weight:
+///
+/// - `disable-model-invocation`, so the model cannot run `/yolo` through its
+///   Skill tool: Claude Code refuses that call and keeps the description out
+///   of the model's context altogether. Without it, an expansion triggered by
+///   the model would run the shell line exactly as the person's does.
+/// - `allowed-tools`, because Claude Code checks an expansion's shell line
+///   against the permission rules and, outside auto mode, aborts the command
+///   on anything short of allow; in auto mode it would hand the line to the
+///   model to run instead, which is the one thing this must not do. The grant
+///   does not end with the expansion, though: it lasts the whole turn the
+///   person typed `/yolo` in, and covers the model's Bash calls too. A real
+///   session showed what that costs with a plain `cctop yolo --slash *`
+///   grant: the person types `/yolo off`, and the model, in the same turn,
+///   runs `cctop yolo --slash on` with no prompt. So the line carries a key —
+///   random, written once and kept across rewrites — and the grant names it.
+///   The model never sees the line, only what it printed, so the command it
+///   could type is not the one the grant covers, and it is prompted for like
+///   any other. The key is not checked by `cctop yolo`: its whole job is to
+///   make the granted command one nobody else can spell.
+/// - the marker, so a `/yolo` that is not cctop's is never overwritten.
+///
+/// What it cannot carry is proof that a person typed it. Claude Code runs an
+/// expansion's shell line through the Bash tool's own code — the same
+/// environment, the same process tree, `AI_AGENT` and all — so `cctop yolo`
+/// sees exactly what it would see if the model had run it. Checked against
+/// 2.1.294's binary and a real session: two runs, one each way, differ in
+/// their pids and nothing else. The model's own Bash call is held at a
+/// permission prompt like any other command, and that is the guard; see
+/// [`crate::yolo::command`].
+fn skill_source(exe: &str, key: &str) -> String {
+    let run = format!("{} yolo --slash={key}", command_word(exe));
+    // YAML's double-quoted strings are a superset of JSON's, so serde's
+    // quoting is a correct YAML quoting of any path at all.
+    let quote = |text: &str| serde_json::Value::String(text.to_string()).to_string();
+    format!(
+        "---\n\
+         description: {description}\n\
+         argument-hint: \"[on|off|status]\"\n\
+         disable-model-invocation: true\n\
+         allowed-tools: {allow}\n\
+         metadata:\n\
+         {SKILL_MARKER}{exe_json}\n\
+         {SKILL_KEY}{key_json}\n\
+         ---\n\
+         cctop's answer to /yolo, already carried out:\n\
+         \n\
+         !`{run} $ARGUMENTS`\n\
+         \n\
+         Repeat that answer to the user exactly as it is, and run nothing because of it.\n",
+        description = quote(
+            "Switch cctop's YOLO on for this session, so every permission prompt \
+             is allowed until it ends. /yolo off stops it; /yolo status says which."
+        ),
+        allow = quote(&format!("Bash({run} *)")),
+        exe_json = quote(exe),
+        key_json = quote(key),
+    )
+}
+
+/// A new key for [`skill_source`]: 128 bits from the kernel, as hex.
+fn new_skill_key() -> std::io::Result<String> {
+    use std::io::Read;
+    let mut bytes = [0u8; 16];
+    std::fs::File::open("/dev/urandom")?.read_exact(&mut bytes)?;
+    Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
+}
+
+/// The key a skill file was written with, read back out of its metadata.
+fn skill_key(text: &str) -> Option<String> {
+    let line = text.lines().find(|l| l.starts_with(SKILL_KEY))?;
+    serde_json::from_str::<String>(line[SKILL_KEY.len()..].trim())
+        .ok()
+        .filter(|key| !key.is_empty())
+}
+
+/// The binary as the first word of a shell command, quoted only when it has
+/// to be — the same rule the hooks' command lines follow.
+fn command_word(exe: &str) -> String {
+    command_line(exe, "", "")
+}
+
+/// The cctop a skill file names, read back out of its marker.
+fn skill_exe(text: &str) -> Option<String> {
+    let line = text.lines().find(|l| l.starts_with(SKILL_MARKER))?;
+    serde_json::from_str::<String>(line[SKILL_MARKER.len()..].trim()).ok()
+}
+
+/// The file in the way of cctop's `/yolo`, when there is one: a skill at its
+/// path that cctop did not write, or a command file of the same name, which
+/// the skill would hide. Either is the person's own `/yolo`.
+fn foreign_yolo(path: &Path, commands: &Path) -> Option<PathBuf> {
+    match std::fs::read_to_string(path) {
+        Ok(text) if skill_exe(&text).is_none() => return Some(path.to_path_buf()),
+        Ok(_) => return None,
+        Err(_) => {}
+    }
+    commands.exists().then(|| commands.to_path_buf())
+}
+
+/// Write `/yolo`, unless the person has a `/yolo` of their own.
+fn skill_install(path: &Path, commands: &Path, exe: &str) -> anyhow::Result<()> {
+    if let Some(theirs) = foreign_yolo(path, commands) {
+        anyhow::bail!(
+            "{} is a {SKILL_LABEL} of your own, so cctop's is not installed",
+            theirs.display()
+        );
+    }
+    let before = std::fs::read_to_string(path).ok();
+    // The key a rewrite keeps, so that refreshing the file does not change
+    // the command a turn in progress was granted.
+    let key = match before.as_deref().and_then(skill_key) {
+        Some(key) => key,
+        None => new_skill_key()?,
+    };
+    let source = skill_source(exe, &key);
+    // Already this, exactly: nothing to write. See [`json_install`].
+    if before.is_some_and(|text| text == source) {
+        return Ok(());
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let tmp = temp_beside(path, "md");
+    std::fs::write(&tmp, source)?;
+    std::fs::rename(&tmp, path)?;
+    Ok(())
+}
+
+/// Delete cctop's `/yolo`, and its directory once that is empty, and say
+/// whether there was one. Anything else at that path is left alone.
+fn skill_remove(path: &Path) -> anyhow::Result<bool> {
+    match std::fs::read_to_string(path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e.into()),
+        Ok(text) if skill_exe(&text).is_none() => Ok(false),
+        Ok(_) => {
+            std::fs::remove_file(path)?;
+            // Only when empty: `remove_dir` refuses anything else, which is
+            // the point — a file the person put beside it stays.
+            if let Some(dir) = path.parent() {
+                let _ = std::fs::remove_dir(dir);
+            }
+            Ok(true)
+        }
+    }
+}
+
+/// What `/yolo` has to say.
+///
+/// Missing is only "not installed" when the hooks beside it are not cctop's
+/// either. With them installed, it is an install from before `/yolo` existed
+/// — short of something this version writes, which [`repair`] fills in the
+/// way it fills in a hook event added since.
+fn skill_health(path: &Path, commands: &Path, hooks: &Path) -> Health {
+    if let Some(theirs) = foreign_yolo(path, commands) {
+        return Health::Foreign(theirs);
+    }
+    match std::fs::read_to_string(path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            match json_health(hooks, Shape::Nested, CLAUDE_EVENTS, CLAUDE_DECIDING) {
+                Health::Absent | Health::Unreadable(_) => Health::Absent,
+                _ => Health::Partial(vec![SKILL_LABEL]),
+            }
+        }
+        Err(e) => Health::Unreadable(e.to_string()),
+        Ok(text) => {
+            let exe = skill_exe(&text);
+            // No key is an older form too: the rewrite gives it one.
+            let outdated = exe.as_deref().is_some_and(|exe| {
+                skill_key(&text).is_none_or(|key| text != skill_source(exe, &key))
+            });
+            verdict(exe, Vec::new(), outdated)
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Status
 // ---------------------------------------------------------------------------
 
@@ -3285,6 +3540,9 @@ pub enum Health {
     Broken(String),
     /// The file could not be read, so nothing can be said about it.
     Unreadable(String),
+    /// Something of the person's own is where cctop would write — their own
+    /// `/yolo` — so cctop's is not installed, by choice rather than by fault.
+    Foreign(PathBuf),
 }
 
 impl Health {
@@ -3297,7 +3555,7 @@ impl Health {
             | Health::Broken(_)
             | Health::Unreadable(_) => true,
             Health::Other { missing, .. } => !missing.is_empty(),
-            Health::Absent | Health::Installed => false,
+            Health::Absent | Health::Installed | Health::Foreign(_) => false,
         }
     }
 
@@ -3469,6 +3727,11 @@ fn describe(health: &Health) -> (String, bool) {
     match health {
         Health::Absent => ("not installed".into(), false),
         Health::Installed => ("installed".into(), false),
+        // The skill on its own: the file is the whole of what is missing.
+        Health::Partial(missing) if missing[..] == [SKILL_LABEL] => (
+            format!("{SKILL_LABEL} missing; cctop writes it at its next start"),
+            true,
+        ),
         Health::Partial(missing) => (
             format!("installed, but missing {}", missing.join(", ")),
             true,
@@ -3490,6 +3753,13 @@ fn describe(health: &Health) -> (String, bool) {
         ),
         Health::Broken(exe) => (format!("points at {exe}, which is gone"), true),
         Health::Unreadable(why) => (why.clone(), true),
+        Health::Foreign(path) => (
+            format!(
+                "{} is your own {SKILL_LABEL}, so cctop's is not installed",
+                path.display()
+            ),
+            false,
+        ),
     }
 }
 
@@ -3586,13 +3856,22 @@ fn repair_in(scopes: &[Scope]) -> Repair {
                         }
                         Some((count, at)) => (
                             at.unwrap_or(&own).to_string(),
-                            format!("filled in {count} missing hooks"),
+                            match config {
+                                Config::Skill { .. } => "added".to_string(),
+                                _ => format!("filled in {count} missing hooks"),
+                            },
                         ),
                     },
                 };
+                // The skill is named, so its line does not read as a second
+                // rewrite of the settings file beside it.
+                let which = match config {
+                    Config::Skill { .. } => format!(" {SKILL_LABEL}"),
+                    _ => String::new(),
+                };
                 match config.install(&exe) {
                     Ok(_) => repair.fixed.push(format!(
-                        "{} ({}): {what}",
+                        "{} ({}){which}: {what}",
                         harness.label(),
                         scope.label()
                     )),
@@ -5887,5 +6166,191 @@ mod tests {
         assert!(!is_our_command(
             "/usr/bin/other yolo-hook PermissionRequest"
         ));
+    }
+
+    /// The three paths a `/yolo` test touches, in a scratch directory of its
+    /// own: never the machine's own `~/.claude`.
+    fn yolo_paths(name: &str) -> (PathBuf, PathBuf, PathBuf) {
+        let dir = scratch(&format!("yolo-skill-{name}"));
+        (
+            dir.join("skills").join("yolo").join("SKILL.md"),
+            dir.join("commands").join("yolo.md"),
+            dir.join("settings.json"),
+        )
+    }
+
+    /// The `!` line's command, as Claude Code will run it.
+    fn bang_line(text: &str) -> &str {
+        text.lines()
+            .find_map(|l| l.strip_prefix("!`")?.strip_suffix('`'))
+            .expect("a ! line")
+    }
+
+    /// The grant the frontmatter makes, unquoted.
+    fn granted(text: &str) -> String {
+        let line = text
+            .lines()
+            .find_map(|l| l.strip_prefix("allowed-tools: "))
+            .expect("an allowed-tools line");
+        serde_json::from_str(line).expect("quoted as JSON")
+    }
+
+    /// What makes `/yolo` the person's alone: the model cannot invoke it, and
+    /// the one command its grant covers is the `!` line itself, key and all —
+    /// so the plain `cctop yolo --slash on` the model could type in the same
+    /// turn is not covered and gets a prompt. A real session showed the
+    /// unkeyed grant letting `/yolo off` be undone by the model unprompted.
+    #[test]
+    fn the_yolo_skill_is_the_persons_and_grants_only_its_own_line() {
+        let text = skill_source("/usr/bin/cctop", "k3y");
+        assert!(text.starts_with("---\n"));
+        assert!(text.contains("\ndisable-model-invocation: true\n"));
+        let line = bang_line(&text);
+        assert_eq!(line, "/usr/bin/cctop yolo --slash=k3y $ARGUMENTS");
+        let grant = granted(&text);
+        assert_eq!(grant, "Bash(/usr/bin/cctop yolo --slash=k3y *)");
+        let prefix = grant
+            .strip_prefix("Bash(")
+            .and_then(|g| g.strip_suffix(" *)"))
+            .unwrap();
+        assert!(line.starts_with(prefix));
+        assert!(!"/usr/bin/cctop yolo --slash on".starts_with(prefix));
+        assert!(!"/usr/bin/cctop yolo on".starts_with(prefix));
+        assert_eq!(skill_exe(&text).as_deref(), Some("/usr/bin/cctop"));
+        assert_eq!(skill_key(&text).as_deref(), Some("k3y"));
+    }
+
+    /// A path the shell would split, or YAML would misread, is quoted for
+    /// each the way each needs, and read back intact.
+    #[test]
+    fn a_spaced_path_survives_the_shell_and_the_yaml() {
+        let exe = "/opt/my tools/it's/cctop";
+        let text = skill_source(exe, "k");
+        assert_eq!(
+            bang_line(&text),
+            r"'/opt/my tools/it'\''s/cctop' yolo --slash=k $ARGUMENTS"
+        );
+        assert_eq!(
+            granted(&text),
+            r"Bash('/opt/my tools/it'\''s/cctop' yolo --slash=k *)"
+        );
+        assert_eq!(skill_exe(&text).as_deref(), Some(exe));
+    }
+
+    /// Written with a key of its own, and written again only when it would
+    /// change — keeping the key, so a refresh mid-turn does not move the
+    /// command that turn was granted.
+    #[test]
+    fn installing_yolo_twice_keeps_its_key_and_its_bytes() {
+        let (path, commands, _) = yolo_paths("twice");
+        skill_install(&path, &commands, "/usr/bin/cctop").unwrap();
+        let first = std::fs::read_to_string(&path).unwrap();
+        let key = skill_key(&first).expect("a key");
+        assert_eq!(key.len(), 32);
+        assert!(key.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_eq!(first, skill_source("/usr/bin/cctop", &key));
+
+        skill_install(&path, &commands, "/usr/bin/cctop").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), first);
+        // A move of the binary rewrites the file and keeps the key.
+        skill_install(&path, &commands, "/opt/cctop").unwrap();
+        let moved = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(moved, skill_source("/opt/cctop", &key));
+
+        // Another install somewhere else gets a different key.
+        let (other, other_commands, _) = yolo_paths("twice-other");
+        skill_install(&other, &other_commands, "/usr/bin/cctop").unwrap();
+        let other_key = skill_key(&std::fs::read_to_string(&other).unwrap());
+        assert_ne!(other_key.as_deref(), Some(key.as_str()));
+    }
+
+    /// A `/yolo` of the person's own — a skill at the same path, or a command
+    /// file the skill would hide — is reported and never written over.
+    #[test]
+    fn a_yolo_of_the_persons_own_is_left_alone() {
+        let (path, commands, hooks) = yolo_paths("theirs");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "---\ndescription: mine\n---\nhello\n").unwrap();
+        assert!(skill_install(&path, &commands, "/usr/bin/cctop").is_err());
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "---\ndescription: mine\n---\nhello\n"
+        );
+        assert_eq!(
+            skill_health(&path, &commands, &hooks),
+            Health::Foreign(path.clone())
+        );
+        assert!(!skill_health(&path, &commands, &hooks).is_problem());
+        assert!(!skill_remove(&path).unwrap());
+        assert!(path.exists());
+
+        let (path, commands, hooks) = yolo_paths("theirs-command");
+        std::fs::create_dir_all(commands.parent().unwrap()).unwrap();
+        std::fs::write(&commands, "my own /yolo\n").unwrap();
+        assert!(skill_install(&path, &commands, "/usr/bin/cctop").is_err());
+        assert!(!path.exists());
+        assert_eq!(
+            skill_health(&path, &commands, &hooks),
+            Health::Foreign(commands.clone())
+        );
+    }
+
+    /// Missing is "not installed" on a machine without cctop's hooks, and a
+    /// shortfall to fill in on one with them — an install from before /yolo.
+    #[test]
+    fn a_missing_yolo_is_short_only_beside_cctops_hooks() {
+        let (path, commands, hooks) = yolo_paths("missing");
+        assert_eq!(skill_health(&path, &commands, &hooks), Health::Absent);
+        let exe = own_exe().unwrap();
+        json_install(&hooks, Shape::Nested, CLAUDE_EVENTS, CLAUDE_DECIDING, &exe).unwrap();
+        let health = skill_health(&path, &commands, &hooks);
+        assert_eq!(health, Health::Partial(vec![SKILL_LABEL]));
+        assert_eq!(health.shortfall(), Some((1, None)));
+
+        skill_install(&path, &commands, &exe).unwrap();
+        assert_eq!(skill_health(&path, &commands, &hooks), Health::Installed);
+    }
+
+    /// Any difference from what this version writes is an older cctop's,
+    /// and a file without a key is one.
+    #[test]
+    fn an_older_yolo_reads_as_outdated() {
+        let (path, commands, hooks) = yolo_paths("older");
+        let exe = own_exe().unwrap();
+        skill_install(&path, &commands, &exe).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        let key_line = text
+            .lines()
+            .find(|l| l.starts_with(SKILL_KEY))
+            .unwrap()
+            .to_string();
+        std::fs::write(&path, text.replace(&format!("{key_line}\n"), "")).unwrap();
+        assert_eq!(
+            skill_health(&path, &commands, &hooks),
+            Health::Outdated { exe: None }
+        );
+        std::fs::write(&path, text.replace("Repeat that", "Say that")).unwrap();
+        assert_eq!(
+            skill_health(&path, &commands, &hooks),
+            Health::Outdated { exe: None }
+        );
+    }
+
+    /// Uninstall takes cctop's file and its emptied directory, and nothing
+    /// the person put beside it.
+    #[test]
+    fn removing_yolo_takes_only_cctops_file() {
+        let (path, commands, _) = yolo_paths("remove");
+        skill_install(&path, &commands, "/usr/bin/cctop").unwrap();
+        assert!(skill_remove(&path).unwrap());
+        assert!(!path.exists());
+        assert!(!path.parent().unwrap().exists());
+        assert!(!skill_remove(&path).unwrap());
+
+        skill_install(&path, &commands, "/usr/bin/cctop").unwrap();
+        let note = path.parent().unwrap().join("notes.md");
+        std::fs::write(&note, "mine").unwrap();
+        assert!(skill_remove(&path).unwrap());
+        assert!(note.exists());
     }
 }

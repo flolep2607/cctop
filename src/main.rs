@@ -193,8 +193,10 @@ fn main() -> anyhow::Result<()> {
     }
 
     // `cctop yolo log` alongside `log`, and for the same reason: it reads a
-    // file and needs nothing set up. Matched on the bare word `yolo` only, so
-    // the ungated `yolo-hook` dispatch above is a different word entirely.
+    // file and needs nothing set up. So does `cctop yolo on|off|status`, which
+    // /yolo runs inside a Claude Code session and which writes one small file.
+    // Matched on the bare word `yolo` only, so the ungated `yolo-hook`
+    // dispatch above is a different word entirely.
     {
         let argv: Vec<String> = std::env::args().collect();
         if argv.get(1).map(String::as_str) == Some("yolo") {
