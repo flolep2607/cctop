@@ -664,6 +664,11 @@ fn hooks(session: &Session, cwd: &Path) -> Vec<HookState> {
                 Health::Partial(missing) => {
                     ("partial", Some(format!("missing {}", missing.join(", "))))
                 }
+                Health::Outdated { exe: None } => ("outdated", Some("in an older form".into())),
+                Health::Outdated { exe: Some(exe) } => (
+                    "outdated",
+                    Some(format!("installed at {exe}, in an older form")),
+                ),
                 Health::Other { exe, .. } => ("other", Some(format!("installed at {exe}"))),
                 Health::Broken(exe) => ("broken", Some(format!("points at {exe}, which is gone"))),
                 Health::Unreadable(why) => ("unreadable", Some(why.clone())),

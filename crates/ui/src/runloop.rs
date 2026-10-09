@@ -205,30 +205,17 @@ pub fn run(
     let watch = cctop_core::watch::Watch::start();
     app.listener = cctop_core::hook::Listener::start();
     app.yolo = cctop_core::yolo::Auto::new(true);
-    // A hook naming a cctop that has since been moved or deleted fires nothing
-    // at all, so it is repointed here rather than left to look installed while
-    // reporting nothing. Anything narrower than that is left for the panel.
-    for fixed in cctop_core::hook::repair(app.hook_project().as_deref()) {
-        app.set_status(&fixed);
-    }
+    // Hooks are brought in line with this binary at every start — a cctop
+    // that was moved or deleted, events an older one did not know, entries in
+    // an older one's form — on a thread of its own, so the first frame never
+    // waits on reading five agents' config files. What it fixed, or could not,
+    // arrives as a toast when it is done; see `App::tick_hook_repair`.
+    let project = app.hook_project();
+    app.start_hook_repair(move || cctop_core::hook::repair(project.as_deref()));
     // Once per launch: the Cost panel's "today" reading $0.00 for work done
     // this morning is the symptom, and nothing on it says the clock is why.
     if let Some(why) = cctop_core::util::unzoned_over_ssh() {
         app.set_status(why);
-    }
-    // What repair deliberately would not touch: an install registering fewer
-    // events than this cctop wants, or a settings file that will not parse.
-    // Both look installed and quietly deliver less than they should, so they
-    // are worth one line on the way in — an install that is simply absent is
-    // not, since that is a choice and nagging about it is what makes people
-    // stop reading the status line.
-    if app
-        .hook_status()
-        .entries
-        .iter()
-        .any(|s| s.health.is_problem())
-    {
-        app.set_status("Agent hooks need attention — press h");
     }
 
     let result = event_loop(
@@ -836,6 +823,7 @@ fn event_loop(
         // The footer's own line refreshes on its own clock, and its command
         // answers on a channel nothing polls but this.
         app.needs_redraw |= app.footer_extra.tick();
+        app.needs_redraw |= app.tick_hook_repair();
         // The insight report's spinner turns on the same terms, and so do
         // the conversation view's and the empty table's during the first scan.
         let scanning = !app.loaded && app.tab == 0;

@@ -16,6 +16,63 @@ impl App {
         self.needs_redraw = true;
     }
 
+    /// Run the hook repair on a thread of its own, and say what it did once it
+    /// is done.
+    ///
+    /// Off the drawing thread because nothing about it is worth a frame: it
+    /// reads every harness's config files, which on a slow or network home is
+    /// the one start-up cost nobody would connect to cctop, and its answer is a
+    /// toast that can arrive a moment after the table. `job` is
+    /// [`cctop_core::hook::repair`] everywhere but the tests, which hand in one
+    /// that blocks to prove the dashboard does not wait for it.
+    pub(super) fn start_hook_repair(
+        &mut self,
+        job: impl FnOnce() -> cctop_core::hook::Repair + Send + 'static,
+    ) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(job());
+        });
+        self.hook_repair = Some(rx);
+    }
+
+    /// Collect a finished repair. Returns whether there is anything new to
+    /// draw, which is only when it had something to say: a pass that found
+    /// every file already right is silent.
+    pub(super) fn tick_hook_repair(&mut self) -> bool {
+        let Some(rx) = &self.hook_repair else {
+            return false;
+        };
+        let repair = match rx.try_recv() {
+            Ok(repair) => repair,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return false,
+            // The thread died without answering — a panic in a parser,
+            // say. Nothing was said before, so nothing is owed now.
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.hook_repair = None;
+                return false;
+            }
+        };
+        self.hook_repair = None;
+        let said = !repair.fixed.is_empty() || repair.needs_attention;
+        for fixed in &repair.fixed {
+            self.set_status(fixed);
+        }
+        // What repair would not or could not fix: a settings file that will
+        // not parse, or a write that failed. Both look installed and quietly
+        // deliver less than they should, so they are worth one line — an
+        // install that is simply absent is not, since that is a choice and
+        // nagging about it is what makes people stop reading the status line.
+        if repair.needs_attention {
+            self.set_status("Agent hooks need attention — press h");
+        }
+        // The panel, if it is open, was read before the repair landed.
+        if said && self.hooks.is_some() {
+            self.hooks = Some(self.hook_status());
+        }
+        said
+    }
+
     /// The integration's state, scoped to whichever project the cursor is on.
     pub(super) fn hook_status(&self) -> cctop_core::hook::Report {
         let mut report =

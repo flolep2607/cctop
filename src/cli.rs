@@ -181,6 +181,12 @@ pub struct Args {
     #[arg(long, num_args = 2, value_names = ["PATH", "SHA256"], hide = true)]
     pub install_update: Option<Vec<String>>,
 
+    /// Internal: the second half of `--update`. The binary just installed brings
+    /// the hooks in line with its own form, which the one it replaced could not
+    /// know
+    #[arg(long, hide = true)]
+    pub repair_hooks: bool,
+
     /// Start on the version already installed, even if a newer one is known
     #[arg(long)]
     pub no_auto_update: bool,

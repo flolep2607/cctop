@@ -306,7 +306,19 @@ fn main() -> anyhow::Result<()> {
         return update::install_staged(&staged[0], &staged[1]);
     }
     if args.update {
-        return update::run(false);
+        update::run(false)?;
+        // The new binary does this, not this one: an update that changed how
+        // a hook is written is one this process knows nothing about. Without
+        // it a CLI-only update would leave the old form firing until the next
+        // dashboard start.
+        update::repair_hooks_with_new_binary();
+        return Ok(());
+    }
+    if args.repair_hooks {
+        for line in hook::repair(None).terminal_lines() {
+            println!("{line}");
+        }
+        return Ok(());
     }
 
     if args.fetch_search_model {
