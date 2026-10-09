@@ -215,9 +215,11 @@ rmux-sdk = { package = "cctop-rmux-sdk", version = "0.10.1" }
 # The rest of the fork that cctop's own daemon (`cctop mux`, #197) is made of:
 # the server itself, the attach client a tab's pane runs, and the protocol both
 # speak. The server keeps its `web` feature, which is the browser share.
+# Server 0.10.1 (with cctop-rmux-core 0.10.1, which does the parsing) answers
+# the Kitty keyboard negotiation, so Shift+Enter reaches a pane as itself.
 rmux-client = { package = "cctop-rmux-client", version = "0.10.0" }
 rmux-proto = { package = "cctop-rmux-proto", version = "0.10.0" }
-rmux-server = { package = "cctop-rmux-server", version = "0.10.0" }
+rmux-server = { package = "cctop-rmux-server", version = "0.10.1" }
 safetensors = "0.6"
 # Pure Rust, and deliberately without `onig`: oniguruma is C and `esaxx-rs` is
 # C++, and a C++ toolchain is the one dependency class the musl release does not

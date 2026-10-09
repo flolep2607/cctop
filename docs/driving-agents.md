@@ -405,7 +405,10 @@ form on the way in, where the terminal says it can send one, and sends
 Shift+Enter on to the agent as `CSI 13;2u` — but only to an agent that turned
 a keyboard protocol on, or through rmux, which rewrites it to a plain Enter
 when the pane's program did not. A shell in a tab is never handed a sequence it
-would print as text.
+would print as text. The daemon answers the kitty negotiation itself (the fork
+carries Helvesec/rmux#227), so a pane that asked only for kitty, as Codex does,
+gets `CSI 13;2u`, and one that also turned on `modifyOtherKeys`, as Claude Code
+does, gets xterm's `CSI 27;2;13~`.
 
 Which agents ask, as of writing: Claude Code turns on both the kitty protocol
 and xterm's `modifyOtherKeys`, and Codex turns on kitty and explicitly turns
