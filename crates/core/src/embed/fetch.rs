@@ -40,7 +40,7 @@ const FILES: &[(&str, u64)] = &[
 fn agent() -> ureq::Agent {
     ureq::Agent::config_builder()
         .timeout_global(Some(std::time::Duration::from_secs(120)))
-        .user_agent(concat!("cctop/", env!("CARGO_PKG_VERSION")))
+        .user_agent(crate::update::user_agent())
         .build()
         .into()
 }

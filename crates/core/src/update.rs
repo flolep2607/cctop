@@ -39,7 +39,6 @@ const RELEASES_URL: &str = "https://api.github.com/repos/flolep2607/cctop/releas
 /// asking for more would cost a second request to say the same thing.
 const RELEASE_LIST_URL: &str = "https://api.github.com/repos/flolep2607/cctop/releases?per_page=30";
 /// GitHub rejects API requests without one.
-const USER_AGENT: &str = concat!("cctop/", env!("CARGO_PKG_VERSION"));
 /// How long a release check stays good for.
 ///
 /// An hour, which is far cheaper than it sounds: the check is one unauthenticated
@@ -50,8 +49,29 @@ const USER_AGENT: &str = concat!("cctop/", env!("CARGO_PKG_VERSION"));
 /// hearing about it while it is still the thing that was just fixed.
 const CHECK_MAX_AGE_SECS: u64 = 60 * 60;
 
+/// The version of the cctop binary, which `main` hands over before anything else.
+///
+/// Not this crate's `CARGO_PKG_VERSION`: since each internal crate carries its
+/// own version (#137), cctop-core is usually behind the release. 0.32.1 shipped
+/// with cctop-core 0.31.0, so a release read its own version as the previous one,
+/// saw itself "out", and updated on every start, forever. The fallback is for
+/// tests and for code that runs without `main` (a library caller), where there is
+/// no binary to ask.
+static VERSION: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
+
+/// Record the binary's version. Called once, first thing in `main`.
+pub fn set_version(version: &'static str) {
+    let _ = VERSION.set(version);
+}
+
 pub fn current_version() -> &'static str {
-    env!("CARGO_PKG_VERSION")
+    VERSION.get().copied().unwrap_or(env!("CARGO_PKG_VERSION"))
+}
+
+/// What cctop calls itself to GitHub and other services, which reject requests
+/// without one: the binary's version, for the same reason as [`current_version`].
+pub fn user_agent() -> String {
+    format!("cctop/{}", current_version())
 }
 
 /// The commit this build was made from, or empty when the build could not tell
@@ -114,7 +134,7 @@ fn unix_secs() -> u64 {
 fn agent() -> ureq::Agent {
     ureq::Agent::config_builder()
         .timeout_global(Some(std::time::Duration::from_secs(15)))
-        .user_agent(USER_AGENT)
+        .user_agent(user_agent())
         .build()
         .into()
 }
@@ -1459,6 +1479,16 @@ fn confirm(dir: &Path, exe: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The version the updater compares with releases is the one `main` hands
+    /// over, not this crate's: cctop-core trails the release, and reading its own
+    /// version made 0.32.1 think it was 0.31.0 and update on every start.
+    #[test]
+    fn the_running_version_is_the_one_main_sets() {
+        set_version("9.9.9-test");
+        assert_eq!(current_version(), "9.9.9-test");
+        assert_eq!(user_agent(), "cctop/9.9.9-test");
+    }
 
     /// The two things that stop a startup update before anything is looked at.
     /// Who owns the binary is not one of them — that decides which of the two
