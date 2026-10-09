@@ -51,12 +51,13 @@
 //! YOLO answers Claude Code's permission dialog with a decision, and that
 //! decision does not come from `cctop hook`. It comes from a second command,
 //! `cctop yolo-hook` ([`yolo_hook`]), installed as its own entry for
-//! `PermissionRequest` only, so that nothing about this command — its
-//! arguments, its settings, the state of any file — can make it decide. That
-//! one prints the allow for a session YOLO is on for, in the process it was
-//! switched on in, and is otherwise exactly as silent as this one, under the
-//! same deadline and the same exit-0 guarantee. [`crate::yolo`] has the
-//! matching rule.
+//! `PermissionRequest` and, matched to `/yolo` alone, `UserPromptExpansion`,
+//! so that nothing about this command — its arguments, its settings, the
+//! state of any file — can make it decide. That one prints the allow for a
+//! session YOLO is on for, in the process it was switched on in, and blocks
+//! the expansion of a typed `/yolo` with the switch's answer; it is otherwise
+//! exactly as silent as this one, under the same deadline and the same exit-0
+//! guarantee. [`crate::yolo`] has the matching rule.
 
 use std::collections::HashMap;
 use std::io::Read;
@@ -376,16 +377,20 @@ fn yolo_allowed_line(session_id: &str, agent: Option<&str>, ask: Option<&str>) -
 /// rejects or reinterprets them.
 pub const YOLO_ALLOW: &str = r#"{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}}"#;
 
-/// `cctop yolo-hook PermissionRequest` — the one hook that may decide.
+/// `cctop yolo-hook <Event>` — the one hook that may decide.
 ///
-/// It answers [`YOLO_ALLOW`] for a permission dialog Claude Code is about to
-/// draw in a session YOLO is on for, and prints nothing for anything else.
-/// Separate from [`emit`] so that `cctop hook` stays what the module docs
-/// promise, byte for byte: an observer that never decides. This keeps every
-/// other guarantee `emit` has — exit 0 whatever happens, a panic hook that
-/// turns an unwind into the same, all the work on a thread it can abandon
-/// under [`DEADLINE`], stdin read to [`MAX_EVENT`] — and adds one more: the
-/// only thing it can say is yes.
+/// It says two things, each in one place only. For `PermissionRequest`, it
+/// answers [`YOLO_ALLOW`] for a permission dialog Claude Code is about to
+/// draw in a session YOLO is on for. For `UserPromptExpansion`, it answers
+/// `/yolo` typed by the person with a block whose reason is the result, so
+/// the switch takes no model turn ([`yolo_typed`]). It prints nothing for
+/// anything else. Separate from [`emit`] so that `cctop hook` stays what the
+/// module docs promise, byte for byte: an observer that never decides. This
+/// keeps every other guarantee `emit` has — exit 0 whatever happens, a panic
+/// hook that turns an unwind into the same, all the work on a thread it can
+/// abandon under [`DEADLINE`], stdin read to [`MAX_EVENT`] — and adds one
+/// more: the only things it can say are yes to a prompt and the answer to
+/// `/yolo`.
 ///
 /// # Why it is safe to say yes
 ///
@@ -418,15 +423,111 @@ pub fn yolo_hook(args: &[String]) -> i32 {
     // made by the deadline is no answer.
     let (verdict_tx, verdict_rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let _ = std::panic::catch_unwind(|| yolo_decide(&event, &verdict_tx));
+        // By the command line's event, and each path checks the payload
+        // agrees: an event neither knows is the silence.
+        let _ = std::panic::catch_unwind(|| match event.as_str() {
+            "PermissionRequest" => yolo_decide(&event, &verdict_tx),
+            "UserPromptExpansion" => yolo_typed(&event, &verdict_tx),
+            _ => {}
+        });
         let _ = done_tx.send(());
     });
-    if settle(&done_rx, &verdict_rx, DEADLINE).is_some() {
+    if let Some(answer) = settle(&done_rx, &verdict_rx, DEADLINE) {
         use std::io::Write;
         // `println!` panics on a closed stdout; see [`answer`].
-        let _ = writeln!(std::io::stdout(), "{YOLO_ALLOW}");
+        let _ = writeln!(std::io::stdout(), "{answer}");
     }
     0
+}
+
+/// `cctop yolo-hook UserPromptExpansion`: answer `/yolo` typed in Claude Code
+/// without letting it expand, so no model turn runs for a switch.
+///
+/// The second and last thing this command may say, and as narrow as the
+/// first: a block, only for Claude Code's own `/yolo` slash command, whose
+/// reason is the answer. Claude Code fires `UserPromptExpansion` only for a
+/// command the person typed — see [`crate::yolo::typed`] for why that makes it
+/// safe to switch YOLO on from here. Every other command, a payload that
+/// will not parse, an event that disagrees with the command line, a deadline
+/// that passed: nothing printed, and the command expands as it would with no
+/// hook at all.
+fn yolo_typed(event: &str, verdict: &std::sync::mpsc::Sender<Option<String>>) {
+    let mut payload = Vec::new();
+    if std::io::stdin()
+        .take(MAX_EVENT)
+        .read_to_end(&mut payload)
+        .is_err()
+    {
+        return;
+    }
+    let Some(typed) = typed_yolo(event, &payload) else {
+        return;
+    };
+    crate::elog::event(
+        "yolo",
+        "typed",
+        serde_json::json!({ "session": typed.session, "args": typed.args }),
+    );
+    let reason = crate::yolo::typed(&typed.session, &typed.args, typed.cwd.as_deref());
+    let _ = verdict.send(Some(yolo_block(&reason)));
+}
+
+/// A `/yolo` the person typed, read out of a `UserPromptExpansion` payload.
+#[derive(Debug, PartialEq, Eq)]
+struct TypedYolo {
+    session: String,
+    args: String,
+    cwd: Option<String>,
+}
+
+/// The payload, when it is `/yolo` typed in Claude Code; `None` for the
+/// silence every other case gets. Apart from the reading and the printing so
+/// every refusal can be asserted on without a process.
+///
+/// Fields checked against Claude Code 2.1.295's own schema for the event:
+/// `expansion_type` is `slash_command` or `mcp_prompt`, and `command_name` is
+/// the bare name, `yolo`, for a skill in `~/.claude/skills`. An MCP prompt
+/// that happens to be called `yolo` is somebody else's.
+fn typed_yolo(event: &str, payload: &[u8]) -> Option<TypedYolo> {
+    if event != "UserPromptExpansion" {
+        return None;
+    }
+    let body: serde_json::Value = serde_json::from_slice(payload).ok()?;
+    let field = |key: &str| body.get(key).and_then(|v| v.as_str());
+    if field("hook_event_name") != Some("UserPromptExpansion")
+        || field("expansion_type") != Some("slash_command")
+        || field("command_name") != Some(YOLO_COMMAND)
+    {
+        return None;
+    }
+    let session = field("session_id").filter(|s| !s.trim().is_empty())?;
+    Some(TypedYolo {
+        session: session.to_string(),
+        args: field("command_args").unwrap_or_default().to_string(),
+        cwd: field("cwd").map(str::to_string),
+    })
+}
+
+/// The command `cctop yolo-hook UserPromptExpansion` answers, and the matcher
+/// its settings entry carries so Claude Code spawns it for nothing else.
+const YOLO_COMMAND: &str = "yolo";
+
+/// Claude Code's `UserPromptExpansion` answer: don't expand, show `reason`.
+///
+/// Checked against 2.1.295's schema: top-level `decision: "block"` and
+/// `reason`, which the person sees in place of the command, and the event's
+/// own `suppressOriginalPrompt`, which drops the "Original prompt: /yolo …"
+/// line under it — the person just typed that. Nothing reaches the model.
+fn yolo_block(reason: &str) -> String {
+    serde_json::json!({
+        "decision": "block",
+        "reason": reason,
+        "hookSpecificOutput": {
+            "hookEventName": "UserPromptExpansion",
+            "suppressOriginalPrompt": true,
+        },
+    })
+    .to_string()
 }
 
 /// Read the prompt, decide, and — having allowed — tell the cctops.
@@ -2080,12 +2181,26 @@ const MARKER: &str = " hook ";
 const YOLO_MARKER: &str = " yolo-hook ";
 
 /// The events `cctop yolo-hook` is installed for, beside the observer, in
-/// Claude Code's settings. One, because a permission dialog about to go up is
-/// the only moment YOLO answers — see [`yolo_hook`] for why not `PreToolUse`.
-const CLAUDE_DECIDING: &[&str] = &["PermissionRequest"];
+/// Claude Code's settings: a permission dialog about to go up, the only
+/// moment YOLO answers — see [`yolo_hook`] for why not `PreToolUse` — and the
+/// expansion of a typed `/yolo`, the only command it answers.
+const CLAUDE_DECIDING: &[&str] = &["PermissionRequest", "UserPromptExpansion"];
 
 /// How a missing `yolo-hook` entry is named in a health report.
-const YOLO_HOOK_LABEL: &str = "PermissionRequest (yolo-hook)";
+fn yolo_hook_label(event: &str) -> &'static str {
+    match event {
+        "UserPromptExpansion" => "UserPromptExpansion (yolo-hook)",
+        _ => "PermissionRequest (yolo-hook)",
+    }
+}
+
+/// The matcher a deciding entry is installed with, where it has one: the
+/// `UserPromptExpansion` entry fires for `/yolo` only, so Claude Code spawns
+/// nothing for any other command. [`typed_yolo`] checks the name anyway — a
+/// matcher in a file the person can edit is a filter, not a guarantee.
+fn deciding_matcher(event: &str) -> Option<&'static str> {
+    (event == "UserPromptExpansion").then_some(YOLO_COMMAND)
+}
 
 /// The argument that tells `cctop hook` its payload is a Codex one, arriving in
 /// argv rather than on stdin.
@@ -2581,23 +2696,26 @@ fn our_entries_for(
     deciding: &[&str],
     exe: &str,
 ) -> Vec<serde_json::Value> {
-    let mut commands = vec![hook_command(exe, event)];
+    let mut commands = vec![(hook_command(exe, event), None)];
     // Its own entry, beside the observer's rather than inside it: the
     // harness runs an event's hooks in parallel, so the observer reports
     // exactly as it does without it.
     if deciding.contains(&event) {
-        commands.push(yolo_hook_command(exe, event));
+        commands.push((yolo_hook_command(exe, event), deciding_matcher(event)));
     }
     commands
         .into_iter()
-        .map(|command| {
+        .map(|(command, matcher)| {
             let command = serde_json::json!({
                 "type": "command",
                 "command": command,
             });
-            match shape {
-                Shape::Nested => serde_json::json!({ "hooks": [command] }),
-                Shape::Flat => command,
+            match (shape, matcher) {
+                (Shape::Nested, Some(matcher)) => {
+                    serde_json::json!({ "matcher": matcher, "hooks": [command] })
+                }
+                (Shape::Nested, None) => serde_json::json!({ "hooks": [command] }),
+                (Shape::Flat, _) => command,
             }
         })
         .collect()
@@ -3163,58 +3281,35 @@ fn plugin_exe(text: &str) -> Option<String> {
 const SKILL_LABEL: &str = "/yolo";
 
 /// The line of the skill's frontmatter that marks it cctop's and records the
-/// binary it runs, as a JSON string, the way the plugin's marker does.
+/// binary that installed it, as a JSON string, the way the plugin's marker does.
 /// `metadata` is the map Claude Code documents as free-form and left to the
 /// tooling that wrote it.
 const SKILL_MARKER: &str = "  cctop: ";
 
-/// The line of the same map that keeps the skill's key between rewrites. See
-/// [`skill_source`] for what the key is for.
-const SKILL_KEY: &str = "  cctop-key: ";
-
 /// `/yolo`, `/yolo off` and `/yolo status` in Claude Code.
+///
+/// The answer does not come from here. `cctop yolo-hook UserPromptExpansion`
+/// ([`yolo_typed`]) blocks the command before it expands and shows the person
+/// the result as the block's reason, so no model turn runs for a switch. The
+/// skill is still needed, because Claude Code only expands, and so only fires
+/// that hook for, a command it knows; a name with no skill or command file
+/// behind it is "Unknown command".
+///
+/// So its body is only what the model sees when the hook did not answer —
+/// hooks not reinstalled since an upgrade, or a Claude Code too old to have
+/// the event — and it runs nothing: an earlier version ran `cctop yolo` from
+/// a `` !`…` `` line, which Claude Code runs through the Bash tool's own code,
+/// so the command could not tell the person from the model, and the turn's
+/// grant for that line covered the model's own Bash calls too.
+///
+/// - `disable-model-invocation`, so the model cannot run `/yolo` through its
+///   Skill tool, and its description stays out of the model's context.
+/// - the marker, so a `/yolo` that is not cctop's is never overwritten.
 ///
 /// A skill rather than a file in `commands/`, because the docs mirrored in
 /// `docs/harnesses/claude/skills.md` say command files are the older form and
 /// to prefer a skill for new work; the two behave the same.
-///
-/// The work is done by the `` !`…` `` line, which Claude Code runs while it
-/// expands the command — when the person types it, before the model sees
-/// anything — and replaces with what the command printed. The model receives
-/// only that line, and is told to repeat it.
-///
-/// Three things in the frontmatter carry the weight:
-///
-/// - `disable-model-invocation`, so the model cannot run `/yolo` through its
-///   Skill tool: Claude Code refuses that call and keeps the description out
-///   of the model's context altogether. Without it, an expansion triggered by
-///   the model would run the shell line exactly as the person's does.
-/// - `allowed-tools`, because Claude Code checks an expansion's shell line
-///   against the permission rules and, outside auto mode, aborts the command
-///   on anything short of allow; in auto mode it would hand the line to the
-///   model to run instead, which is the one thing this must not do. The grant
-///   does not end with the expansion, though: it lasts the whole turn the
-///   person typed `/yolo` in, and covers the model's Bash calls too. A real
-///   session showed what that costs with a plain `cctop yolo --slash *`
-///   grant: the person types `/yolo off`, and the model, in the same turn,
-///   runs `cctop yolo --slash on` with no prompt. So the line carries a key —
-///   random, written once and kept across rewrites — and the grant names it.
-///   The model never sees the line, only what it printed, so the command it
-///   could type is not the one the grant covers, and it is prompted for like
-///   any other. The key is not checked by `cctop yolo`: its whole job is to
-///   make the granted command one nobody else can spell.
-/// - the marker, so a `/yolo` that is not cctop's is never overwritten.
-///
-/// What it cannot carry is proof that a person typed it. Claude Code runs an
-/// expansion's shell line through the Bash tool's own code — the same
-/// environment, the same process tree, `AI_AGENT` and all — so `cctop yolo`
-/// sees exactly what it would see if the model had run it. Checked against
-/// 2.1.294's binary and a real session: two runs, one each way, differ in
-/// their pids and nothing else. The model's own Bash call is held at a
-/// permission prompt like any other command, and that is the guard; see
-/// [`crate::yolo::command`].
-fn skill_source(exe: &str, key: &str) -> String {
-    let run = format!("{} yolo --slash={key}", command_word(exe));
+fn skill_source(exe: &str) -> String {
     // YAML's double-quoted strings are a superset of JSON's, so serde's
     // quoting is a correct YAML quoting of any path at all.
     let quote = |text: &str| serde_json::Value::String(text.to_string()).to_string();
@@ -3223,46 +3318,21 @@ fn skill_source(exe: &str, key: &str) -> String {
          description: {description}\n\
          argument-hint: \"[on|off|status]\"\n\
          disable-model-invocation: true\n\
-         allowed-tools: {allow}\n\
          metadata:\n\
          {SKILL_MARKER}{exe_json}\n\
-         {SKILL_KEY}{key_json}\n\
          ---\n\
-         cctop's answer to /yolo, already carried out:\n\
+         cctop answers /yolo itself, from a hook, before this text is used. If \
+         you are reading this, that hook did not run, so YOLO was not changed.\n\
          \n\
-         !`{run} $ARGUMENTS`\n\
-         \n\
-         Repeat that answer to the user exactly as it is, and run nothing because of it.\n",
+         Tell the user exactly that, in one line, and that `cctop --install-hooks` \
+         installs the hook (it needs Claude Code's UserPromptExpansion hook event). \
+         Run nothing, and do not try to switch YOLO any other way.\n",
         description = quote(
             "Switch cctop's YOLO on for this session, so every permission prompt \
              is allowed until it ends. /yolo off stops it; /yolo status says which."
         ),
-        allow = quote(&format!("Bash({run} *)")),
         exe_json = quote(exe),
-        key_json = quote(key),
     )
-}
-
-/// A new key for [`skill_source`]: 128 bits from the kernel, as hex.
-fn new_skill_key() -> std::io::Result<String> {
-    use std::io::Read;
-    let mut bytes = [0u8; 16];
-    std::fs::File::open("/dev/urandom")?.read_exact(&mut bytes)?;
-    Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
-}
-
-/// The key a skill file was written with, read back out of its metadata.
-fn skill_key(text: &str) -> Option<String> {
-    let line = text.lines().find(|l| l.starts_with(SKILL_KEY))?;
-    serde_json::from_str::<String>(line[SKILL_KEY.len()..].trim())
-        .ok()
-        .filter(|key| !key.is_empty())
-}
-
-/// The binary as the first word of a shell command, quoted only when it has
-/// to be — the same rule the hooks' command lines follow.
-fn command_word(exe: &str) -> String {
-    command_line(exe, "", "")
 }
 
 /// The cctop a skill file names, read back out of its marker.
@@ -3292,13 +3362,7 @@ fn skill_install(path: &Path, commands: &Path, exe: &str) -> anyhow::Result<()> 
         );
     }
     let before = std::fs::read_to_string(path).ok();
-    // The key a rewrite keeps, so that refreshing the file does not change
-    // the command a turn in progress was granted.
-    let key = match before.as_deref().and_then(skill_key) {
-        Some(key) => key,
-        None => new_skill_key()?,
-    };
-    let source = skill_source(exe, &key);
+    let source = skill_source(exe);
     // Already this, exactly: nothing to write. See [`json_install`].
     if before.is_some_and(|text| text == source) {
         return Ok(());
@@ -3351,10 +3415,9 @@ fn skill_health(path: &Path, commands: &Path, hooks: &Path) -> Health {
         Err(e) => Health::Unreadable(e.to_string()),
         Ok(text) => {
             let exe = skill_exe(&text);
-            // No key is an older form too: the rewrite gives it one.
-            let outdated = exe.as_deref().is_some_and(|exe| {
-                skill_key(&text).is_none_or(|key| text != skill_source(exe, &key))
-            });
+            // An older form — the one that ran a shell line — is outdated
+            // like any other difference, and the rewrite drops the line.
+            let outdated = exe.as_deref().is_some_and(|exe| text != skill_source(exe));
             verdict(exe, Vec::new(), outdated)
         }
     }
@@ -3409,7 +3472,7 @@ fn json_health(
             missing.push(*event);
         }
         if deciding.contains(event) && !has(&|e| yolo_hook_command(e, event)) {
-            missing.push(YOLO_HOOK_LABEL);
+            missing.push(yolo_hook_label(event));
         }
         recorded = recorded.or(exe);
     }
@@ -5111,8 +5174,12 @@ mod tests {
                     let mut entries = vec![serde_json::json!({"hooks": [{"type": "command",
                         "command": format!("{} hook {e}", exe.display())}]})];
                     if CLAUDE_DECIDING.contains(e) {
-                        entries.push(serde_json::json!({"hooks": [{"type": "command",
-                            "command": format!("{} yolo-hook {e}", exe.display())}]}));
+                        let mut entry = serde_json::json!({"hooks": [{"type": "command",
+                            "command": format!("{} yolo-hook {e}", exe.display())}]});
+                        if let Some(matcher) = deciding_matcher(e) {
+                            entry["matcher"] = matcher.into();
+                        }
+                        entries.push(entry);
                     }
                     ((*e).to_string(), serde_json::Value::Array(entries))
                 })
@@ -6095,7 +6162,8 @@ mod tests {
     }
 
     /// Claude Code gets the deciding entry beside the observer, for
-    /// `PermissionRequest` alone; health notices it missing, repair puts it
+    /// `PermissionRequest` and — matched to `/yolo` alone —
+    /// `UserPromptExpansion`; health notices either missing, repair puts it
     /// back, and uninstall takes both.
     #[test]
     fn the_yolo_hook_is_installed_beside_the_observer_and_removed_with_it() {
@@ -6119,7 +6187,31 @@ mod tests {
                 yolo_hook_command(&exe, "PermissionRequest")
             ]
         );
-        for event in CLAUDE_EVENTS.iter().filter(|e| **e != "PermissionRequest") {
+        assert_eq!(
+            commands("UserPromptExpansion"),
+            [
+                hook_command(&exe, "UserPromptExpansion"),
+                yolo_hook_command(&exe, "UserPromptExpansion")
+            ]
+        );
+        // The observer hears every command; the deciding entry is spawned
+        // for `/yolo` alone.
+        let matchers: Vec<Option<String>> =
+            read_settings(&path).unwrap()["hooks"]["UserPromptExpansion"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|e| {
+                    e.get("matcher")
+                        .and_then(|m| m.as_str())
+                        .map(str::to_string)
+                })
+                .collect();
+        assert_eq!(matchers, [None, Some("yolo".to_string())]);
+        for event in CLAUDE_EVENTS
+            .iter()
+            .filter(|e| !CLAUDE_DECIDING.contains(e))
+        {
             assert_eq!(commands(event), [hook_command(&exe, event)], "{event}");
         }
         assert_eq!(Harness::Claude.health(&scope).unwrap(), Health::Installed);
@@ -6141,11 +6233,43 @@ mod tests {
         write_settings(&path, &root).unwrap();
         assert_eq!(
             Harness::Claude.health(&scope).unwrap(),
-            Health::Partial(vec![YOLO_HOOK_LABEL])
+            Health::Partial(vec![yolo_hook_label("PermissionRequest")])
         );
         repair_in(std::slice::from_ref(&scope));
         assert_eq!(Harness::Claude.health(&scope).unwrap(), Health::Installed);
         assert_eq!(commands("PermissionRequest").len(), 2, "repair doubled up");
+
+        // The same for an install from before `/yolo` was answered by a hook:
+        // the expansion entry missing is a shortfall repair fills in, and the
+        // entry without its matcher is an older form it rewrites.
+        let mut root = read_settings(&path).unwrap();
+        root["hooks"]["UserPromptExpansion"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|e| !entry_commands(e).any(|c| c.contains(YOLO_MARKER)));
+        write_settings(&path, &root).unwrap();
+        assert_eq!(
+            Harness::Claude.health(&scope).unwrap(),
+            Health::Partial(vec![yolo_hook_label("UserPromptExpansion")])
+        );
+        repair_in(std::slice::from_ref(&scope));
+        assert_eq!(Harness::Claude.health(&scope).unwrap(), Health::Installed);
+        let mut root = read_settings(&path).unwrap();
+        for entry in root["hooks"]["UserPromptExpansion"].as_array_mut().unwrap() {
+            entry.as_object_mut().unwrap().shift_remove("matcher");
+        }
+        write_settings(&path, &root).unwrap();
+        assert!(matches!(
+            Harness::Claude.health(&scope).unwrap(),
+            Health::Outdated { .. }
+        ));
+        repair_in(std::slice::from_ref(&scope));
+        assert_eq!(Harness::Claude.health(&scope).unwrap(), Health::Installed);
+        assert_eq!(
+            commands("UserPromptExpansion").len(),
+            2,
+            "repair doubled up"
+        );
 
         remove(&scope);
         assert_eq!(Harness::Claude.health(&scope).unwrap(), Health::Absent);
@@ -6168,6 +6292,64 @@ mod tests {
         ));
     }
 
+    /// Only Claude Code's own `/yolo`, typed, is read as one: every other
+    /// command, an MCP prompt of the same name, a payload that disagrees with
+    /// the command line, and one with no session are the silence.
+    #[test]
+    fn only_a_typed_yolo_is_answered() {
+        let body = |change: &dyn Fn(&mut serde_json::Value)| {
+            let mut b = serde_json::json!({
+                "session_id": "s1", "cwd": "/w", "hook_event_name": "UserPromptExpansion",
+                "expansion_type": "slash_command", "command_name": "yolo",
+                "command_args": "off", "command_source": "userSettings", "prompt": "/yolo off",
+            });
+            change(&mut b);
+            serde_json::to_vec(&b).unwrap()
+        };
+        assert_eq!(
+            typed_yolo("UserPromptExpansion", &body(&|_| {})),
+            Some(TypedYolo {
+                session: "s1".into(),
+                args: "off".into(),
+                cwd: Some("/w".into()),
+            })
+        );
+        // No args at all is bare `/yolo`, which is on.
+        let bare = typed_yolo(
+            "UserPromptExpansion",
+            &body(&|b| {
+                b.as_object_mut().unwrap().shift_remove("command_args");
+            }),
+        );
+        assert_eq!(bare.map(|t| t.args), Some(String::new()));
+        assert_eq!(typed_yolo("PermissionRequest", &body(&|_| {})), None);
+        assert_eq!(typed_yolo("", &body(&|_| {})), None);
+        for change in [
+            &(|b: &mut serde_json::Value| b["command_name"] = "deploy".into())
+                as &dyn Fn(&mut serde_json::Value),
+            &|b| b["command_name"] = "YOLO".into(),
+            &|b| b["expansion_type"] = "mcp_prompt".into(),
+            &|b| b["hook_event_name"] = "UserPromptSubmit".into(),
+            &|b| b["session_id"] = " ".into(),
+            &|b| b["session_id"] = 7.into(),
+        ] {
+            assert_eq!(typed_yolo("UserPromptExpansion", &body(change)), None);
+        }
+        assert_eq!(typed_yolo("UserPromptExpansion", b"{"), None);
+        assert_eq!(typed_yolo("UserPromptExpansion", b""), None);
+    }
+
+    /// The answer is the block Claude Code 2.1.295's schema takes for this
+    /// event, and nothing else: no `continue`, no `additionalContext` that
+    /// would reach the model.
+    #[test]
+    fn the_typed_answer_is_a_block_and_nothing_else() {
+        assert_eq!(
+            yolo_block("YOLO on \"here\""),
+            r#"{"decision":"block","reason":"YOLO on \"here\"","hookSpecificOutput":{"hookEventName":"UserPromptExpansion","suppressOriginalPrompt":true}}"#
+        );
+    }
+
     /// The three paths a `/yolo` test touches, in a scratch directory of its
     /// own: never the machine's own `~/.claude`.
     fn yolo_paths(name: &str) -> (PathBuf, PathBuf, PathBuf) {
@@ -6179,89 +6361,43 @@ mod tests {
         )
     }
 
-    /// The `!` line's command, as Claude Code will run it.
-    fn bang_line(text: &str) -> &str {
-        text.lines()
-            .find_map(|l| l.strip_prefix("!`")?.strip_suffix('`'))
-            .expect("a ! line")
-    }
-
-    /// The grant the frontmatter makes, unquoted.
-    fn granted(text: &str) -> String {
-        let line = text
-            .lines()
-            .find_map(|l| l.strip_prefix("allowed-tools: "))
-            .expect("an allowed-tools line");
-        serde_json::from_str(line).expect("quoted as JSON")
-    }
-
-    /// What makes `/yolo` the person's alone: the model cannot invoke it, and
-    /// the one command its grant covers is the `!` line itself, key and all —
-    /// so the plain `cctop yolo --slash on` the model could type in the same
-    /// turn is not covered and gets a prompt. A real session showed the
-    /// unkeyed grant letting `/yolo off` be undone by the model unprompted.
+    /// `/yolo` is the person's alone and runs nothing: no `!` line, no grant,
+    /// and the model cannot invoke it. The answer comes from the
+    /// `UserPromptExpansion` hook; the body is only the fallback when that
+    /// did not run.
     #[test]
-    fn the_yolo_skill_is_the_persons_and_grants_only_its_own_line() {
-        let text = skill_source("/usr/bin/cctop", "k3y");
+    fn the_yolo_skill_runs_nothing() {
+        let text = skill_source("/usr/bin/cctop");
         assert!(text.starts_with("---\n"));
         assert!(text.contains("\ndisable-model-invocation: true\n"));
-        let line = bang_line(&text);
-        assert_eq!(line, "/usr/bin/cctop yolo --slash=k3y $ARGUMENTS");
-        let grant = granted(&text);
-        assert_eq!(grant, "Bash(/usr/bin/cctop yolo --slash=k3y *)");
-        let prefix = grant
-            .strip_prefix("Bash(")
-            .and_then(|g| g.strip_suffix(" *)"))
-            .unwrap();
-        assert!(line.starts_with(prefix));
-        assert!(!"/usr/bin/cctop yolo --slash on".starts_with(prefix));
-        assert!(!"/usr/bin/cctop yolo on".starts_with(prefix));
+        assert!(!text.contains("!`"), "{text}");
+        assert!(!text.contains("allowed-tools"), "{text}");
+        assert!(!text.contains("yolo on"), "{text}");
+        assert!(text.contains("--install-hooks"));
         assert_eq!(skill_exe(&text).as_deref(), Some("/usr/bin/cctop"));
-        assert_eq!(skill_key(&text).as_deref(), Some("k3y"));
     }
 
-    /// A path the shell would split, or YAML would misread, is quoted for
-    /// each the way each needs, and read back intact.
+    /// A path YAML would misread is quoted and read back intact.
     #[test]
-    fn a_spaced_path_survives_the_shell_and_the_yaml() {
-        let exe = "/opt/my tools/it's/cctop";
-        let text = skill_source(exe, "k");
-        assert_eq!(
-            bang_line(&text),
-            r"'/opt/my tools/it'\''s/cctop' yolo --slash=k $ARGUMENTS"
-        );
-        assert_eq!(
-            granted(&text),
-            r"Bash('/opt/my tools/it'\''s/cctop' yolo --slash=k *)"
-        );
-        assert_eq!(skill_exe(&text).as_deref(), Some(exe));
+    fn a_spaced_path_survives_the_yaml() {
+        let exe = "/opt/my tools/it's \"q\"/cctop";
+        assert_eq!(skill_exe(&skill_source(exe)).as_deref(), Some(exe));
     }
 
-    /// Written with a key of its own, and written again only when it would
-    /// change — keeping the key, so a refresh mid-turn does not move the
-    /// command that turn was granted.
+    /// Written again only when it would change.
     #[test]
-    fn installing_yolo_twice_keeps_its_key_and_its_bytes() {
+    fn installing_yolo_twice_keeps_its_bytes() {
         let (path, commands, _) = yolo_paths("twice");
         skill_install(&path, &commands, "/usr/bin/cctop").unwrap();
         let first = std::fs::read_to_string(&path).unwrap();
-        let key = skill_key(&first).expect("a key");
-        assert_eq!(key.len(), 32);
-        assert!(key.chars().all(|c| c.is_ascii_hexdigit()));
-        assert_eq!(first, skill_source("/usr/bin/cctop", &key));
-
+        assert_eq!(first, skill_source("/usr/bin/cctop"));
         skill_install(&path, &commands, "/usr/bin/cctop").unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), first);
-        // A move of the binary rewrites the file and keeps the key.
         skill_install(&path, &commands, "/opt/cctop").unwrap();
-        let moved = std::fs::read_to_string(&path).unwrap();
-        assert_eq!(moved, skill_source("/opt/cctop", &key));
-
-        // Another install somewhere else gets a different key.
-        let (other, other_commands, _) = yolo_paths("twice-other");
-        skill_install(&other, &other_commands, "/usr/bin/cctop").unwrap();
-        let other_key = skill_key(&std::fs::read_to_string(&other).unwrap());
-        assert_ne!(other_key.as_deref(), Some(key.as_str()));
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            skill_source("/opt/cctop")
+        );
     }
 
     /// A `/yolo` of the person's own — a skill at the same path, or a command
@@ -6311,25 +6447,30 @@ mod tests {
         assert_eq!(skill_health(&path, &commands, &hooks), Health::Installed);
     }
 
-    /// Any difference from what this version writes is an older cctop's,
-    /// and a file without a key is one.
+    /// Any difference from what this version writes is an older cctop's —
+    /// above all the one that ran `cctop yolo` from a `!` line with a grant,
+    /// which repair rewrites without it.
     #[test]
     fn an_older_yolo_reads_as_outdated() {
         let (path, commands, hooks) = yolo_paths("older");
         let exe = own_exe().unwrap();
         skill_install(&path, &commands, &exe).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
-        let key_line = text
-            .lines()
-            .find(|l| l.starts_with(SKILL_KEY))
-            .unwrap()
-            .to_string();
-        std::fs::write(&path, text.replace(&format!("{key_line}\n"), "")).unwrap();
+        // The form #214 wrote: a key, a grant and a shell line.
+        let older = format!(
+            "---\ndescription: \"x\"\ndisable-model-invocation: true\n\
+             allowed-tools: \"Bash({exe} yolo --slash=k *)\"\nmetadata:\n\
+             {SKILL_MARKER}{}\n  cctop-key: \"k\"\n---\n!`{exe} yolo --slash=k $ARGUMENTS`\n",
+            serde_json::Value::String(exe.clone())
+        );
+        std::fs::write(&path, &older).unwrap();
         assert_eq!(
             skill_health(&path, &commands, &hooks),
             Health::Outdated { exe: None }
         );
-        std::fs::write(&path, text.replace("Repeat that", "Say that")).unwrap();
+        skill_install(&path, &commands, &exe).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
+        std::fs::write(&path, text.replace("Run nothing", "Run it")).unwrap();
         assert_eq!(
             skill_health(&path, &commands, &hooks),
             Health::Outdated { exe: None }
