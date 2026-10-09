@@ -1958,6 +1958,7 @@ fn gemini_result(result: &Value) -> String {
 fn is_harness_text(text: &str) -> bool {
     let head = text.trim_start();
     head.starts_with("<command-name>")
+        || head.starts_with("<command-message>")
         || head.starts_with("<local-command")
         || head.starts_with("<system-reminder>")
         || head.starts_with("<user-prompt-submit-hook>")
@@ -2339,6 +2340,10 @@ mod tests {
         ));
         assert!(is_harness_text("<user-prompt-submit-hook>\nhook said this"));
         assert!(is_harness_text("<command-name>/clear</command-name>"));
+        // Claude Code also writes the tags the other way round, message first.
+        assert!(is_harness_text(
+            "<command-message>yolo</command-message>\n<command-name>/yolo</command-name>\n<command-args>status</command-args>"
+        ));
         assert!(is_harness_text("Caveat: the messages below were generated"));
     }
 
