@@ -3206,12 +3206,29 @@ pub(super) fn draw_connect(frame: &mut Frame, area: Rect, app: &mut App, layout:
                     lines.push(dim(
                         "whoever you invite. Nobody needs a Cloudflare account.",
                     ));
-                    if let Some((_, edit)) = field {
-                        lines.push(Line::default());
-                        lines.push(text("Your email — the owner, always full:"));
-                        lines.push(input_line(edit));
+                    match field {
+                        Some((Typing::Token, edit)) => {
+                            lines.push(Line::default());
+                            lines.push(text("A browser login cannot manage Access; an API"));
+                            lines.push(text("token can, and keeps this tunnel as it is:"));
+                            let shown = "dash.cloudflare.com/profile/api-tokens";
+                            lines.push(Line::from(Span::styled(format!("    {shown}"), accent)));
+                            links.push((shown.to_string(), cloudflare::token_link()));
+                            lines.push(text("Paste it here:"));
+                            lines.push(masked_line(edit.chars().count()));
+                        }
+                        Some((_, edit)) => {
+                            lines.push(Line::default());
+                            lines.push(text("Your email — the owner, always full:"));
+                            lines.push(input_line(edit));
+                        }
+                        None => {}
                     }
                     match typing {
+                        Some(Typing::Token) => (
+                            " [Enter] use it  [Ctrl+O] copy link  [Esc] cancel".to_string(),
+                            vec![("[Enter]", enter), ("[Ctrl+O]", ctrl('o')), ("[Esc]", esc)],
+                        ),
                         Some(_) => (
                             " [Enter] turn on  [Esc] cancel".to_string(),
                             vec![("[Enter]", enter), ("[Esc]", esc)],

@@ -139,6 +139,10 @@ pub enum Typing {
     Owner,
     /// An email or `@domain` to invite, read-only.
     Invite,
+    /// An API token to replace a browser login's, which Cloudflare never lets
+    /// manage Access. Asked for before Access is turned on, rather than after
+    /// Cloudflare refuses it.
+    Token,
 }
 
 /// What a worker thread comes back with.
@@ -149,6 +153,8 @@ enum Answer {
     Zones(Auth, Result<Vec<Zone>, cloudflare::Error>),
     Suggested(Auth, Zone, Result<String, cloudflare::Error>),
     Created(Result<Account, String>),
+    /// The account with a pasted token in place of its login's.
+    Adopted(Result<Account, String>),
     Removed(Result<(Vec<String>, bool), String>),
     Access(Result<Applied, String>),
 }
@@ -697,7 +703,13 @@ impl App {
                 };
                 flow.problem = None;
             }
-            (KeyCode::Char('o'), None) => *field = Some((Typing::Owner, LineEdit::default())),
+            (KeyCode::Char('o'), None) => {
+                let typing = match account.login {
+                    true => Typing::Token,
+                    false => Typing::Owner,
+                };
+                *field = Some((typing, LineEdit::default()));
+            }
             (KeyCode::Char('o'), Some(_)) => *confirm = true,
             (KeyCode::Char('i'), Some(_)) => *field = Some((Typing::Invite, LineEdit::default())),
             (KeyCode::Up | KeyCode::Char('k'), Some(_)) => *cursor = cursor.saturating_sub(1),
@@ -753,31 +765,39 @@ impl App {
             return;
         };
         let typed = text.trim().to_string();
-        let checked = cctop_core::cloudflare::access::parse_who(&typed)
-            .filter(|who| *typing == Typing::Invite || !who.starts_with('@'));
-        let Some(who) = checked else {
-            flow.problem = Some(match typing {
-                Typing::Owner => "The owner is one email address.".to_string(),
-                Typing::Invite => {
-                    "An email address, or a whole domain written @company.com.".to_string()
-                }
-            });
-            return;
-        };
+        let who = cctop_core::cloudflare::access::parse_who(&typed);
         let typing = *typing;
+        let refused = match typing {
+            Typing::Owner if who.as_ref().is_none_or(|w| w.starts_with('@')) => {
+                Some("The owner is one email address.")
+            }
+            Typing::Invite if who.is_none() => {
+                Some("An email address, or a whole domain written @company.com.")
+            }
+            Typing::Token if typed.is_empty() => Some("Paste the token first."),
+            _ => None,
+        };
+        if let Some(why) = refused {
+            flow.problem = Some(why.to_string());
+            return;
+        }
         *field = None;
-        match typing {
-            Typing::Owner => self.access_work(
+        match (typing, who) {
+            (Typing::Token, _) => self.connect_work("Checking the token with Cloudflare…", {
+                move || Answer::Adopted(cloudflare::adopt_token(&typed))
+            }),
+            (Typing::Owner, Some(owner)) => self.access_work(
                 "Putting the page behind Cloudflare Access…",
-                Change::On { owner: who },
+                Change::On { owner },
             ),
-            Typing::Invite => self.access_work(
+            (Typing::Invite, Some(who)) => self.access_work(
                 "Updating who may log in…",
                 Change::Invite {
                     who,
                     level: Level::Read,
                 },
             ),
+            (_, None) => {}
         }
     }
 
@@ -955,6 +975,17 @@ impl App {
                 self.set_status(applied.said);
             }
             Answer::Access(Err(message)) => flow.problem = Some(message),
+            Answer::Adopted(Ok(adopted)) => {
+                let Step::Access { account, field, .. } = &mut flow.step else {
+                    return;
+                };
+                *account = adopted.clone();
+                // Straight on to what the token was for.
+                *field = Some((Typing::Owner, LineEdit::default()));
+                self.connected = Some(Connected::from(&adopted));
+                self.set_status("The account now uses your API token");
+            }
+            Answer::Adopted(Err(message)) => flow.problem = Some(message),
         }
     }
 
@@ -1066,9 +1097,28 @@ impl App {
                     flow.problem = None;
                 }
                 KeyCode::Enter => self.submit_access_field(),
+                KeyCode::Char('o')
+                    if ctrl
+                        && matches!(
+                            flow.step,
+                            Step::Access {
+                                field: Some((Typing::Token, _)),
+                                ..
+                            }
+                        ) =>
+                {
+                    self.copy_token_link()
+                }
                 _ => {
+                    let max = match &flow.step {
+                        Step::Access {
+                            field: Some((Typing::Token, _)),
+                            ..
+                        } => TOKEN_MAX,
+                        _ => HOSTNAME_MAX,
+                    };
                     if let Some(field) = flow.field()
-                        && field.key(key, HOSTNAME_MAX).changed()
+                        && field.key(key, max).changed()
                     {
                         flow.problem = None;
                     }
@@ -1451,6 +1501,61 @@ mod tests {
         let mut app = test_app();
         app.open_connect_at(flow);
         (app, seen)
+    }
+
+    #[test]
+    fn a_login_account_is_asked_for_a_token_before_access_not_after() {
+        let account = Account {
+            hostname: Some("cctop.example.test".into()),
+            api_token: Some("made-up-login-token".into()),
+            login: true,
+            ..Account::default()
+        };
+        let mut app = test_app();
+        app.open_connect_at(Connect::new(
+            Step::Access {
+                account: account.clone(),
+                cursor: 0,
+                field: None,
+                confirm: false,
+                said: Vec::new(),
+            },
+            Mode::List,
+        ));
+        app.on_key_connect(KeyCode::Char('o').into());
+        assert!(matches!(
+            step(&app),
+            Step::Access {
+                field: Some((Typing::Token, _)),
+                ..
+            }
+        ));
+        // A token far longer than an email still fits.
+        for _ in 0..300 {
+            app.on_key_connect(KeyCode::Char('x').into());
+        }
+        let Step::Access {
+            field: Some((_, edit)),
+            ..
+        } = step(&app)
+        else {
+            panic!("the field closed");
+        };
+        assert_eq!(edit.chars().count(), 300);
+
+        // Once the token is taken, the owner's email is next.
+        app.connect_answer(Answer::Adopted(Ok(Account {
+            login: false,
+            ..account
+        })));
+        assert!(matches!(
+            step(&app),
+            Step::Access {
+                field: Some((Typing::Owner, _)),
+                account,
+                ..
+            } if !account.login
+        ));
     }
 
     /// Wait for the call in flight, as the tick would.

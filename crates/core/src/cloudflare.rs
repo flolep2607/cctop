@@ -1158,6 +1158,50 @@ pub fn connected() -> Result<(Account, Api), String> {
     Ok((account, api))
 }
 
+/// Hand an account connected by browser login a pasted API token, so what
+/// the login's token is never given — Cloudflare Access, above all — can be
+/// done without disconnecting. The login's token is fixed by Cloudflare to
+/// managing tunnels, and the login flow has no way to ask for more, so a token
+/// the user makes is the only way to more; the tunnel, its hostnames and their
+/// records stay as they are, and only the credential that manages them moves.
+pub fn adopt_token(token: &str) -> Result<Account, String> {
+    let account = crate::tunnel::account()
+        .ok_or_else(|| "No Cloudflare account is connected.".to_string())?;
+    let adopted = adopt_with(&Api::new(token), account, token).map_err(|e| e.to_string())?;
+    crate::tunnel::save_account(&adopted)
+        .map_err(|e| format!("Could not write config.toml: {e}"))?;
+    Ok(adopted)
+}
+
+pub(crate) fn adopt_with(api: &Api, account: Account, token: &str) -> Result<Account, Error> {
+    if account.from_env {
+        return Err(Error::Login(
+            "That tunnel comes from CCTOP_TUNNEL_TOKEN; connect it with setup to give it a \
+             token."
+                .into(),
+        ));
+    }
+    api.verify()?;
+    // The same account, or every call after this one is about a tunnel the
+    // token cannot see.
+    let zones = api.zones()?;
+    if !zones
+        .iter()
+        .any(|z| Some(&z.id) == account.zone_id.as_ref())
+    {
+        return Err(Error::Login(format!(
+            "That token cannot see {}, the domain this tunnel is on. Make it on the same \
+             Cloudflare account.",
+            account.zone_name().unwrap_or("the domain")
+        )));
+    }
+    Ok(Account {
+        api_token: Some(token.to_string()),
+        login: false,
+        ..account
+    })
+}
+
 fn saved(renamed: &Renamed) -> Result<(), String> {
     crate::tunnel::save_account(&renamed.account).map_err(|e| {
         format!(
@@ -2023,6 +2067,39 @@ mod tests {
         assert_eq!(left.0.len(), 2, "{left:?}");
         assert!(left.0[0].contains("cctop.example.test"), "{left:?}");
         assert!(left.0[0].contains("browser login"), "{left:?}");
+    }
+
+    #[test]
+    fn a_pasted_token_takes_over_from_a_login_and_keeps_the_tunnel() {
+        let (base, _) = fake_api(cloudflare(None));
+        let login = Account {
+            token: "eyJhIjoi-made-up".into(),
+            hostname: Some("cctop.example.test".into()),
+            api_token: Some("made-up-login-token".into()),
+            login: true,
+            account_id: Some("acct1".into()),
+            zone_id: Some("zone1".into()),
+            tunnel_id: Some(TUNNEL_ID.into()),
+            ..Account::default()
+        };
+        let api = Api::at(&base, "made-up-pasted");
+        let adopted = adopt_with(&api, login.clone(), "made-up-pasted").unwrap();
+        assert_eq!(adopted.api_token.as_deref(), Some("made-up-pasted"));
+        assert!(!adopted.login);
+        assert_eq!(adopted.tunnel_id, login.tunnel_id);
+        assert_eq!(adopted.token, login.token);
+
+        // A token on another account would manage a tunnel it cannot see.
+        let elsewhere = Account {
+            zone_id: Some("zone2".into()),
+            ..login.clone()
+        };
+        let why = adopt_with(&api, elsewhere, "made-up-pasted").unwrap_err();
+        assert!(why.to_string().contains("example.test"), "{why}");
+
+        // And a token Cloudflare refuses is refused here.
+        let bad = Api::at(&base, "not-made-up");
+        assert!(adopt_with(&bad, login, "not-made-up").is_err());
     }
 
     #[test]
