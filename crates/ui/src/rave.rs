@@ -338,8 +338,10 @@ pub fn paint(buf: &mut Buffer, footer: Rect, t: Duration, truecolor: bool) {
             }
             cell.bg = snap(hsv(hue, 0.9, value.min(0.55)));
 
-            let hue = (f32::from(x) * 6.0 + f32::from(y) * 12.0 - roll).rem_euclid(360.0);
-            cell.fg = snap(hsv(hue, 0.85, 1.0));
+            if inked(cell) {
+                let hue = (f32::from(x) * 6.0 + f32::from(y) * 12.0 - roll).rem_euclid(360.0);
+                cell.fg = snap(hsv(band(hue), 0.85, 1.0));
+            }
         }
     }
     for (x, y, glint) in glints {
@@ -356,6 +358,43 @@ pub fn paint(buf: &mut Buffer, footer: Rect, t: Duration, truecolor: bool) {
         build,
         truecolor,
     );
+}
+
+/// The rainbow's hues, a twelfth of the wheel apart.
+const BAND: f32 = 30.0;
+
+/// `hue` held to the start of its band.
+///
+/// The rainbow rolls about a column a frame, so a hue worked out per cell
+/// gave nearly every letter on screen a new colour on every frame, each in a
+/// run of its own. In bands five columns wide a letter changes colour only
+/// when an edge passes it, one frame in five, and the letters between edges
+/// share a colour — so a frame carries a fifth of the colour changes it did,
+/// and most of the screen is not sent at all.
+fn band(hue: f32) -> f32 {
+    (hue / BAND).floor() * BAND
+}
+
+/// Whether `cell` shows its foreground colour at all, and so is worth
+/// writing the rainbow into.
+///
+/// A blank shows only its ground. Giving it the rainbow anyway changed every
+/// cell of the screen on every frame — the roll moves the hue about a column
+/// a frame — and broke the ground into runs a cell or two long, each of which
+/// costs the terminal a full colour sequence. That was most of what a frame
+/// weighed, all of it invisible, and over ssh a frame's weight is what limits
+/// how many arrive a second. Left alone, a blank keeps the foreground its
+/// widget gave it, which does not move between frames, so a blank changes only
+/// when its ground does.
+///
+/// Underlined, struck-through and reversed blanks do show the foreground —
+/// as a line, or as the cell's whole colour — so they keep the rainbow.
+fn inked(cell: &ratatui::buffer::Cell) -> bool {
+    use ratatui::style::Modifier;
+    cell.symbol() != " "
+        || cell
+            .modifier
+            .intersects(Modifier::UNDERLINED | Modifier::CROSSED_OUT | Modifier::REVERSED)
 }
 
 /// Where the mirror ball throws its light this half-beat, and with what.
@@ -599,6 +638,85 @@ mod tests {
             );
         }
         assert!(buf.content()[80..].iter().any(|c| c.symbol() != " "));
+    }
+
+    /// What the terminal is sent, one frame to the next, stays a few bytes a
+    /// cell.
+    ///
+    /// A frame's weight is what limits how many arrive a second over a slow
+    /// link, and a screen of mostly blank ground with some text on it — what
+    /// a dashboard is — was sent whole on every frame, with a colour sequence
+    /// every cell or two for colours nobody could see: about 13 bytes a cell
+    /// on this screen, where it is now about 2. Measured as the bytes ratatui
+    /// writes for the difference between consecutive frames, over a second of
+    /// them.
+    #[test]
+    fn a_frame_is_light_enough_for_a_slow_link() {
+        use ratatui::backend::Backend;
+        let area = Rect::new(0, 0, 160, 40);
+        let footer = Rect::new(0, 39, 160, 1);
+        let mut screen = Buffer::empty(area);
+        for y in (2..36).step_by(3) {
+            screen.set_string(
+                2,
+                y,
+                "opus-5   $12.34   42.9K   main   repo",
+                ratatui::style::Style::default(),
+            );
+        }
+        let frame = |ms: u64| {
+            let mut buf = screen.clone();
+            paint(&mut buf, footer, Duration::from_millis(ms), false);
+            buf
+        };
+        let bytes = |from: &Buffer, to: &Buffer| {
+            let mut written = Vec::new();
+            ratatui::backend::CrosstermBackend::new(&mut written)
+                .draw(from.diff(to).into_iter())
+                .expect("draw");
+            written.len()
+        };
+        // Mid-phrase, away from the build and the drop, at the effect's rate.
+        let frames = 30;
+        let mut sent = 0;
+        let mut last = frame(5_000);
+        for i in 1..=frames {
+            let next = frame(5_000 + i * effects::FRAME.as_millis() as u64);
+            sent += bytes(&last, &next);
+            last = next;
+        }
+        let per_frame = sent / frames as usize;
+        let cells = usize::from(area.width) * usize::from(area.height);
+        assert!(
+            per_frame < 4 * cells,
+            "{per_frame} bytes a frame for {cells} cells"
+        );
+    }
+
+    /// A blank's foreground is never seen, so the party leaves it alone; a
+    /// letter, and a blank that draws its foreground as a line, get the
+    /// rainbow.
+    #[test]
+    fn only_what_shows_a_foreground_is_given_one() {
+        let area = Rect::new(0, 0, 20, 2);
+        let mut buf = Buffer::empty(area);
+        let gray = ratatui::style::Style::default().fg(Color::Indexed(245));
+        buf.set_string(0, 0, "ab  ", gray);
+        buf.set_string(
+            4,
+            0,
+            "  ",
+            gray.add_modifier(ratatui::style::Modifier::UNDERLINED),
+        );
+        paint(
+            &mut buf,
+            Rect::new(0, 1, 20, 1),
+            Duration::from_millis(700),
+            false,
+        );
+        assert_ne!(buf[(0, 0)].fg, Color::Indexed(245));
+        assert_eq!(buf[(2, 0)].fg, Color::Indexed(245));
+        assert_ne!(buf[(4, 0)].fg, Color::Indexed(245));
     }
 
     /// A session switched into ultracode after cctop started starts the
