@@ -418,7 +418,7 @@ handed no token, since a token would outlive the invite.
 
 ponytail: the dashboard's Settings and the web page cannot manage invites yet,
 and there is no second, Access-free hostname for public token links with a
-switch to turn them off; both are follow-ups to #219.
+switch to turn them off; those are #225 and #226.
 
 ## The token
 
