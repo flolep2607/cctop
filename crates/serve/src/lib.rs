@@ -79,6 +79,8 @@ mod analytics;
 #[cfg(feature = "debug")]
 mod debug;
 mod http;
+/// A Cloudflare Access login as a way in, beside the tokens.
+mod identity;
 /// `/metrics`, the snapshot in Prometheus's text format.
 mod metrics;
 /// The `--notify` webhook. Its send is `cctop_core::notify::post`, which the
@@ -292,6 +294,10 @@ struct Shared {
     /// [`address`]. A trait object so a test can rename against a fake
     /// Cloudflare without touching `config.toml`.
     addresses: Arc<dyn address::Addresses>,
+    /// Who a Cloudflare Access login is, and what the list lets them do —
+    /// see [`identity`]. A trait object so a test can log in with a key of
+    /// its own instead of a real team's.
+    identities: Arc<dyn identity::Identities>,
 }
 
 /// One publish of the whole table.
@@ -635,6 +641,7 @@ pub fn start(options: Options) -> anyhow::Result<Serving> {
         ssh: ssh::Reach::ssh(),
         is_share_host: tunnel::is_share_host,
         addresses: Arc::new(address::Connected),
+        identities: Arc::new(identity::Configured::new()),
     });
 
     let remotes = Arc::new(Mutex::new(Remotes::default()));
@@ -1465,12 +1472,15 @@ fn publish(
 /// The distinction lives at the router rather than inside each route: the
 /// check is the same for everything the read-only link may not do, and a route
 /// added later that forgets it is the bug the single gate prevents.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// Ordered by what each is worth, read-only first, so the better of two ways
+/// in is their `max`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Access {
-    /// The full link: every page, every GET, and the actions when they are on.
-    Full,
     /// The read-only link: everything but `/api/act/*`.
     ReadOnly,
+    /// The full link: every page, every GET, and the actions when they are on.
+    Full,
 }
 
 /// The cookie a page hands back for the run's token. Named with the port
@@ -1493,6 +1503,33 @@ fn access_for(shared: &Shared, presented: &str) -> Option<Access> {
         return Some(Access::ReadOnly);
     }
     None
+}
+
+/// What a Cloudflare Access login on `request` is worth, or `None` when it
+/// carries none or one that does not check out. A refusal is logged with its
+/// reason, never with the token.
+fn access_login(shared: &Shared, request: &Request) -> Option<Access> {
+    let jwt = request
+        .headers()
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case(identity::HEADER))
+        .map(|(_, v)| v.trim())
+        .filter(|v| !v.is_empty())?;
+    match shared.identities.check(jwt) {
+        Ok((_, cctop_core::cloudflare::access::Level::Full)) => Some(Access::Full),
+        Ok((_, cctop_core::cloudflare::access::Level::Read)) => Some(Access::ReadOnly),
+        // Every request through the edge carries one, so a serve with no
+        // Access set up would log every request: only a real refusal is.
+        Err(identity::Why::NotSetUp) => None,
+        Err(why) => {
+            cctop_core::elog::event(
+                "http",
+                "access-login",
+                serde_json::json!({"refused": format!("{why:?}")}),
+            );
+            None
+        }
+    }
 }
 
 /// Read one request, answer it, and let the connection close.
@@ -1545,15 +1582,19 @@ fn serve_connection(shared: &Shared, stream: &mut TcpStream) {
     // way in: the cookie only ever repeats a token that was already minted.
     // `Authorization: Bearer` is the same credential again, in the form a
     // script or HTTP client sends rather than a browser.
-    let Some(access) = access_for(shared, request.token())
+    let presented = access_for(shared, request.token())
         .or_else(|| access_for(shared, request.bearer()))
         .or_else(|| {
             access_for(
                 shared,
                 request.cookie(&cookie_name(shared.port)).unwrap_or(""),
             )
-        })
-    else {
+        });
+    // A Cloudflare Access login, beside the tokens rather than instead of
+    // them: whichever is worth more decides. Only the signed assertion is
+    // read — see [`identity`] for why the email header beside it is not.
+    let login = access_login(shared, &request);
+    let Some(access) = presented.max(login) else {
         cctop_core::elog::event(
             "http",
             "request",
@@ -1576,8 +1617,17 @@ fn serve_connection(shared: &Shared, stream: &mut TcpStream) {
                 Access::Full => "full",
                 Access::ReadOnly => "readonly",
             },
+            "via": match presented >= login {
+                true => "token",
+                false => "access",
+            },
         }),
     );
+    // What the page may be handed back: the token this request presented,
+    // and only when that token is what let it in. A login that got in on
+    // its identity is given no token at all — one would outlive the invite,
+    // and work on the token hostname for whoever it was passed to.
+    let handed = presented.filter(|p| *p == access);
 
     // Before the router, so an armed fault covers every API route rather than
     // the handful somebody remembered to touch.
@@ -1613,7 +1663,7 @@ fn serve_connection(shared: &Shared, stream: &mut TcpStream) {
         );
     }
     match path.as_str() {
-        "/" => app_page(shared, stream, &request, access),
+        "/" => app_page(shared, stream, &request, handed),
         // Fixed for a build but not named by one, so revalidated rather than
         // kept: a `304` is as cheap as a cache hit and survives an upgrade.
         "/favicon.svg" => http::respond_packed(
@@ -1634,7 +1684,7 @@ fn serve_connection(shared: &Shared, stream: &mut TcpStream) {
             "",
             None,
         ),
-        "/api/config" => config_route(shared, stream, &request, access),
+        "/api/config" => config_route(shared, stream, &request, access, handed),
         "/api/sessions" => {
             // Tagged, because a page whose event stream is not getting through
             // — a quick tunnel, which does not carry SSE — polls this instead,
@@ -1680,11 +1730,11 @@ fn serve_connection(shared: &Shared, stream: &mut TcpStream) {
         "/api/events" => events(shared, stream, &request),
         "/insight/optimize" => api_insight(shared, stream, &request, "optimize"),
         "/insight/compare" => api_insight(shared, stream, &request, "compare"),
-        "/analytics" => app_page(shared, stream, &request, access),
+        "/analytics" => app_page(shared, stream, &request, handed),
         // Every tab's terminal, tiled. The page itself is harmless to a
         // read-only link — opening a terminal is the action, and that route
         // checks the credential as every action does.
-        "/workspace" => app_page(shared, stream, &request, access),
+        "/workspace" => app_page(shared, stream, &request, handed),
         // The whole fleet's history in one document — the analytics page
         // filters and charts it client-side, so this one read-only route is
         // all the server owes it. Untrimmed buckets are affordable here
@@ -1760,9 +1810,9 @@ fn serve_connection(shared: &Shared, stream: &mut TcpStream) {
                 &body,
             );
         }
-        _ if path.starts_with("/session/") => app_page(shared, stream, &request, access),
+        _ if path.starts_with("/session/") => app_page(shared, stream, &request, handed),
         // A popped-out terminal: the same app, drawing only the terminal.
-        _ if path.starts_with("/window/") => app_page(shared, stream, &request, access),
+        _ if path.starts_with("/window/") => app_page(shared, stream, &request, handed),
         _ if path.starts_with("/api/report/") => {
             api_report(shared, stream, &request, &path["/api/report/".len()..]);
         }
@@ -2350,10 +2400,11 @@ fn current(shared: &Shared) -> Arc<Snapshot> {
 ///
 /// The tag names the build, so it is the same for both credentials, which is
 /// now right: the page carries neither.
-fn app_page(shared: &Shared, stream: &mut TcpStream, request: &Request, access: Access) {
-    let credential = match access {
-        Access::Full => shared.token.as_str(),
-        Access::ReadOnly => shared.readonly.as_str(),
+fn app_page(shared: &Shared, stream: &mut TcpStream, request: &Request, handed: Option<Access>) {
+    let credential = match handed {
+        Some(Access::Full) => shared.token.as_str(),
+        Some(Access::ReadOnly) => shared.readonly.as_str(),
+        None => "",
     };
 
     // Hand the credential back as a cookie so a reload — which has no `?t=`
@@ -2366,7 +2417,7 @@ fn app_page(shared: &Shared, stream: &mut TcpStream, request: &Request, access: 
         let held = request
             .cookie(&cookie_name(shared.port))
             .and_then(|c| access_for(shared, c));
-        if !(access == Access::ReadOnly && held == Some(Access::Full)) {
+        if !(handed == Some(Access::ReadOnly) && held == Some(Access::Full)) {
             headers = format!(
                 "Set-Cookie: {}={credential}; Path=/; HttpOnly; SameSite=Strict\r\n",
                 cookie_name(shared.port)
@@ -2506,11 +2557,22 @@ fn relay_socket(stream: &mut TcpStream, request: &Request, port: u16, path: &str
 /// link opened in a browser holding the full cookie gets the read-only answer.
 ///
 /// `no-store` like every other route that carries the token.
-fn config_route(shared: &Shared, stream: &mut TcpStream, request: &Request, access: Access) {
-    let (credential, actions) = match access {
-        Access::Full => (shared.token.as_str(), shared.actions),
-        Access::ReadOnly => (shared.readonly.as_str(), false),
+///
+/// A page let in by an Access login is told no token (`handed` is `None`):
+/// every request it makes comes through the edge with the login again.
+fn config_route(
+    shared: &Shared,
+    stream: &mut TcpStream,
+    request: &Request,
+    access: Access,
+    handed: Option<Access>,
+) {
+    let credential = match handed {
+        Some(Access::Full) => shared.token.as_str(),
+        Some(Access::ReadOnly) => shared.readonly.as_str(),
+        None => "",
     };
+    let actions = access == Access::Full && shared.actions;
     http::respond(
         stream,
         Some(request),
@@ -3131,6 +3193,7 @@ mod tests {
             ssh: ssh::Reach::nowhere(),
             is_share_host: |_| false,
             addresses: Arc::new(address::Nowhere),
+            identities: Arc::new(identity::Nowhere),
         }
     }
 
@@ -3150,6 +3213,157 @@ mod tests {
         let open = shared("", "");
         assert_eq!(access_for(&open, ""), Some(Access::Full));
         assert_eq!(access_for(&open, "anything"), Some(Access::Full));
+    }
+
+    /// A serve with both tokens and Access set up for `owner@example.test`
+    /// and `@example.test` read-only, logging in against the tests' own key.
+    fn behind_access() -> Shared {
+        Shared {
+            identities: Arc::new(identity::Fixed::new(
+                cctop_core::cloudflare::access::fake::settings(),
+            )),
+            ..shared("full", "view")
+        }
+    }
+
+    /// `/api/config` as a request with `headers` sees it: the status line
+    /// and, on a 200, the JSON.
+    fn config_with(shared: &Shared, target: &str, headers: &str) -> (String, serde_json::Value) {
+        let raw = response_of(shared, "GET", target, headers);
+        let status = raw.lines().next().unwrap_or_default().to_string();
+        let body = raw.split_once("\r\n\r\n").map_or("", |(_, b)| b);
+        (status, serde_json::from_str(body).unwrap_or_default())
+    }
+
+    #[test]
+    fn a_forged_access_header_opens_nothing() {
+        use cctop_core::cloudflare::access::fake;
+        let shared = behind_access();
+        let owner = fake::claims("owner@example.test");
+        let mut expired = owner.clone();
+        expired["exp"] = serde_json::json!(cctop_core::cloudflare::access::now() - 3600);
+        let mut other_app = owner.clone();
+        other_app["aud"] = serde_json::json!(["some-other-app"]);
+        // The email header is what the edge adds beside the JWT, and what
+        // anything on loopback can write: alone, or beside an assertion that
+        // does not check out, it is worth nothing.
+        let email = "Cf-Access-Authenticated-User-Email: owner@example.test\r\n";
+        let forgeries = [
+            email.to_string(),
+            format!(
+                "{email}Cf-Access-Jwt-Assertion: {}\r\n",
+                fake::forged(&owner)
+            ),
+            format!(
+                "{email}Cf-Access-Jwt-Assertion: {}\r\n",
+                fake::unsigned(&owner)
+            ),
+            format!(
+                "{email}Cf-Access-Jwt-Assertion: {}\r\n",
+                fake::token(&expired)
+            ),
+            format!(
+                "{email}Cf-Access-Jwt-Assertion: {}\r\n",
+                fake::token(&other_app)
+            ),
+            format!("{email}Cf-Access-Jwt-Assertion: not.a.jwt\r\n"),
+            format!(
+                "{email}Cookie: CF_Authorization={}\r\n",
+                fake::forged(&owner)
+            ),
+        ];
+        for headers in &forgeries {
+            for target in ["/", "/api/config", "/api/sessions"] {
+                assert_eq!(
+                    status_of(&shared, "GET", target, headers),
+                    "HTTP/1.1 403 Forbidden",
+                    "{target} with {headers}"
+                );
+            }
+        }
+        // A genuine login by someone nobody invited is refused the same way.
+        let stranger = format!(
+            "Cf-Access-Jwt-Assertion: {}\r\n",
+            fake::token(&fake::claims("someone@elsewhere.test"))
+        );
+        assert_eq!(
+            status_of(&shared, "GET", "/api/config", &stranger),
+            "HTTP/1.1 403 Forbidden"
+        );
+    }
+
+    #[test]
+    fn an_access_login_gets_what_its_invite_says_and_no_token() {
+        use cctop_core::cloudflare::access::fake;
+        let shared = behind_access();
+        let login = |email: &str| {
+            format!(
+                "Cf-Access-Jwt-Assertion: {}\r\n",
+                fake::token(&fake::claims(email))
+            )
+        };
+
+        let (status, owner) = config_with(&shared, "/api/config", &login("owner@example.test"));
+        assert_eq!(status, "HTTP/1.1 200 OK");
+        assert_eq!(owner["actions"], true);
+        // No token handed to a page that got in on its identity: it would
+        // outlive the invite.
+        assert_eq!(owner["token"], "");
+
+        let colleague = login("colleague@example.test");
+        let (status, read) = config_with(&shared, "/api/config", &colleague);
+        assert_eq!(status, "HTTP/1.1 200 OK");
+        assert_eq!(read["actions"], false);
+        assert_eq!(read["token"], "");
+        // Exactly what the read-only token gets: the actions are refused.
+        let act = response_of(
+            &shared,
+            "POST",
+            "/api/act/kill/anything",
+            &format!("{colleague}Content-Type: application/json\r\nContent-Length: 2\r\n\r\n{{}}"),
+        );
+        assert!(act.starts_with("HTTP/1.1 403"), "{act}");
+        assert!(act.contains("this link is read-only"), "{act}");
+
+        // The page gets no cookie either: nothing to replay without the login.
+        let (head, _) = exchange(&shared, "/", &login("owner@example.test"));
+        assert!(head.starts_with("HTTP/1.1 200"), "{head}");
+        assert_eq!(header(&head, "Set-Cookie"), None, "{head}");
+    }
+
+    #[test]
+    fn a_token_and_a_login_together_get_the_better_of_the_two() {
+        use cctop_core::cloudflare::access::fake;
+        let access = behind_access();
+        let colleague = format!(
+            "Cf-Access-Jwt-Assertion: {}\r\n",
+            fake::token(&fake::claims("colleague@example.test"))
+        );
+        // The full token beside a read-only login: the token decides, and
+        // the page is handed it back as before.
+        let (_, both) = config_with(&access, "/api/config?t=full", &colleague);
+        assert_eq!(both["actions"], true);
+        assert_eq!(both["token"], "full");
+        // The read-only token beside the owner's login: the login decides,
+        // and no token is handed back.
+        let owner = format!(
+            "Cf-Access-Jwt-Assertion: {}\r\n",
+            fake::token(&fake::claims("owner@example.test"))
+        );
+        let (_, both) = config_with(&access, "/api/config?t=view", &owner);
+        assert_eq!(both["actions"], true);
+        assert_eq!(both["token"], "");
+        // And with no Access set up at all, a genuine-looking JWT is ignored
+        // and the tokens work exactly as they did.
+        let plain = shared("full", "view");
+        assert_eq!(
+            status_of(&plain, "GET", "/api/config", &owner),
+            "HTTP/1.1 403 Forbidden"
+        );
+        assert_eq!(
+            status_of(&plain, "GET", "/api/config?t=view", &owner),
+            "HTTP/1.1 200 OK"
+        );
     }
 
     /// Ask `api_search` the way the router does — a request parsed off a real

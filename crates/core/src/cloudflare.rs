@@ -32,6 +32,7 @@ use serde_json::{Value, json};
 
 use crate::tunnel::{Account, ShareName};
 
+pub mod access;
 pub mod login;
 
 /// Cloudflare's API.
@@ -781,6 +782,7 @@ pub fn create(api: &Api, zone: &Zone, hostname: &str, machine: &str) -> Result<A
         api_token: Some(api.token.clone()),
         login: api.login,
         share_names: Default::default(),
+        access: None,
         from_env: false,
     })
 }
@@ -1548,6 +1550,7 @@ mod tests {
                 },
             )]
             .into(),
+            access: None,
             from_env: false,
         }
     }

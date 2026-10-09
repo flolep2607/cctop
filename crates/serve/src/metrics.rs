@@ -896,6 +896,7 @@ mod tests {
             ssh: crate::ssh::Reach::nowhere(),
             is_share_host: |_| false,
             addresses: std::sync::Arc::new(crate::address::Nowhere),
+            identities: std::sync::Arc::new(crate::identity::Nowhere),
         };
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();

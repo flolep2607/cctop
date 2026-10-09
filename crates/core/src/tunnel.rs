@@ -534,6 +534,10 @@ pub struct Account {
     /// ponytail: a session deleted from history keeps its name and record
     /// until it is renamed, cleared, or the account is removed.
     pub share_names: std::collections::BTreeMap<String, ShareName>,
+    /// Cloudflare Access in front of the page, when `cctop tunnel access on`
+    /// put it there: who may log in, and the ids of what cctop created for
+    /// it, which `cctop tunnel remove` deletes with the rest.
+    pub access: Option<crate::cloudflare::access::Settings>,
     /// Whether this came from `CCTOP_TUNNEL_TOKEN` rather than the file — and
     /// so is not cctop's to remove.
     pub from_env: bool,
@@ -606,6 +610,7 @@ impl fmt::Debug for Account {
             .field("api_token", &self.api_token.as_ref().map(|_| "[redacted]"))
             .field("login", &self.login)
             .field("share_names", &self.share_names)
+            .field("access", &self.access)
             .field("from_env", &self.from_env)
             .finish()
     }
@@ -621,6 +626,19 @@ pub fn account() -> Option<Account> {
         std::env::var("CCTOP_TUNNEL_HOSTNAME").ok().as_deref(),
         file.as_deref(),
     )
+}
+
+/// The Access settings in `config.toml`, whatever connected the tunnel: a
+/// service running on `CCTOP_TUNNEL_TOKEN` can still put its page behind
+/// Access by hand. `None` when there are none, or none that are complete.
+pub fn access_settings() -> Option<crate::cloudflare::access::Settings> {
+    access_settings_in(&std::fs::read_to_string(&*config::CONFIG_FILE).ok()?)
+}
+
+pub fn access_settings_in(text: &str) -> Option<crate::cloudflare::access::Settings> {
+    let doc = text.parse::<toml_edit::DocumentMut>().ok()?;
+    let table = doc.get("tunnel")?.get("access")?.as_table_like()?;
+    access_from_table(table).filter(|s| s.usable())
 }
 
 /// [`account`] from its three sources, which is the half worth testing.
@@ -704,7 +722,52 @@ fn from_table(text: &str) -> Option<Account> {
                     .collect()
             })
             .unwrap_or_default(),
+        access: table
+            .get("access")
+            .and_then(|v| v.as_table_like())
+            .and_then(access_from_table),
         from_env: false,
+    })
+}
+
+/// The `[tunnel.access]` table. An invite whose `who` or `level` does not
+/// read is dropped rather than guessed at: a rule nobody can say the meaning
+/// of should not let anyone in.
+fn access_from_table(
+    table: &dyn toml_edit::TableLike,
+) -> Option<crate::cloudflare::access::Settings> {
+    use crate::cloudflare::access::{Invite, Level, Settings, parse_who};
+    let text = |key: &str| {
+        table
+            .get(key)
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(String::from)
+    };
+    let invites = table
+        .get("invites")
+        .and_then(|v| v.as_array())
+        .map(|list| {
+            list.iter()
+                .filter_map(|entry| {
+                    let entry = entry.as_inline_table()?;
+                    Some(Invite {
+                        who: parse_who(entry.get("who")?.as_str()?)?,
+                        level: Level::from_word(entry.get("level")?.as_str()?)?,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    Some(Settings {
+        team: text("team")?,
+        aud: text("aud")?,
+        owner: text("owner")?.to_ascii_lowercase(),
+        invites,
+        app_id: text("app_id"),
+        policy_id: text("policy_id"),
+        idp_id: text("idp_id"),
     })
 }
 
@@ -751,6 +814,36 @@ pub(crate) fn save_account_in(path: &Path, account: &Account) -> anyhow::Result<
                 names.insert(session, toml_edit::Item::Table(entry));
             }
             table.insert("share_names", toml_edit::Item::Table(names));
+        }
+        if let Some(access) = &account.access {
+            let mut entry = toml_edit::Table::new();
+            for (key, value) in [
+                ("team", Some(&access.team)),
+                ("aud", Some(&access.aud)),
+                ("owner", Some(&access.owner)),
+                ("app_id", access.app_id.as_ref()),
+                ("policy_id", access.policy_id.as_ref()),
+                ("idp_id", access.idp_id.as_ref()),
+            ] {
+                if let Some(value) = value {
+                    entry.insert(key, toml_edit::value(value));
+                }
+            }
+            // One `{ who, level }` per line, so the list reads as a list.
+            let mut invites = toml_edit::Array::new();
+            for invite in &access.invites {
+                let mut one = toml_edit::InlineTable::new();
+                one.insert("who", invite.who.as_str().into());
+                one.insert("level", invite.level.word().into());
+                invites.push(one);
+            }
+            for value in invites.iter_mut() {
+                value.decor_mut().set_prefix("\n  ");
+            }
+            invites.set_trailing("\n");
+            invites.set_trailing_comma(true);
+            entry.insert("invites", toml_edit::value(invites));
+            table.insert("access", toml_edit::Item::Table(entry));
         }
         doc.insert("tunnel", toml_edit::Item::Table(table));
     })
@@ -827,6 +920,12 @@ mod tests {
                 ),
             ]
             .into(),
+            access: Some(crate::cloudflare::access::Settings {
+                app_id: Some("app1".into()),
+                policy_id: Some("pol1".into()),
+                idp_id: None,
+                ..crate::cloudflare::access::fake::settings()
+            }),
             from_env: false,
         }
     }
@@ -848,6 +947,10 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("token = \"keep-me\" # a comment"), "{text}");
+        assert!(
+            text.contains("\n  { who = \"@example.test\", level = \"read\" },\n]"),
+            "{text}"
+        );
         assert_eq!(account_from(None, None, Some(&text)), Some(full()));
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
@@ -898,7 +1001,10 @@ mod tests {
     #[test]
     fn debug_prints_neither_credential() {
         let shown = format!("{:?}", full());
-        assert!(!shown.contains("made-up"), "{shown}");
+        // The two credentials by name: the Access team and AUD tag beside
+        // them are made up too, and are not secrets.
+        assert!(!shown.contains("eyJhIjoi-made-up"), "{shown}");
+        assert!(!shown.contains("made-up-api-token"), "{shown}");
         assert!(shown.contains("cctop.example.test"), "{shown}");
         assert!(shown.contains("myagent"), "{shown}");
     }

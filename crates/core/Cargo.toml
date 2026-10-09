@@ -32,6 +32,7 @@ test-support = []
 [dependencies]
 cctop-tunnel.workspace = true
 anyhow.workspace = true
+base64.workspace = true
 chrono.workspace = true
 crossterm.workspace = true
 dirs.workspace = true
@@ -41,6 +42,7 @@ notify.workspace = true
 ratatui.workspace = true
 rayon.workspace = true
 regex.workspace = true
+ring.workspace = true
 rmux-client.workspace = true
 rmux-proto.workspace = true
 rmux-sdk.workspace = true

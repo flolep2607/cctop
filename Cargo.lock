@@ -490,6 +490,7 @@ name = "cctop-core"
 version = "0.32.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "cctop-rmux-client",
  "cctop-rmux-proto",
  "cctop-rmux-sdk",
@@ -505,6 +506,7 @@ dependencies = [
  "ratatui",
  "rayon",
  "regex",
+ "ring",
  "rusqlite",
  "safetensors",
  "self-replace",

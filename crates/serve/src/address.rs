@@ -324,6 +324,7 @@ pub mod tests {
                 },
             )]
             .into(),
+            access: None,
             from_env: false,
         };
         let fake = Fake {
