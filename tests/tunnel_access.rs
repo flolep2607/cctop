@@ -184,14 +184,72 @@ fn access_off_deletes_what_was_made_and_keeps_the_tunnel() {
     let out = cctop(&dir, &api, &["access", "off"], "");
     assert!(out.status.success(), "{}", said(&out));
     let gone = calls(&seen);
-    assert!(gone.iter().all(|c| c.contains("/access/")), "{gone:?}");
-    assert_eq!(gone.len(), 3, "{gone:?}");
+    // The three Access objects, then the token hostname: out of the ingress
+    // list, then its record. Never the tunnel or the page's records.
+    assert_eq!(
+        gone.iter().filter(|c| c.contains("/access/")).count(),
+        3,
+        "{gone:?}"
+    );
+    assert!(gone[3].ends_with("/configurations"), "{gone:?}");
+    assert!(
+        gone[4].starts_with("DELETE /zones/zone1/dns_records/"),
+        "{gone:?}"
+    );
+    assert_eq!(gone.len(), 5, "{gone:?}");
     let out = cctop(&dir, &api, &["status"], "");
     assert!(said(&out).contains("Connected: https://"), "{}", said(&out));
     assert!(
         said(&out).contains("Cloudflare Access: off"),
         "{}",
         said(&out)
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn public_links_off_deletes_the_token_hostname_and_on_makes_it_again() {
+    let dir = sandbox("links");
+    let (api, seen) = fake::api(fake::accepting(None));
+    assert!(
+        cctop(&dir, &api, &["setup"], "made-up-api-token\n")
+            .status
+            .success()
+    );
+    let out = cctop(
+        &dir,
+        &api,
+        &["access", "on", "--owner", "owner@example.test"],
+        "",
+    );
+    assert!(out.status.success(), "{}", said(&out));
+    assert!(said(&out).contains("-link.example.test"), "{}", said(&out));
+    let status = said(&cctop(&dir, &api, &["status"], ""));
+    assert!(status.contains("Public token links: on"), "{status}");
+
+    seen.lock().unwrap().clear();
+    let out = cctop(&dir, &api, &["access", "links", "off"], "");
+    assert!(out.status.success(), "{}", said(&out));
+    let gone = calls(&seen);
+    assert!(
+        gone.iter()
+            .any(|c| c.starts_with("DELETE /zones/zone1/dns_records/")),
+        "{gone:?}"
+    );
+    assert!(!gone.iter().any(|c| c.contains("/access/")), "{gone:?}");
+    let status = said(&cctop(&dir, &api, &["status"], ""));
+    assert!(status.contains("Public token links: off"), "{status}");
+    let config = std::fs::read_to_string(dir.join("config/cctop/config.toml")).unwrap();
+    assert!(config.contains("public_links = false"), "{config}");
+    assert!(!config.contains("link_hostname"), "{config}");
+
+    seen.lock().unwrap().clear();
+    let out = cctop(&dir, &api, &["access", "links", "on"], "");
+    assert!(out.status.success(), "{}", said(&out));
+    assert!(
+        calls(&seen).contains(&"POST /zones/zone1/dns_records".to_string()),
+        "{:?}",
+        calls(&seen)
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
