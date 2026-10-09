@@ -82,10 +82,13 @@ pub enum Via {
 pub enum Origin {
     Tui,
     Web,
-    /// From inside the session itself: `/yolo`, or `cctop yolo` run there.
-    /// One word for both, because nothing can tell them apart — see
-    /// [`crate::yolo::command`].
+    /// From inside the session itself: `cctop yolo off` run in its shell,
+    /// which the model can do as easily as the person.
     Session,
+    /// `/yolo` typed by the person, answered by `cctop yolo-hook
+    /// UserPromptExpansion` — which Claude Code fires only for a command the
+    /// person typed, never for one the model runs. See [`crate::yolo::typed`].
+    Typed,
 }
 
 /// The tool a permission prompt was for, and what it was asked to touch, as the
@@ -511,12 +514,14 @@ const HELP: &str = "\
 cctop yolo — switch YOLO from inside a session, and what it allowed
 
 Usage:
-  cctop yolo on | off | status
+  cctop yolo off | status
   cctop yolo log [--session <id>] [--since <when>] [-n <count>] [--json] [-f]
 
-`on`, `off` and `status` act on the Claude Code session they run inside, so
-they are for that session's own shell — which is what /yolo in Claude Code
-runs. `on` lasts until the session's process ends.
+`off` and `status` act on the Claude Code session they run inside, so they are
+for that session's own shell. `on` is refused everywhere: inside a session it
+could as well be the model asking, so YOLO is switched on by typing /yolo in
+the session (answered by cctop's hook, never by the model) or from cctop's
+table or page. It lasts until the session's process ends.
 
 Every prompt YOLO allowed, by the hook or by a key press, and every time it was
 switched on or off, is appended to ~/.local/share/cctop/yolo-log.jsonl (rotated
@@ -537,9 +542,7 @@ treat the file as sensitive.
 pub fn run(argv: &[String]) -> i32 {
     match argv.first().map(String::as_str) {
         Some("log") => run_log(&Log::default(), &argv[1..], &mut std::io::stdout()),
-        Some(word) if matches!(word, "on" | "off" | "status") || word.starts_with("--slash") => {
-            crate::yolo::command(argv)
-        }
+        Some("on" | "off" | "status") => crate::yolo::command(argv),
         Some("-h" | "--help" | "help") | None => {
             print!("{HELP}");
             0
@@ -687,6 +690,7 @@ fn render(line: &Line) -> String {
                 Some(Origin::Tui) => " from the TUI",
                 Some(Origin::Web) => " from the web",
                 Some(Origin::Session) => " from inside the session",
+                Some(Origin::Typed) => " typed as /yolo",
                 None => "",
             };
             let pid = line.pid.map(|p| format!(" pid {p}")).unwrap_or_default();

@@ -124,8 +124,20 @@ fn request_for(session: &str, command: &str) -> Vec<u8> {
 }
 
 fn fire_as(dir: &Path, word: &str, event: &str, stdin: &[u8]) -> Fired {
+    fire_with(dir, word, event, stdin, &[])
+}
+
+/// [`fire_as`] with these variables set, as Claude Code sets them for a hook.
+fn fire_with(dir: &Path, word: &str, event: &str, stdin: &[u8], vars: &[(&str, &str)]) -> Fired {
     let started = Instant::now();
-    let mut child = command(dir)
+    let mut cmd = command(dir);
+    cmd.env_remove("CLAUDE_PID")
+        .env_remove("CLAUDE_CODE_SESSION_ID")
+        .env_remove("CLAUDECODE");
+    for (k, v) in vars {
+        cmd.env(k, v);
+    }
+    let mut child = cmd
         .arg(word)
         .arg(event)
         .stdin(Stdio::piped())
@@ -161,6 +173,54 @@ fn fire_as(dir: &Path, word: &str, event: &str, stdin: &[u8]) -> Fired {
 
 fn fire(dir: &Path, stdin: &[u8]) -> Fired {
     fire_as(dir, "yolo-hook", "PermissionRequest", stdin)
+}
+
+/// A `UserPromptExpansion` payload for `/<name> <args>`, as Claude Code
+/// 2.1.295 sends it (captured from a real session, ids replaced).
+fn expansion(session: &str, name: &str, args: &str) -> serde_json::Value {
+    serde_json::json!({
+        "session_id": session,
+        "transcript_path": "/t.jsonl",
+        "cwd": "/w",
+        "prompt_id": "p",
+        "permission_mode": "default",
+        "hook_event_name": "UserPromptExpansion",
+        "expansion_type": "slash_command",
+        "command_name": name,
+        "command_args": args,
+        "command_source": "userSettings",
+        "prompt": format!("/{name} {args}"),
+    })
+}
+
+/// Fire `cctop yolo-hook UserPromptExpansion` for `/yolo <args>` the way
+/// Claude Code does, this test process standing as the agent.
+fn type_yolo(dir: &Path, session: &str, args: &str) -> Fired {
+    let pid = std::process::id().to_string();
+    fire_with(
+        dir,
+        "yolo-hook",
+        "UserPromptExpansion",
+        &serde_json::to_vec(&expansion(session, "yolo", args)).unwrap(),
+        &[("CLAUDE_PID", &pid), ("CLAUDE_CODE_SESSION_ID", session)],
+    )
+}
+
+/// The block `/yolo` is answered with, and its reason.
+#[track_caller]
+fn blocked(fired: &Fired) -> String {
+    assert_eq!(fired.code, Some(0));
+    assert!(fired.took < PATIENCE, "took {:?}", fired.took);
+    let out = String::from_utf8(fired.stdout.clone()).unwrap();
+    assert_eq!(out.lines().count(), 1, "{out}");
+    let answer: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
+    assert_eq!(answer["decision"], "block", "{out}");
+    assert_eq!(
+        answer["hookSpecificOutput"],
+        serde_json::json!({"hookEventName": "UserPromptExpansion", "suppressOriginalPrompt": true}),
+    );
+    assert_eq!(answer.as_object().unwrap().len(), 3, "{out}");
+    answer["reason"].as_str().unwrap().to_string()
 }
 
 /// Exit 0, nothing on stdout, and back promptly.
@@ -420,5 +480,199 @@ fn yolo_log_reads_both_files_and_filters() {
     let help = command(&dir).arg("yolo").output().unwrap();
     assert_eq!(help.status.code(), Some(0));
     assert!(String::from_utf8_lossy(&help.stdout).contains("cctop yolo log"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `/yolo`, `/yolo status` and `/yolo off` typed in Claude Code are answered
+/// by the hook itself, with a block whose reason is the answer — so the
+/// command never expands and no model turn runs — and the switch they throw
+/// is the one the `PermissionRequest` hook honours, logged as typed.
+#[test]
+fn typed_yolo_is_answered_by_the_hook() {
+    let dir = sandbox("typed");
+    assert_eq!(
+        blocked(&type_yolo(&dir, "s1", "status")),
+        "YOLO is off for this session."
+    );
+    assert!(!state(&dir).exists(), "status wrote the switch");
+
+    let on = blocked(&type_yolo(&dir, "s1", ""));
+    assert!(on.starts_with("YOLO on for this session"), "{on}");
+    let doc: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(state(&dir)).unwrap()).unwrap();
+    assert_eq!(doc["sessions"]["s1"]["agent"]["pid"], std::process::id());
+    // What the switch is for: the next permission prompt is allowed.
+    let fired = fire(&dir, &request("s1"));
+    assert_eq!(String::from_utf8_lossy(&fired.stdout), format!("{ALLOW}\n"));
+
+    let status = blocked(&type_yolo(&dir, "s1", " status "));
+    assert!(
+        status.starts_with("YOLO is on for this session"),
+        "{status}"
+    );
+    assert!(status.contains("1 prompt allowed"), "{status}");
+
+    let off = blocked(&type_yolo(&dir, "s1", "off"));
+    assert!(off.starts_with("YOLO off for this session"), "{off}");
+    assert_silent(&fire(&dir, &request("s1")), "a prompt after /yolo off");
+    assert_eq!(
+        blocked(&type_yolo(&dir, "s1", "off")),
+        "YOLO was not on for this session."
+    );
+
+    // The words it does not know are answered too, and change nothing.
+    let bad = blocked(&type_yolo(&dir, "s1", "yes please"));
+    assert!(bad.contains("on, off or status"), "{bad}");
+
+    let switches: Vec<(String, String)> = logged(&dir)
+        .iter()
+        .filter(|l| l["event"] != "allow")
+        .map(|l| {
+            (
+                l["event"].as_str().unwrap().to_string(),
+                l["from"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        switches,
+        [
+            ("on".into(), "typed".into()),
+            ("off".into(), "typed".into())
+        ]
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Without a `CLAUDE_PID` naming one of its ancestors there is no process to
+/// give the permission to: `/yolo` is still answered — the person typed it —
+/// but with why, and nothing is switched.
+#[test]
+fn typed_yolo_without_its_agent_switches_nothing() {
+    let dir = sandbox("typed-no-agent");
+    let payload = serde_json::to_vec(&expansion("s1", "yolo", "on")).unwrap();
+    for vars in [vec![], vec![("CLAUDE_PID", "1")]] {
+        let why = blocked(&fire_with(
+            &dir,
+            "yolo-hook",
+            "UserPromptExpansion",
+            &payload,
+            &vars,
+        ));
+        assert!(why.starts_with("YOLO unchanged"), "{why}");
+    }
+    assert!(!state(&dir).exists());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Every expansion but Claude Code's own `/yolo` is silence, whichever way
+/// it differs — and `cctop hook` says nothing even for `/yolo`.
+#[test]
+fn every_other_expansion_is_silence() {
+    let dir = sandbox("typed-silence");
+    let pid = std::process::id().to_string();
+    let vars = [
+        ("CLAUDE_PID", pid.as_str()),
+        ("CLAUDE_CODE_SESSION_ID", "s1"),
+    ];
+    let with = |change: &dyn Fn(&mut serde_json::Value)| {
+        let mut body = expansion("s1", "yolo", "on");
+        change(&mut body);
+        serde_json::to_vec(&body).unwrap()
+    };
+    for (case, payload) in [
+        (
+            "another command",
+            with(&|b| b["command_name"] = "deploy".into()),
+        ),
+        (
+            "a longer name",
+            with(&|b| b["command_name"] = "yolo2".into()),
+        ),
+        (
+            "a plugin's yolo",
+            with(&|b| b["command_name"] = "p:yolo".into()),
+        ),
+        (
+            "an MCP prompt named yolo",
+            with(&|b| b["expansion_type"] = "mcp_prompt".into()),
+        ),
+        (
+            "a payload about another event",
+            with(&|b| b["hook_event_name"] = "UserPromptSubmit".into()),
+        ),
+        (
+            "no command name",
+            with(&|b| b["command_name"] = serde_json::Value::Null),
+        ),
+        ("no session", with(&|b| b["session_id"] = "".into())),
+        ("empty", Vec::new()),
+        ("malformed", b"{ not json".to_vec()),
+    ] {
+        assert_silent(
+            &fire_with(&dir, "yolo-hook", "UserPromptExpansion", &payload, &vars),
+            case,
+        );
+    }
+    let yolo = with(&|_| {});
+    // `/yolo`'s payload on any other event, and the observer on this one.
+    for event in ["PermissionRequest", "UserPromptSubmit", "PreToolUse", ""] {
+        assert_silent(
+            &fire_with(&dir, "yolo-hook", event, &yolo, &vars),
+            &format!("yolo-hook fired for {event:?}"),
+        );
+    }
+    assert_silent(
+        &fire_with(&dir, "hook", "UserPromptExpansion", &yolo, &vars),
+        "cctop hook UserPromptExpansion",
+    );
+    assert!(!state(&dir).exists(), "something switched");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `cctop yolo on` is refused, inside a session and out — a model's Bash
+/// call is indistinguishable from the person there — while `status` and
+/// `off`, which cannot widen anything, still answer.
+#[test]
+fn the_cli_cannot_switch_yolo_on() {
+    let dir = sandbox("cli-on");
+    let pid = std::process::id().to_string();
+    let inside = [
+        ("CLAUDECODE", "1"),
+        ("CLAUDE_PID", pid.as_str()),
+        ("CLAUDE_CODE_SESSION_ID", "s1"),
+    ];
+    for vars in [&inside[..], &[]] {
+        let mut cmd = command(&dir);
+        cmd.env_remove("CLAUDE_PID")
+            .env_remove("CLAUDE_CODE_SESSION_ID")
+            .env_remove("CLAUDECODE");
+        for (k, v) in vars {
+            cmd.env(k, v);
+        }
+        let out = cmd.args(["yolo", "on"]).output().unwrap();
+        assert_eq!(out.status.code(), Some(1));
+        assert!(out.stdout.is_empty());
+        assert!(String::from_utf8_lossy(&out.stderr).contains("/yolo"));
+    }
+    // The flag the old `/yolo` skill ran is no way in either.
+    let out = command(&dir)
+        .envs(inside)
+        .args(["yolo", "--slash=k", "on"])
+        .output()
+        .unwrap();
+    assert_ne!(out.status.code(), Some(0));
+    assert!(!state(&dir).exists());
+
+    let status = command(&dir)
+        .envs(inside)
+        .args(["yolo", "status"])
+        .output()
+        .unwrap();
+    assert_eq!(status.status.code(), Some(0));
+    assert_eq!(
+        String::from_utf8_lossy(&status.stdout),
+        "YOLO is off for this session.\n"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
