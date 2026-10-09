@@ -149,6 +149,35 @@ reads each file once and writes nothing; anything it does change is said once in
 the status line (or on stderr for `serve`). `cctop hook` itself never does this:
 it stays as fast and as silent as below.
 
+### `/yolo` in Claude Code
+
+A user install of Claude Code's hooks also writes one skill,
+`~/.claude/skills/yolo/SKILL.md`, so YOLO can be switched without leaving the
+session: `/yolo` switches it on for that session (every permission prompt is
+allowed until the session's process ends), `/yolo off` switches it off, and
+`/yolo status` says which. The work is done by `cctop yolo on|off|status`, which
+any shell inside the session can run too: it takes the session from
+`CLAUDE_CODE_SESSION_ID` and the agent process from `CLAUDE_PID` (Claude Code
+2.1.214 or later), and writes the same switch the table does.
+
+It is refreshed and removed with the hooks, never written over a `/yolo` of your
+own (a skill of that name, or `~/.claude/commands/yolo.md`), and not installed
+at project scope, since a command that hands out permission is not one to
+check in.
+
+What it cannot do is prove that you typed it. Claude Code runs a command's
+`` !`…` `` line through the Bash tool's own code, so `cctop yolo` sees exactly
+the environment and process tree it would see if the model had run it — checked
+against Claude Code 2.1.294, where the two differ only in their pids. The guards
+are Claude Code's: the skill sets `disable-model-invocation`, so the model's
+Skill tool is refused; the permission the skill grants itself covers only its
+own command line, which carries a random key the model never sees, so even in
+the turn you typed `/yolo` the model's own `cctop yolo on` is held at a
+permission prompt. That prompt is the whole of the guard. If Bash is broadly
+allowed — `Bash(*)`, bypass mode, or "don't ask again" for `cctop yolo *` — the
+model can switch YOLO on for itself, as it could by writing the switch file
+directly.
+
 Cursor also reads Claude Code's `settings.json` of its own accord, so with both
 installed each moment arrives twice; that costs a process spawn and nothing
 else, since the second event says exactly what the first did. The same goes for
