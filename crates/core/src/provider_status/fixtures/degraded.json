@@ -11,14 +11,14 @@
     {
       "id": "01K6Z",
       "name": "Increased error rates",
-      "status": "monitoring",
+      "status": "identified",
       "impact": "minor",
       "created_at": "2026-10-08T14:04:37.000Z",
       "started_at": "2026-10-08T13:55:00.000Z",
       "components": [],
       "incident_updates": [
         {"status": "investigating", "body": "We are investigating.", "created_at": "2026-10-08T14:04:37.000Z"},
-        {"status": "monitoring", "body": "We have applied the\n  mitigation   and are monitoring.", "created_at": "2026-10-08T15:07:54.000Z"}
+        {"status": "identified", "body": "We have found the\n  cause   and are applying a mitigation.", "created_at": "2026-10-08T15:07:54.000Z"}
       ]
     }
   ],
