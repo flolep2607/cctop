@@ -828,6 +828,9 @@ mod tests {
             share_hostname: Some("cctop-share.example.test".into()),
             zone: Some("example.test".into()),
             rename: Ok(()),
+            access_owner: None,
+            link_hostname: None,
+            public_links: true,
         });
         app
     }

@@ -682,6 +682,84 @@ fn connect_popup() {
     snap("connect_done", &mut app);
 }
 
+/// Who may log in: the connected account with Access on, its invite list with
+/// public token links on, then off; and Access off with the owner's field
+/// open. Every address here is made up.
+#[test]
+fn connect_access() {
+    use super::connect::{Connect, Step, Typing};
+    use cctop_core::cloudflare::access::{Invite, Level, Settings};
+    use cctop_core::tunnel::Account;
+    let settings = Settings {
+        owner: "owner@example.com".into(),
+        invites: vec![
+            Invite {
+                who: "@example.com".into(),
+                level: Level::Read,
+            },
+            Invite {
+                who: "boss@example.org".into(),
+                level: Level::Full,
+            },
+        ],
+        app_id: Some("app1".into()),
+        link_hostname: Some("cctop-link.example.com".into()),
+        link_record_id: Some("rec-link".into()),
+        ..Settings::default()
+    };
+    let account = |access: Option<Settings>| Account {
+        token: "eyJhIjoi-made-up".into(),
+        hostname: Some("cctop.example.com".into()),
+        share_hostname: Some("cctop-share.example.com".into()),
+        access: access.map(Box::new),
+        ..Account::default()
+    };
+    let open = |step: Step| {
+        let mut app = fixture();
+        app.connect = Some(Connect::new(step, Mode::List));
+        app.mode = Mode::Connect;
+        app
+    };
+
+    let mut app = open(Step::Connected {
+        account: account(Some(settings.clone())),
+        confirm: false,
+    });
+    snap("connect_connected_access", &mut app);
+
+    let mut app = open(Step::Access {
+        account: account(Some(settings.clone())),
+        cursor: 1,
+        field: None,
+        confirm: false,
+        said: vec!["Invited boss@example.org, with full access.".into()],
+    });
+    snap("connect_access_on", &mut app);
+
+    let mut app = open(Step::Access {
+        account: account(Some(Settings {
+            public_links: false,
+            link_hostname: None,
+            link_record_id: None,
+            ..settings
+        })),
+        cursor: 0,
+        field: Some((Typing::Invite, "guest@".into())),
+        confirm: false,
+        said: Vec::new(),
+    });
+    snap("connect_access_links_off", &mut app);
+
+    let mut app = open(Step::Access {
+        account: account(None),
+        cursor: 0,
+        field: Some((Typing::Owner, "owner@example.com".into())),
+        confirm: false,
+        said: Vec::new(),
+    });
+    snap("connect_access_off", &mut app);
+}
+
 /// Choosing an address: the share panel with its `Address` line, the field
 /// `e` opens on it, and the dashboard's field with its warning. Every token
 /// and link here is made up, and only hostnames reach the screen.

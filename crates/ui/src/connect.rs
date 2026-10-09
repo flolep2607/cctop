@@ -21,6 +21,15 @@
 //! way. Both ways then meet at the same domain and hostname steps, carrying an
 //! [`Auth`] that says which kind of token they hold.
 //!
+//! # Who may log in
+//!
+//! `a` on the connected account opens [`Step::Access`]: Cloudflare Access on
+//! or off, the invite list, and whether token links still work from outside.
+//! Every edit is [`access_setup::apply`], the one `cctop tunnel access` and the
+//! web page make too, on a thread of its own like every other call here; it
+//! saves `config.toml` there, so a popup closed mid-call still leaves the file
+//! and Cloudflare agreeing.
+//!
 //! # Credentials on screen
 //!
 //! Never. The paste field is masked from the first character, the tokens are
@@ -29,6 +38,8 @@
 //! of which quotes the token.
 
 use super::*;
+use cctop_core::cloudflare::access::Level;
+use cctop_core::cloudflare::access_setup::{self, Applied, Change};
 use cctop_core::cloudflare::login::Login;
 use cctop_core::cloudflare::{self, Auth, Pasted, Zone};
 use cctop_core::tunnel::Account;
@@ -106,6 +117,27 @@ pub enum Step {
     Failed { message: String },
     /// Disconnected, and anything left on Cloudflare to delete by hand.
     Disconnected { left: Vec<String>, made_here: bool },
+    /// Cloudflare Access on the connected account: on or off, the invites
+    /// with one under the cursor, and the token links' switch.
+    Access {
+        account: Account,
+        cursor: usize,
+        /// A field open for an address, and what Enter does with it.
+        field: Option<(Typing, LineEdit)>,
+        /// Asking before Access is turned off.
+        confirm: bool,
+        /// What the last edit said, or left behind on Cloudflare.
+        said: Vec<String>,
+    },
+}
+
+/// What the Access step's field is for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Typing {
+    /// The owner's email, to turn Access on.
+    Owner,
+    /// An email or `@domain` to invite, read-only.
+    Invite,
 }
 
 /// What a worker thread comes back with.
@@ -117,7 +149,12 @@ enum Answer {
     Suggested(Auth, Zone, Result<String, cloudflare::Error>),
     Created(Result<Account, String>),
     Removed(Result<(Vec<String>, bool), String>),
+    Access(Result<Applied, String>),
 }
+
+/// How an Access edit is made: [`access_setup::apply`], except in a test,
+/// which applies it to an account of its own against the fake API.
+pub type ApplyAccess = Arc<dyn Fn(Change) -> Result<Applied, String> + Send + Sync>;
 
 /// A call to Cloudflare in flight.
 pub struct Working {
@@ -143,6 +180,7 @@ pub struct Connect {
     /// Where a login starts: Cloudflare, and in a test the fake, so that no
     /// test polls the real store.
     new_login: Box<dyn Fn() -> Login>,
+    apply_access: ApplyAccess,
 }
 
 impl Drop for Connect {
@@ -161,6 +199,7 @@ impl Connect {
             problem: None,
             cancel: Arc::default(),
             new_login: Box::new(Login::new),
+            apply_access: Arc::new(access_setup::apply),
         }
     }
 
@@ -185,6 +224,7 @@ impl Connect {
                     ..
                 } | Step::Hostname { .. }
                     | Step::TunnelHostname { .. }
+                    | Step::Access { field: Some(_), .. }
             )
     }
 
@@ -199,7 +239,11 @@ impl Connect {
                 method: Method::Paste,
             }
             | Step::Hostname { field, .. }
-            | Step::TunnelHostname { field, .. } => Some(field),
+            | Step::TunnelHostname { field, .. }
+            | Step::Access {
+                field: Some((_, field)),
+                ..
+            } => Some(field),
             _ => None,
         }
     }
@@ -217,6 +261,12 @@ pub struct Connected {
     pub zone: Option<String>,
     /// Whether cctop can write the account's DNS, or why not.
     pub rename: Result<(), &'static str>,
+    /// Who owns the page's Cloudflare Access, while it is on.
+    pub access_owner: Option<String>,
+    /// Where token links go while Access is on, and whether they work from
+    /// outside at all.
+    pub link_hostname: Option<String>,
+    pub public_links: bool,
 }
 
 impl From<&Account> for Connected {
@@ -227,6 +277,12 @@ impl From<&Account> for Connected {
             share_hostname: account.share_hostname.clone(),
             zone: account.zone_name().map(str::to_string),
             rename: account.can_rename(),
+            access_owner: account.access.as_ref().map(|a| a.owner.clone()),
+            link_hostname: account
+                .access
+                .as_ref()
+                .and_then(|a| a.link_hostname.clone()),
+            public_links: account.access.as_ref().is_none_or(|a| a.public_links),
         }
     }
 }
@@ -538,10 +594,195 @@ impl App {
             .split(['/', '?'])
             .next()
             .unwrap_or_default();
-        self.connected
+        self.connected.as_ref().is_some_and(|c| {
+            [&c.hostname, &c.link_hostname]
+                .into_iter()
+                .flatten()
+                .any(|h| h.eq_ignore_ascii_case(host))
+        })
+    }
+
+    /// `a` on the connected account: its Access, as `config.toml` has it.
+    fn open_access(&mut self) {
+        let Some(flow) = self.connect.as_mut() else {
+            return;
+        };
+        let Step::Connected { account, .. } = &flow.step else {
+            return;
+        };
+        flow.step = Step::Access {
+            account: account.clone(),
+            cursor: 0,
+            field: None,
+            confirm: false,
+            said: Vec::new(),
+        };
+        flow.problem = None;
+    }
+
+    /// Make `change` off the UI thread.
+    fn access_work(&mut self, what: &'static str, change: Change) {
+        let Some(flow) = self.connect.as_ref() else {
+            return;
+        };
+        let apply = flow.apply_access.clone();
+        self.connect_work(what, move || Answer::Access(apply(change)));
+    }
+
+    /// A key on the Access step, with no field open.
+    fn on_key_access(&mut self, key: KeyEvent) {
+        let Some(flow) = self.connect.as_mut() else {
+            return;
+        };
+        let Step::Access {
+            account,
+            cursor,
+            field,
+            confirm,
+            ..
+        } = &mut flow.step
+        else {
+            return;
+        };
+        let settings = account.access.as_deref().cloned();
+        if *confirm {
+            match key.code {
+                KeyCode::Char('y') => {
+                    *confirm = false;
+                    self.access_work("Taking the page out of Access…", Change::Off);
+                }
+                KeyCode::Char('n') | KeyCode::Esc => *confirm = false,
+                _ => {}
+            }
+            return;
+        }
+        let selected = settings
             .as_ref()
-            .and_then(|c| c.hostname.as_deref())
-            .is_some_and(|h| h.eq_ignore_ascii_case(host))
+            .and_then(|s| s.invites.get(*cursor).cloned());
+        match (key.code, &settings) {
+            (KeyCode::Esc, _) => {
+                let account = account.clone();
+                flow.step = Step::Connected {
+                    account,
+                    confirm: false,
+                };
+                flow.problem = None;
+            }
+            (KeyCode::Char('o'), None) => *field = Some((Typing::Owner, LineEdit::default())),
+            (KeyCode::Char('o'), Some(_)) => *confirm = true,
+            (KeyCode::Char('i'), Some(_)) => *field = Some((Typing::Invite, LineEdit::default())),
+            (KeyCode::Up | KeyCode::Char('k'), Some(_)) => *cursor = cursor.saturating_sub(1),
+            (KeyCode::Down | KeyCode::Char('j'), Some(s)) => {
+                *cursor = (*cursor + 1).min(s.invites.len().saturating_sub(1))
+            }
+            (KeyCode::Char('x') | KeyCode::Delete, Some(_)) => {
+                if let Some(invite) = selected {
+                    self.access_work(
+                        "Updating who may log in…",
+                        Change::Uninvite { who: invite.who },
+                    );
+                }
+            }
+            (KeyCode::Char('f'), Some(_)) => {
+                if let Some(invite) = selected {
+                    let level = match invite.level {
+                        Level::Read => Level::Full,
+                        Level::Full => Level::Read,
+                    };
+                    self.access_work(
+                        "Updating who may log in…",
+                        Change::Invite {
+                            who: invite.who,
+                            level,
+                        },
+                    );
+                }
+            }
+            (KeyCode::Char('l'), Some(s)) => {
+                let on = !s.public_links;
+                self.access_work(
+                    match on {
+                        true => "Making the token hostname…",
+                        false => "Deleting the token hostname…",
+                    },
+                    Change::PublicLinks(on),
+                );
+            }
+            _ => {}
+        }
+    }
+
+    /// Enter in the Access step's field.
+    fn submit_access_field(&mut self) {
+        let Some(flow) = self.connect.as_mut() else {
+            return;
+        };
+        let Step::Access { field, .. } = &mut flow.step else {
+            return;
+        };
+        let Some((typing, text)) = field.as_ref() else {
+            return;
+        };
+        let typed = text.trim().to_string();
+        let checked = cctop_core::cloudflare::access::parse_who(&typed)
+            .filter(|who| *typing == Typing::Invite || !who.starts_with('@'));
+        let Some(who) = checked else {
+            flow.problem = Some(match typing {
+                Typing::Owner => "The owner is one email address.".to_string(),
+                Typing::Invite => {
+                    "An email address, or a whole domain written @company.com.".to_string()
+                }
+            });
+            return;
+        };
+        let typing = *typing;
+        *field = None;
+        match typing {
+            Typing::Owner => self.access_work(
+                "Putting the page behind Cloudflare Access…",
+                Change::On { owner: who },
+            ),
+            Typing::Invite => self.access_work(
+                "Updating who may log in…",
+                Change::Invite {
+                    who,
+                    level: Level::Read,
+                },
+            ),
+        }
+    }
+
+    /// The links this dashboard hands out, after Access or its token links
+    /// changed under a serve on the account: the token hostname while public
+    /// links are on, the page's bare address while they are off — a token
+    /// gets nothing through the tunnel then.
+    fn retarget_links(&mut self, account: &Account) {
+        if !self.serving_on_account() {
+            return;
+        }
+        let Some(page) = account.hostname.as_ref().map(|h| format!("https://{h}")) else {
+            return;
+        };
+        let Some(serving) = self.serving.as_mut() else {
+            return;
+        };
+        let token = |link: &str| link.split_once("?t=").map(|(_, t)| t.to_string());
+        let full = token(&serving.local);
+        let readonly = token(&serving.readonly);
+        let origin = match account.access.as_deref() {
+            Some(settings) => settings.token_origin(&page),
+            None => Some(page.clone()),
+        };
+        match (origin, full) {
+            (Some(origin), Some(full)) => {
+                serving.public = Some(format!("{origin}/?t={full}"));
+                if let Some(readonly) = readonly {
+                    serving.readonly = format!("{origin}/?t={readonly}");
+                }
+            }
+            (Some(origin), None) => serving.public = Some(format!("{origin}/")),
+            (None, _) => serving.public = Some(format!("{page}/")),
+        }
     }
 
     /// Take a worker's answer, if one has come. Returns whether the screen
@@ -650,6 +891,32 @@ impl App {
                 self.set_status("Cloudflare account disconnected");
             }
             Answer::Removed(Err(message)) => flow.step = Step::Failed { message },
+            Answer::Access(Ok(applied)) => {
+                let Step::Access {
+                    account,
+                    cursor,
+                    said,
+                    ..
+                } = &mut flow.step
+                else {
+                    return;
+                };
+                *account = applied.account.clone();
+                let count = account.access.as_ref().map_or(0, |a| a.invites.len());
+                *cursor = (*cursor).min(count.saturating_sub(1));
+                *said = std::iter::once(applied.said.clone())
+                    .chain(
+                        applied
+                            .left
+                            .iter()
+                            .map(|item| format!("Left on Cloudflare to delete by hand: {item}")),
+                    )
+                    .collect();
+                self.connected = Some(Connected::from(&applied.account));
+                self.retarget_links(&applied.account);
+                self.set_status(applied.said);
+            }
+            Answer::Access(Err(message)) => flow.problem = Some(message),
         }
     }
 
@@ -753,7 +1020,25 @@ impl App {
                 KeyCode::Esc => self.close_connect(),
                 _ => {}
             },
+            Step::Access { field: Some(_), .. } => match key.code {
+                KeyCode::Esc => {
+                    if let Step::Access { field, .. } = &mut flow.step {
+                        *field = None;
+                    }
+                    flow.problem = None;
+                }
+                KeyCode::Enter => self.submit_access_field(),
+                _ => {
+                    if let Some(field) = flow.field()
+                        && field.key(key, HOSTNAME_MAX).changed()
+                    {
+                        flow.problem = None;
+                    }
+                }
+            },
+            Step::Access { .. } => self.on_key_access(key),
             Step::Connected { confirm, .. } => match (key.code, *confirm) {
+                (KeyCode::Char('a'), false) => self.open_access(),
                 (KeyCode::Char('d'), false) => *confirm = true,
                 (KeyCode::Char('y'), true) => self.disconnect(),
                 (KeyCode::Char('n') | KeyCode::Esc, true) => *confirm = false,
@@ -1078,6 +1363,130 @@ mod tests {
             "No login arrived within ten minutes; start again.".into(),
         ))));
         assert!(matches!(step(&app), Step::Failed { message } if message.contains("ten minutes")));
+    }
+
+    /// The Access step over an account cctop set up, whose edits go to the
+    /// fake Cloudflare API rather than `config.toml`. Every token is made up.
+    fn access_app() -> (App, cctop_core::cloudflare::fake::Seen) {
+        use cctop_core::cloudflare::{Api, fake};
+        let (base, seen) = fake::api(fake::accepting(None));
+        let account = Account {
+            token: "eyJhIjoi-made-up".into(),
+            hostname: Some("cctop.example.test".into()),
+            share_hostname: Some("cctop-share.example.test".into()),
+            account_id: Some("acct1".into()),
+            zone_id: Some("zone1".into()),
+            tunnel_id: Some(fake::TUNNEL_ID.into()),
+            api_token: Some("made-up-api-token".into()),
+            ..Account::default()
+        };
+        let held = Arc::new(std::sync::Mutex::new(account.clone()));
+        let mut flow = Connect::new(
+            Step::Connected {
+                account,
+                confirm: false,
+            },
+            Mode::List,
+        );
+        flow.apply_access = Arc::new(move |change| {
+            let mut account = held.lock().unwrap();
+            let api = Api::fake(&base, "made-up-api-token");
+            let applied =
+                access_setup::apply_with(&api, &account, change).map_err(|e| e.to_string())?;
+            *account = applied.account.clone();
+            Ok(applied)
+        });
+        let mut app = test_app();
+        app.open_connect_at(flow);
+        (app, seen)
+    }
+
+    /// Wait for the call in flight, as the tick would.
+    fn settle(app: &mut App) {
+        cctop_core::test_wait::eventually_true("the Access edit", || {
+            app.tick_connect();
+            app.connect.as_ref().is_some_and(|c| c.working.is_none())
+        });
+    }
+
+    fn settings(app: &App) -> Option<cctop_core::cloudflare::access::Settings> {
+        match step(app) {
+            Step::Access { account, .. } => account.access.as_deref().cloned(),
+            _ => panic!("not the Access step"),
+        }
+    }
+
+    fn type_in(app: &mut App, text: &str) {
+        app.paste_connect(text);
+        app.on_key_connect(KeyCode::Enter.into());
+    }
+
+    #[test]
+    fn access_goes_on_invites_change_and_the_edge_follows() {
+        let (mut app, seen) = access_app();
+        app.on_key_connect(KeyCode::Char('a').into());
+        assert_eq!(settings(&app), None);
+        // A domain is no owner: refused under the field, before any call.
+        app.on_key_connect(KeyCode::Char('o').into());
+        assert!(app.connect.as_ref().unwrap().typing());
+        type_in(&mut app, "@example.test");
+        assert!(app.connect.as_ref().unwrap().problem.is_some());
+        assert!(seen.lock().unwrap().is_empty());
+        app.on_key_connect(KeyCode::Esc.into());
+        app.on_key_connect(KeyCode::Char('o').into());
+        type_in(&mut app, "Owner@Example.test");
+        settle(&mut app);
+        let on = settings(&app).expect("Access is on");
+        assert_eq!(on.owner, "owner@example.test");
+        assert_eq!(on.link_hostname.as_deref(), Some("cctop-link.example.test"));
+        assert_eq!(
+            app.connected
+                .as_ref()
+                .and_then(|c| c.access_owner.as_deref()),
+            Some("owner@example.test")
+        );
+
+        app.on_key_connect(KeyCode::Char('i').into());
+        type_in(&mut app, "guest@elsewhere.test");
+        settle(&mut app);
+        app.on_key_connect(KeyCode::Char('f').into());
+        settle(&mut app);
+        let invites = settings(&app).unwrap().invites;
+        assert_eq!(invites.len(), 1);
+        assert_eq!(invites[0].level, Level::Full);
+        let policy = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .rev()
+            .find(|(m, p, _)| m == "PUT" && p.contains("/access/policies/"))
+            .map(|(_, _, b)| b.clone())
+            .expect("the policy was rewritten");
+        assert!(policy.contains("guest@elsewhere.test"), "{policy}");
+
+        // Token links off and on: the hostname goes and comes back.
+        app.on_key_connect(KeyCode::Char('l').into());
+        settle(&mut app);
+        let off = settings(&app).unwrap();
+        assert!(!off.public_links);
+        assert_eq!(off.link_hostname, None);
+        assert!(!app.connected.as_ref().unwrap().public_links);
+        app.on_key_connect(KeyCode::Char('l').into());
+        settle(&mut app);
+        assert!(settings(&app).unwrap().public_links);
+
+        app.on_key_connect(KeyCode::Char('x').into());
+        settle(&mut app);
+        assert!(settings(&app).unwrap().invites.is_empty());
+
+        // Off asks first.
+        app.on_key_connect(KeyCode::Char('o').into());
+        assert!(settings(&app).is_some());
+        app.on_key_connect(KeyCode::Char('y').into());
+        settle(&mut app);
+        assert_eq!(settings(&app), None);
+        app.on_key_connect(KeyCode::Esc.into());
+        assert!(matches!(step(&app), Step::Connected { .. }));
     }
 
     #[test]
