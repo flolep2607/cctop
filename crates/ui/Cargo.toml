@@ -2,7 +2,7 @@
 name = "cctop-ui"
 # Its own version, not the release's: bumped only in a release that changes
 # this crate. The rules are in tools/release-plan.sh, which CI enforces.
-version = "0.31.2"
+version = "0.32.0"
 edition.workspace = true
 rust-version.workspace = true
 description = "Internal to cctop: the terminal dashboard. No stable API; use the cctop binary."
