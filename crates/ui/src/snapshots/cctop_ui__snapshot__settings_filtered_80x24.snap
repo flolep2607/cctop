@@ -1,5 +1,5 @@
 ---
-source: src/ui/snapshot.rs
+source: crates/ui/src/snapshot.rs
 expression: screen
 ---
  1:Dashboard │ + Tab (t) ───────────────────────────────────────────── Settings
@@ -13,7 +13,7 @@ expression: screen
 │  File ~/.config/cctop/config.toml                                            │
 │                                                                              │
 │config.toml · [settings]                                                      │
-│  notify            false            Bell + desktop alert when a session need…│
+│  notify            [ ]              Bell + desktop alert when a session need…│
 │  alert_cost        0                Alert when a session's cost passes $X    │
 │  alert_burn        0                Alert when a session burns over $X an ho…│
 │  alert_today       0                Alert when today's spend passes $X       │

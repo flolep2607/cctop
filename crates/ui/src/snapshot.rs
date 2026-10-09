@@ -413,6 +413,24 @@ fn settings_page() {
     snap("settings_cloudflare", &mut app);
 }
 
+/// The settings page's colours, which the text snapshots cannot carry: each
+/// value type in its own ink, a bool green or red, and the wash a set value
+/// gets behind it.
+///
+/// Two values are set on the fixture for the wash, because the page draws only
+/// defaults otherwise and a highlight nobody can see is one the snapshot would
+/// happily let regress. A number and a bool, so both readings are pinned: the
+/// wash over a type colour, and a true toggle as `[x]` plus its green.
+#[test]
+fn settings_styles() {
+    let mut app = fixture();
+    app.settings_open = true;
+    app.settings.notify = Some(true);
+    app.settings.idle_after = Some(3.0);
+    let buffer = draw(&mut app, LARGE);
+    insta::assert_snapshot!(styles(&buffer));
+}
+
 #[test]
 fn context_panel() {
     let mut app = fixture();
