@@ -83,7 +83,8 @@ fn main() -> anyhow::Result<()> {
         std::process::exit(hook::emit(&argv[2..]));
     }
 
-    // `cctop yolo-hook`, the one hook that may answer a permission prompt, is
+    // `cctop yolo-hook`, the one hook that may decide — allow a permission
+    // prompt, or answer a typed `/yolo` in place of its expansion — is
     // spawned by Claude Code exactly as `hook` is and answered here for the
     // same reasons, ungated by any setting: whether it says anything is
     // decided inside it, per session — see `hook::yolo_hook`. Its own word
@@ -193,8 +194,8 @@ fn main() -> anyhow::Result<()> {
     }
 
     // `cctop yolo log` alongside `log`, and for the same reason: it reads a
-    // file and needs nothing set up. So does `cctop yolo on|off|status`, which
-    // /yolo runs inside a Claude Code session and which writes one small file.
+    // file and needs nothing set up. So does `cctop yolo off|status`, which
+    // writes one small file (`on` is refused: /yolo is the way in).
     // Matched on the bare word `yolo` only, so the ungated `yolo-hook`
     // dispatch above is a different word entirely.
     {

@@ -26,6 +26,17 @@
 //! which is what "this session" means. Nothing needs a cctop to be running for
 //! any of it: the process check is what bounds it, not a live owner.
 //!
+//! # Switching it on from the session: `/yolo`
+//!
+//! Typed in Claude Code, `/yolo` is answered by the same command,
+//! `cctop yolo-hook`, installed for `UserPromptExpansion` with the matcher
+//! `yolo`: it switches, and blocks the command with the result as the reason,
+//! so the person sees the answer and the model never runs a turn for it
+//! ([`typed`]). Claude Code fires that event only for a command the person
+//! typed, which is what lets this switch YOLO on where `cctop yolo on` run
+//! from the session's shell may not: there, the person and the model's Bash
+//! tool look the same, so the CLI refuses `on` ([`command`]).
+//!
 //! # The key press: Codex, and the fallback for Claude
 //!
 //! Everything else is cctop pressing the same key a person clicking Allow
@@ -311,6 +322,18 @@ fn set_in(
     agent: Option<u32>,
     how: &Switch,
 ) -> std::io::Result<()> {
+    set_within(dir, log, session_id, agent, how, LOCK_PATIENCE)
+}
+
+/// [`set_in`], giving up on the lock after `patience`.
+fn set_within(
+    dir: &Path,
+    log: &crate::yolo_log::Log,
+    session_id: &str,
+    agent: Option<u32>,
+    how: &Switch,
+    patience: Duration,
+) -> std::io::Result<()> {
     let process = match agent {
         Some(pid) => Some(Agent::of(pid).ok_or_else(|| {
             std::io::Error::new(
@@ -323,7 +346,7 @@ fn set_in(
     let id = session_id.to_string();
     // Off names no process; the one it was on for is the one to record.
     let mut was: Option<u32> = None;
-    let result = update(dir, |state| match process {
+    let result = update_within(dir, patience, |state| match process {
         Some(process) => {
             let entry = state.sessions.entry(id).or_insert_with(|| Entry {
                 since: stamp_now(),
@@ -824,10 +847,10 @@ impl Auto {
 }
 
 // ---------------------------------------------------------------------------
-// From inside the session: `cctop yolo on|off|status`, and `/yolo`
+// From inside the session: `/yolo`, and `cctop yolo off|status`
 // ---------------------------------------------------------------------------
 
-/// What `cctop yolo` was asked to do.
+/// What `/yolo` or `cctop yolo` was asked to do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Ask {
     On,
@@ -866,20 +889,28 @@ struct Inside {
 /// command it runs: `CLAUDE_CODE_SESSION_ID`, documented as matching the
 /// `session_id` its hooks are given and following `/clear`, and `CLAUDE_PID`,
 /// its own pid (2.1.214 and later).
-///
-/// `CLAUDE_PID` is only believed when it is one of this process's ancestors.
-/// That is the test the hook applies to the recorded process, so a pid that
-/// failed it here would be a switch that answers nothing; and an environment
-/// inherited by something that has since left the agent — a daemon started
-/// from a session — names a process that is not running it.
 fn inside(env: &dyn Fn(&str) -> Option<String>, ancestry: &[u32]) -> Result<Inside, String> {
     let session = env("CLAUDE_CODE_SESSION_ID").filter(|s| !s.trim().is_empty());
     let Some(session) = session else {
         return Err("this is not running inside a Claude Code session, and \
-                    `cctop yolo` switches the session it runs in: type /yolo in \
-                    the session, or switch it from cctop's table"
+                    `cctop yolo` acts on the session it runs in"
             .into());
     };
+    Ok(Inside {
+        session,
+        agent: agent(env, ancestry)?,
+    })
+}
+
+/// The agent process running this command: `CLAUDE_PID`, which Claude Code
+/// sets for its hooks as for its Bash calls (checked in 2.1.295).
+///
+/// Only believed when it is one of this process's ancestors. That is the test
+/// the `PermissionRequest` hook applies to the recorded process, so a pid that
+/// failed it here would be a switch that answers nothing; and an environment
+/// inherited by something that has since left the agent — a daemon started
+/// from a session — names a process that is not running it.
+fn agent(env: &dyn Fn(&str) -> Option<String>, ancestry: &[u32]) -> Result<u32, String> {
     let Some(agent) = env("CLAUDE_PID").and_then(|p| p.trim().parse::<u32>().ok()) else {
         return Err("Claude Code did not say which process is running this \
                     session (CLAUDE_PID, set from Claude Code 2.1.214)"
@@ -891,44 +922,38 @@ fn inside(env: &dyn Fn(&str) -> Option<String>, ancestry: &[u32]) -> Result<Insi
              there is no process to give the permission to"
         ));
     }
-    Ok(Inside { session, agent })
+    Ok(agent)
 }
 
-/// `cctop yolo on|off|status`, and `cctop yolo --slash=<key> [word]`, which
-/// is what the `/yolo` command runs.
+/// What `on` says when it is refused from the command line.
+const ON_REFUSED: &str = "`cctop yolo on` is refused: run from a session's \
+    shell, it cannot be told apart from the model switching itself on. Type \
+    /yolo in the session, or switch it from cctop's table or page.";
+
+/// `cctop yolo off|status` — and `on`, which is always refused.
 ///
-/// One line out either way, because `/yolo` puts it in front of the model to
-/// repeat. A refusal goes to stderr with a non-zero exit, which makes Claude
-/// Code abort the command and show the person the reason without the model
-/// seeing it at all.
-///
-/// Nothing here can tell the person typing `/yolo` from the model running the
-/// same command through its Bash tool: Claude Code runs a command file's
-/// shell lines through that same tool, with the same environment and the same
-/// process tree (see the `/yolo` command in [`crate::hook`]). The model's
-/// Bash call is held at a permission prompt like any other — which is the
-/// guard, and the only one — unless Bash is broadly allowed, in which case the
-/// model could as easily have written `yolo.json` itself.
+/// Why `on` is refused: run inside a Claude Code session, nothing here can
+/// tell the person from the model calling the same command through its Bash
+/// tool — same environment, same process tree. `/yolo` can, because Claude
+/// Code fires `UserPromptExpansion` only for a command the person typed, so
+/// that is the way on ([`typed`]). Outside a session there is no session to
+/// switch: the CLI has never taken a session id, and is not given one now,
+/// since a named session is just as easy for the model to name. `off` and
+/// `status` only ever take permission away or read it, so they stay.
 pub fn command(argv: &[String]) -> i32 {
-    // `--slash=<key>`: the key is the skill's, and only there to make the
-    // command line its grant covers one the model cannot spell — see the
-    // `/yolo` skill in [`crate::hook`]. Nothing here checks it.
-    let (slash, words) = match argv.first().map(String::as_str) {
-        Some(flag) if flag == "--slash" || flag.starts_with("--slash=") => (true, &argv[1..]),
-        _ => (false, argv),
-    };
-    let Some(ask) = Ask::parse(words, slash) else {
+    let Some(ask) = Ask::parse(argv, false) else {
         eprintln!("cctop yolo: expected on, off or status");
         return 2;
     };
+    if ask == Ask::On {
+        eprintln!("cctop yolo: {ON_REFUSED}");
+        return 1;
+    }
     let env = |name: &str| std::env::var(name).ok();
     let answer = inside(&env, &crate::hook::ancestry()).and_then(|inside| {
         let how = Switch {
             from: crate::yolo_log::Origin::Session,
-            cwd: std::fs::read_link(format!("/proc/{}/cwd", inside.agent))
-                .ok()
-                .or_else(|| std::env::current_dir().ok())
-                .map(|p| p.display().to_string()),
+            cwd: cwd_of(inside.agent, None),
             harness: Some("claude".into()),
         };
         answer_in(&dir(), &crate::yolo_log::Log::default(), ask, &inside, &how)
@@ -945,6 +970,84 @@ pub fn command(argv: &[String]) -> i32 {
     }
 }
 
+/// The session's working directory for the lasting record: the agent's own,
+/// else what the caller knows, else this process's.
+fn cwd_of(agent: u32, known: Option<&str>) -> Option<String> {
+    std::fs::read_link(format!("/proc/{agent}/cwd"))
+        .ok()
+        .map(|p| p.display().to_string())
+        .or_else(|| known.map(str::to_string))
+        .or_else(|| {
+            std::env::current_dir()
+                .ok()
+                .map(|p| p.display().to_string())
+        })
+}
+
+/// `/yolo [on|off|status]` as typed in Claude Code: do it, and say what is now
+/// true, for `cctop yolo-hook UserPromptExpansion` to show the person in
+/// place of the command ([`crate::hook::yolo_hook`]).
+///
+/// Every outcome is a line to show, a refusal included: the person typed
+/// `/yolo` and is owed an answer, and letting the command expand instead would
+/// hand it to the model, which is what this exists to avoid.
+///
+/// # Why this may switch YOLO on
+///
+/// Claude Code fires `UserPromptExpansion` only when the person types a
+/// command — the model's Skill tool goes through `PreToolUse` instead, and
+/// `/yolo` has `disable-model-invocation` besides. So the person is the only
+/// one who can get here through Claude Code. The session is the payload's,
+/// and the process is `CLAUDE_PID`, held to the same ancestry test as the
+/// `PermissionRequest` hook's. A model that ran `cctop yolo-hook` through Bash
+/// with a payload of its own making could reach this too, but that is a Bash
+/// call held at a permission prompt like any other, and no harder than
+/// writing `yolo.json` itself — the bar every other way in already sits at.
+pub fn typed(session: &str, args: &str, cwd: Option<&str>) -> String {
+    let env = |name: &str| std::env::var(name).ok();
+    typed_in(
+        &dir(),
+        &crate::yolo_log::Log::default(),
+        session,
+        args,
+        cwd,
+        &env,
+        &crate::hook::ancestry(),
+    )
+}
+
+fn typed_in(
+    dir: &Path,
+    log: &crate::yolo_log::Log,
+    session: &str,
+    args: &str,
+    cwd: Option<&str>,
+    env: &dyn Fn(&str) -> Option<String>,
+    ancestry: &[u32],
+) -> String {
+    let words: Vec<String> = args.split_whitespace().map(str::to_string).collect();
+    let Some(ask) = Ask::parse(&words, true) else {
+        return "/yolo takes on, off or status (nothing means on).".into();
+    };
+    let agent = match agent(env, ancestry) {
+        Ok(agent) => agent,
+        Err(why) => return format!("YOLO unchanged: {why}."),
+    };
+    let inside = Inside {
+        session: session.to_string(),
+        agent,
+    };
+    let how = Switch {
+        from: crate::yolo_log::Origin::Typed,
+        cwd: cwd_of(agent, cwd),
+        harness: Some("claude".into()),
+    };
+    // The hook's clock, not a person's: a lock held past it is an answer
+    // that says so, rather than a hook that outlives its deadline.
+    answer_within(dir, log, ask, &inside, &how, HOOK_LOCK_PATIENCE)
+        .unwrap_or_else(|why| format!("YOLO unchanged: {why}."))
+}
+
 /// Do what was asked for the session `inside`, and say what is now true.
 fn answer_in(
     dir: &Path,
@@ -952,6 +1055,17 @@ fn answer_in(
     ask: Ask,
     inside: &Inside,
     how: &Switch,
+) -> Result<String, String> {
+    answer_within(dir, log, ask, inside, how, LOCK_PATIENCE)
+}
+
+fn answer_within(
+    dir: &Path,
+    log: &crate::yolo_log::Log,
+    ask: Ask,
+    inside: &Inside,
+    how: &Switch,
+    patience: Duration,
 ) -> Result<String, String> {
     let entry = read_state(dir).sessions.remove(&inside.session);
     // On for this very process. An entry for an earlier process of the same
@@ -964,7 +1078,8 @@ fn answer_in(
     let failed = |e: std::io::Error| format!("could not write the YOLO switch: {e}");
     match ask {
         Ask::On => {
-            set_in(dir, log, &inside.session, Some(inside.agent), how).map_err(failed)?;
+            set_within(dir, log, &inside.session, Some(inside.agent), how, patience)
+                .map_err(failed)?;
             Ok(
                 "YOLO on for this session: every permission prompt is allowed \
                 until it ends. /yolo off stops it."
@@ -975,7 +1090,7 @@ fn answer_in(
         // record does not gain a switch nobody threw.
         Ask::Off if entry.is_none() => Ok("YOLO was not on for this session.".into()),
         Ask::Off => {
-            set_in(dir, log, &inside.session, None, how).map_err(failed)?;
+            set_within(dir, log, &inside.session, None, how, patience).map_err(failed)?;
             Ok("YOLO off for this session: permission prompts wait for you again.".into())
         }
         Ask::Status => Ok(match (mine, entry) {
@@ -1863,6 +1978,39 @@ mod tests {
 
         // Off again writes nothing: no switch was thrown.
         assert_eq!(say(Ask::Off), "YOLO was not on for this session.");
+        assert_eq!(log.read().len(), 2);
+    }
+
+    /// `/yolo` typed: the session is the payload's, the process is
+    /// `CLAUDE_PID` held to the ancestry test, the record says typed, and
+    /// every refusal is an answer that switched nothing.
+    #[test]
+    fn typed_yolo_switches_this_process_and_says_so() {
+        let dir = scratch("typed");
+        let log = log_of(&dir);
+        let pid = me().to_string();
+        let vars = [("CLAUDE_PID", pid.as_str())];
+        let env = env_of(&vars);
+        let say = |args: &str, ancestry: &[u32]| {
+            typed_in(&dir, &log, "s1", args, Some("/w"), &env, ancestry)
+        };
+        assert_eq!(say("status", &[me()]), "YOLO is off for this session.");
+        assert!(say("", &[me()]).starts_with("YOLO on for this session"));
+        assert!(allows_in(&dir, "s1", &[me()]));
+        assert!(say("off", &[me()]).starts_with("YOLO off"));
+        assert!(!allows_in(&dir, "s1", &[me()]));
+        assert!(
+            log.read()
+                .iter()
+                .all(|l| l.from == Some(crate::yolo_log::Origin::Typed))
+        );
+
+        // Words it does not know, and a CLAUDE_PID that is not running it.
+        assert!(say("on please", &[me()]).contains("on, off or status"));
+        assert!(say("on", &[42]).starts_with("YOLO unchanged"));
+        let nobody = typed_in(&dir, &log, "s1", "on", None, &env_of(&[]), &[me()]);
+        assert!(nobody.starts_with("YOLO unchanged"), "{nobody}");
+        assert!(!allows_in(&dir, "s1", &[me()]));
         assert_eq!(log.read().len(), 2);
     }
 
