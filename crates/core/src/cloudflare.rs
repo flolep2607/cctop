@@ -762,6 +762,17 @@ pub fn share_hostname(hostname: &str) -> String {
     }
 }
 
+/// The hostname token links go on while the page is behind Access, beside
+/// `hostname` on the same tunnel: `cctop.example.com` →
+/// `cctop-link.example.com`. Not the share hostname: that one goes to the
+/// share front, which never serves the page ([`crate::tunnel`]'s `SHARES`).
+pub fn link_hostname(hostname: &str) -> String {
+    match hostname.split_once('.') {
+        Some((label, zone)) => format!("{label}-link.{zone}"),
+        None => format!("{hostname}-link"),
+    }
+}
+
 /// Create the tunnel, its configuration and its DNS records, and return the
 /// account to store. Nothing is left behind on failure: whatever was made
 /// before the failing call is deleted again, so a retry starts clean.
@@ -864,11 +875,16 @@ fn hostnames(account: &Account) -> Vec<String> {
         .share_names
         .keys()
         .filter_map(|session| account.named_share_host(session));
+    let link = account
+        .access
+        .as_ref()
+        .and_then(|a| a.link_record_id.as_ref().and(a.link_hostname.clone()));
     account
         .hostname
         .iter()
         .chain(account.share_hostname.iter())
         .cloned()
+        .chain(link)
         .chain(names)
         .collect()
 }
@@ -888,6 +904,13 @@ fn taken_by(
     }
     if account.share_hostname.as_deref() == Some(host) {
         return Some("shares without a name of their own".to_string());
+    }
+    if account
+        .access
+        .as_ref()
+        .is_some_and(|a| a.is_link_host(host))
+    {
+        return Some("public token links".to_string());
     }
     account
         .share_names

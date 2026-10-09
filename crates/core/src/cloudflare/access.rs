@@ -129,7 +129,7 @@ pub fn parse_who(input: &str) -> Option<String> {
 }
 
 /// What `cctop tunnel access` set up: the `[tunnel.access]` table.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Settings {
     /// The team domain, `<team>.cloudflareaccess.com`: where the keys are,
     /// and the issuer every token must name.
@@ -144,6 +144,39 @@ pub struct Settings {
     pub policy_id: Option<String>,
     /// The one-time PIN provider, only when cctop created it.
     pub idp_id: Option<String>,
+    /// Whether a token link still opens the page through the tunnel. With
+    /// Access on, the dashboard's hostname asks for a login before anything
+    /// reaches cctop, so a token is only any use to someone who cannot log
+    /// in on a hostname of its own — [`Settings::link_hostname`]. Off, the
+    /// page's server refuses every token that comes through the tunnel, on
+    /// any hostname, and only a login gets in from outside; loopback keeps
+    /// its token. On unless turned off, which is how Access behaved before
+    /// there was a switch.
+    pub public_links: bool,
+    /// The hostname token links go on while Access is on: beside the
+    /// dashboard's and outside the Access application, so it asks for no
+    /// login. Only while [`Settings::public_links`] is on, and only when
+    /// cctop made its DNS record.
+    pub link_hostname: Option<String>,
+    /// That record, to delete it by.
+    pub link_record_id: Option<String>,
+}
+
+impl Default for Settings {
+    fn default() -> Settings {
+        Settings {
+            team: String::new(),
+            aud: String::new(),
+            owner: String::new(),
+            invites: Vec::new(),
+            app_id: None,
+            policy_id: None,
+            idp_id: None,
+            public_links: true,
+            link_hostname: None,
+            link_record_id: None,
+        }
+    }
 }
 
 impl Settings {
@@ -174,6 +207,36 @@ impl Settings {
     /// Where the team publishes its signing keys.
     pub fn certs_url(&self) -> String {
         format!("https://{}/cdn-cgi/access/certs", self.team)
+    }
+
+    /// Whether `email` is the owner: the one login that may change who else
+    /// can log in, as the full token may.
+    pub fn is_owner(&self, email: &str) -> bool {
+        !self.owner.is_empty() && email.trim().eq_ignore_ascii_case(&self.owner)
+    }
+
+    /// Whether `host` is the token links' hostname.
+    pub fn is_link_host(&self, host: &str) -> bool {
+        let host = host.split(':').next().unwrap_or_default();
+        self.link_hostname.as_deref().is_some_and(|link| {
+            link.trim_end_matches('.')
+                .eq_ignore_ascii_case(host.trim_end_matches('.'))
+        })
+    }
+
+    /// The origin a token link is printed on while Access is on: the token
+    /// hostname when there is one, the dashboard's `page` origin when Access
+    /// was set up by hand and has none, and `None` when public links are
+    /// off — a token that comes through the tunnel is refused then, so there
+    /// is no link to hand out.
+    pub fn token_origin(&self, page: &str) -> Option<String> {
+        if !self.public_links {
+            return None;
+        }
+        Some(match &self.link_hostname {
+            Some(link) => format!("https://{link}"),
+            None => page.to_string(),
+        })
     }
 
     /// Whether there is enough to check a login against.

@@ -22,9 +22,21 @@
 //! dashboard rather than an API default to make on someone's behalf, so its
 //! absence is an error that says where to click ([`Error::NoTeam`]).
 //!
+//! Beside them, outside the application, a **token hostname**
+//! (`cctop-link.<domain>`): a DNS record and an ingress entry of the tunnel's
+//! own, routed to the page like the dashboard's hostname but asking for no
+//! login, so a `?t=` link still works for someone who cannot log in. It is
+//! made with the application and removed with it, and "public token links:
+//! off" removes it alone ([`Change::PublicLinks`]); the page's server then
+//! refuses a token on any tunnel hostname as a second lock.
+//!
 //! As with the tunnel, only what cctop created is deleted, by the ids it
 //! stored, and a setup that fails halfway deletes what it made before
 //! returning.
+//!
+//! The terminal's `cctop tunnel access`, the dashboard's Cloudflare popup and
+//! the web page's Access dialog all make their edits through [`apply`], so
+//! the three cannot drift apart in what an edit does on Cloudflare.
 
 use serde_json::{Value, json};
 
@@ -190,6 +202,61 @@ impl Api {
     }
 }
 
+/// Point the token hostname at the tunnel: refused before any write when
+/// the name already has a record cctop did not make. Returns the hostname and
+/// what to delete its record by.
+fn add_link(api: &Api, account: &Account) -> Result<(String, String), Error> {
+    let (zone, tunnel_id) = super::writable_zone(account)?;
+    let page = account
+        .hostname
+        .as_deref()
+        .ok_or_else(|| Error::Hostname(crate::tunnel::TOKEN_ONLY.to_string()))?;
+    let host = super::link_hostname(page);
+    if api.record_exists(&zone, &host)? {
+        return Err(Error::Hostname(format!(
+            "{host}, where token links would go, already has a DNS record that cctop did \
+             not make. Delete it, or turn public token links off."
+        )));
+    }
+    let record = api.add_cname(&zone, &host, &tunnel_id)?;
+    Ok((host, record))
+}
+
+/// Delete the token hostname's record, or the sentence saying it is left.
+fn delete_link(api: &Api, account: &Account, settings: &Settings) -> Option<String> {
+    let record = settings.link_record_id.as_ref()?;
+    let (zone_id, tunnel_id) = (account.zone_id.as_ref()?, account.tunnel_id.as_ref()?);
+    api.delete_record(zone_id, record, tunnel_id)
+        .err()
+        .map(|e| {
+            format!(
+                "the DNS record {record} of {} ({e})",
+                settings
+                    .link_hostname
+                    .as_deref()
+                    .unwrap_or("the token hostname")
+            )
+        })
+}
+
+/// Write the tunnel's ingress list for `account` as it now is. Only the
+/// dashboard reads that list — cctop routes by its own table — so it is
+/// written for the display's sake, and a failure is the caller's to weigh.
+fn configure(api: &Api, account: &Account) -> Result<(), Error> {
+    let (zone, tunnel_id) = super::writable_zone(account)?;
+    let names = super::hostnames(account);
+    let names: Vec<&str> = names.iter().map(String::as_str).collect();
+    api.configure(&zone.account_id, &tunnel_id, &names)
+}
+
+/// `account` with `settings` as its Access.
+fn with_settings(account: &Account, settings: &Settings) -> Account {
+    Account {
+        access: Some(Box::new(settings.clone())),
+        ..account.clone()
+    }
+}
+
 /// Put `account`'s page behind Access for `owner`, keeping `invites`, and
 /// return the settings to store. An account already behind Access has its
 /// policy updated instead, so `access on` run twice changes the owner rather
@@ -216,35 +283,55 @@ pub fn enable(
     let team = api.team_domain(account_id)?;
     let (idp, made_idp) = api.one_time_pin(account_id)?;
     let mut made_policy = None;
+    let mut made_app = None;
+    let mut made_link = None;
     let built = (|| {
         let policy = api.create_policy(account_id, policy_body(host, &owner, &invites))?;
         made_policy = Some(policy.clone());
         let (app, aud) = api.create_app(account_id, host, &policy)?;
-        Ok((policy, app, aud))
+        made_app = Some(app.clone());
+        // The token hostname with it, so `access on` changes nothing for a
+        // token link but its address; `links off` is the step that does.
+        let (link, record) = add_link(api, account)?;
+        made_link = Some(record.clone());
+        let settings = Settings {
+            team: team.clone(),
+            aud,
+            owner: owner.clone(),
+            invites: invites.clone(),
+            app_id: Some(app),
+            policy_id: Some(policy),
+            idp_id: made_idp.then(|| idp.clone()),
+            public_links: true,
+            link_hostname: Some(link),
+            link_record_id: Some(record),
+        };
+        configure(api, &with_settings(account, &settings))?;
+        Ok(settings)
     })();
-    let (policy, app, aud) = match built {
-        Ok(made) => made,
+    match built {
+        Ok(settings) => Ok(settings),
         Err(e) => {
             // Best effort, newest first; the error worth reporting is the
             // one that stopped the setup.
+            let undo = Settings {
+                link_hostname: None,
+                link_record_id: made_link,
+                ..Settings::default()
+            };
+            let _ = delete_link(api, account, &undo);
+            if let Some(app) = made_app {
+                let _ = api.delete_access(account_id, "apps", &app, PERMISSIONS[0]);
+            }
             if let Some(policy) = made_policy {
                 let _ = api.delete_access(account_id, "policies", &policy, PERMISSIONS[0]);
             }
             if made_idp {
                 let _ = api.delete_access(account_id, "identity_providers", &idp, PERMISSIONS[1]);
             }
-            return Err(e);
+            Err(e)
         }
-    };
-    Ok(Settings {
-        team,
-        aud,
-        owner,
-        invites,
-        app_id: Some(app),
-        policy_id: Some(policy),
-        idp_id: made_idp.then_some(idp),
-    })
+    }
 }
 
 /// Write `settings`' owner and invites to the policy cctop made, so the edge
@@ -301,7 +388,200 @@ pub fn disable(api: &Api, account: &Account, settings: &Settings) -> Vec<String>
             left.push(format!("{what} {id} ({e})"));
         }
     }
+    // The token hostname last: with the application gone the dashboard's
+    // own hostname takes a token again, and a second one is no use.
+    if settings.link_record_id.is_some() {
+        let _ = configure(api, &without_access(account));
+        left.extend(delete_link(api, account, settings));
+    }
     left
+}
+
+fn without_access(account: &Account) -> Account {
+    Account {
+        access: None,
+        ..account.clone()
+    }
+}
+
+/// Turn public token links on or off: the token hostname made or deleted,
+/// and the switch stored with it. Off, the ingress entry goes before the
+/// record, so nothing answers on a name about to vanish; on, the record comes
+/// first, so the entry never names a hostname with no record. Access set up
+/// by hand, with no application cctop made, has no token hostname of cctop's
+/// to touch: only the switch moves, and the server's lock follows it.
+pub fn set_public_links(
+    api: &Api,
+    account: &Account,
+    settings: &Settings,
+    on: bool,
+) -> Result<(Settings, Vec<String>), Error> {
+    let mut next = Settings {
+        public_links: on,
+        ..settings.clone()
+    };
+    let made_here = settings.app_id.is_some();
+    match on {
+        true if made_here && settings.link_record_id.is_none() => {
+            let (host, record) = add_link(api, account)?;
+            next.link_hostname = Some(host);
+            next.link_record_id = Some(record.clone());
+            if let Err(e) = configure(api, &with_settings(account, &next)) {
+                let _ = delete_link(api, account, &next);
+                return Err(e);
+            }
+            Ok((next, Vec::new()))
+        }
+        false if settings.link_record_id.is_some() => {
+            next.link_hostname = None;
+            next.link_record_id = None;
+            configure(api, &with_settings(account, &next))?;
+            Ok((
+                next,
+                delete_link(api, account, settings).into_iter().collect(),
+            ))
+        }
+        _ => Ok((next, Vec::new())),
+    }
+}
+
+/// One edit to Access, the same from every face that makes one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Change {
+    /// Put the page behind Access for this owner, or change the owner.
+    On {
+        owner: String,
+    },
+    Off,
+    /// Add `who`, or change its level in place.
+    Invite {
+        who: String,
+        level: Level,
+    },
+    Uninvite {
+        who: String,
+    },
+    PublicLinks(bool),
+}
+
+/// What an edit came to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Applied {
+    /// The account to store.
+    pub account: Account,
+    /// What happened, as a sentence for whoever asked.
+    pub said: String,
+    /// What could not be deleted from Cloudflare, for the user to delete by
+    /// hand.
+    pub left: Vec<String>,
+}
+
+/// The sentence for an edit that needs Access on first.
+pub const OFF: &str = "Cloudflare Access is off; turn it on with an owner email first.";
+
+/// Make `change` on Cloudflare and return the account to store. Every refusal
+/// comes before any write; nothing is saved here.
+pub fn apply_with(api: &Api, account: &Account, change: Change) -> Result<Applied, Error> {
+    let done = |settings: Option<Settings>, said: String, left: Vec<String>| Applied {
+        account: Account {
+            access: settings.map(Box::new),
+            ..account.clone()
+        },
+        said,
+        left,
+    };
+    let current = account.access.as_deref().cloned();
+    match (change, current) {
+        (Change::On { owner }, current) => {
+            let invites = current.map(|c| c.invites).unwrap_or_default();
+            let settings = enable(api, account, &owner, invites)?;
+            let said = format!(
+                "Access is on: {} logs in at https://{} with a code Cloudflare emails.",
+                settings.owner,
+                account.hostname.as_deref().unwrap_or_default()
+            );
+            Ok(done(Some(settings), said, Vec::new()))
+        }
+        (Change::Off, None) => Ok(done(
+            None,
+            "Cloudflare Access is already off.".into(),
+            vec![],
+        )),
+        (Change::Off, Some(settings)) => {
+            let left = disable(api, account, &settings);
+            Ok(done(
+                None,
+                "Access is off: the dashboard is opened with its token link again.".into(),
+                left,
+            ))
+        }
+        (_, None) => Err(Error::Hostname(OFF.to_string())),
+        (Change::Invite { who, level }, Some(mut settings)) => {
+            let who = super::access::parse_who(&who).ok_or_else(|| {
+                Error::Hostname(format!(
+                    "{} is neither an email address nor a domain like @company.com",
+                    who.trim()
+                ))
+            })?;
+            if who == settings.owner {
+                return Err(Error::Hostname(format!(
+                    "{who} is the owner, who always has full access."
+                )));
+            }
+            settings.invites = with_invite(settings.invites, who.clone(), level);
+            update(api, account, &settings)?;
+            let said = match level {
+                Level::Full => format!("Invited {who}, with full access."),
+                Level::Read => format!("Invited {who}, read-only."),
+            };
+            Ok(done(Some(settings), said, Vec::new()))
+        }
+        (Change::Uninvite { who }, Some(mut settings)) => {
+            let who = super::access::parse_who(&who).unwrap_or_else(|| who.trim().to_string());
+            let before = settings.invites.len();
+            settings.invites.retain(|i| i.who != who);
+            if settings.invites.len() == before {
+                let said = format!("{who} was not invited; nothing changed.");
+                return Ok(done(Some(settings), said, Vec::new()));
+            }
+            update(api, account, &settings)?;
+            Ok(done(
+                Some(settings),
+                format!("{who} can no longer log in."),
+                Vec::new(),
+            ))
+        }
+        (Change::PublicLinks(on), Some(settings)) => {
+            let (settings, left) = set_public_links(api, account, &settings, on)?;
+            let said = match (on, &settings.link_hostname) {
+                (true, Some(host)) => format!("Token links work again, on https://{host}."),
+                (true, None) => "Token links work again.".to_string(),
+                (false, _) => {
+                    "Token links are off: from outside, only an Access login gets in.".to_string()
+                }
+            };
+            Ok(done(Some(settings), said, left))
+        }
+    }
+}
+
+/// [`apply_with`] on the connected account, then the account saved and the
+/// token hostname's route brought in line while this process holds the
+/// tunnel. An error is a sentence for the user.
+///
+/// ponytail: two edits at once from two faces each read the account, write
+/// Cloudflare and save; the second save wins. One person edits one list.
+pub fn apply(change: Change) -> Result<Applied, String> {
+    let (account, api) = super::connected()?;
+    let applied = apply_with(&api, &account, change).map_err(|e| e.to_string())?;
+    crate::tunnel::save_account(&applied.account).map_err(|e| {
+        format!(
+            "Cloudflare has the change, but cctop could not remember it ({e}); `cctop tunnel \
+             remove` will not find what it made"
+        )
+    })?;
+    crate::tunnel::sync_link();
+    Ok(applied)
 }
 
 /// `invites` with `who` set to `level`: added, or changed in place so the
@@ -372,7 +652,24 @@ mod tests {
                 "POST /accounts/acct1/access/identity_providers",
                 "POST /accounts/acct1/access/policies",
                 "POST /accounts/acct1/access/apps",
+                // The token hostname, beside the application and outside it.
+                "GET /zones/zone1/dns_records?name=cctop-link.example.test",
+                "POST /zones/zone1/dns_records",
+                &format!("PUT {INGRESS}"),
             ]
+        );
+        assert!(settings.public_links);
+        assert_eq!(
+            settings.link_hostname.as_deref(),
+            Some("cctop-link.example.test")
+        );
+        let record = settings.link_record_id.clone().expect("its record id");
+        let cname = body_of(&seen, "POST /zones/zone1/dns_records");
+        assert_eq!(cname["name"], "cctop-link.example.test");
+        let ingress = body_of(&seen, &format!("PUT {INGRESS}"));
+        assert!(
+            ingress.to_string().contains("cctop-link.example.test"),
+            "{ingress}"
         );
         let policy = body_of(&seen, "POST /accounts/acct1/access/policies");
         assert_eq!(policy["decision"], "allow");
@@ -396,8 +693,114 @@ mod tests {
                 "DELETE /accounts/acct1/access/apps/app1",
                 "DELETE /accounts/acct1/access/policies/pol1",
                 "DELETE /accounts/acct1/access/identity_providers/idp1",
+                &format!("PUT {INGRESS}"),
+                &format!("DELETE /zones/zone1/dns_records/{record}"),
             ]
         );
+        let ingress = body_of(&seen, &format!("PUT {INGRESS}"));
+        assert!(!ingress.to_string().contains("cctop-link"), "{ingress}");
+    }
+
+    /// The tunnel's ingress list, as the fake API is asked to write it.
+    const INGRESS: &str =
+        "/accounts/acct1/cfd_tunnel/6ff42ae2-765d-4adf-8112-31c55c1551ef/configurations";
+
+    #[test]
+    fn public_links_off_takes_the_token_hostname_away_and_on_brings_it_back() {
+        let (base, seen) = fake_api(accepting(None));
+        let api = Api::at(&base, "made-up-api-token");
+        let settings = enable(&api, &account(), "owner@example.test", Vec::new()).unwrap();
+        let record = settings.link_record_id.clone().unwrap();
+        let on = Account {
+            access: Some(Box::new(settings)),
+            ..account()
+        };
+        seen.lock().unwrap().clear();
+        let off = apply_with(&api, &on, Change::PublicLinks(false)).unwrap();
+        let stored = off.account.access.as_deref().unwrap();
+        assert!(!stored.public_links);
+        assert_eq!(stored.link_hostname, None);
+        assert_eq!(stored.link_record_id, None);
+        // The ingress entry first, then the record.
+        assert_eq!(
+            calls(&seen),
+            [
+                format!("PUT {INGRESS}"),
+                format!("DELETE /zones/zone1/dns_records/{record}"),
+            ]
+        );
+        assert!(
+            !body_of(&seen, &format!("PUT {INGRESS}"))
+                .to_string()
+                .contains("cctop-link")
+        );
+        // The Access application is left alone: only the token's way in goes.
+        assert_eq!(stored.app_id.as_deref(), Some("app1"));
+
+        seen.lock().unwrap().clear();
+        let back = apply_with(&api, &off.account, Change::PublicLinks(true)).unwrap();
+        let stored = back.account.access.as_deref().unwrap();
+        assert!(stored.public_links);
+        assert_eq!(
+            stored.link_hostname.as_deref(),
+            Some("cctop-link.example.test")
+        );
+        assert!(calls(&seen).contains(&"POST /zones/zone1/dns_records".to_string()));
+        assert!(back.said.contains("https://cctop-link.example.test"));
+    }
+
+    #[test]
+    fn a_taken_token_hostname_undoes_the_whole_setup() {
+        let accept = accepting(None);
+        let (base, seen) =
+            fake_api(
+                move |method: &str, path: &str, body: &str| match (method, path) {
+                    ("GET", "/zones/zone1/dns_records?name=cctop-link.example.test") => {
+                        ok(json!([{"id": "theirs", "type": "A"}]))
+                    }
+                    _ => accept(method, path, body),
+                },
+            );
+        let api = Api::at(&base, "made-up-api-token");
+        let err = enable(&api, &account(), "owner@example.test", Vec::new()).unwrap_err();
+        assert!(err.to_string().contains("cctop-link.example.test"), "{err}");
+        let calls = calls(&seen);
+        for undone in [
+            "DELETE /accounts/acct1/access/apps/app1",
+            "DELETE /accounts/acct1/access/policies/pol1",
+            "DELETE /accounts/acct1/access/identity_providers/idp1",
+        ] {
+            assert!(calls.contains(&undone.to_string()), "{undone}: {calls:?}");
+        }
+        assert!(!calls.iter().any(|c| c.contains("theirs")), "{calls:?}");
+    }
+
+    #[test]
+    fn an_edit_with_access_off_or_a_bad_address_writes_nothing() {
+        let (base, seen) = fake_api(accepting(None));
+        let api = Api::at(&base, "made-up-api-token");
+        let err = apply_with(
+            &api,
+            &account(),
+            Change::Invite {
+                who: "a@b.test".into(),
+                level: Level::Read,
+            },
+        )
+        .unwrap_err();
+        assert_eq!(err.to_string(), OFF);
+        let on = Account {
+            access: Some(Box::new(crate::cloudflare::access::fake::settings())),
+            ..account()
+        };
+        for who in ["not an address", "owner@example.test"] {
+            let change = Change::Invite {
+                who: who.into(),
+                level: Level::Full,
+            };
+            assert!(apply_with(&api, &on, change).is_err(), "{who}");
+        }
+        assert!(calls(&seen).is_empty(), "{:?}", calls(&seen));
     }
 
     #[test]

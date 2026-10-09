@@ -152,6 +152,8 @@ pub fn start(port: u16, want: Want, share_front: Option<u16>) -> anyhow::Result<
                 // routed anywhere else would be a road nobody vetted.
                 let share = account.share_hostname.as_deref().zip(share_front);
                 let shares = Some(SHARES.lend(handle.routes().clone(), handle.hostname(), share));
+                sync_link();
+                watch_link(SHARES.generation());
                 return Ok(Tunnel {
                     url: handle.url().to_string(),
                     kind: Kind::Account,
@@ -332,6 +334,51 @@ pub fn is_share_host(host: &str) -> bool {
     SHARES.is_share_host(host)
 }
 
+/// Whether `host` reaches the page over the account's tunnel this process
+/// holds: the dashboard's hostname, or the token hostname. A request whose
+/// `Host` is one of these came through the tunnel — the edge only forwards
+/// a hostname the table routes, and writes it into `Host` itself.
+pub fn is_tunnel_host(host: &str) -> bool {
+    SHARES.is_page_route(host)
+}
+
+/// Route the token hostname to the page, or stop, as `config.toml` says now
+/// ([`crate::cloudflare::access::Settings::link_hostname`] while public links
+/// are on). Called when the tunnel is lent, after an edit made here, and by
+/// [`watch_link`] for an edit made by another cctop.
+pub fn sync_link() {
+    let want = access_settings()
+        .filter(|s| s.public_links)
+        .and_then(|s| s.link_hostname);
+    SHARES.set_link(want);
+}
+
+/// Follow `config.toml` while the tunnel lent as `generation` is up, so a
+/// `cctop tunnel access links on` in another terminal routes the token
+/// hostname here without a restart. A stat every two seconds; the file is
+/// read only when it changed. The route is a convenience — the server's own
+/// lock is what refuses a token with links off, at its next request.
+fn watch_link(generation: u64) {
+    let _ = std::thread::Builder::new()
+        .name("cctop-link-route".into())
+        .spawn(move || {
+            let stamp = || {
+                std::fs::metadata(&*config::CONFIG_FILE)
+                    .ok()
+                    .map(|m| (m.modified().ok(), m.len()))
+            };
+            let mut seen = stamp();
+            while SHARES.generation() == generation {
+                std::thread::sleep(std::time::Duration::from_secs(2));
+                let now = stamp();
+                if now != seen && SHARES.generation() == generation {
+                    seen = now;
+                    sync_link();
+                }
+            }
+        });
+}
+
 /// Changes whenever the lent tunnel comes or goes, so a share minted on it
 /// can tell it outlived the tunnel it was minted on.
 pub fn share_generation() -> u64 {
@@ -345,6 +392,8 @@ struct Lease {
     routes: Routes,
     page: String,
     share: Option<(String, u16)>,
+    /// The token hostname, while it is routed to the page.
+    link: Option<String>,
 }
 
 struct Shares {
@@ -376,6 +425,7 @@ impl Shares {
             routes,
             page: page.to_string(),
             share: share.map(|(host, front)| (host.to_string(), front)),
+            link: None,
         });
         Lent {
             shares: self,
@@ -394,6 +444,11 @@ impl Shares {
         // would hand the page's address to the front, and the page's links
         // would open a terminal app instead.
         if same_host(host, &lease.page) {
+            return None;
+        }
+        // Nor the token hostname, nor anything else that reaches the page:
+        // a share hostname is never one, whichever way round it is asked.
+        if lease.routes.port_for(host) == Some(lease.routes.primary()) {
             return None;
         }
         lease.routes.insert(host, *front);
@@ -436,6 +491,42 @@ impl Shares {
 
     fn page_host(&self) -> Option<String> {
         self.locked().as_ref().map(|lease| lease.page.clone())
+    }
+
+    fn is_page_route(&self, host: &str) -> bool {
+        let host = host.split(':').next().unwrap_or_default();
+        self.locked()
+            .as_ref()
+            .is_some_and(|lease| lease.routes.port_for(host) == Some(lease.routes.primary()))
+    }
+
+    /// Route `want` to the page in place of the token hostname routed
+    /// before. Never onto a hostname the share front answers, nor the page's
+    /// own: those keep what they go to.
+    fn set_link(&self, want: Option<String>) {
+        let mut lent = self.locked();
+        let Some(lease) = lent.as_mut() else {
+            return;
+        };
+        if lease.link == want {
+            return;
+        }
+        let primary = lease.routes.primary();
+        if let Some(old) = lease.link.take()
+            && !same_host(&old, &lease.page)
+            && lease.routes.port_for(&old) == Some(primary)
+        {
+            lease.routes.remove(&old);
+        }
+        if let Some(host) = want {
+            let front = lease.share.as_ref().map(|(_, front)| *front);
+            let taken = lease.routes.port_for(&host).filter(|p| *p != primary);
+            if same_host(&host, &lease.page) || (taken.is_some() && taken == front) {
+                return;
+            }
+            lease.routes.insert(&host, primary);
+            lease.link = Some(host);
+        }
     }
 
     fn move_page(&self, old: &str, new: &str) {
@@ -771,6 +862,14 @@ fn access_from_table(
         app_id: text("app_id"),
         policy_id: text("policy_id"),
         idp_id: text("idp_id"),
+        // Only a `false` written there turns them off: a table from before
+        // the switch existed keeps the token links it had.
+        public_links: table
+            .get("public_links")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true),
+        link_hostname: text("link_hostname").map(|h| h.to_ascii_lowercase()),
+        link_record_id: text("link_record_id"),
     })
 }
 
@@ -827,11 +926,14 @@ pub(crate) fn save_account_in(path: &Path, account: &Account) -> anyhow::Result<
                 ("app_id", access.app_id.as_ref()),
                 ("policy_id", access.policy_id.as_ref()),
                 ("idp_id", access.idp_id.as_ref()),
+                ("link_hostname", access.link_hostname.as_ref()),
+                ("link_record_id", access.link_record_id.as_ref()),
             ] {
                 if let Some(value) = value {
                     entry.insert(key, toml_edit::value(value));
                 }
             }
+            entry.insert("public_links", toml_edit::value(access.public_links));
             // One `{ who, level }` per line, so the list reads as a list.
             let mut invites = toml_edit::Array::new();
             for invite in &access.invites {
@@ -927,10 +1029,24 @@ mod tests {
                 app_id: Some("app1".into()),
                 policy_id: Some("pol1".into()),
                 idp_id: None,
+                public_links: false,
+                link_hostname: Some("cctop-link.example.test".into()),
+                link_record_id: Some("rec5".into()),
                 ..crate::cloudflare::access::fake::settings()
             })),
             from_env: false,
         }
+    }
+
+    #[test]
+    fn an_access_table_from_before_the_switch_keeps_its_token_links() {
+        let text = "[tunnel.access]\nteam = \"t.cloudflareaccess.com\"\naud = \"a\"\n\
+                    owner = \"owner@example.test\"\n";
+        let settings = access_settings_in(text).unwrap();
+        assert!(settings.public_links);
+        assert_eq!(settings.link_hostname, None);
+        let off = format!("{text}public_links = false\n");
+        assert!(!access_settings_in(&off).unwrap().public_links);
     }
 
     #[test]
@@ -1124,6 +1240,41 @@ mod tests {
         assert_eq!(LOCAL.upstream(), None);
         assert!(!LOCAL.is_share_host("cctop-share.example.test"));
         assert_ne!(LOCAL.generation(), held, "shares minted on it are stale");
+    }
+
+    #[test]
+    fn the_token_hostname_reaches_the_page_and_never_the_share_front() {
+        static LOCAL: Shares = Shares::new();
+        const FRONT: u16 = 5555;
+        let routes = Routes::new(7777);
+        routes.insert("cctop.example.test", 7777);
+        let _lent = LOCAL.lend(
+            routes.clone(),
+            "cctop.example.test",
+            Some(("cctop-share.example.test", FRONT)),
+        );
+        LOCAL.route(4000, None);
+        assert!(LOCAL.is_page_route("cctop.example.test:443"));
+        assert!(!LOCAL.is_page_route("cctop-link.example.test"));
+        assert!(!LOCAL.is_page_route("127.0.0.1:7777"));
+
+        LOCAL.set_link(Some("cctop-link.example.test".into()));
+        assert_eq!(routes.port_for("cctop-link.example.test"), Some(7777));
+        assert!(LOCAL.is_page_route("cctop-link.example.test"));
+        assert!(!LOCAL.is_share_host("cctop-link.example.test"));
+        // A share can never be routed onto it, nor it onto a share's.
+        assert_eq!(LOCAL.route(4000, Some("cctop-link.example.test")), None);
+        assert_eq!(routes.port_for("cctop-link.example.test"), Some(7777));
+        LOCAL.set_link(Some("cctop-share.example.test".into()));
+        assert_eq!(routes.port_for("cctop-share.example.test"), Some(FRONT));
+        assert_eq!(routes.port_for("cctop-link.example.test"), None);
+        assert!(!LOCAL.is_page_route("cctop-share.example.test"));
+
+        // Public links off: the route goes, and the page's stays.
+        LOCAL.set_link(Some("cctop-link.example.test".into()));
+        LOCAL.set_link(None);
+        assert_eq!(routes.port_for("cctop-link.example.test"), None);
+        assert_eq!(routes.port_for("cctop.example.test"), Some(7777));
     }
 
     #[test]
