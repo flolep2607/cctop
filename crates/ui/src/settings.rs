@@ -218,15 +218,20 @@ pub const VIEWS: [(&str, &str, View); 10] = [
                 ];
                 let mut out = Vec::new();
                 for col in cols {
-                    for asc in [false, true] {
+                    // Ascending first: the default is `last ↑`, and the page
+                    // resets a choice by taking its first option
+                    // (`App::settings_reset`), so the default has to be it.
+                    for asc in [true, false] {
                         out.push(format!("{}{}", col.key(), if asc { " ↑" } else { " ↓" }));
                     }
                 }
                 out
             },
             set: |app, spec| {
-                let (key, asc) = spec.split_once(' ').unwrap_or((spec, ""));
-                let asc = !asc.is_empty();
+                let (key, arrow) = spec.split_once(' ').unwrap_or((spec, ""));
+                // The arrow is the direction, spelled: anything that is not an
+                // ascending arrow is a descending choice, not an ascending one.
+                let asc = arrow == "↑";
                 app.subagent_sort = (super::panels::SubagentSort::parse(key), asc);
                 app.save_prefs();
             },

@@ -1273,6 +1273,18 @@ pub fn tool_color(name: &str) -> Color {
     )
 }
 
+/// Stable per-kind colour so the same subagent kind keeps its hue between
+/// refreshes, the way [`tool_color`] does for tools.
+///
+/// Deliberately the same hue set and the same hash: a subagent kind and a tool
+/// name may even land on one hue without harm, because the two never stand
+/// side by side — the TYPE cell lives in the Subagents panel, tool cells in
+/// the table and the activity log — and a second set of ten indices would be
+/// ten more places the dark and light palettes could drift apart.
+pub fn subagent_color(kind: &str) -> Color {
+    tool_color(kind)
+}
+
 /// The colours a workspace tab can be painted, in the order the picker walks
 /// them.
 ///
@@ -1781,6 +1793,25 @@ pub(super) mod tests {
         assert_eq!(running_dot_color(Some(1_000)), Color::Indexed(71));
         // Same hash over the same ten hues, so a tool keeps the colour it had.
         assert_eq!(tool_color("Bash"), Color::Indexed(173));
+    }
+
+    /// A subagent kind keeps the hue its name hashes to — pinned so a change
+    /// to the hash or the hue set is a visible diff rather than a screen that
+    /// quietly repaints every kind a new colour — and none without colour.
+    #[test]
+    fn subagent_kinds_keep_their_hues() {
+        assert_eq!(subagent_color("explore"), Color::Indexed(114));
+        // Stability is the contract: the same kind, the same hue, every frame.
+        assert_eq!(subagent_color("explore"), subagent_color("explore"));
+
+        let before = colors().variant;
+        let _restore = Restore(before);
+        set_theme(Some("mono"));
+        assert_eq!(
+            subagent_color("explore"),
+            Color::Reset,
+            "mono paints emphasis, not hues"
+        );
     }
 
     /// Only a terminal that says so gets RGB; anything else — including the

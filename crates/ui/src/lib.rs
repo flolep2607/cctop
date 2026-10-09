@@ -657,6 +657,9 @@ pub struct App {
     pub tool_expanded: Option<String>,
     /// Which invocation owns each rendered line, so a click maps to an entry.
     pub tool_owners: Vec<Option<String>>,
+    /// What the Subagents panel sorts by, and its direction — with the
+    /// table's reading of each column: ascending for `Last` is newest-first
+    /// (`columns::compare`).
     pub subagent_sort: (panels::SubagentSort, bool),
 
     pub cpu_history: HashMap<String, History>,

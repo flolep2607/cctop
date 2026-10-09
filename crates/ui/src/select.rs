@@ -312,6 +312,18 @@ impl App {
         self.save_prefs();
     }
 
+    /// The Subagents panel's sort, with the table's toggle semantics: the
+    /// column already sorted by flips direction, a new one starts ascending.
+    /// The settings page still offers the explicit pairs — it is a list of
+    /// labelled choices — but a click on the panel's own header is the
+    /// interaction the table has, and it should not mean something else.
+    pub(super) fn set_subagent_sort(&mut self, col: panels::SubagentSort) {
+        let (cur, asc) = self.subagent_sort;
+        self.subagent_sort = if cur == col { (col, !asc) } else { (col, true) };
+        self.save_prefs();
+        self.needs_redraw = true;
+    }
+
     /// Expand or collapse the invocation under a clicked log row.
     pub(super) fn toggle_tool_expansion(&mut self, row_offset: usize) {
         let line = self.tool_scroll as usize + row_offset;
@@ -718,6 +730,19 @@ mod tests {
         app.set_sort(ColumnId::Cpu);
         assert!(app.sort_asc, "new column starts ascending");
         assert_eq!(app.sort_col, ColumnId::Cpu);
+    }
+
+    /// The panel's sort answers its header clicks the way the table's does:
+    /// the column already sorted by flips, a new one starts ascending.
+    #[test]
+    fn subagent_sort_toggles_on_repeat_and_resets_on_change() {
+        let mut app = test_app();
+        app.subagent_sort = (panels::SubagentSort::Cost, true);
+        app.set_subagent_sort(panels::SubagentSort::Cost);
+        assert!(!app.subagent_sort.1, "same column must flip direction");
+        app.set_subagent_sort(panels::SubagentSort::Type);
+        assert!(app.subagent_sort.1, "new column starts ascending");
+        assert_eq!(app.subagent_sort.0, panels::SubagentSort::Type);
     }
 
     /// What decides a refresh is the key and the stamp, and both are fields of

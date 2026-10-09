@@ -1079,6 +1079,32 @@ mod tests {
         assert!(!app.on_settings());
     }
 
+    /// Enter on the subagent_sort row turns it to the next option, and the
+    /// arrow on that option is the direction it sets: `↓` is descending, not
+    /// merely "some arrow was there". The cycle used to write ascending for
+    /// both, so the row never appeared to move.
+    #[test]
+    fn cycling_subagent_sort_takes_the_direction_from_its_arrow() {
+        let mut app = test_app();
+        app.goto_settings();
+        app.on_key(key(KeyCode::Char('/')));
+        for c in "subagent_sort".chars() {
+            app.on_key(key(KeyCode::Char(c)));
+        }
+        app.on_key(key(KeyCode::Enter));
+        assert_eq!(
+            app.subagent_sort,
+            (panels::SubagentSort::Last, false),
+            "the default is last ↑, so the next option is last ↓"
+        );
+        app.on_key(key(KeyCode::Enter));
+        assert_eq!(
+            app.subagent_sort,
+            (panels::SubagentSort::Type, true),
+            "the pair done, the cycle moves on: type ↑"
+        );
+    }
+
     /// `Alt+w` on the settings page closes nothing, and says so.
     ///
     /// The page is over a tab without being it, so the key that ends an agent

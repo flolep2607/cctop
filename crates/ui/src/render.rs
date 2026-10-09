@@ -60,6 +60,10 @@ pub struct Layout {
     pub(super) table_track: Option<Rect>,
     /// The active bottom panel's scrollbar track, while it overflows.
     pub(super) panel_track: Option<Rect>,
+    /// The Subagents panel's header cells while that header is on screen:
+    /// `(row, start_col, end_col, sort)`. A click on one is the table header's
+    /// click — it sorts the panel by that column, toggling on a repeat.
+    pub(super) subagent_header: Vec<(u16, u16, u16, panels::SubagentSort)>,
     /// Every place a key is written on screen as its own label, and the key it
     /// stands for: `(row, start_col, end_col, key)`.
     ///
@@ -98,6 +102,14 @@ impl Layout {
             .iter()
             .find(|(a, b, _)| col >= *a && col < *b)
             .map(|(_, _, id)| *id)
+    }
+
+    /// The Subagents panel's header column under the cursor, if any.
+    pub fn subagent_header_at(&self, col: u16, row: u16) -> Option<panels::SubagentSort> {
+        self.subagent_header
+            .iter()
+            .find(|(r, a, b, _)| *r == row && col >= *a && col < *b)
+            .map(|(_, _, _, sort)| *sort)
     }
 
     /// The key written under the cursor, if a click there means pressing one.
@@ -1546,6 +1558,7 @@ fn draw_bottom(frame: &mut Frame, area: Rect, app: &mut App, layout: &mut Layout
     layout.tab_row = area.y;
     layout.tool_sidebar = None;
     layout.tool_log = None;
+    layout.subagent_header.clear();
 
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
@@ -1730,6 +1743,23 @@ fn draw_bottom(frame: &mut Frame, area: Rect, app: &mut App, layout: &mut Layout
         app.tool_scroll.min(max_scroll)
     } else {
         scroll.min(max_scroll)
+    };
+    // The subagents header is the panel's first line, and clickable only
+    // while it is on screen: once the panel is scrolled, its rows own every
+    // cell and the header is not among them.
+    layout.subagent_header = if app.bottom_tab == 4 && scroll == 0 {
+        app.panel_data
+            .as_ref()
+            .filter(|d| !d.subagents.is_empty())
+            .map(|_| {
+                panels::subagent_header_spans(target.width as usize)
+                    .into_iter()
+                    .map(|(a, b, sort)| (target.y, target.x + a as u16, target.x + b as u16, sort))
+                    .collect()
+            })
+            .unwrap_or_default()
+    } else {
+        Vec::new()
     };
     let total = lines.len();
     frame.render_widget(Paragraph::new(lines).scroll((scroll, 0)), target);
@@ -3624,6 +3654,10 @@ mod tests {
             )],
             pane_rects: vec![Rect::new(1, 7, 40, 10)],
             address_row: Some((15, 11, 29)),
+            subagent_header: vec![
+                (19, 0, 9, panels::SubagentSort::Last),
+                (19, 9, 22, panels::SubagentSort::Type),
+            ],
         };
         // An address answers a right-click on its own row and columns only.
         assert!(layout.address_at(11, 15));
@@ -3677,6 +3711,17 @@ mod tests {
         assert_eq!(layout.row_at(12), None);
         assert_eq!(layout.header_column_at(6, 6), Some(ColumnId::Cost));
         assert_eq!(layout.header_column_at(6, 7), None);
+        // The Subagents panel's header answers only its own row, and each
+        // column only its own span of it.
+        assert_eq!(
+            layout.subagent_header_at(3, 19),
+            Some(panels::SubagentSort::Last)
+        );
+        assert_eq!(
+            layout.subagent_header_at(10, 19),
+            Some(panels::SubagentSort::Type)
+        );
+        assert_eq!(layout.subagent_header_at(3, 20), None);
         assert_eq!(layout.tab_at(9, 20), Some(1));
         assert_eq!(layout.tab_at(9, 21), None);
         assert!(layout.in_bottom_panel(20));
@@ -4418,5 +4463,70 @@ mod tests {
         let (buf, max) = draw(100);
         assert_eq!(max, 0);
         assert_eq!(thumb_cells(&buf), 0);
+    }
+
+    /// The Subagents panel's header answers clicks while it is on screen, and
+    /// stops the moment the panel is scrolled past it.
+    #[test]
+    fn the_subagents_header_is_clickable_only_while_it_shows() {
+        use cctop_core::session::{SessionData, Subagent, SubagentStatus};
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let draw = |scroll: u16| {
+            let mut app = crate::tests::test_app();
+            app.sessions = vec![crate::tests::session("a", false, "x")];
+            app.loaded = true;
+            app.refilter();
+            app.bottom_tab = 4;
+            app.subagent_scroll = scroll;
+            // More agents than the pane has rows, so scrolling can actually
+            // take the header off screen.
+            let agent = |id: &str| Subagent {
+                agent_id: id.into(),
+                agent_type: "explore".into(),
+                description: String::new(),
+                model: "m".into(),
+                started_at: None,
+                last_active: None,
+                duration_ms: 0,
+                status: SubagentStatus::Done,
+                cost: 0.0,
+                tool_count: 0,
+                turns: 0,
+                tokens: 0,
+                last_text: None,
+                tool_use_id: None,
+                context: None,
+                ghost: false,
+            };
+            app.panel_data = Some(SessionData {
+                subagents: vec![agent("s1"), agent("s2"), agent("s3")],
+                ..Default::default()
+            });
+            let mut terminal = Terminal::new(TestBackend::new(120, 5)).expect("backend");
+            let mut layout = Layout::default();
+            terminal
+                .draw(|frame| draw_bottom(frame, frame.area(), &mut app, &mut layout))
+                .expect("draw");
+            layout
+        };
+        let shown = draw(0);
+        assert_eq!(
+            shown.subagent_header_at(3, 1),
+            Some(panels::SubagentSort::Last),
+            "LAST is the first header cell, on the panel's first content row"
+        );
+        assert_eq!(
+            shown.subagent_header_at(10, 2),
+            None,
+            "row two is the first agent's row, not the header"
+        );
+        let scrolled = draw(1);
+        assert_eq!(
+            scrolled.subagent_header_at(3, 1),
+            None,
+            "a scrolled panel's rows own every cell, header included"
+        );
     }
 }
