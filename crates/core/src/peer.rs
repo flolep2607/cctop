@@ -811,6 +811,28 @@ mod tests {
         );
     }
 
+    /// The TLS pump end to end against a real host: the request written
+    /// before the handshake has to go out after it, and the answer has to
+    /// come back through `poll`. Needs the network, so run by hand:
+    /// `cargo test -p cctop-core peer::tests::the_tls_pump -- --ignored`.
+    #[test]
+    #[ignore]
+    fn the_tls_pump_carries_a_whole_exchange() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut reader = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (mut client, _) = listener.accept().unwrap();
+        let mut upstream = Upstream::connect("example.com", true).expect("connects");
+        upstream
+            .write_all(b"GET / HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n")
+            .unwrap();
+        let pump = std::thread::spawn(move || upstream.pump(&mut client));
+        let mut got = String::new();
+        let _ = reader.read_to_string(&mut got);
+        pump.join().unwrap();
+        assert!(got.starts_with("HTTP/1.1 200"), "{got}");
+        assert!(got.contains("</html>"), "the whole body came through");
+    }
+
     #[test]
     fn discovery_finds_the_other_cctop_tunnels_and_their_page_hostnames() {
         use crate::cloudflare::fake::{api as fake_api, ok};
