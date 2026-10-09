@@ -271,7 +271,7 @@ impl Report {
                     let named: Vec<Standing> = out
                         .incidents
                         .iter()
-                        .filter(|i| i.components.iter().any(|n| *n == c.name))
+                        .filter(|i| i.components.contains(&c.name))
                         .map(|i| i.standing)
                         .collect();
                     match !named.is_empty() && named.iter().all(|s| *s == Standing::Stale) {
