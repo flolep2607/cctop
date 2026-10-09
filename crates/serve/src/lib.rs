@@ -2521,7 +2521,7 @@ fn app_config(credential: &str, actions: bool) -> String {
         "token": credential,
         "actions": actions,
         "home": home,
-        "version": env!("CARGO_PKG_VERSION"),
+        "version": cctop_core::update::current_version(),
     })
     .to_string()
 }
@@ -3059,7 +3059,7 @@ mod tests {
         let (full, _) = config("/api/config?t=full", "");
         assert_eq!(full["token"], "full");
         assert_eq!(full["actions"], true);
-        assert_eq!(full["version"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(full["version"], cctop_core::update::current_version());
         for (target, headers) in [
             ("/api/config?t=view", ""),
             ("/api/config", "Authorization: Bearer view\r\n"),

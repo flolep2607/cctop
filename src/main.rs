@@ -40,6 +40,11 @@ fn main() -> anyhow::Result<()> {
     // Before anything, `hook` included: a binary built by `cargo test` carries
     // core's test guards, and this is what keeps them off. See `under_test`.
     cctop_core::running_as_the_binary();
+    // The release version, which is this crate's and not cctop-core's: the
+    // updater compares it with the newest release, and core's own version is
+    // usually older (see `update::current_version`). Before `hook` too, which
+    // stamps it on what it reports.
+    cctop_core::update::set_version(env!("CARGO_PKG_VERSION"));
 
     // `cctop run <agent> …` is handled before clap so the agent's own flags are
     // never mistaken for cctop's — `cctop claude --help` must reach claude.

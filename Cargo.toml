@@ -19,7 +19,7 @@
 # bumped crate, its requirement if the bump is breaking, the root version and
 # the lock.
 [workspace.package]
-version = "0.32.1"
+version = "0.32.2"
 edition = "2024"
 rust-version = "1.88"
 license = "MIT"
