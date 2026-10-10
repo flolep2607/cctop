@@ -667,10 +667,9 @@ pub fn save_token(profile: &str, token: &str) -> anyhow::Result<()> {
     };
     // Same refusal as the harness config writers: a file cctop cannot parse is
     // one it must not rewrite, and `toml_edit` keeps the comments and layout of
-    // a file the user is expected to open.
-    let mut doc = text
-        .parse::<toml_edit::DocumentMut>()
-        .map_err(|e| anyhow::anyhow!("{} is not valid TOML ({e}); fix it first", path.display()))?;
+    // a file the user is expected to open. The refusal names the line and never
+    // quotes it — this file holds the account tokens.
+    let mut doc = parse_toml(path, &text)?;
     // Built as real tables rather than by indexing straight through, which
     // toml_edit renders as a single inline `accounts = { work = { … } }` line.
     if !doc.contains_key("accounts") {
@@ -697,8 +696,7 @@ pub fn save_token(profile: &str, token: &str) -> anyhow::Result<()> {
     // the config, and created unreadable to anyone else from the start:
     // widening a file that already holds a secret is a window, however short.
     let tmp = temp_beside(path, "toml");
-    std::fs::write(&tmp, doc.to_string())?;
-    restrict(&tmp)?;
+    write_secret(&tmp, &doc.to_string())?;
     std::fs::rename(&tmp, path)?;
     // Launchable at once, and polled at once, rather than after a restart and
     // after the next interval: the account was added to be used.
@@ -857,10 +855,71 @@ fn token_account_in(environ: &[u8], config_text: &str) -> Option<String> {
         .find(|name| pick_token(config_text, name).as_deref() == Some(token))
 }
 
-/// Owner-only permissions: the file holds a token.
-pub(crate) fn restrict(path: &Path) -> std::io::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+/// Write `contents` to `path`, owner-only from the moment it exists.
+///
+/// A secret that arrives as `fs::write` followed by a `chmod` is
+/// readable by everyone for as long as the file exists — a window of
+/// microseconds that widens to whatever a slow filesystem makes of it, and
+/// the reason the comments above these writers say "owner-only from the
+/// start". `create` rather than `create_new`: [`temp_beside`] already
+/// makes the name unique, and a reused pid must not fail to save a config
+/// because a crashed run left its file behind.
+pub(crate) fn write_secret(path: &Path, contents: &str) -> std::io::Result<()> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)?;
+    std::io::Write::write_all(&mut file, contents.as_bytes())
+}
+
+/// Parse `text` as the TOML of `path`, or say where it broke.
+///
+/// A refusal says the path, the line and column, and what the parser
+/// wanted — and never what the line held. `toml_edit`'s own `Display`
+/// prints the offending source under the caret, and this is the file the
+/// Cloudflare tunnel token and the API token live in: a parse error is
+/// most likely *about* a secret, half-quoted or unquoted. `message()`
+/// carries the grammar instead — `expected \`=\`` — which names no value.
+/// The one message that quotes something the file said is `duplicate key`,
+/// which names the key: a table header is an identifier rather than a
+/// value, but a pasted token is a token whether it stands in a value or a
+/// key, so that name goes too. The span still gives the position, so the
+/// line a person must open is pointed at without its contents being
+/// repeated.
+pub(crate) fn parse_toml(path: &Path, text: &str) -> anyhow::Result<toml_edit::DocumentMut> {
+    text.parse::<toml_edit::DocumentMut>()
+        .map_err(|e: toml_edit::TomlError| {
+            let where_ = match e.span() {
+                Some(span) => {
+                    let at = span.start.min(text.len());
+                    let line = text[..at].matches('\n').count() + 1;
+                    let column = at - text[..at].rfind('\n').map_or(0, |nl| nl + 1) + 1;
+                    format!(" at line {line}, column {column}")
+                }
+                None => String::new(),
+            };
+            // The key a duplicate was found on: everything the parser puts in
+            // backticks that is a name rather than punctuation.
+            let what = e
+                .message()
+                .lines()
+                .map(|line| match line.split_once("duplicate key `") {
+                    Some((head, rest)) => format!("{head}duplicate key `<key>`{}", {
+                        let close = rest.find('`').unwrap_or(rest.len());
+                        &rest[close..]
+                    }),
+                    None => line.to_string(),
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            anyhow::anyhow!(
+                "{} is not valid TOML{where_} ({what}); fix it first",
+                path.display(),
+            )
+        })
 }
 
 fn read_codex_token_in(dir: &Path) -> Option<String> {
@@ -1328,6 +1387,52 @@ fn codex_usage(token: &str) -> ProviderStatus {
 
 #[cfg(test)]
 mod tests {
+
+    /// A parse failure names the file, the line and the column, and never the
+    /// line's contents: `config.toml` is where the tunnel and API tokens live,
+    /// so the line that fails to parse is the one most likely to hold one.
+    #[test]
+    fn a_malformed_config_is_named_by_position_not_by_its_line() {
+        use super::parse_toml;
+        let secret = "sk-ant-oat01-0123456789abcdef";
+        let path = std::path::Path::new("/home/x/.config/cctop/config.toml");
+        let text = format!("[accounts.work]\ntoken = {secret}\n");
+        let why = parse_toml(path, &text).unwrap_err().to_string();
+        assert!(why.contains(&path.display().to_string()), "{why}");
+        assert!(why.contains("line 2"), "{why}");
+        assert!(!why.contains(secret), "{why} repeated the token");
+        // Nor any fragment of the line it broke on.
+        assert!(!why.contains("oat01"), "{why} quoted the line");
+        // The one message that quotes the file — `duplicate key` — is held to
+        // the same rule: a token pasted as a *table name* is a token too.
+        let twice = format!("[{secret}]\n[accounts]\nx = 1\n[{secret}]\ny = 2\n");
+        let why = parse_toml(path, &twice).unwrap_err().to_string();
+        assert!(why.contains("duplicate key"), "{why}");
+        assert!(!why.contains(secret), "{why} repeated the token");
+        assert!(!why.contains("oat01"), "{why} quoted a key");
+        // A clean file parses, and the message still says what went wrong.
+        let ok = "[accounts]\n[accounts.work]\ntoken = \"x\"\n";
+        assert!(parse_toml(path, ok).is_ok());
+    }
+
+    /// A temp file holding a config or a token is owner-only from the moment
+    /// it exists — not created wide and then narrowed.
+    #[test]
+    fn a_written_secret_is_owner_only_before_a_byte_of_it_lands() {
+        use super::write_secret;
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml.toml");
+        write_secret(&path, "token = \"sk-ant-oat01-x\"\n").unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "mode was {mode:o}");
+        // And the contents are what was asked for.
+        assert!(std::fs::read_to_string(&path).unwrap().contains("sk-ant"));
+        // A second write to the same name still lands: `create` is not
+        // `create_new`, so a reused pid cannot fail to save its config.
+        write_secret(&path, "token = \"y\"\n").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "token = \"y\"\n");
+    }
 
     /// A token account's sessions live in the default directory, so only the
     /// process can say which subscription it is spending — and a handoff that

@@ -1172,6 +1172,41 @@ mod tests {
         assert_eq!(req.cookie("absent"), None);
     }
 
+    /// Every log line in the crate is built from `Request::path`, and the
+    /// access token rides in the query of every request the page makes. So the
+    /// path has to be the path and nothing else: the one field that gets
+    /// written down must not be the one carrying the credential.
+    #[test]
+    fn the_path_a_request_logs_is_never_the_query_it_arrived_with() {
+        let token = "0123456789abcdef0123456789abcdef";
+        for target in [
+            format!("/?t={token}"),
+            format!("/api/config?t={token}"),
+            format!("/term/1?a=1&t={token}"),
+            format!("/rmux-ws/1/share?t={token}#frag"),
+        ] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let mut client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+            let (server, _) = listener.accept().unwrap();
+            use std::io::Write;
+            client
+                .write_all(format!("GET {target} HTTP/1.1\r\n\r\n").as_bytes())
+                .unwrap();
+            let request = Request::parse(&server).unwrap();
+            assert!(
+                !request.path.contains(token),
+                "{target} logged as {}",
+                request.path
+            );
+            assert!(
+                !request.path.contains('?'),
+                "{target} logged as {}",
+                request.path
+            );
+            assert!(request.path.starts_with('/'), "{}", request.path);
+        }
+    }
+
     /// Prometheus sends `Authorization: Bearer <token>`; the scheme is
     /// case-insensitive by RFC 9110, and any other scheme is not a token.
     #[test]

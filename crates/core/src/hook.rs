@@ -3028,9 +3028,10 @@ fn read_codex(path: &Path) -> anyhow::Result<toml_edit::DocumentMut> {
     };
     // Same refusal as the JSON side, and for the same reason: a config cctop
     // cannot parse is one it must not rewrite. `toml_edit` is used rather than a
-    // plain deserializer so the user's comments and layout survive the edit.
-    text.parse::<toml_edit::DocumentMut>()
-        .map_err(|e| anyhow::anyhow!("{} is not valid TOML ({e}); fix it first", path.display()))
+    // plain deserializer so the user's comments and layout survive the edit —
+    // and the refusal names the line's position without quoting it, as every
+    // other reader of a file that may hold a token does.
+    crate::quota::parse_toml(path, &text)
 }
 
 fn write_codex(path: &Path, doc: &toml_edit::DocumentMut) -> anyhow::Result<()> {
@@ -3039,7 +3040,9 @@ fn write_codex(path: &Path, doc: &toml_edit::DocumentMut) -> anyhow::Result<()> 
     }
     let path = &through_link(path);
     let tmp = temp_beside(path, "toml");
-    std::fs::write(&tmp, doc.to_string())?;
+    // Owner-only from the moment it exists, like every other writer of a file
+    // cctop rewrites: this one can hold an auth token.
+    crate::quota::write_secret(&tmp, &doc.to_string())?;
     std::fs::rename(&tmp, path)?;
     Ok(())
 }

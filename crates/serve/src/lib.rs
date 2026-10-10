@@ -1565,6 +1565,29 @@ fn through_tunnel(shared: &Shared, request: &Request) -> bool {
         })
 }
 
+/// What the access cookie's `Secure` attribute is, empty when it may not
+/// carry one.
+///
+/// A `Secure` cookie is dropped by any browser that received it over plain
+/// HTTP — and this listener speaks plain HTTP either way, since the tunnel
+/// terminates TLS at Cloudflare's edge and forwards here, and a machine's
+/// own page is opened at `http://127.0.0.1:7777`. So the attribute goes on
+/// only when the browser's side of that hop was HTTPS: the edge forwards
+/// `X-Forwarded-Proto: https`, and a request [`through_tunnel`] came through
+/// the edge however it is labelled. Anything that can reach this port can
+/// write those headers, but writing them only takes its own cookie away —
+/// the browser refuses a `Secure` cookie set over plain HTTP, so a spoofed
+/// `https` loses the reload the cookie exists for and nothing else.
+fn secure_attribute(shared: &Shared, request: &Request) -> &'static str {
+    let forwarded = request.headers().iter().any(|(k, v)| {
+        k.eq_ignore_ascii_case("x-forwarded-proto") && v.eq_ignore_ascii_case("https")
+    });
+    match forwarded || through_tunnel(shared, request) {
+        true => "; Secure",
+        false => "",
+    }
+}
+
 /// What a Cloudflare Access login on `request` is worth, with whose it is,
 /// or `None` when it carries none or one that does not check out. A refusal
 /// is logged with its reason, never with the token.
@@ -1700,6 +1723,14 @@ fn serve_connection(shared: &Shared, stream: &mut TcpStream) {
     // access.
     let admin = presented == Some(Access::Full) || owner;
     let Some(access) = presented.max(login).max(peer) else {
+        // ponytail: no backoff on a wrong token, and the denial is logged as
+        // it arrives. A token here is 128 bits of entropy (`new_token`), so a
+        // guess is not a way in at any rate a refusal could slow it down to —
+        // the work is done by the comparison, which is already constant-time
+        // for equal lengths — and the one thing a delay would buy, masking
+        // which of two supplied tokens was wrong, an attacker who can already
+        // read the length leak has no use for. A wrong token is refused the
+        // same way with or without it: immediately, and once per request.
         cctop_core::elog::event(
             "http",
             "request",
@@ -2740,8 +2771,9 @@ fn app_page(shared: &Shared, stream: &mut TcpStream, request: &Request, handed: 
             .and_then(|c| access_for(shared, c));
         if !(handed == Some(Access::ReadOnly) && held == Some(Access::Full)) {
             headers = format!(
-                "Set-Cookie: {}={credential}; Path=/; HttpOnly; SameSite=Strict\r\n",
-                cookie_name(shared.port)
+                "Set-Cookie: {}={credential}; Path=/; HttpOnly; SameSite=Strict{}\r\n",
+                cookie_name(shared.port),
+                secure_attribute(shared, request)
             );
         }
     }
@@ -3464,6 +3496,67 @@ mod tests {
         }
         let (head, _) = exchange(&guarded, "/api/config", "");
         assert!(head.starts_with("HTTP/1.1 403 "), "{head}");
+    }
+
+    /// Every refusal of the main page — 403 at the gate, 404 past it, 405 for
+    /// a method no route takes — repeats the status and a fixed sentence, and
+    /// never the credential that asked. A share hostname's 404 is held to the
+    /// same rule (`share_host.rs`), and this is its counterpart here: the token
+    /// arrives in the query line, so a message that quoted the request would
+    /// print it.
+    #[test]
+    fn a_refusal_never_echoes_the_token_it_refused() {
+        // Hex, and long enough that no sentence cctop writes could contain one
+        // by accident: a leak cannot hide behind a word the prose also uses.
+        let full = "0123456789abcdef0123456789abcdef";
+        let wrong = "fedcba9876543210fedcba9876543210";
+        let guarded = shared(full, "view");
+        let asked = |method: &str, target: &str, headers: &str| -> String {
+            let raw = response_of(&guarded, method, target, headers);
+            for leaked in [full, wrong] {
+                assert!(
+                    !raw.contains(leaked),
+                    "{method} {target} leaked a credential"
+                );
+            }
+            raw
+        };
+        // 403: at the gate, with a credential that is neither of this run's —
+        // in the query, in the header, and in both at once. A *successful*
+        // page's `Set-Cookie` is the one answer that carries a credential, and
+        // a refusal is not that answer.
+        for headers in [String::new(), format!("Authorization: Bearer {wrong}\r\n")] {
+            let raw = asked("GET", &format!("/?t={wrong}"), &headers);
+            assert!(
+                raw.lines().next().unwrap_or_default().contains(" 403 "),
+                "{raw}"
+            );
+        }
+        // 404: past the gate — the right token, a page that is not there.
+        let raw = asked("GET", &format!("/no-such-page?t={full}"), "");
+        assert!(
+            raw.lines().next().unwrap_or_default().contains(" 404 "),
+            "{raw}"
+        );
+        // 405: a method no route of cctop's takes, credential in the query.
+        // A body's worth of length, so the refusal is the route's and not the
+        // parser's `411`.
+        let raw = asked(
+            "POST",
+            &format!("/metrics?t={full}"),
+            "Content-Length: 2\r\n\r\n{}",
+        );
+        assert!(
+            raw.lines().next().unwrap_or_default().contains(" 405 "),
+            "{raw}"
+        );
+        // And a read-only link refused an action: 403, with the credential
+        // that would have been enough if this were not an act.
+        let raw = asked("GET", "/api/act/x/prompt?t=view", "");
+        assert!(
+            raw.lines().next().unwrap_or_default().contains(" 403 "),
+            "{raw}"
+        );
     }
 
     #[test]
@@ -4928,6 +5021,53 @@ mod tests {
         let (head, _) = exchange(&guarded, "/?t=full", &format!("If-None-Match: {full}\r\n"));
         assert!(head.starts_with("HTTP/1.1 304 "), "{head}");
         assert!(header(&head, "Set-Cookie").is_some(), "{head}");
+    }
+
+    /// The cookie's `Secure` attribute follows the tunnel, not the listener:
+    /// a page reached through Cloudflare's edge was HTTPS on the browser's
+    /// side and must never fall back to plain HTTP; a page opened on this
+    /// machine's own `http://127.0.0.1` would have a `Secure` cookie dropped
+    /// by every browser, losing the reload it exists for.
+    #[test]
+    fn the_cookie_is_secure_only_when_the_browser_came_through_the_tunnel() {
+        let tunneled = Shared {
+            is_tunnel_host: |host: &str| host.ends_with(".trycloudflare.com"),
+            ..shared("full", "view")
+        };
+        let cookie = |shared: &Shared, headers: &str| {
+            let (head, _) = exchange(shared, "/?t=full", headers);
+            assert!(head.starts_with("HTTP/1.1 200 "), "{head}");
+            header(&head, "Set-Cookie").expect("a cookie").to_string()
+        };
+
+        // This machine, over plain HTTP: no Secure, or the browser would
+        // refuse to send the cookie back to the address it came from.
+        let plain = cookie(&shared("full", "view"), "");
+        assert!(plain.contains("HttpOnly"), "{plain}");
+        assert!(plain.contains("SameSite=Strict"), "{plain}");
+        assert!(!plain.contains("Secure"), "{plain}");
+
+        // The edge says HTTPS, so the attribute goes on.
+        let forwarded = cookie(
+            &tunneled,
+            "Host: dash.trycloudflare.com\r\nX-Forwarded-Proto: https\r\n",
+        );
+        assert!(forwarded.contains("Secure"), "{forwarded}");
+
+        // And a request through the tunnel carries the edge's headers even
+        // where the proxy stripped `X-Forwarded-Proto`.
+        let edged = cookie(
+            &tunneled,
+            "Host: dash.trycloudflare.com\r\nCf-Ray: 8f2c\r\n",
+        );
+        assert!(edged.contains("Secure"), "{edged}");
+
+        // A proxy in front that says plain keeps the cookie sendable.
+        let demoted = cookie(
+            &shared("full", "view"),
+            "Host: 192.168.1.4:7777\r\nX-Forwarded-Proto: http\r\n",
+        );
+        assert!(!demoted.contains("Secure"), "{demoted}");
     }
 
     #[test]
