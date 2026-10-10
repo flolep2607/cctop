@@ -96,6 +96,18 @@ pub fn run(
     for host in &hosts {
         spawn_host_poller(host.clone(), res_tx.clone());
     }
+    // The other cctops on the Cloudflare account, found rather than named,
+    // arriving as the same `Remote` responses an ssh host's poller sends.
+    {
+        let tx = res_tx.clone();
+        cctop_core::peer::spawn(move |machine, snapshot| {
+            tx.send(Response::Remote {
+                host: machine.to_string(),
+                snapshot,
+            })
+            .is_ok()
+        });
+    }
 
     // One cached check per day, off the UI thread. Only ever reports: replacing
     // the binary stays behind an explicit `--update`. A build output is told
@@ -119,6 +131,7 @@ pub fn run(
     // cannot disagree about what is on screen.
     if hosts.is_empty() {
         app.hidden_columns.push(ColumnId::Host);
+        app.host_auto_hidden = true;
     }
     // The conversations and serves that reach back to a remote row ask the
     // `Host`, not the row — the row only knows the machine's name.
@@ -661,6 +674,9 @@ fn event_loop(
                 Ok(Response::Remote { host, snapshot }) => {
                     match snapshot {
                         cctop_core::fleet::Snapshot::Rows(rows) => {
+                            if !rows.is_empty() && std::mem::take(&mut app.host_auto_hidden) {
+                                app.hidden_columns.retain(|c| *c != ColumnId::Host);
+                            }
                             app.remote_errors.remove(&host);
                             app.remotes.insert(host, rows);
                         }

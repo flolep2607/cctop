@@ -459,6 +459,24 @@ fn settings_filtered_styles() {
     insta::assert_snapshot!(styles(&buffer));
 }
 
+/// The settings page's colours, which the text snapshots cannot carry: each
+/// value type in its own ink, a bool green or red, and the wash a set value
+/// gets behind it.
+///
+/// Two values are set on the fixture for the wash, because the page draws only
+/// defaults otherwise and a highlight nobody can see is one the snapshot would
+/// happily let regress. A number and a bool, so both readings are pinned: the
+/// wash over a type colour, and a true toggle as `[x]` plus its green.
+#[test]
+fn settings_styles() {
+    let mut app = fixture();
+    app.settings_open = true;
+    app.settings.notify = Some(true);
+    app.settings.idle_after = Some(3.0);
+    let buffer = draw(&mut app, LARGE);
+    insta::assert_snapshot!(styles(&buffer));
+}
+
 #[test]
 fn context_panel() {
     let mut app = fixture();
@@ -718,6 +736,7 @@ fn connect_popup() {
 
     let mut app = open(Step::Failed {
         message: Error::NoDomain.to_string(),
+        then: super::connect::Method::Browser,
     });
     snap("connect_no_domain", &mut app);
 
@@ -804,6 +823,18 @@ fn connect_access() {
         said: Vec::new(),
     });
     snap("connect_access_off", &mut app);
+
+    let mut app = open(Step::Access {
+        account: Account {
+            login: true,
+            ..account(None)
+        },
+        cursor: 0,
+        field: Some((Typing::Token, "made-up".into())),
+        confirm: false,
+        said: Vec::new(),
+    });
+    snap("connect_access_login_token", &mut app);
 }
 
 /// Choosing an address: the share panel with its `Address` line, the field

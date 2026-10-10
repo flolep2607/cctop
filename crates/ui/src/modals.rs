@@ -655,7 +655,12 @@ fn filter_help(rows: Vec<(HelpRow, Line<'static>)>, query: &str) -> Vec<Line<'st
 /// choices and the keybinds were never going to fit either. Being a tab is what
 /// gave it the whole frame below the bar, so the row count costs scrolling
 /// instead of costing a subset of the knobs.
-pub(super) fn draw_settings(frame: &mut Frame, area: Rect, app: &mut App) {
+pub(super) fn draw_settings(
+    frame: &mut Frame,
+    area: Rect,
+    app: &mut App,
+    layout: &mut super::render::Layout,
+) {
     let rows = app.settings_shown();
     let shown = rows.len();
     let total = app.settings_items().len();
@@ -664,7 +669,7 @@ pub(super) fn draw_settings(frame: &mut Frame, area: Rect, app: &mut App) {
     // wrapped. Passed in rather than measured here because the block has not
     // been built yet, and its border is two of those columns.
     let width = area.width.saturating_sub(2) as usize;
-    let (lines, cursor_line) = settings_lines(app, &rows, cursor, width);
+    let (lines, cursor_line, item_lines) = settings_lines(app, &rows, cursor, width);
     let height = lines.len() as u16;
 
     let mut block = Block::bordered()
@@ -691,6 +696,18 @@ pub(super) fn draw_settings(frame: &mut Frame, area: Rect, app: &mut App) {
     // and it is what an `End` key needs in order to have a ceiling.
     app.settings_max_scroll = max_scroll;
     app.settings_scroll = scroll;
+    // The rows a pointer can land on, recorded while they are laid out: the
+    // page scrolls inside its block, and which item a screen row shows is
+    // arithmetic only this pass knows. Cctop holds the terminal's mouse
+    // capture, so a click here is answered here or nowhere.
+    layout.settings_inner = Some(inner);
+    layout.settings_rows = item_lines
+        .into_iter()
+        .filter_map(|(line, at)| {
+            let on_screen = line.checked_sub(scroll)?;
+            (on_screen < inner.height).then_some((inner.y + on_screen, at))
+        })
+        .collect();
     if max_scroll > 0 {
         // On the border, so it costs no content line and cannot scroll away.
         let count = match app.settings_filter.is_empty() {
@@ -762,6 +779,23 @@ fn settings_filter_border(app: &App) -> String {
         true => " / filter ".to_string(),
         false => format!(" /{} ", app.settings_filter),
     }
+}
+
+/// What a value on the settings page is, which is what colours it.
+///
+/// Decided where the value comes from rather than from its text, because the
+/// text does not say: a `[settings]` entry takes its type from the schema (the
+/// parser for bools, the shape of the default for number-versus-string), a view
+/// choice from its `View` variant, and a keybind or the Cloudflare row is
+/// neither config-typed nor cycled. A bool carries its state because both
+/// channels read it — the hue, green against red, and the checkbox glyph the
+/// row draws in place of the word.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ValueKind {
+    Bool(bool),
+    Cycle,
+    Number,
+    Text,
 }
 
 /// The page's rows, grouped under the three places a value can be written, and
@@ -866,7 +900,7 @@ fn settings_lines(
     rows: &[super::settings::Item],
     cursor: usize,
     width: usize,
-) -> (Vec<Line<'static>>, u16) {
+) -> (Vec<Line<'static>>, u16, Vec<(u16, usize)>) {
     use super::settings::{Item, VIEWS, View};
     // Columns a row spends before its description: the gutter, the name, the
     // value, and the set-marker.
@@ -874,6 +908,10 @@ fn settings_lines(
     let section = |t: &str| Line::from(Span::styled(t.to_string(), theme::title()));
     let mut lines = Vec::new();
     let mut cursor_line = 0u16;
+    // `(line index, item index)` for the lines that are a row of the list,
+    // which is what turns a screen position back into the item drawn there —
+    // the headings and the file line are lines with no item behind them.
+    let mut item_lines = Vec::new();
 
     // Cut rather than wrapped, for the reason given on the Paragraph. A config
     // path is as long as somebody's home directory made it, and a problem
@@ -913,20 +951,59 @@ fn settings_lines(
     let mut row = |lines: &mut Vec<Line<'static>>,
                    at: usize,
                    name: &str,
+                   ty: ValueKind,
                    value: String,
                    set: bool,
                    what: &str,
                    kind: Kind| {
         let here = at == cursor;
-        let style = match set {
-            true => accent.add_modifier(Modifier::BOLD),
-            false => accent,
+        // The type's own ink, and for a set value a wash beside it. Bold stays
+        // what it was — the wash adds a second reading of "not the default"
+        // without taking the first away.
+        let style = {
+            let pal = theme::colors();
+            let ink = match ty {
+                ValueKind::Bool(on) => match on {
+                    true => pal.bool_on,
+                    false => pal.bool_off,
+                },
+                ValueKind::Cycle => pal.cycle_hue,
+                ValueKind::Number => pal.number_hue,
+                ValueKind::Text => pal.text_hue,
+            };
+            match set {
+                true => Style::default()
+                    .fg(ink)
+                    .add_modifier(Modifier::BOLD)
+                    .patch(theme::edited()),
+                false => Style::default().fg(ink),
+            }
+        };
+        // A bool is a checkbox rather than the word: `[x]` and `[ ]` are three
+        // cells of ASCII, which every terminal draws at one cell each. Emoji
+        // would say the same thing at a width no terminal agrees on, and the
+        // word was the only thing a reader without colour had.
+        let text = match ty {
+            ValueKind::Bool(on) => match on {
+                true => "[x]".to_string(),
+                false => "[ ]".to_string(),
+            },
+            ValueKind::Cycle | ValueKind::Number | ValueKind::Text => value,
         };
         // Padded out to the value column from whatever was drawn, so the marker
         // and the description do not shift when a value is longer than its cap.
+        // The padding wears the value's style, so a set value's wash fills the
+        // column — except under a key, whose cap must not read as fourteen wide.
+        let pad_style = match kind {
+            Kind::Key => Style::default(),
+            Kind::Plain | Kind::Cycles => style,
+        };
         let pad_to = |spans: &mut Vec<Span<'static>>, width: usize| {
             let used: usize = spans.iter().map(Span::width).sum();
-            spans.push(Span::raw(" ".repeat(width.saturating_sub(used))));
+            spans.push(Span::styled(
+                " ".repeat(width.saturating_sub(used)),
+                pad_style,
+            ));
         };
         // Three ways a row can be mid-edit, in the order they can happen: a key
         // being bound, a number typed, or nothing at all.
@@ -944,7 +1021,8 @@ fn settings_lines(
         } else if here && let Some(input) = &app.settings_input {
             let mut spans = input.spans(usize::MAX, style, accent, "█");
             // Padded back out to the column the other rows fill, so the marker
-            // and the description do not shift as the value is typed.
+            // and the description do not shift as the value is typed. Styled
+            // like the text above: a set value keeps its wash while edited.
             pad_to(&mut spans, VALUE_W);
             spans
         } else {
@@ -958,7 +1036,7 @@ fn settings_lines(
                 Kind::Cycles => max_value.saturating_sub(1),
                 _ => max_value,
             };
-            let shown = super::render::elide(&value, cut);
+            let shown = super::render::elide(&text, cut);
             let mut spans = match kind {
                 Kind::Plain => marked(&shown, &needle, style),
                 Kind::Key => marked(&shown, &needle, theme::key_cap()),
@@ -998,6 +1076,7 @@ fn settings_lines(
             cursor_line = lines.len() as u16;
             line = line.style(theme::selected());
         }
+        item_lines.push((lines.len() as u16, at));
         lines.push(line);
     };
 
@@ -1010,9 +1089,19 @@ fn settings_lines(
         lines.push(section("config.toml · [settings]"));
         for (at, entry) in rows.iter().enumerate() {
             let Item::Setting(i) = entry else { continue };
-            let (name, _, what) = cctop_core::settings::SETTINGS[*i];
+            let (name, default, what) = cctop_core::settings::SETTINGS[*i];
             let (value, set) = app.settings.value_of(name);
-            row(&mut lines, at, name, value, set, what, Kind::Plain);
+            // The schema decides the type: the parser is what knows a bool
+            // (`is_toggle`), a default the file would spell as a number makes
+            // the row numeric, and anything else is a string to read.
+            let kind = if cctop_core::settings::is_toggle(name) {
+                ValueKind::Bool(value == "true")
+            } else if default.parse::<f64>().is_ok() {
+                ValueKind::Number
+            } else {
+                ValueKind::Text
+            };
+            row(&mut lines, at, name, kind, value, set, what, Kind::Plain);
         }
     }
 
@@ -1024,13 +1113,16 @@ fn settings_lines(
             let (name, what, view) = &VIEWS[*i];
             let value = app.view_value(view);
             let set = app.view_is_set(view);
-            // Only a choice turns quietly under Enter; the flag and the number
-            // say on screen what they are about to do.
-            let kind = match view {
-                View::Choice { .. } => Kind::Cycles,
-                _ => Kind::Plain,
+            // The variant is the type: a flag flips, a choice turns, a number
+            // is typed. Only a choice turns quietly under Enter, so only it
+            // carries the mark; the flag and the number say on screen what they
+            // are about to do.
+            let (ty, kind) = match view {
+                View::Flag { value: get, .. } => (ValueKind::Bool(get(app)), Kind::Plain),
+                View::Choice { .. } => (ValueKind::Cycle, Kind::Cycles),
+                View::Number { .. } => (ValueKind::Number, Kind::Plain),
             };
-            row(&mut lines, at, name, value, set, what, kind);
+            row(&mut lines, at, name, ty, value, set, what, kind);
         }
     }
 
@@ -1045,6 +1137,7 @@ fn settings_lines(
                     &mut lines,
                     at,
                     "cloudflare",
+                    ValueKind::Text,
                     value,
                     set,
                     super::settings::CLOUDFLARE_WHAT,
@@ -1062,7 +1155,16 @@ fn settings_lines(
             let (action, default, what) = cctop_core::settings::BINDINGS[*i];
             let key = app.settings.key_for(action).to_string();
             let set = key != *default;
-            row(&mut lines, at, action, key, set, what, Kind::Key);
+            row(
+                &mut lines,
+                at,
+                action,
+                ValueKind::Text,
+                key,
+                set,
+                what,
+                Kind::Key,
+            );
         }
     }
 
@@ -1090,7 +1192,7 @@ fn settings_lines(
         ),
         theme::dim(),
     )));
-    (lines, cursor_line)
+    (lines, cursor_line, item_lines)
 }
 
 pub(super) fn draw_search(frame: &mut Frame, area: Rect, app: &App) {
@@ -3262,7 +3364,7 @@ pub(super) fn draw_connect(frame: &mut Frame, area: Rect, app: &mut App, layout:
                 ],
             )
         }
-        Step::Failed { message } => {
+        Step::Failed { message, .. } => {
             lines.extend(wrap(message, 0, warn));
             lines.push(Line::default());
             lines.push(dim("Quick tunnels still work: t in the serve panel."));
@@ -3357,12 +3459,29 @@ pub(super) fn draw_connect(frame: &mut Frame, area: Rect, app: &mut App, layout:
                     lines.push(dim(
                         "whoever you invite. Nobody needs a Cloudflare account.",
                     ));
-                    if let Some((_, edit)) = field {
-                        lines.push(Line::default());
-                        lines.push(text("Your email — the owner, always full:"));
-                        lines.push(input_line(edit));
+                    match field {
+                        Some((Typing::Token, edit)) => {
+                            lines.push(Line::default());
+                            lines.push(text("A browser login cannot manage Access; an API"));
+                            lines.push(text("token can, and keeps this tunnel as it is:"));
+                            let shown = "dash.cloudflare.com/profile/api-tokens";
+                            lines.push(Line::from(Span::styled(format!("    {shown}"), accent)));
+                            links.push((shown.to_string(), cloudflare::token_link()));
+                            lines.push(text("Paste it here:"));
+                            lines.push(masked_line(edit.chars().count()));
+                        }
+                        Some((_, edit)) => {
+                            lines.push(Line::default());
+                            lines.push(text("Your email — the owner, always full:"));
+                            lines.push(input_line(edit));
+                        }
+                        None => {}
                     }
                     match typing {
+                        Some(Typing::Token) => (
+                            " [Enter] use it  [Ctrl+O] copy link  [Esc] cancel".to_string(),
+                            vec![("[Enter]", enter), ("[Ctrl+O]", ctrl('o')), ("[Esc]", esc)],
+                        ),
                         Some(_) => (
                             " [Enter] turn on  [Esc] cancel".to_string(),
                             vec![("[Enter]", enter), ("[Esc]", esc)],
@@ -4164,7 +4283,7 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(100, 15)).expect("backend");
         let mut frame_text = |app: &mut App| {
             terminal
-                .draw(|frame| draw_settings(frame, frame.area(), app))
+                .draw(|frame| draw_settings(frame, frame.area(), app, &mut Layout::default()))
                 .expect("draw");
             let buffer = terminal.backend().buffer();
             buffer
@@ -4194,7 +4313,7 @@ mod tests {
     fn column(app: &App, from: usize, len: usize) -> Vec<(String, Style)> {
         let rows = app.settings_shown();
         let cursor = app.settings_cursor.min(rows.len().saturating_sub(1));
-        let (lines, at) = super::settings_lines(app, &rows, cursor, 100);
+        let (lines, at, _) = super::settings_lines(app, &rows, cursor, 100);
         let mut col = 0;
         let mut out = Vec::new();
         for span in &lines[at as usize].spans {
@@ -4408,7 +4527,7 @@ mod tests {
         at_row(&mut app, |i| *i == crate::settings::Item::Cloudflare);
         let rows = app.settings_shown();
         let cursor = app.settings_cursor;
-        let (lines, at) = super::settings_lines(&app, &rows, cursor, 80);
+        let (lines, at, _) = super::settings_lines(&app, &rows, cursor, 80);
         let line = &lines[at as usize];
         let drawn = line.spans.iter().map(|s| s.width()).sum::<usize>();
         assert!(drawn <= 80, "the row ran off the frame: {line:?}");
@@ -4417,6 +4536,107 @@ mod tests {
             text.contains("Your Cloudflare tunnel"),
             "the description left the frame: {line:?}"
         );
+    }
+
+    /// Each value type in its own ink, the wash a set value wears, and a bool
+    /// as a checkbox — in every palette the page can be drawn in: dark, light,
+    /// and no colour at all.
+    ///
+    /// The glyph replaced the word, so the column arithmetic is asserted with
+    /// it: `[x]` is three cells where `true` was four, and a glyph that did not
+    /// pad back out to the value column would shift the marker and the
+    /// description under it on every row at once.
+    #[test]
+    fn each_value_type_is_painted_and_the_columns_hold() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let start = theme::variant();
+        let _restore = theme::tests::Restore(start);
+
+        let mut app = crate::tests::test_app();
+        // One bool and one number off their defaults, so the wash has something
+        // to sit behind; the rest of the page is defaults.
+        app.settings.notify = Some(true);
+        app.settings.idle_after = Some(3.0);
+
+        // The shape a palette change must not disturb: the row from just inside
+        // the gutter to the end of the value column, text only.
+        let mut shape = String::new();
+        for named in ["dark", "light", "mono"] {
+            theme::set_theme(Some(named));
+            let mut terminal = Terminal::new(TestBackend::new(100, 50)).expect("backend");
+            terminal
+                .draw(|frame| draw_settings(frame, frame.area(), &mut app, &mut Layout::default()))
+                .expect("draw");
+            let buffer = terminal.backend().buffer();
+            let pal = theme::colors();
+            // The block's border is column 0, so the row's two-space gutter
+            // puts the name at 3 and the value — `  {name:<18}` — at 21, with
+            // the three-cell marker at 35 and the description at 38.
+            let row = |name: &str| {
+                (0..buffer.area.height)
+                    .find(|&y| {
+                        (3u16..21)
+                            .map(|x| buffer[(x, y)].symbol())
+                            .collect::<String>()
+                            .starts_with(name)
+                    })
+                    .unwrap_or_else(|| panic!("{named}: no row for {name}"))
+            };
+
+            // A true bool at its default's opposite: the glyph, the green, and
+            // the wash of a value that is not the default.
+            let y = row("notify");
+            let value: String = (21u16..35).map(|x| buffer[(x, y)].symbol()).collect();
+            assert_eq!(value, format!("[x]{}", " ".repeat(11)), "{named}");
+            let cell = &buffer[(21, y)];
+            assert_eq!(cell.fg, pal.bool_on, "{named}");
+            // The marker and the description are where the word left them:
+            // this value is set, so the marker cell carries its `*`.
+            let marker: String = (35u16..38).map(|x| buffer[(x, y)].symbol()).collect();
+            assert_eq!(marker, " * ", "{named}: the marker column moved");
+            assert_eq!(buffer[(38, y)].symbol(), "B", "{named}: descriptions");
+            match theme::no_color() {
+                true => assert!(
+                    cell.modifier.contains(Modifier::UNDERLINED),
+                    "mono: a set value lost its second channel"
+                ),
+                false => assert_eq!(cell.bg, pal.edited_bg, "{named}: no wash"),
+            }
+
+            // A false bool, still on its default: red, and on the ground
+            // rather than on the wash.
+            let y = row("warn_agents");
+            assert_eq!(buffer[(21, y)].symbol(), "[", "{named}");
+            let cell = &buffer[(21, y)];
+            assert_eq!(cell.fg, pal.bool_off, "{named}");
+            assert_eq!(cell.bg, pal.ground, "{named}: a default wore the wash");
+
+            // The other three types, one hue each.
+            assert_eq!(
+                buffer[(21, row("compact_threshold"))].fg,
+                pal.number_hue,
+                "{named}"
+            );
+            assert_eq!(buffer[(21, row("theme"))].fg, pal.text_hue, "{named}");
+            assert_eq!(
+                buffer[(21, row("bottom_panel"))].fg,
+                pal.cycle_hue,
+                "{named}"
+            );
+            // A number off its default wears the wash under its own ink.
+            assert_eq!(buffer[(21, row("idle_after"))].bg, pal.edited_bg, "{named}");
+
+            // Same page, same shape, whatever the palette: mono may only change
+            // how it is inked, never where anything sits.
+            let line: String = (1u16..38).map(|x| buffer[(x, y)].symbol()).collect();
+            if shape.is_empty() {
+                shape = line;
+            } else {
+                assert_eq!(shape, line, "{named}: the row moved");
+            }
+        }
     }
 
     fn help_text(app: &mut App) -> String {

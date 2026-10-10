@@ -8,8 +8,10 @@
 //!   which mostly means darker, more saturated ink instead of pastels.
 //! * **Mono** — `NO_COLOR`. Every colour becomes `Color::Reset` and emphasis
 //!   moves to `Modifier`, so the terminal's own scheme is left alone. The
-//!   shapes still carry the state: `●` versus `○` for running, `FREE`/`incl`
-//!   in the cost cells, `▲`/`▼` on the sorted column.
+//!   shapes still carry the state: `●` versus `○` for running, `●`/`◐`/`○` for
+//!   how much a session asks permission to do, a block bar in front of a
+//!   context percentage, `free`/`incl` in the cost cells, `▲`/`▼` on the sorted
+//!   column.
 //!
 //! Everything reads the active palette through [`colors`] rather than through
 //! constants, since the choice isn't known until the process has looked at its
@@ -95,6 +97,16 @@ pub struct Palette {
     /// The active-search badge, which is deliberately not the accent hue.
     pub filter_badge: Color,
 
+    /// The settings page's value types, one ink each, so a scan of the page
+    /// tells a toggle from a choice from a number without reading a word.
+    /// A bool is the pair, because for those the hue *is* the value: green
+    /// points one way and red the other.
+    pub bool_on: Color,
+    pub bool_off: Color,
+    pub cycle_hue: Color,
+    pub text_hue: Color,
+    pub number_hue: Color,
+
     pub cost_low: Color,
     pub cost_mid: Color,
     pub cost_high: Color,
@@ -129,6 +141,11 @@ pub struct Palette {
     /// Tint for rows marked for a batch action, so marks read at a glance even
     /// when nothing is selected. Kept dim so it stays behind the data.
     pub marked_bg: Color,
+    /// Wash behind a settings value that is not its default: the `*` marker's
+    /// partner, so "somebody changed this" reads without reading the marker.
+    /// One step off the ground rather than a hue — it has to sit behind four
+    /// different foreground inks without arguing with any of them.
+    pub edited_bg: Color,
 
     /// A freshly active session's status dot, and the step just below it.
     pub dot_fresh: Color,
@@ -163,6 +180,14 @@ const DARK: Palette = Palette {
     accent: Color::Indexed(75),
     on_accent: Color::Black,
     filter_badge: Color::Cyan,
+    // The settings page's value types: the sixteen-colour green and cyan
+    // exactly, so a terminal that can only show sixteen keeps the split; a
+    // saturated red, gold and purple-magenta for the rest.
+    bool_on: Color::Indexed(40),
+    bool_off: Color::Indexed(160),
+    cycle_hue: Color::Indexed(44),
+    text_hue: Color::Indexed(220),
+    number_hue: Color::Indexed(134),
     cost_low: Color::Indexed(114),
     cost_mid: Color::Indexed(221),
     cost_high: Color::Indexed(203),
@@ -185,6 +210,10 @@ const DARK: Palette = Palette {
     failed_bg: Color::Indexed(52),
     header_bg: Color::Indexed(236),
     marked_bg: Color::Indexed(53),
+    // One grey step above the selection (236): distinct from the ground at
+    // rest and still a step rather than a tie when the cursor's row is the
+    // one that is set.
+    edited_bg: Color::Indexed(237),
     dot_fresh: Color::Indexed(82),
     dot_warm: Color::Indexed(71),
     name_hue: Color::Indexed(180),
@@ -233,6 +262,13 @@ const LIGHT: Palette = Palette {
     accent: Color::Indexed(25),
     on_accent: Color::White,
     filter_badge: Color::Indexed(23),
+    // Ink where the dark palette has light: the same hues dark enough to read
+    // on white, kept apart from each other the same way.
+    bool_on: Color::Indexed(28),
+    bool_off: Color::Indexed(124),
+    cycle_hue: Color::Indexed(30),
+    text_hue: Color::Indexed(130),
+    number_hue: Color::Indexed(90),
     cost_low: Color::Indexed(28),
     cost_mid: Color::Indexed(130),
     cost_high: Color::Indexed(124),
@@ -259,6 +295,9 @@ const LIGHT: Palette = Palette {
     failed_bg: Color::Indexed(224),
     header_bg: Color::Indexed(250),
     marked_bg: Color::Indexed(225),
+    // 253, mirrored like the rest of light's greys: a shade off white that a
+    // set value can still be found by, without becoming the page's own ground.
+    edited_bg: Color::Indexed(253),
     dot_fresh: Color::Indexed(34),
     dot_warm: Color::Indexed(22),
     name_hue: Color::Indexed(94),
@@ -306,6 +345,11 @@ const MONO: Palette = {
         accent: r,
         on_accent: r,
         filter_badge: r,
+        bool_on: r,
+        bool_off: r,
+        cycle_hue: r,
+        text_hue: r,
+        number_hue: r,
         cost_low: r,
         cost_mid: r,
         cost_high: r,
@@ -328,6 +372,7 @@ const MONO: Palette = {
         failed_bg: r,
         header_bg: r,
         marked_bg: r,
+        edited_bg: r,
         dot_fresh: r,
         dot_warm: r,
         name_hue: r,
@@ -361,6 +406,11 @@ impl Palette {
             accent: f(self.accent),
             on_accent: f(self.on_accent),
             filter_badge: f(self.filter_badge),
+            bool_on: f(self.bool_on),
+            bool_off: f(self.bool_off),
+            cycle_hue: f(self.cycle_hue),
+            text_hue: f(self.text_hue),
+            number_hue: f(self.number_hue),
             cost_low: f(self.cost_low),
             cost_mid: f(self.cost_mid),
             cost_high: f(self.cost_high),
@@ -383,6 +433,7 @@ impl Palette {
             failed_bg: f(self.failed_bg),
             header_bg: f(self.header_bg),
             marked_bg: f(self.marked_bg),
+            edited_bg: f(self.edited_bg),
             dot_fresh: f(self.dot_fresh),
             dot_warm: f(self.dot_warm),
             name_hue: f(self.name_hue),
@@ -447,6 +498,8 @@ fn adapt_for(color: Color, variant: Variant, depth: Depth, truecolor: bool) -> C
 ///   pinks both land on bright yellow, making a marked row and a failed call
 ///   one colour. Blue is the selection here because the table almost never
 ///   produces it (it favours cyan), so no row's own ink disappears into it.
+///   The settings page's edit wash folds onto the same grounds — black on
+///   dark, white on light — so it names its two steps by hand as well.
 /// * A ramp's empty slot is there to be seen, and dark's lands on black.
 /// * Light's accent and label were a deep blue that the table turns to cyan,
 ///   and white key caps on cyan are unreadable.
@@ -460,6 +513,7 @@ fn sixteen(palette: Palette) -> Palette {
             p.dot_warm = Color::Green;
             p.selected_bg = Color::Blue;
             p.header_bg = Color::Blue;
+            p.edited_bg = Color::DarkGray;
             let heat = [
                 Color::DarkGray,
                 Color::Green,
@@ -485,6 +539,7 @@ fn sixteen(palette: Palette) -> Palette {
             p.border_hi = Color::Blue;
             p.failed_bg = Color::LightRed;
             p.marked_bg = Color::LightMagenta;
+            p.edited_bg = Color::Gray;
             p.spark_accent = [
                 Color::Gray,
                 Color::Cyan,
@@ -1062,6 +1117,17 @@ pub fn marked() -> Style {
     match no_color() {
         true => Style::default().add_modifier(Modifier::UNDERLINED),
         false => Style::default().bg(colors().marked_bg),
+    }
+}
+
+/// The wash behind a settings value that is not its default, the `*` marker's
+/// partner. Underlined without colour, the way a mark is: a background cannot
+/// be asked to carry the signal alone when the terminal has said it takes no
+/// colour at all.
+pub fn edited() -> Style {
+    match no_color() {
+        true => Style::default().add_modifier(Modifier::UNDERLINED),
+        false => Style::default().bg(colors().edited_bg),
     }
 }
 

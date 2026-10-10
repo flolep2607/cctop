@@ -13,7 +13,7 @@ HEEEEEEEEEEHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH
 HAAAAAAA...............................................................................................................H
 H......................................................................................................................H
 HEEEEEEEEEEEEEEEEEEEEEEEE..............................................................................................H
-HDDLLLLLLLLLLDDDDDDDDMDDDDDDDDDDDDDNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN............................................H
+HDDLLLLLLLLLLDDDDDDDDMMMMMMMMMMMMMMNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN............................................H
 H......................................................................................................................H
 HAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA...........................................H
 H......................................................................................................................H
@@ -55,6 +55,6 @@ I fg=Indexed(109) bg=Reset mod=NONE
 J fg=White bg=Reset mod=BOLD
 K fg=Indexed(114) bg=Reset mod=NONE
 L fg=White bg=Indexed(236) mod=BOLD | UNDERLINED
-M fg=Indexed(75) bg=Indexed(236) mod=BOLD
+M fg=Indexed(134) bg=Indexed(236) mod=BOLD
 N fg=Indexed(245) bg=Indexed(236) mod=BOLD
 O fg=Black bg=Indexed(75) mod=BOLD

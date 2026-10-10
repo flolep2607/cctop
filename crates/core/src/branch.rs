@@ -1,4 +1,5 @@
-//! The git branch a session's working directory has checked out.
+//! The git branch a session's working directory has checked out, and how far
+//! that checkout has diverged from its upstream.
 //!
 //! Read here rather than in the table that shows it, because the branch is
 //! part of what a session *is* to every surface that describes one — the
@@ -192,6 +193,123 @@ fn read_head(start: &Path) -> Option<String> {
     }
 }
 
+/// A checkout's position against its upstream, and when it was measured.
+/// `None` is a real answer — no upstream, no repository, nothing to walk —
+/// and is cached like a name is.
+type MarkReading = (Option<(u32, u32)>, Instant);
+
+/// Working directory -> its last ahead/behind reading.
+static MARKS: LazyLock<Mutex<HashMap<String, MarkReading>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// How far a session's checkout has diverged from its upstream, as
+/// `(ahead, behind)`, or `None` when there is nothing to measure against: a
+/// branch tracking no upstream, a directory outside any repository, a
+/// checkout git could not be asked.
+///
+/// The count lives here for the same reason the name does — it is part of
+/// describing the session — but read with a subprocess, because a merge-base
+/// walk over the commit graph is in no file: [`branch`] gets the name without
+/// starting git, and the counts are what git gets started for. See
+/// [`ahead_behind`] for how that is kept cheap enough for a table to ask per
+/// visible row.
+pub fn ahead_behind_of(s: &crate::session::Session) -> Option<(u32, u32)> {
+    match &s.remote {
+        // A remote row's upstream is on the other machine, and the count did
+        // not come with the row: asking here would measure whichever checkout
+        // sits at the same path locally, which is not the same repository.
+        Some(_) => None,
+        // Same story as a name for a sandbox whose mount is already gone.
+        None if s.sandbox.is_some() && !s.is_running() => None,
+        None => ahead_behind(&s.label_source),
+    }
+}
+
+/// Ahead/behind of a working directory, cached under [`BRANCH_TTL`].
+///
+/// The walk itself is one `git rev-list` per directory per TTL: the counts are
+/// not in any file, and this is asked per visible row per frame, so asking
+/// twice for the same checkout inside one frame has to cost a hash lookup. The
+/// name is read first and the answer it gives settles whether git is worth
+/// starting at all — a session outside a repository never spawns a process.
+///
+/// The read happens with the lock *not* held, for the reason [`branch`] gives:
+/// a subprocess is slower than the ancestor walk it replaces, and holding a
+/// process-global mutex across it would stall every other row.
+fn ahead_behind(dir: &str) -> Option<(u32, u32)> {
+    branch(dir)?;
+    let (cached, fresh) = {
+        let cache = MARKS.lock().unwrap_or_else(PoisonError::into_inner);
+        match cache.get(dir) {
+            Some((mark, at)) => (*mark, at.elapsed() < BRANCH_TTL),
+            None => (None, false),
+        }
+    };
+    if fresh {
+        return cached;
+    }
+    let read = read_ahead_behind_uncached(dir);
+    let mut cache = MARKS.lock().unwrap_or_else(PoisonError::into_inner);
+    // Another thread may have asked while the lock was off; its answer is at
+    // least as recent, so it stands.
+    if !cache
+        .get(dir)
+        .is_some_and(|(_, at)| at.elapsed() < BRANCH_TTL)
+    {
+        cache.insert(dir.to_string(), (read, Instant::now()));
+    }
+    read
+}
+
+/// The counts for `dir` straight from git — no cache, no lock.
+///
+/// `git rev-list --count --left-right HEAD...@{upstream}` prints `<ahead>` TAB
+/// `<behind>` and exits non-zero when the branch tracks nothing, which is the
+/// `None` of this function rather than an error worth reporting.
+///
+/// Read-only, and scrubbed so it stays that way: every `GIT_*` variable is
+/// removed the way `insight::ship` removes them, so an environment picked up
+/// somewhere else cannot point this at a different repository — and cctop can
+/// be started from inside a hook, where git has already exported its own —
+/// while `GIT_OPTIONAL_LOCKS=0` keeps even the index refresh git does on its
+/// own from taking a lock in a checkout cctop was only ever asked to look at.
+/// stderr is piped rather than inherited: git's complaints belong in a CI log,
+/// not on a terminal cctop has taken over.
+fn read_ahead_behind_uncached(dir: &str) -> Option<(u32, u32)> {
+    let mut cmd = std::process::Command::new("git");
+    cmd.arg("-C")
+        .arg(dir)
+        .args(["rev-list", "--count", "--left-right", "HEAD...@{upstream}"]);
+    let inherited: Vec<std::ffi::OsString> = std::env::vars_os()
+        .map(|(key, _)| key)
+        .filter(|key| key.to_string_lossy().starts_with("GIT_"))
+        .collect();
+    for key in inherited {
+        cmd.env_remove(key);
+    }
+    let out = cmd
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    parse_counts(std::str::from_utf8(&out.stdout).ok()?)
+}
+
+/// Read `<ahead>\t<behind>` as counted.
+///
+/// Anything else on stdout — which for this invocation would mean git changed
+/// its output format — is an answer not worth trusting: a wrong mark on a row
+/// is worse than no mark, since nothing on screen can tell the two apart.
+fn parse_counts(stdout: &str) -> Option<(u32, u32)> {
+    let (ahead, behind) = stdout.trim().split_once('\t')?;
+    Some((ahead.trim().parse().ok()?, behind.trim().parse().ok()?))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -287,5 +405,110 @@ mod tests {
             }
         }
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// The output form [`parse_counts`] is written against, and the forms that
+    /// must not become a mark: a wrong count on a row is worse than none,
+    /// because nothing on screen can tell them apart.
+    #[test]
+    fn counts_are_read_from_the_two_numbers_git_prints() {
+        assert_eq!(parse_counts("1\t1\n"), Some((1, 1)));
+        assert_eq!(parse_counts("0\t0"), Some((0, 0)));
+        assert_eq!(parse_counts("12\t3"), Some((12, 3)));
+        assert_eq!(parse_counts("1 1"), None);
+        assert_eq!(parse_counts("one\ttwo"), None);
+        assert_eq!(parse_counts("1\t2\t3"), None);
+        assert_eq!(parse_counts(""), None);
+    }
+
+    /// The count needs a real repository: it is a merge-base walk, which no
+    /// hand-built `.git` directory can stand in for. A checkout one commit
+    /// ahead of a local upstream and one behind it says `1\t1`; a repository
+    /// whose branch tracks nothing is `None`, and so is a directory outside
+    /// any repository — that one answered without starting a process.
+    #[test]
+    fn ahead_behind_counts_a_checkout_against_its_upstream() {
+        let root = std::env::temp_dir().join(format!("cctop-ahead-behind-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+
+        git(&root, &["init", "-q", "-b", "main"]);
+        write(&root, "f", "a");
+        git(&root, &["add", "f"]);
+        git(&root, &["commit", "-qm", "base"]);
+        // An upstream that is a local branch: `branch.<x>.remote` of `.`, which
+        // git resolves through `@{upstream}` like any remote-tracking one, and
+        // which needs no second machine to reach.
+        git(&root, &["branch", "peer"]);
+        git(&root, &["branch", "--set-upstream-to=peer"]);
+        write(&root, "g", "b");
+        git(&root, &["add", "g"]);
+        git(&root, &["commit", "-qm", "on main"]);
+        git(&root, &["checkout", "-q", "peer"]);
+        write(&root, "h", "c");
+        git(&root, &["add", "h"]);
+        git(&root, &["commit", "-qm", "on peer"]);
+        git(&root, &["checkout", "-q", "main"]);
+
+        let mut diverged = session("diverged");
+        diverged.label_source = root.to_string_lossy().into_owned();
+        assert_eq!(ahead_behind_of(&diverged), Some((1, 1)));
+        // Asked again inside the TTL: the same answer, from the cache.
+        assert_eq!(ahead_behind_of(&diverged), Some((1, 1)));
+
+        let alone = root.join("alone");
+        std::fs::create_dir_all(&alone).unwrap();
+        git(&alone, &["init", "-q", "-b", "main"]);
+        write(&alone, "f", "a");
+        git(&alone, &["add", "f"]);
+        git(&alone, &["commit", "-qm", "base"]);
+        let mut untracked = session("untracked");
+        untracked.label_source = alone.to_string_lossy().into_owned();
+        assert_eq!(ahead_behind_of(&untracked), None);
+
+        let mut outside = session("outside");
+        outside.label_source = root.join("plain").to_string_lossy().into_owned();
+        assert_eq!(ahead_behind_of(&outside), None);
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Run git in `dir`. The identity is passed in the environment rather than
+    /// configured, so the test does not depend on a global `git config` being
+    /// present on whichever machine runs it.
+    fn git(dir: &std::path::Path, args: &[&str]) {
+        let mut cmd = std::process::Command::new("git");
+        cmd.arg("-C")
+            .arg(dir)
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        // The suite is run from cctop's pre-commit hook as well as from a
+        // shell, and inside a hook git has exported `GIT_DIR` and friends for
+        // *its* repository: inherited, they would aim this fixture's commits at
+        // cctop's own index. Drop every `GIT_*` so the repository these
+        // commands name is the one created here.
+        let inherited: Vec<std::ffi::OsString> = std::env::vars_os()
+            .map(|(key, _)| key)
+            .filter(|key| key.to_string_lossy().starts_with("GIT_"))
+            .collect();
+        for key in inherited {
+            cmd.env_remove(key);
+        }
+        cmd.env("GIT_AUTHOR_NAME", "cctop test")
+            .env("GIT_AUTHOR_EMAIL", "test@cctop.invalid")
+            .env("GIT_COMMITTER_NAME", "cctop test")
+            .env("GIT_COMMITTER_EMAIL", "test@cctop.invalid");
+        let out = cmd.output().expect("git to be installed");
+        assert!(
+            out.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    fn write(dir: &std::path::Path, file: &str, body: &str) {
+        std::fs::write(dir.join(file), body).unwrap();
     }
 }

@@ -17,10 +17,13 @@
 //! about *this* filesystem, and would quietly do the wrong thing to whatever
 //! happens to live at the same path here.
 //!
-//! ponytail: read-only, and one direction. Attaching to, typing into or
-//! stopping a remote agent would each need cctop to be running on the far side
-//! and listening — a different and much larger thing than reading a snapshot,
-//! and the reading is the half with no failure mode worse than a stale row.
+//! ponytail: an ssh host is read-only, and one direction. Attaching to or
+//! typing into its agents needs a cctop on the far side that is listening —
+//! which is what a sibling on the same Cloudflare account is ([`crate::peer`]):
+//! its rows arrive the same way, as [`Remote`], and the web page reaches its
+//! terminal and its actions through the hub's relay. An ssh host has no such
+//! listener, and the reading is the half with no failure mode worse than a
+//! stale row.
 
 use crate::pricing::Provider;
 use crate::session::{ActivityState, ContextUsage, Remote, Session, Surface};

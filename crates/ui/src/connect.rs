@@ -113,8 +113,9 @@ pub enum Step {
         hostname: Option<String>,
         shares: bool,
     },
-    /// What stopped it, in Cloudflare's or cctop's words.
-    Failed { message: String },
+    /// What stopped it, in Cloudflare's or cctop's words, and the way in
+    /// that Enter starts over at.
+    Failed { message: String, then: Method },
     /// Disconnected, and anything left on Cloudflare to delete by hand.
     Disconnected { left: Vec<String>, made_here: bool },
     /// Cloudflare Access on the connected account: on or off, the invites
@@ -138,6 +139,10 @@ pub enum Typing {
     Owner,
     /// An email or `@domain` to invite, read-only.
     Invite,
+    /// An API token to replace a browser login's, which Cloudflare never lets
+    /// manage Access. Asked for before Access is turned on, rather than after
+    /// Cloudflare refuses it.
+    Token,
 }
 
 /// What a worker thread comes back with.
@@ -148,6 +153,8 @@ enum Answer {
     Zones(Auth, Result<Vec<Zone>, cloudflare::Error>),
     Suggested(Auth, Zone, Result<String, cloudflare::Error>),
     Created(Result<Account, String>),
+    /// The account with a pasted token in place of its login's.
+    Adopted(Result<Account, String>),
     Removed(Result<(Vec<String>, bool), String>),
     Access(Result<Applied, String>),
 }
@@ -205,9 +212,14 @@ impl Connect {
 
     /// The first step, empty.
     pub fn start(back: Mode) -> Connect {
+        Connect::start_at(back, METHODS[0])
+    }
+
+    /// The first step, empty, with `method` chosen.
+    fn start_at(back: Mode, method: Method) -> Connect {
         Connect::new(
             Step::Start {
-                method: METHODS[0],
+                method,
                 field: LineEdit::default(),
             },
             back,
@@ -287,16 +299,37 @@ impl From<&Account> for Connected {
     }
 }
 
-/// A refusal in the popup's words: Cloudflare's sentence, except that a
-/// missing permission points at the link one Enter away rather than spelling
-/// out its two hundred characters of query string.
+/// A refusal in the popup's words: Cloudflare's sentence, except that one
+/// whose way out is a new token points at the token link one Enter away
+/// rather than spelling out its five hundred characters of query string, which
+/// wrap across the popup's border and cannot be copied or clicked.
 fn said(error: &cloudflare::Error) -> String {
     match error {
         cloudflare::Error::MissingPermission(permission) => format!(
             "That token lacks the permission \"{permission}\". Enter goes back to the \
              link, which makes one with all three."
         ),
+        cloudflare::Error::LoginRefused(permission) => format!(
+            "Cloudflare did not let the browser login do this (it needs \
+             \"{permission}\"). Enter goes to the token link instead, which makes a \
+             token that can."
+        ),
         other => other.to_string(),
+    }
+}
+
+/// The failed step for `error`: back to the token link when a token is the
+/// way out, back to the first way in otherwise.
+fn failed(error: &cloudflare::Error) -> Step {
+    let then = match error {
+        cloudflare::Error::MissingPermission(_) | cloudflare::Error::LoginRefused(_) => {
+            Method::Paste
+        }
+        _ => METHODS[0],
+    };
+    Step::Failed {
+        message: said(error),
+        then,
     }
 }
 
@@ -554,6 +587,7 @@ impl App {
                           it to stop using it, and delete the tunnel in the Cloudflare \
                           dashboard."
                     .to_string(),
+                then: METHODS[0],
             };
             return;
         }
@@ -568,6 +602,7 @@ impl App {
                     message: "Another cctop on this machine is serving over this tunnel. \
                               Stop it first, then disconnect."
                         .to_string(),
+                    then: METHODS[0],
                 };
             }
             return;
@@ -668,7 +703,13 @@ impl App {
                 };
                 flow.problem = None;
             }
-            (KeyCode::Char('o'), None) => *field = Some((Typing::Owner, LineEdit::default())),
+            (KeyCode::Char('o'), None) => {
+                let typing = match account.login {
+                    true => Typing::Token,
+                    false => Typing::Owner,
+                };
+                *field = Some((typing, LineEdit::default()));
+            }
             (KeyCode::Char('o'), Some(_)) => *confirm = true,
             (KeyCode::Char('i'), Some(_)) => *field = Some((Typing::Invite, LineEdit::default())),
             (KeyCode::Up | KeyCode::Char('k'), Some(_)) => *cursor = cursor.saturating_sub(1),
@@ -724,31 +765,39 @@ impl App {
             return;
         };
         let typed = text.trim().to_string();
-        let checked = cctop_core::cloudflare::access::parse_who(&typed)
-            .filter(|who| *typing == Typing::Invite || !who.starts_with('@'));
-        let Some(who) = checked else {
-            flow.problem = Some(match typing {
-                Typing::Owner => "The owner is one email address.".to_string(),
-                Typing::Invite => {
-                    "An email address, or a whole domain written @company.com.".to_string()
-                }
-            });
-            return;
-        };
+        let who = cctop_core::cloudflare::access::parse_who(&typed);
         let typing = *typing;
+        let refused = match typing {
+            Typing::Owner if who.as_ref().is_none_or(|w| w.starts_with('@')) => {
+                Some("The owner is one email address.")
+            }
+            Typing::Invite if who.is_none() => {
+                Some("An email address, or a whole domain written @company.com.")
+            }
+            Typing::Token if typed.is_empty() => Some("Paste the token first."),
+            _ => None,
+        };
+        if let Some(why) = refused {
+            flow.problem = Some(why.to_string());
+            return;
+        }
         *field = None;
-        match typing {
-            Typing::Owner => self.access_work(
+        match (typing, who) {
+            (Typing::Token, _) => self.connect_work("Checking the token with Cloudflare…", {
+                move || Answer::Adopted(cloudflare::adopt_token(&typed))
+            }),
+            (Typing::Owner, Some(owner)) => self.access_work(
                 "Putting the page behind Cloudflare Access…",
-                Change::On { owner: who },
+                Change::On { owner },
             ),
-            Typing::Invite => self.access_work(
+            (Typing::Invite, Some(who)) => self.access_work(
                 "Updating who may log in…",
                 Change::Invite {
                     who,
                     level: Level::Read,
                 },
             ),
+            (_, None) => {}
         }
     }
 
@@ -801,6 +850,7 @@ impl App {
                 flow.working = None;
                 flow.step = Step::Failed {
                     message: "The call to Cloudflare gave no answer.".to_string(),
+                    then: METHODS[0],
                 };
                 return true;
             }
@@ -864,7 +914,7 @@ impl App {
             | Answer::Zones(_, Err(e))
             | Answer::Suggested(_, _, Err(e)) => {
                 flow.qr = false;
-                flow.step = Step::Failed { message: said(&e) };
+                flow.step = failed(&e);
             }
             Answer::Created(Ok(account)) => {
                 flow.step = Step::Done {
@@ -882,7 +932,10 @@ impl App {
                 {
                     flow.problem = Some(message);
                 } else {
-                    flow.step = Step::Failed { message };
+                    flow.step = Step::Failed {
+                        message,
+                        then: METHODS[0],
+                    };
                 }
             }
             Answer::Removed(Ok((left, made_here))) => {
@@ -890,7 +943,12 @@ impl App {
                 self.connected = None;
                 self.set_status("Cloudflare account disconnected");
             }
-            Answer::Removed(Err(message)) => flow.step = Step::Failed { message },
+            Answer::Removed(Err(message)) => {
+                flow.step = Step::Failed {
+                    message,
+                    then: METHODS[0],
+                }
+            }
             Answer::Access(Ok(applied)) => {
                 let Step::Access {
                     account,
@@ -917,6 +975,17 @@ impl App {
                 self.set_status(applied.said);
             }
             Answer::Access(Err(message)) => flow.problem = Some(message),
+            Answer::Adopted(Ok(adopted)) => {
+                let Step::Access { account, field, .. } = &mut flow.step else {
+                    return;
+                };
+                *account = adopted.clone();
+                // Straight on to what the token was for.
+                *field = Some((Typing::Owner, LineEdit::default()));
+                self.connected = Some(Connected::from(&adopted));
+                self.set_status("The account now uses your API token");
+            }
+            Answer::Adopted(Err(message)) => flow.problem = Some(message),
         }
     }
 
@@ -1010,12 +1079,12 @@ impl App {
                 KeyCode::Esc | KeyCode::Enter => self.close_connect(),
                 _ => {}
             },
-            Step::Failed { .. } => match key.code {
+            Step::Failed { then, .. } => match key.code {
                 // Back to the start rather than out: the usual next move is
                 // another token, made with the permission that was missing.
                 KeyCode::Enter => {
-                    let back = flow.back;
-                    *flow = Connect::start(back);
+                    let (back, then) = (flow.back, *then);
+                    *flow = Connect::start_at(back, then);
                 }
                 KeyCode::Esc => self.close_connect(),
                 _ => {}
@@ -1028,9 +1097,28 @@ impl App {
                     flow.problem = None;
                 }
                 KeyCode::Enter => self.submit_access_field(),
+                KeyCode::Char('o')
+                    if ctrl
+                        && matches!(
+                            flow.step,
+                            Step::Access {
+                                field: Some((Typing::Token, _)),
+                                ..
+                            }
+                        ) =>
+                {
+                    self.copy_token_link()
+                }
                 _ => {
+                    let max = match &flow.step {
+                        Step::Access {
+                            field: Some((Typing::Token, _)),
+                            ..
+                        } => TOKEN_MAX,
+                        _ => HOSTNAME_MAX,
+                    };
                     if let Some(field) = flow.field()
-                        && field.key(key, HOSTNAME_MAX).changed()
+                        && field.key(key, max).changed()
                     {
                         flow.problem = None;
                     }
@@ -1172,23 +1260,35 @@ mod tests {
 
     #[test]
     fn each_refusal_ends_on_its_own_sentence() {
-        for error in [
-            cloudflare::Error::NoDomain,
-            cloudflare::Error::ZonePending("example.test".into()),
-            cloudflare::Error::TokenRefused,
-            cloudflare::Error::MissingPermission(cloudflare::PERMISSIONS[0]),
+        // Each with the way in Enter starts over at: the token link when a
+        // token is the way out, the first way in otherwise.
+        for (error, then) in [
+            (cloudflare::Error::NoDomain, METHODS[0]),
+            (
+                cloudflare::Error::ZonePending("example.test".into()),
+                METHODS[0],
+            ),
+            (cloudflare::Error::TokenRefused, METHODS[0]),
+            (
+                cloudflare::Error::MissingPermission(cloudflare::PERMISSIONS[0]),
+                Method::Paste,
+            ),
+            (
+                cloudflare::Error::LoginRefused(cloudflare::PERMISSIONS[0]),
+                Method::Paste,
+            ),
         ] {
             let mut app = app();
             app.connect_answer(Answer::Zones("made-up".into(), Err(error.clone())));
-            let Step::Failed { message } = step(&app) else {
+            let Step::Failed { message, .. } = step(&app) else {
                 panic!("{error:?} did not fail");
             };
             assert_eq!(*message, said(&error));
             assert!(!message.contains("permissionGroupKeys"), "{message}");
-            // Enter starts over, with a fresh field, at the first way in.
             app.on_key_connect(KeyCode::Enter.into());
             assert!(
-                matches!(step(&app), Step::Start { field, method } if field.is_empty() && *method == METHODS[0])
+                matches!(step(&app), Step::Start { field, method } if field.is_empty() && *method == then),
+                "{error:?}"
             );
         }
     }
@@ -1362,7 +1462,9 @@ mod tests {
         app.connect_answer(Answer::LoggedIn(Err(cloudflare::Error::Login(
             "No login arrived within ten minutes; start again.".into(),
         ))));
-        assert!(matches!(step(&app), Step::Failed { message } if message.contains("ten minutes")));
+        assert!(
+            matches!(step(&app), Step::Failed { message, .. } if message.contains("ten minutes"))
+        );
     }
 
     /// The Access step over an account cctop set up, whose edits go to the
@@ -1399,6 +1501,61 @@ mod tests {
         let mut app = test_app();
         app.open_connect_at(flow);
         (app, seen)
+    }
+
+    #[test]
+    fn a_login_account_is_asked_for_a_token_before_access_not_after() {
+        let account = Account {
+            hostname: Some("cctop.example.test".into()),
+            api_token: Some("made-up-login-token".into()),
+            login: true,
+            ..Account::default()
+        };
+        let mut app = test_app();
+        app.open_connect_at(Connect::new(
+            Step::Access {
+                account: account.clone(),
+                cursor: 0,
+                field: None,
+                confirm: false,
+                said: Vec::new(),
+            },
+            Mode::List,
+        ));
+        app.on_key_connect(KeyCode::Char('o').into());
+        assert!(matches!(
+            step(&app),
+            Step::Access {
+                field: Some((Typing::Token, _)),
+                ..
+            }
+        ));
+        // A token far longer than an email still fits.
+        for _ in 0..300 {
+            app.on_key_connect(KeyCode::Char('x').into());
+        }
+        let Step::Access {
+            field: Some((_, edit)),
+            ..
+        } = step(&app)
+        else {
+            panic!("the field closed");
+        };
+        assert_eq!(edit.chars().count(), 300);
+
+        // Once the token is taken, the owner's email is next.
+        app.connect_answer(Answer::Adopted(Ok(Account {
+            login: false,
+            ..account
+        })));
+        assert!(matches!(
+            step(&app),
+            Step::Access {
+                field: Some((Typing::Owner, _)),
+                account,
+                ..
+            } if !account.login
+        ));
     }
 
     /// Wait for the call in flight, as the tick would.
@@ -1513,7 +1670,7 @@ mod tests {
         app.on_key_connect(KeyCode::Char('d').into());
         app.on_key_connect(KeyCode::Char('y').into());
         assert!(
-            matches!(step(&app), Step::Failed { message } if message.contains("CCTOP_TUNNEL_TOKEN"))
+            matches!(step(&app), Step::Failed { message, .. } if message.contains("CCTOP_TUNNEL_TOKEN"))
         );
     }
 }

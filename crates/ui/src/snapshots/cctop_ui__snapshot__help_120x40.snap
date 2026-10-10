@@ -1,5 +1,5 @@
 ---
-source: src/ui/snapshot.rs
+source: crates/ui/src/snapshot.rs
 expression: screen
 ---
  1:Dashboard │ + Tab (t) ───────────────────────────────────────────────────────────────────────────────────── Settings
@@ -10,11 +10,11 @@ expression: screen
 │All time         $28.│  ?  F1            This page                                              ┃                     │
 ╰─────────────────────│  ,                The settings tab: every setting, view choice and       ┃─────────────────────╯
 ╭ Sessions (4) ───────│keybind                                                                   ┃─────────────────────╮
-│   LAST▲    DUR      │  theme            auto / light / dark / mono, in config.toml             ┃ANCH       PROJECT   │
-│●    now     1h    $1│  q  F10           Quit                                                   ┃           Fix the c…│
-│●     7m     2h     $│  +                Add a Claude account (runs claude setup-token)         ┃           api       │
-│○     3h     1h     $│                                                                          ┃           docs      │
-│○     2d    12h     $│Navigation                                                                │           infra     │
+│   LAST▲    DUR      │  theme            auto / light / dark / mono, in config.toml             ┃RANCH       PROJECT  │
+│●    now     1h    $1│  q  F10           Quit                                                   ┃            Fix the …│
+│●     7m     2h     $│  +                Add a Claude account (runs claude setup-token)         ┃            api      │
+│○     3h     1h     $│                                                                          ┃            docs     │
+│○     2d    12h     $│Navigation                                                                │            infra    │
 │                     │  ↑/k  ↓/j         Move between sessions                                  │                     │
 │                     │  PgUp / PgDn      Page through the list                                  │                     │
 │                     │  Ctrl+U / Ctrl+D  Half a page up / down                                  │                     │
