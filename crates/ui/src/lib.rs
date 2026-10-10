@@ -809,6 +809,11 @@ pub struct App {
     /// the rows say only *where* a session lives — reaching it for a
     /// conversation or a served report wants the `Host`, command and all.
     pub remote_hosts: Vec<cctop_core::fleet::Host>,
+    /// Whether HOST was hidden only for want of anything to put in it — no
+    /// `--host` — so the first sibling found on the Cloudflare account
+    /// ([`cctop_core::peer`]) brings it back, where a column the user hid
+    /// stays hidden.
+    pub host_auto_hidden: bool,
     /// The socket the agents push their events to. `None` when one could not be
     /// bound, in which case every estimate carries on exactly as it did before
     /// hooks existed.
@@ -991,6 +996,7 @@ impl App {
             insight_kind: "optimize",
             chat: None,
             remote_hosts: Vec::new(),
+            host_auto_hidden: false,
             loaded: false,
             visible: Vec::new(),
             finished_agents: std::collections::HashSet::new(),

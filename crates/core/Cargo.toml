@@ -48,6 +48,7 @@ rmux-proto.workspace = true
 rmux-sdk.workspace = true
 rmux-server.workspace = true
 rusqlite.workspace = true
+rustls.workspace = true
 safetensors.workspace = true
 self-replace.workspace = true
 serde.workspace = true
@@ -61,6 +62,7 @@ tokio.workspace = true
 toml_edit.workspace = true
 ureq.workspace = true
 vt100.workspace = true
+webpki-roots.workspace = true
 
 [dev-dependencies]
 # The export tests read the markdown back as markdown.

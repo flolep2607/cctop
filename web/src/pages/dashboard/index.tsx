@@ -16,6 +16,7 @@ import { dotOfTab } from "@/lib/status";
 import { TerminalFrame } from "@/components/terminal";
 import { popOut, type Terminal } from "@/lib/terminal";
 import { POLL_EVERY, useSessions, useStored, useTabs, useTick } from "@/hooks/use-live";
+import { useHosts } from "@/hooks/use-hosts";
 import type { Session, Tab } from "@/lib/types";
 import { SessionRow, WantingRow } from "./rows";
 import { Quota } from "./quota";
@@ -352,12 +353,10 @@ export function DashboardPage() {
   );
 }
 
-// Hosts read over ssh that could not be, said once.
+// Machines that could not be read — ssh hosts and siblings on the account —
+// for as long as they cannot be.
 function HostBanners() {
-  const [failed, setFailed] = useState<[string, string][]>([]);
-  useEffect(() => {
-    getJson<[string, string][]>("/api/hosts").then((f) => setFailed(Array.isArray(f) ? f : []), () => {});
-  }, []);
+  const failed = [...useHosts()];
   return (
     <>
       {failed.map(([host, why]) => (

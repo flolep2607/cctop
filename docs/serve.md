@@ -533,6 +533,43 @@ this filesystem, which would report whatever happens to live there locally.
 When the far side cannot answer — the host is down, or its cctop is older than
 these flags — the route says so with a 502 rather than an empty page.
 
+### Machines on the same Cloudflare account find each other
+
+Every machine you ran `cctop tunnel setup` on, against one Cloudflare account,
+has a tunnel there called `cctop-<machine>` at a hostname of its own. That is
+already the list, so there is nothing to type: cctop lists the account's
+`cctop-*` tunnels, and every other machine's sessions appear in the table — the
+dashboard's and the page's — with the machine's name on the row and a dot that
+is green while it answers and red when it stops. A machine that goes offline is
+shown offline, with the reason, never silently dropped.
+
+What you need: each machine connected to the account with an API token or the
+browser login (`cctop tunnel setup` either way — a pasted *tunnel* token holds
+nothing that can list the account), and cctop serving on its tunnel there (the
+dashboard's `B`, or `cctop serve --tunnel`) for it to be read. A machine whose
+tunnel has no connector is shown as offline.
+
+From the page you can open a sibling's session as if it were local: its
+conversation, report and access, its terminal, and the actions. The page only
+ever talks to the machine you opened it on, which relays to the other at
+`/api/peer/<machine>/…` — so the content policy is unchanged, and the terminal
+frame is the same same-origin frame as a local one. Who may act is decided
+where you are: a read-only link reads a sibling and cannot act on it.
+
+How one cctop proves itself to another, with nothing configured: being on the
+same account is the trust. Each machine holds its own tunnel's token, a secret,
+and any API token on the account can fetch any tunnel's token. So the caller
+fetches the other machine's token and signs each request with it —
+`Authorization: cctop-peer <time>.<HMAC-SHA256(token, time + method + path)>` —
+and the other checks it against its own, within a minute either way. Nobody off
+the account can get that token. A signature is never handed a token of the
+page's, and a rotated tunnel token is refetched on the refusal that follows.
+
+When [Access](#cloudflare-access-in-front) fronts a machine's page, siblings
+reach it on its `-link` hostname, which is outside Access; with public token
+links off there is no such hostname, and that machine shows as offline with the
+reason.
+
 ## Flags
 
 | | |
@@ -564,7 +601,8 @@ these flags — the route says so with a 502 rather than an empty page.
 | `GET /api/chat/<id>?agent=<agent>` | One subagent's own conversation, by the id its `Agent` call names — what `cctop --chat <id> --agent <agent>` prints; 404 for an id the session does not list |
 | `GET /api/access/<id>` | What one session can reach: instructions, skills, MCP servers — what `cctop --access` prints |
 | `GET /api/events` | Server-sent events; one `sessions` event per refresh |
-| `GET /api/hosts` | Which `--host` machines could not be read, and why |
+| `GET /api/hosts` | Which `--host` machines and sibling machines on the account could not be read, and why |
+| `/api/peer/<machine>/<path>` | A sibling machine's `/api/<…>` or terminal socket, relayed and signed. Reads for any link; a `POST` and a terminal only for one that may act. Not its pages or its event stream |
 | `GET /api/agents` | What this run can hand work to, and whether it will act at all — the page hides the controls it cannot use rather than offering buttons that answer 403 |
 | `GET /api/tabs` | The tabs cctop is running, for the page's tab strip |
 | `GET /api/quota` | Each account's rate-limit status and windows — `{"claude":[…],"codex":[…]}`, each profile with `status`, `detail`, `plan` and `windows` |

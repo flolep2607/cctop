@@ -1,5 +1,6 @@
 //! Session-table column definitions: rendering, sorting, and tooltips.
 
+use cctop_core::hook::Permission;
 use cctop_core::session::{ActivityState, Session, Subagent, SubagentStatus};
 use cctop_core::util;
 use chrono::{DateTime, Utc};
@@ -107,7 +108,12 @@ pub const COLUMNS: &[Column] = &[
     Column {
         id: ColumnId::Context,
         label: "CTX%",
-        width: Some(6),
+        // Two cells of bar plus `>100%` after it: seven cells is the whole
+        // answer, and one more — a third cell of bar — would push DUR, the
+        // next column by priority, out of the idle frame, whose rows are then
+        // 119 cells wide against the 118 it has (see
+        // `the_idle_view_keeps_duration_at_120`).
+        width: Some(7),
         priority: 60,
         right_align: true,
         desc: "Context window used, as a share of the auto-compact threshold",
@@ -187,7 +193,7 @@ pub const COLUMNS: &[Column] = &[
         // narrows and the numbers start dropping off.
         priority: 72,
         right_align: false,
-        desc: "How much the session asks before it acts, as its own hooks reported it:\nask, edits (writes files unasked), plan (cannot act), BYPASS (asks nothing).\nyolo when cctop is allowing every prompt it raises (the row menu switches it).\n─ when the session has no cctop hooks installed and so cannot say.",
+        desc: "How much the session asks before it acts, as its own hooks reported it:\n● BYPASS — or yolo, cctop allowing every prompt it raises (the row menu\nswitches it), ◐ ask or edits, ○ plan (cannot act), each shape filling by\nhow little it asks. ─ when the session has no cctop hooks and cannot say.",
     },
     Column {
         id: ColumnId::Conflict,
@@ -406,6 +412,61 @@ fn age_secs(s: &Session, now: &DateTime<Utc>) -> Option<i64> {
     util::parse_ts(&s.last_active).map(|d| (now.timestamp() - d.timestamp()).max(0))
 }
 
+/// Cells of shade in the bar in front of a context percentage.
+///
+/// Two, because that is what fits: the tallest cell this can print is a full
+/// bar and `>100%` — seven cells, which is the width of the column. A third
+/// cell of bar needs eight, and the idle frame — 118 cells to spend, memory
+/// kept — is 119 wide with DUR in it at eight, so DUR would be the column
+/// that goes (see `the_idle_view_keeps_duration_at_120`). Two cells still
+/// give three shapes, empty, half and full; the number after them is the
+/// exact figure, and the colour of the same cell is graded from that number.
+const CONTEXT_BAR: usize = 2;
+
+/// A context percentage as a bar of shade in front of the number it counts.
+///
+/// `pct` is `percent_to_compact()` — the share of the auto-compact threshold
+/// that the cell's colour and the context panel are read from — so the bar
+/// cannot disagree with either. Above the threshold the bar is full and the
+/// `>` before the number says the rest; the `COMPCT` cell covers the other case.
+///
+/// Fixed-width blocks, no emoji, and no reliance on the palette: in the mono
+/// theme every colour in the application is `Reset`, so the pressure a row is
+/// under has to be readable from the shape alone, which `▓` against `░` is.
+fn context_cell(pct: f64) -> String {
+    let rounded = pct.round() as i64;
+    let used = rounded.clamp(0, 100) as f64 / 100.0 * CONTEXT_BAR as f64;
+    let filled = (used.round() as usize).min(CONTEXT_BAR);
+    let number = if rounded > 100 {
+        ">100%".to_string()
+    } else {
+        format!("{rounded}%")
+    };
+    format!(
+        "{}{}{number}",
+        "▓".repeat(filled),
+        "░".repeat(CONTEXT_BAR - filled),
+    )
+}
+
+/// A row's ahead/behind counts as the tail of its branch cell.
+///
+/// `None` covers both ends of the question: a session with no checkout or no
+/// upstream has nothing to say, and so does one that is exactly in step — a
+/// mark that reads `↑0 ↓0` on every row in a clean working list is noise. The
+/// counts come from [`cctop_core::branch::ahead_behind_of`], which measures a
+/// checkout against its own upstream rather than this machine's at the same
+/// path, so remote and stopped-sandboxed rows have no mark either.
+pub fn branch_mark(s: &Session) -> Option<String> {
+    let (ahead, behind) = cctop_core::branch::ahead_behind_of(s)?;
+    match (ahead, behind) {
+        (0, 0) => None,
+        (a, 0) => Some(format!("↑{a}")),
+        (0, b) => Some(format!("↓{b}")),
+        (a, b) => Some(format!("↑{a} ↓{b}")),
+    }
+}
+
 /// Cell text for one column. Empty means "nothing worth showing".
 ///
 /// Borrowed where the text is already on the session — the harness, the
@@ -425,9 +486,12 @@ pub fn render_cell<'a>(id: ColumnId, s: &'a Session, now: &DateTime<Utc>) -> Cow
         },
         ColumnId::Last => Owned(util::relative_age(&s.last_active, now)),
         ColumnId::Duration => Owned(util::session_duration(&s.started_at, &s.last_active)),
+        // A free session's cost is a statement, not a figure: lowercase and
+        // italic (see `table::session_row`), which distinguishes it from the dash that
+        // means no cost could be read at all.
         ColumnId::Cost => match s.total_cost {
             _ if !s.cost_available => Borrowed("─"),
-            _ if s.cost_is_free => Borrowed("FREE"),
+            _ if s.cost_is_free => Borrowed("free"),
             Some(c) => Owned(util::compact_usd(c)),
             None => Borrowed("incl"),
         },
@@ -435,7 +499,7 @@ pub fn render_cell<'a>(id: ColumnId, s: &'a Session, now: &DateTime<Utc>) -> Cow
             if !s.cost_available {
                 Borrowed("─")
             } else if s.cost_is_free {
-                Borrowed("FREE")
+                Borrowed("free")
             } else if s.total_cost.is_none() {
                 Borrowed("incl")
             } else if s.cost_hour > 0.0 {
@@ -448,7 +512,7 @@ pub fn render_cell<'a>(id: ColumnId, s: &'a Session, now: &DateTime<Utc>) -> Cow
             if !s.cost_available {
                 Borrowed("─")
             } else if s.cost_is_free {
-                Borrowed("FREE")
+                Borrowed("free")
             } else if s.total_cost.is_none() {
                 Borrowed("incl")
             } else if s.cost_today > 0.0 {
@@ -463,14 +527,7 @@ pub fn render_cell<'a>(id: ColumnId, s: &'a Session, now: &DateTime<Utc>) -> Cow
             // compacted and stopped keeps its last measured percentage, which is
             // what the context panel breaks down for the same session.
             Some(_) if s.is_compacting() => Borrowed("COMPCT"),
-            Some(c) => {
-                let pct = c.percent_to_compact().round() as i64;
-                if pct > 100 {
-                    Borrowed(">100%")
-                } else {
-                    Owned(format!("{pct}%"))
-                }
-            }
+            Some(c) => Owned(context_cell(c.percent_to_compact())),
         },
         ColumnId::Cpu => match &s.process {
             Some(p) => Owned(format!("{:.1}", p.cpu)),
@@ -506,16 +563,26 @@ pub fn render_cell<'a>(id: ColumnId, s: &'a Session, now: &DateTime<Utc>) -> Cow
             true => Borrowed("─"),
             false => Borrowed(s.harness.as_str()),
         },
+        // One cell, three shapes, so the column's width is its own: a word per
+        // mode (`yolo`, `edits`) spent a word's worth of cells on a table whose
+        // numbers do not have them to spare. The shapes are the Status
+        // column's family — a disc, a disc half drawn, an empty ring — so how
+        // much this session asks reads as ink before it reads as a hue, which
+        // is the only kind of legibility the mono palette has.
         // A session with no hooks cannot report this, and "─" is the honest
         // answer: not "it asks about everything", which would be a guess about
         // the one column whose whole job is not to guess.
         // YOLO outranks whatever mode the harness reports: whatever the agent
-        // would have asked, cctop is answering yes.
-        ColumnId::Permission => match (&s.yolo, s.permission) {
-            (Some(_), _) => Borrowed("yolo"),
-            (None, Some(p)) => Borrowed(p.label()),
-            (None, None) => Borrowed("─"),
-        },
+        // would have asked, cctop is answering yes — and it draws as the same
+        // full circle BYPASS does, because in effect it is the same thing.
+        // The colour rule is unchanged: the unrestricted pair are still the hot
+        // rows, and it is the shape that now says which kind of unrestricted.
+        ColumnId::Permission => Borrowed(match (&s.yolo, s.permission) {
+            (Some(_), _) | (None, Some(Permission::Bypass)) => "●",
+            (None, Some(Permission::Ask | Permission::AcceptEdits)) => "◐",
+            (None, Some(Permission::Plan)) => "○",
+            (None, None) => "─",
+        }),
         // Blank rather than a dash for the ordinary case. This column is a
         // warning light, and a light that is on in every row is off.
         ColumnId::Conflict => match s.conflict {
@@ -547,8 +614,15 @@ pub fn render_cell<'a>(id: ColumnId, s: &'a Session, now: &DateTime<Utc>) -> Cow
         // is about Claude's config directories, and every other harness is not
         // missing one so much as not having the idea.
         ColumnId::Profile => Borrowed(s.profile.as_deref().unwrap_or_default()),
+        // The branch, then how far it has diverged from its upstream. The mark
+        // trails where Host's leads: a host name is the part worth keeping when
+        // the cell is cut, while a mark that is cut away costs the row nothing
+        // it cannot still read from the name (see `table::session_row`).
         ColumnId::Branch => match cctop_core::branch::branch_of(s) {
-            Some(branch) => Owned(branch),
+            Some(branch) => match branch_mark(s) {
+                Some(mark) => Owned(format!("{branch} {mark}")),
+                None => Owned(branch),
+            },
             None => Borrowed("─"),
         },
         ColumnId::Project => Borrowed(s.display_label()),
@@ -596,8 +670,10 @@ pub fn render_subagent_cell(
                 "─".into()
             }
         }
+        // The same bar a session's row gets: one column, one reading, and a
+        // child's window is measured against the same threshold as its parent's.
         ColumnId::Context => match &sub.context {
-            Some(c) => format!("{}%", c.percent_to_compact().round() as i64),
+            Some(c) => context_cell(c.percent_to_compact()),
             None => "─".into(),
         },
         ColumnId::Tools => {
@@ -853,6 +929,70 @@ mod tests {
         assert_eq!(ids(8), vec![ColumnId::Project]);
     }
 
+    /// The frame cctop's own dashboard is drawn in: a 120-cell screen inside
+    /// a bordered panel, so the columns share 118, and CTX% has to fit inside
+    /// that without costing a column the frame shows on purpose. Seven cells
+    /// — what it is now — leaves one in hand, eight uses the last of them, and
+    /// a ninth would push CPU%, the lowest-priority measurement on screen and
+    /// the next to go, out of the frame. This is the width CTX% is sized
+    /// against rather than by taste.
+    #[test]
+    fn the_dashboard_columns_at_120_still_include_cpu() {
+        let shown = visible_columns_among(118, &[], &[], &[session("a")]);
+        let ids: Vec<ColumnId> = shown.iter().map(|c| c.id).collect();
+        for still_there in [
+            ColumnId::Status,
+            ColumnId::Last,
+            ColumnId::Cost,
+            ColumnId::Context,
+            ColumnId::Cpu,
+            ColumnId::Model,
+            ColumnId::Harness,
+            ColumnId::Permission,
+            ColumnId::Branch,
+            ColumnId::Project,
+        ] {
+            assert!(
+                ids.contains(&still_there),
+                "{still_there:?} must still fit 118 cells: {ids:?}"
+            );
+        }
+        // One user in view, so USER is out by the data's own rule and the
+        // frame keeps every column that is its own choice to show.
+        assert!(!ids.contains(&ColumnId::User));
+    }
+
+    /// The same 118 cells from the idle frame, which is the tighter of the
+    /// two: memory is kept there and duration is what the drop rule takes
+    /// first among what is left. This is what sizes CTX% — its bar is two
+    /// cells because a third would make the frame 119 wide with DUR in it, and
+    /// a column of a view should not pay for a bar on another.
+    #[test]
+    fn the_idle_view_keeps_duration_at_120() {
+        let shown = visible_columns_among(118, &[], &[ColumnId::Memory], &[session("a")]);
+        let ids: Vec<ColumnId> = shown.iter().map(|c| c.id).collect();
+        for still_there in [
+            ColumnId::Status,
+            ColumnId::Last,
+            ColumnId::Duration,
+            ColumnId::Cost,
+            ColumnId::Context,
+            ColumnId::Memory,
+            ColumnId::Model,
+            ColumnId::Harness,
+            ColumnId::Permission,
+            ColumnId::Branch,
+            ColumnId::Project,
+        ] {
+            assert!(
+                ids.contains(&still_there),
+                "{still_there:?} must still fit 118 cells: {ids:?}"
+            );
+        }
+        // CPU% is the first to go in either frame; it goes here too.
+        assert!(!ids.contains(&ColumnId::Cpu));
+    }
+
     #[test]
     fn explicit_hidden_columns_win_over_automatic_dropping() {
         let hidden = parse_hidden("cpu, mem,nonsense");
@@ -918,9 +1058,9 @@ mod tests {
         s.total_cost = Some(0.0);
 
         let now = chrono::Utc::now();
-        assert_eq!(render_cell(ColumnId::Cost, &s, &now), "FREE");
-        assert_eq!(render_cell(ColumnId::CostHour, &s, &now), "FREE");
-        assert_eq!(render_cell(ColumnId::CostToday, &s, &now), "FREE");
+        assert_eq!(render_cell(ColumnId::Cost, &s, &now), "free");
+        assert_eq!(render_cell(ColumnId::CostHour, &s, &now), "free");
+        assert_eq!(render_cell(ColumnId::CostToday, &s, &now), "free");
     }
 
     #[test]
@@ -1047,7 +1187,99 @@ mod tests {
             max: 200_000,
             compacted: false,
         });
-        assert_eq!(render_cell(ColumnId::Context, &s, &now), ">100%");
+        assert_eq!(render_cell(ColumnId::Context, &s, &now), "▓▓>100%");
+    }
+
+    /// The bar and the number are one reading: the bar is the same
+    /// `percent_to_compact()` the cell's colour is graded from, scaled to the
+    /// two cells the column has for it, with the figure beside it rounded.
+    /// Seven cells wide is the column because two of bar plus `>100%` is
+    /// exactly seven — the tallest thing this cell can print.
+    #[test]
+    fn the_context_bar_is_the_percentage_it_shows() {
+        let now = Utc::now();
+        let threshold = *cctop_core::config::COMPACT_THRESHOLD;
+        assert!(
+            (0.0..1.0).contains(&threshold),
+            "a fraction of the window: {threshold}"
+        );
+        let at = |fraction: f64| {
+            let mut s = session("ctx");
+            s.context = Some(cctop_core::session::ContextUsage {
+                used: (1_000_000.0 * fraction * threshold) as u64,
+                max: 1_000_000,
+                compacted: false,
+            });
+            render_cell(ColumnId::Context, &s, &now).into_owned()
+        };
+        assert_eq!(at(0.10), "░░10%", "barely warmed up");
+        assert_eq!(at(0.60), "▓░60%", "one of two filled, not none");
+        assert_eq!(at(1.0), "▓▓100%", "at the threshold the bar is full");
+        // Past it the bar has nowhere left to grow, and the number says so.
+        assert_eq!(at(1.4), "▓▓>100%");
+
+        // Nothing to measure, and a compaction still running, are unchanged.
+        let mut s = session("ctx");
+        assert_eq!(render_cell(ColumnId::Context, &s, &now), "─");
+        s.context = Some(cctop_core::session::ContextUsage {
+            used: 1,
+            max: 2,
+            compacted: true,
+        });
+        s.inferred_running = true;
+        assert_eq!(render_cell(ColumnId::Context, &s, &now), "COMPCT");
+
+        // And the column holds the tallest cell it can print.
+        let column = COLUMNS
+            .iter()
+            .find(|c| c.id == ColumnId::Context)
+            .expect("context column");
+        assert_eq!(column.width, Some(7));
+        assert!(util::cells(&at(1.4)) <= 7, "the widest cell fits");
+    }
+
+    /// Three shapes and a dash for the permission column: `●` for a session
+    /// that asks about nothing, `◐` for one that asks as it goes, `○` for the
+    /// plan that needs approving. YOLO draws as BYPASS does — in effect the
+    /// same thing — and which of them get painted red is `table::cell_color`'s
+    /// rule, unchanged.
+    #[test]
+    fn the_permission_column_is_three_shapes_and_a_dash() {
+        let now = Utc::now();
+        let mut s = session("perm");
+        let cell = |s: &cctop_core::session::Session| {
+            render_cell(ColumnId::Permission, s, &now).into_owned()
+        };
+        assert_eq!(cell(&s), "─", "no hooks reported");
+        s.permission = Some(cctop_core::hook::Permission::Plan);
+        assert_eq!(cell(&s), "○");
+        s.permission = Some(cctop_core::hook::Permission::Ask);
+        assert_eq!(cell(&s), "◐");
+        s.permission = Some(cctop_core::hook::Permission::AcceptEdits);
+        assert_eq!(cell(&s), "◐");
+        s.permission = Some(cctop_core::hook::Permission::Bypass);
+        assert_eq!(cell(&s), "●");
+        // YOLO outranks the configured mode.
+        s.permission = Some(cctop_core::hook::Permission::Plan);
+        s.yolo = Some(std::sync::Arc::new(cctop_core::yolo::Entry {
+            since: now.to_rfc3339(),
+            allowed: Vec::new(),
+            agent: None,
+        }));
+        assert_eq!(cell(&s), "●");
+
+        // Every one of them is a fixed width cell the column has room for.
+        let column = COLUMNS
+            .iter()
+            .find(|c| c.id == ColumnId::Permission)
+            .expect("permission column");
+        for glyph in ["─", "○", "◐", "●"] {
+            assert_eq!(util::cells(glyph), 1, "{glyph} must not depend on the font");
+        }
+        assert!(
+            column.width.unwrap() > 1,
+            "and the column has more than one"
+        );
     }
 
     /// A transcript that ends on a compaction never changes again, so a session
@@ -1063,7 +1295,7 @@ mod tests {
             max: 200_000,
             compacted: true,
         });
-        assert_eq!(render_cell(ColumnId::Context, &stopped, &now), "60%");
+        assert_eq!(render_cell(ColumnId::Context, &stopped, &now), "▓░60%");
 
         let mut live = session("b");
         live.inferred_running = true;
