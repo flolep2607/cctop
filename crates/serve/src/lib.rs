@@ -1683,6 +1683,14 @@ fn serve_connection(shared: &Shared, stream: &mut TcpStream) {
     // access.
     let admin = presented == Some(Access::Full) || owner;
     let Some(access) = presented.max(login) else {
+        // ponytail: no backoff on a wrong token, and the denial is logged as
+        // it arrives. A token here is 128 bits of entropy (`new_token`), so a
+        // guess is not a way in at any rate a refusal could slow it down to —
+        // the work is done by the comparison, which is already constant-time
+        // for equal lengths — and the one thing a delay would buy, masking
+        // which of two supplied tokens was wrong, an attacker who can already
+        // read the length leak has no use for. A wrong token is refused the
+        // same way with or without it: immediately, and once per request.
         cctop_core::elog::event(
             "http",
             "request",
@@ -3233,6 +3241,67 @@ mod tests {
         }
         let (head, _) = exchange(&guarded, "/api/config", "");
         assert!(head.starts_with("HTTP/1.1 403 "), "{head}");
+    }
+
+    /// Every refusal of the main page — 403 at the gate, 404 past it, 405 for
+    /// a method no route takes — repeats the status and a fixed sentence, and
+    /// never the credential that asked. A share hostname's 404 is held to the
+    /// same rule (`share_host.rs`), and this is its counterpart here: the token
+    /// arrives in the query line, so a message that quoted the request would
+    /// print it.
+    #[test]
+    fn a_refusal_never_echoes_the_token_it_refused() {
+        // Hex, and long enough that no sentence cctop writes could contain one
+        // by accident: a leak cannot hide behind a word the prose also uses.
+        let full = "0123456789abcdef0123456789abcdef";
+        let wrong = "fedcba9876543210fedcba9876543210";
+        let guarded = shared(full, "view");
+        let asked = |method: &str, target: &str, headers: &str| -> String {
+            let raw = response_of(&guarded, method, target, headers);
+            for leaked in [full, wrong] {
+                assert!(
+                    !raw.contains(leaked),
+                    "{method} {target} leaked a credential"
+                );
+            }
+            raw
+        };
+        // 403: at the gate, with a credential that is neither of this run's —
+        // in the query, in the header, and in both at once. A *successful*
+        // page's `Set-Cookie` is the one answer that carries a credential, and
+        // a refusal is not that answer.
+        for headers in [String::new(), format!("Authorization: Bearer {wrong}\r\n")] {
+            let raw = asked("GET", &format!("/?t={wrong}"), &headers);
+            assert!(
+                raw.lines().next().unwrap_or_default().contains(" 403 "),
+                "{raw}"
+            );
+        }
+        // 404: past the gate — the right token, a page that is not there.
+        let raw = asked("GET", &format!("/no-such-page?t={full}"), "");
+        assert!(
+            raw.lines().next().unwrap_or_default().contains(" 404 "),
+            "{raw}"
+        );
+        // 405: a method no route of cctop's takes, credential in the query.
+        // A body's worth of length, so the refusal is the route's and not the
+        // parser's `411`.
+        let raw = asked(
+            "POST",
+            &format!("/metrics?t={full}"),
+            "Content-Length: 2\r\n\r\n{}",
+        );
+        assert!(
+            raw.lines().next().unwrap_or_default().contains(" 405 "),
+            "{raw}"
+        );
+        // And a read-only link refused an action: 403, with the credential
+        // that would have been enough if this were not an act.
+        let raw = asked("GET", "/api/act/x/prompt?t=view", "");
+        assert!(
+            raw.lines().next().unwrap_or_default().contains(" 403 "),
+            "{raw}"
+        );
     }
 
     #[test]

@@ -29,6 +29,16 @@ async function read(): Promise<Config> {
 // and screenshots — and it goes before the wait for the answer, not after.
 // Captured first: a page that wants something else from the query (`?find=`)
 // reads it from here, not from a URL that has already been rewritten.
+//
+// ponytail: stripped here rather than by a server redirect. A 303 that
+// dropped `?t=` would have to re-issue `Set-Cookie` on the way, and the
+// cookie it could set is the credential *this* link carries — so opening a
+// read-only link in a browser already holding the full one would replace
+// that full cookie with the read-only one, and every other dashboard tab
+// would drop to read-only until the full link was opened again. What the
+// server can do safely it already does: mint a cookie that is not sent over
+// plain http (`app_page`), and this strip needs no server round trip, so
+// the history API stays the one thing asked of the browser.
 export const OPENING_QUERY = new URLSearchParams(location.search);
 try {
   const here = new URL(location.href);

@@ -491,9 +491,12 @@ fn save(path: &Path, text: &str) -> std::io::Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    let tmp = path.with_extension("toml.cctop-tmp");
-    std::fs::write(&tmp, text)?;
-    crate::quota::restrict(&tmp)?;
+    // A pid-and-sequence name rather than the one fixed `toml.cctop-tmp` this
+    // used: two cctops saving at once would otherwise write the same inode,
+    // and whichever renamed first would publish a file the other was still
+    // writing into.
+    let tmp = crate::quota::temp_beside(path, "toml");
+    crate::quota::write_secret(&tmp, text)?;
     std::fs::rename(&tmp, path)
 }
 
@@ -517,9 +520,7 @@ pub fn write(
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
         Err(e) => return Err(e.into()),
     };
-    let mut doc = text
-        .parse::<toml_edit::DocumentMut>()
-        .map_err(|e| anyhow::anyhow!("{} is not valid TOML ({e}); fix it first", path.display()))?;
+    let mut doc = crate::quota::parse_toml(path, &text)?;
     if !doc.contains_key(table) {
         doc.insert(table, toml_edit::Item::Table(toml_edit::Table::new()));
     }
