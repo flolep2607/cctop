@@ -22,6 +22,29 @@ announce. It is a silent overwrite of someone else's uncommitted work.
 If you are already editing the main checkout and another session is too, say so
 rather than racing: whoever is further along should finish first.
 
+## Diff every file-editing command to see what it did
+
+The worktree rule protects other sessions from your edits; nothing so far has
+protected you from your own. A command that edits files — `sed -i`, a
+`patch`, a bulk rename — exits 0 whether it changed one line or forty, and
+what it printed is not the change. An agent that takes the command's word
+for its effect can carry a wrong or oversized edit all the way to a pull
+request, where the diff everyone reads is the first place anyone sees what
+actually happened.
+
+So after any command that edits files, run `git diff` and read the answer:
+`git diff --stat` for the summary — which files, how many lines — then the
+relevant hunks for the before&after itself. Confirm the change is the one
+you meant before moving on; that is the whole rule. The snapshot advice
+under "Verify the way CI does" is this same habit on one kind of change;
+this is its general form.
+
+In a directory that is not under version control there is no diff to read.
+Take a backup before editing — a copy beside the file, or edit elsewhere
+and move the result in — or say plainly, before the edit, that it is
+irreversible. The cost of skipping any of this is the same: a change no one
+has actually looked at, carried to wherever it does the most damage.
+
 ## Verify the way CI does
 
 CI sets `RUSTFLAGS: -D warnings`, so a warning is a build failure. Clippy output
