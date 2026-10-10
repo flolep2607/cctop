@@ -935,25 +935,70 @@ impl SubagentSort {
 /// transcripts were read in — two agents that spent the same and finished at the
 /// same instant keep the same rows between refreshes.
 fn subagent_cmp(a: &Subagent, b: &Subagent, sort: SubagentSort, asc: bool) -> Ordering {
+    let num = |x: f64, y: f64| x.partial_cmp(&y).unwrap_or(Ordering::Equal);
     let ord = match sort {
-        SubagentSort::Last => a
+        // Newest-first reads as "ascending" for an age column, the way the
+        // table's own sort reads it (`columns::compare`); an agent with no
+        // timestamp is the oldest one there is.
+        SubagentSort::Last => b
             .last_active
             .as_deref()
             .unwrap_or_default()
-            .cmp(b.last_active.as_deref().unwrap_or_default()),
+            .cmp(a.last_active.as_deref().unwrap_or_default()),
         SubagentSort::Type => a.agent_type.cmp(&b.agent_type),
         SubagentSort::Model => a.model.cmp(&b.model),
         SubagentSort::Description => a.description.cmp(&b.description),
-        SubagentSort::Cost => a.cost.partial_cmp(&b.cost).unwrap_or(Ordering::Equal),
+        // A ghost's transcript was purged, so what it cost is unknown rather
+        // than zero; unknown sorts below every priced agent the way a bundled
+        // session sorts below a priced one in the table.
+        SubagentSort::Cost => num(
+            if a.ghost { -1.0 } else { a.cost },
+            if b.ghost { -1.0 } else { b.cost },
+        ),
         SubagentSort::Tools => a.tool_count.cmp(&b.tool_count),
         SubagentSort::Context => {
             let r = |s: &Subagent| s.context.map(|c| c.percent_to_compact()).unwrap_or(-1.0);
-            r(a).partial_cmp(&r(b)).unwrap_or(Ordering::Equal)
+            num(r(a), r(b))
         }
         SubagentSort::Duration => a.duration_ms.cmp(&b.duration_ms),
     }
     .then_with(|| a.agent_id.cmp(&b.agent_id));
     if asc { ord } else { ord.reverse() }
+}
+
+/// The fixed columns of the Subagents panel, before the description: the
+/// widths the header line and the rows agree on. The description takes
+/// whatever is left.
+const SUBAGENT_FIXED_W: usize = 6 + 2 + 2 + 12 + 1 + 12 + 1 + 8 + 1 + 6 + 1 + 5 + 1 + 7;
+
+/// The panel's sortable header cells as `(start, end, sort)` spans in
+/// panel-relative columns — or what still fits when the panel is narrower
+/// than the fixed columns.
+///
+/// One source of truth for the header geometry: `subagents()` lays the labels
+/// out with the same widths, and `render.rs` records these spans for mouse
+/// hit-testing, so a click on a column's label reaches that column's sort the
+/// way a click on the table's header does. Each end is the next label's
+/// start, so the gap between cells is a hit too.
+pub fn subagent_header_spans(width: usize) -> Vec<(usize, usize, SubagentSort)> {
+    let desc_w = width.saturating_sub(SUBAGENT_FIXED_W).max(10);
+    [
+        (SubagentSort::Last, 0, 9),
+        (SubagentSort::Type, 9, 22),
+        (SubagentSort::Model, 22, 35),
+        (SubagentSort::Description, 35, 36 + desc_w),
+        (SubagentSort::Cost, 36 + desc_w, 45 + desc_w),
+        (SubagentSort::Tools, 45 + desc_w, 52 + desc_w),
+        (SubagentSort::Context, 52 + desc_w, 58 + desc_w),
+        (SubagentSort::Duration, 58 + desc_w, 65 + desc_w),
+    ]
+    .into_iter()
+    .filter_map(|(col, a, b)| {
+        let a = a.min(width);
+        let b = b.min(width);
+        (a < b).then_some((a, b, col))
+    })
+    .collect()
 }
 
 pub fn subagents(
@@ -976,13 +1021,27 @@ pub fn subagents(
     let mut order: Vec<usize> = (0..data.subagents.len()).collect();
     order.sort_by(|&a, &b| subagent_cmp(&data.subagents[a], &data.subagents[b], sort, asc));
 
-    let fixed = 6 + 2 + 2 + 12 + 1 + 12 + 1 + 8 + 1 + 6 + 1 + 5 + 1 + 7;
-    let desc_w = width.saturating_sub(fixed).max(10);
+    let desc_w = width.saturating_sub(SUBAGENT_FIXED_W).max(10);
 
+    // The arrow names the sorted column the way the table's header draws it,
+    // so the panel reads the same as the table it is mirroring.
+    let arrow = |c: SubagentSort| match (c == sort, asc) {
+        (true, true) => "▲",
+        (true, false) => "▼",
+        _ => "",
+    };
+    let lab = |c: SubagentSort, name: &str| format!("{name}{}", arrow(c));
     let mut lines = vec![Line::from(Span::styled(
         format!(
             "{:<6}   {:<12} {:<12} {:<desc_w$} {:>8} {:>6} {:>5} {:>7}",
-            "LAST", "TYPE", "MODEL", "DESC", "COST", "TOOLS", "CTX", "TIME"
+            lab(SubagentSort::Last, "LAST"),
+            lab(SubagentSort::Type, "TYPE"),
+            lab(SubagentSort::Model, "MODEL"),
+            lab(SubagentSort::Description, "DESC"),
+            lab(SubagentSort::Cost, "COST"),
+            lab(SubagentSort::Tools, "TOOLS"),
+            lab(SubagentSort::Context, "CTX"),
+            lab(SubagentSort::Duration, "TIME"),
         ),
         theme::header(),
     ))];
@@ -1029,7 +1088,14 @@ pub fn subagents(
             Span::raw(" "),
             Span::styled(
                 format!("{:<12}", util::truncate(&sa.agent_type, 12)),
-                row_style,
+                // A ghost's kind is metadata that outlived its transcript;
+                // like its other cells it stays dim rather than wearing a hue
+                // that would read as measured.
+                if sa.ghost {
+                    row_style
+                } else {
+                    Style::default().fg(theme::subagent_color(&sa.agent_type))
+                },
             ),
             Span::raw(" "),
             Span::styled(
@@ -2378,6 +2444,128 @@ mod tests {
             costs(false)[0].contains("$5.00"),
             "dearest first descending"
         );
+    }
+
+    /// The panel reads "ascending" the way the table's own sort reads it
+    /// (`columns::compare`): for an age column that is newest-first, so the
+    /// default keeps leading with the most recently active agent.
+    #[test]
+    fn the_age_column_ascends_newest_first_like_the_table() {
+        let mut young = subagent("young", 1.0, false);
+        young.last_active = Some("2026-01-01T00:02:00Z".into());
+        young.description = "the newer one".into();
+        let mut old = subagent("old", 1.0, false);
+        old.last_active = Some("2026-01-01T00:01:00Z".into());
+        old.description = "the older one".into();
+        let data = SessionData {
+            subagents: vec![old, young],
+            ..Default::default()
+        };
+        let first = |sort, asc| -> String {
+            subagents(Some(&data), sort, asc, 120)[1]
+                .spans
+                .iter()
+                .map(|s| s.content.as_ref())
+                .collect()
+        };
+        assert!(
+            first(SubagentSort::Last, true).contains("the newer one"),
+            "ascending is newest-first, the table's reading of an age column"
+        );
+        assert!(
+            first(SubagentSort::Last, false).contains("the older one"),
+            "descending flips it"
+        );
+    }
+
+    /// A ghost's purged transcript takes its cost to unknown, and unknown
+    /// sorts below every priced agent the way a bundled session does in the
+    /// table.
+    #[test]
+    fn a_ghosts_unknown_cost_sorts_below_priced() {
+        let data = SessionData {
+            subagents: vec![subagent("g", 0.0, true), subagent("p", 5.0, false)],
+            ..Default::default()
+        };
+        let first = |asc| -> String {
+            subagents(Some(&data), SubagentSort::Cost, asc, 120)[1]
+                .spans
+                .iter()
+                .map(|s| s.content.as_ref())
+                .collect()
+        };
+        assert!(
+            first(true).contains('◌'),
+            "ascending leads with the unknown cost"
+        );
+        assert!(
+            first(false).contains('○'),
+            "descending leads with the priced agent"
+        );
+    }
+
+    /// The header names the sorted column with the table's own arrow, so the
+    /// panel says what it is sorted by without opening settings.
+    #[test]
+    fn the_header_marks_the_sorted_column_with_an_arrow() {
+        let data = SessionData {
+            subagents: vec![subagent("a", 1.0, false)],
+            ..Default::default()
+        };
+        let head = |sort, asc| -> String {
+            subagents(Some(&data), sort, asc, 120)[0]
+                .spans
+                .iter()
+                .map(|s| s.content.as_ref())
+                .collect()
+        };
+        assert!(head(SubagentSort::Cost, false).contains("COST▼"));
+        assert!(head(SubagentSort::Cost, true).contains("COST▲"));
+        let unsorted = head(SubagentSort::Cost, false);
+        assert!(
+            !unsorted.contains("TYPE▲") && !unsorted.contains("TYPE▼"),
+            "only the sorted column wears the arrow: {unsorted}"
+        );
+    }
+
+    /// The clickable spans are the header's own geometry: each covers the
+    /// label it names, so a click cannot land in one column and sort by
+    /// another.
+    #[test]
+    fn the_clickable_header_spans_cover_the_labels_they_sort() {
+        let data = SessionData {
+            subagents: vec![subagent("a", 1.0, false)],
+            ..Default::default()
+        };
+        let width = 120;
+        let head: String = subagents(Some(&data), SubagentSort::Last, true, width)[0]
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+        let labels = [
+            (SubagentSort::Last, "LAST"),
+            (SubagentSort::Type, "TYPE"),
+            (SubagentSort::Model, "MODEL"),
+            (SubagentSort::Description, "DESC"),
+            (SubagentSort::Cost, "COST"),
+            (SubagentSort::Tools, "TOOLS"),
+            (SubagentSort::Context, "CTX"),
+            (SubagentSort::Duration, "TIME"),
+        ];
+        let spans = subagent_header_spans(width);
+        assert_eq!(spans.len(), labels.len(), "every column is clickable");
+        for ((a, b, col), (want_col, want_label)) in spans.iter().zip(&labels) {
+            assert_eq!(col, want_col, "the spans walk the columns in order");
+            let cell: String = head.chars().skip(*a).take(b - a).collect();
+            // Trimmed, because a right-aligned cell wears its padding on the
+            // left: the label is what names the column, wherever in the cell
+            // it sits.
+            assert!(
+                cell.trim().starts_with(want_label),
+                "span {a}..{b} covers {cell:?}, not {want_label}"
+            );
+        }
     }
 
     #[test]

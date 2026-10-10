@@ -2329,6 +2329,8 @@ impl App {
                     self.tool_tab = idx;
                     self.tool_follow = true;
                     self.needs_redraw = true;
+                } else if let Some(sort) = layout.subagent_header_at(ev.column, ev.row) {
+                    self.set_subagent_sort(sort);
                 } else if let Some(tab) = layout.tab_at(ev.column, ev.row) {
                     self.bottom_tab = tab;
                     self.save_prefs();

@@ -713,6 +713,9 @@ pub struct UiPrefs {
     /// a deliberate act about one session, not a click that lands a pixel away
     /// from something else.
     pub expanded: Vec<String>,
+    /// What the Subagents panel sorts by, and its direction — with the table's
+    /// own reading of each: ascending for `last` is newest-first, so `last ↑`
+    /// means what the table's `last ▲` means (`columns::compare`).
     pub subagent_sort_col: String,
     pub subagent_sort_asc: bool,
     /// Only show sessions whose cost reaches this floor (0 disables it).
@@ -786,7 +789,10 @@ impl Default for UiPrefs {
             tool_show_diff: false,
             expanded: Vec::new(),
             subagent_sort_col: "last".into(),
-            subagent_sort_asc: false,
+            // Ascending for `last` is newest-first, so this default keeps the
+            // panel showing the most recently active agent first — what
+            // `last ↓` showed under the panel's old, opposite semantics.
+            subagent_sort_asc: true,
             cost_floor: 0.0,
             notify: false,
             auto_update: true,
