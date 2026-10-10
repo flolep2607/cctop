@@ -1540,6 +1540,29 @@ fn through_tunnel(shared: &Shared, request: &Request) -> bool {
         })
 }
 
+/// What the access cookie's `Secure` attribute is, empty when it may not
+/// carry one.
+///
+/// A `Secure` cookie is dropped by any browser that received it over plain
+/// HTTP — and this listener speaks plain HTTP either way, since the tunnel
+/// terminates TLS at Cloudflare's edge and forwards here, and a machine's
+/// own page is opened at `http://127.0.0.1:7777`. So the attribute goes on
+/// only when the browser's side of that hop was HTTPS: the edge forwards
+/// `X-Forwarded-Proto: https`, and a request [`through_tunnel`] came through
+/// the edge however it is labelled. Anything that can reach this port can
+/// write those headers, but writing them only takes its own cookie away —
+/// the browser refuses a `Secure` cookie set over plain HTTP, so a spoofed
+/// `https` loses the reload the cookie exists for and nothing else.
+fn secure_attribute(shared: &Shared, request: &Request) -> &'static str {
+    let forwarded = request.headers().iter().any(|(k, v)| {
+        k.eq_ignore_ascii_case("x-forwarded-proto") && v.eq_ignore_ascii_case("https")
+    });
+    match forwarded || through_tunnel(shared, request) {
+        true => "; Secure",
+        false => "",
+    }
+}
+
 /// What a Cloudflare Access login on `request` is worth, with whose it is,
 /// or `None` when it carries none or one that does not check out. A refusal
 /// is logged with its reason, never with the token.
@@ -2485,8 +2508,9 @@ fn app_page(shared: &Shared, stream: &mut TcpStream, request: &Request, handed: 
             .and_then(|c| access_for(shared, c));
         if !(handed == Some(Access::ReadOnly) && held == Some(Access::Full)) {
             headers = format!(
-                "Set-Cookie: {}={credential}; Path=/; HttpOnly; SameSite=Strict\r\n",
-                cookie_name(shared.port)
+                "Set-Cookie: {}={credential}; Path=/; HttpOnly; SameSite=Strict{}\r\n",
+                cookie_name(shared.port),
+                secure_attribute(shared, request)
             );
         }
     }
@@ -4672,6 +4696,53 @@ mod tests {
         let (head, _) = exchange(&guarded, "/?t=full", &format!("If-None-Match: {full}\r\n"));
         assert!(head.starts_with("HTTP/1.1 304 "), "{head}");
         assert!(header(&head, "Set-Cookie").is_some(), "{head}");
+    }
+
+    /// The cookie's `Secure` attribute follows the tunnel, not the listener:
+    /// a page reached through Cloudflare's edge was HTTPS on the browser's
+    /// side and must never fall back to plain HTTP; a page opened on this
+    /// machine's own `http://127.0.0.1` would have a `Secure` cookie dropped
+    /// by every browser, losing the reload it exists for.
+    #[test]
+    fn the_cookie_is_secure_only_when_the_browser_came_through_the_tunnel() {
+        let tunneled = Shared {
+            is_tunnel_host: |host: &str| host.ends_with(".trycloudflare.com"),
+            ..shared("full", "view")
+        };
+        let cookie = |shared: &Shared, headers: &str| {
+            let (head, _) = exchange(shared, "/?t=full", headers);
+            assert!(head.starts_with("HTTP/1.1 200 "), "{head}");
+            header(&head, "Set-Cookie").expect("a cookie").to_string()
+        };
+
+        // This machine, over plain HTTP: no Secure, or the browser would
+        // refuse to send the cookie back to the address it came from.
+        let plain = cookie(&shared("full", "view"), "");
+        assert!(plain.contains("HttpOnly"), "{plain}");
+        assert!(plain.contains("SameSite=Strict"), "{plain}");
+        assert!(!plain.contains("Secure"), "{plain}");
+
+        // The edge says HTTPS, so the attribute goes on.
+        let forwarded = cookie(
+            &tunneled,
+            "Host: dash.trycloudflare.com\r\nX-Forwarded-Proto: https\r\n",
+        );
+        assert!(forwarded.contains("Secure"), "{forwarded}");
+
+        // And a request through the tunnel carries the edge's headers even
+        // where the proxy stripped `X-Forwarded-Proto`.
+        let edged = cookie(
+            &tunneled,
+            "Host: dash.trycloudflare.com\r\nCf-Ray: 8f2c\r\n",
+        );
+        assert!(edged.contains("Secure"), "{edged}");
+
+        // A proxy in front that says plain keeps the cookie sendable.
+        let demoted = cookie(
+            &shared("full", "view"),
+            "Host: 192.168.1.4:7777\r\nX-Forwarded-Proto: http\r\n",
+        );
+        assert!(!demoted.contains("Secure"), "{demoted}");
     }
 
     #[test]

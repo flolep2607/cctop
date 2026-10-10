@@ -504,6 +504,22 @@ const POST_TIMEOUT: Duration = Duration::from_secs(5);
 /// flag exists to prevent.
 static WARNED: AtomicBool = AtomicBool::new(false);
 
+/// What a failed notification POST may say about where it was going.
+///
+/// A webhook target commonly *is* a credential — Slack and Discord put the
+/// secret in the URL's path — so the complaint names the origin only, never
+/// the whole URL.
+fn origin_of(target: &str) -> String {
+    let Some((scheme, rest)) = target.split_once("://") else {
+        return "(unparseable)".to_string();
+    };
+    let host = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+    if scheme.is_empty() || host.is_empty() {
+        return "(unparseable)".to_string();
+    }
+    format!("{scheme}://{host}")
+}
+
 /// POST `body` to `target` on a thread of its own, on a short deadline.
 ///
 /// `log` is the extra fields the event log records beside the outcome. Shared
@@ -533,7 +549,12 @@ pub fn post(target: String, body: String, log: serde_json::Value) {
         if let Err(why) = sent
             && !WARNED.swap(true, Ordering::Relaxed)
         {
-            eprintln!("cctop: notify POST to {target} failed: {why}");
+            // The URL may carry the credential; the error may repeat it back.
+            let origin = origin_of(&target);
+            eprintln!(
+                "cctop: notify POST to {origin} failed: {}",
+                why.to_string().replace(target.as_str(), &origin)
+            );
         }
     });
 }
@@ -552,6 +573,29 @@ mod tests {
             s.process = Some(crate::proc::ProcInfo::default());
         }
         s
+    }
+
+    /// A webhook target is often a credential in URL form, so a failure
+    /// names the origin and nothing else.
+    #[test]
+    fn a_failed_post_complains_about_the_origin_only() {
+        // Slack and Discord both keep the secret in the path.
+        assert_eq!(
+            super::origin_of("https://hooks.slack.com/services/T000/B000/XXXX"),
+            "https://hooks.slack.com"
+        );
+        assert_eq!(
+            super::origin_of("https://discord.com/api/webhooks/1/id-token"),
+            "https://discord.com"
+        );
+        assert_eq!(
+            super::origin_of("http://127.0.0.1:8080/hook?secret=hunter2"),
+            "http://127.0.0.1:8080"
+        );
+        // Nothing to extract: the complaint still says where, in no detail
+        // that could carry anything.
+        assert_eq!(super::origin_of("not a url"), "(unparseable)");
+        assert_eq!(super::origin_of(""), "(unparseable)");
     }
 
     /// The complaint this split exists for: before it, an agent holding a

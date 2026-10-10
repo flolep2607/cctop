@@ -219,23 +219,34 @@ fn render(tokens: &Tokens) -> String {
 /// dangerous ones: a missing `readonly` line quietly served as no read-only
 /// link, or a `readonly` equal to `full`, which the gate would answer as full
 /// access to someone handed the "read-only" link.
+///
+/// A refusal names the line that is wrong but never repeats what it held:
+/// every line of this file is a credential, and an error message is the
+/// sort of text that ends up pasted into a bug report.
 fn parse(text: &str) -> Result<Tokens, String> {
     let mut tokens = Tokens::none();
-    for line in text.lines().map(str::trim) {
+    for (n, line) in text.lines().map(str::trim).enumerate() {
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
         let (scope, token) = line
             .split_once(char::is_whitespace)
             .map(|(s, t)| (s, t.trim()))
-            .ok_or_else(|| format!("the line `{line}` is not `scope token`"))?;
+            .ok_or_else(|| format!("line {} is not `scope token`", n + 1))?;
         let slot = match scope {
             "full" => &mut tokens.full,
             "readonly" => &mut tokens.readonly,
             // A scrape scope existed on the branch that introduced this file,
             // before `/metrics` left the gate; a file written then still loads.
             "metrics" => continue,
-            other => return Err(format!("`{other}` is not a token scope")),
+            // Not echoed either: the first word of a line that got the file
+            // wrong may itself be a token pasted without its scope.
+            _ => {
+                return Err(format!(
+                    "line {} has a scope that is not a token scope",
+                    n + 1
+                ));
+            }
         };
         if token.len() != super::TOKEN_BYTES * 2 || !token.bytes().all(|b| b.is_ascii_hexdigit()) {
             return Err(format!(
@@ -345,6 +356,29 @@ mod tests {
         let short = format!("full abc\nreadonly {}\n", t('b'));
         assert!(parse(&short).is_err());
         assert!(parse("admin 00\n").is_err());
+    }
+
+    /// The file's whole content is tokens, and an error is the sort of text
+    /// that ends up pasted into a bug report: a refusal names the line and
+    /// never repeats what it held.
+    #[test]
+    fn a_refusal_never_repeats_what_the_file_held() {
+        let token = "0123456789abcdef".repeat(super::super::TOKEN_BYTES / 8);
+        // A line with no scope at all — the likeliest paste slip, since
+        // copying just the token is what a hurried reader does.
+        let err = parse(&format!("{token}\n")).unwrap_err();
+        assert!(!err.contains(&token), "{err}");
+        assert!(err.contains("line 1"), "{err}");
+        // A token pasted where its scope belongs.
+        let err = parse(&format!("{token} alsojunk\n")).unwrap_err();
+        assert!(!err.contains(&token), "{err}");
+        assert!(err.contains("scope"), "{err}");
+        // And the wrong-scope refusal still says which line, with the line
+        // numbered from one as a person counts them.
+        let t = |c: char| c.to_string().repeat(super::super::TOKEN_BYTES * 2);
+        let err = parse(&format!("full {}\nadmin {}\n", t('a'), t('b'))).unwrap_err();
+        assert!(err.contains("line 2"), "{err}");
+        assert!(!err.contains("admin"), "{err}");
     }
 
     #[test]
