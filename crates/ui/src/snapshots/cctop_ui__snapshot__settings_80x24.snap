@@ -14,8 +14,8 @@ expression: screen
 │                                                                              ┃
 │config.toml · [settings]                                                      │
 │  theme             "auto"           auto/light/dark/mono; auto asks the term…│
-│  notify            false            Bell + desktop alert when a session need…│
-│  auto_update       true             Offer to update at startup when a newer …│
+│  notify            [ ]              Bell + desktop alert when a session need…│
+│  auto_update       [x]              Offer to update at startup when a newer …│
 │  compact_threshold 83.5             Context % at which the agent compacts. O…│
 │  hide_columns      ""               Columns to hide, e.g. "tok_rate,mem"     │
 │  alert_cost        0                Alert when a session's cost passes $X    │

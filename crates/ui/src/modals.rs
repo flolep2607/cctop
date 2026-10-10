@@ -781,6 +781,23 @@ fn settings_filter_border(app: &App) -> String {
     }
 }
 
+/// What a value on the settings page is, which is what colours it.
+///
+/// Decided where the value comes from rather than from its text, because the
+/// text does not say: a `[settings]` entry takes its type from the schema (the
+/// parser for bools, the shape of the default for number-versus-string), a view
+/// choice from its `View` variant, and a keybind or the Cloudflare row is
+/// neither config-typed nor cycled. A bool carries its state because both
+/// channels read it — the hue, green against red, and the checkbox glyph the
+/// row draws in place of the word.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ValueKind {
+    Bool(bool),
+    Cycle,
+    Number,
+    Text,
+}
+
 /// The page's rows, grouped under the three places a value can be written, and
 /// the line the cursor's row ended up on.
 ///
@@ -795,7 +812,7 @@ fn settings_lines(
     cursor: usize,
     width: usize,
 ) -> (Vec<Line<'static>>, u16, Vec<(u16, usize)>) {
-    use super::settings::{Item, VIEWS};
+    use super::settings::{Item, VIEWS, View};
     /// Columns a row spends before its description: the gutter, the name, the
     /// value, and the set-marker.
     const LEAD: usize = 2 + 18 + 14 + 3;
@@ -831,13 +848,43 @@ fn settings_lines(
     let mut row = |lines: &mut Vec<Line<'static>>,
                    at: usize,
                    name: &str,
+                   kind: ValueKind,
                    value: String,
                    set: bool,
                    what: &str| {
         let here = at == cursor;
-        let style = match set {
-            true => accent.add_modifier(Modifier::BOLD),
-            false => accent,
+        // The type's own ink, and for a set value a wash beside it. Bold stays
+        // what it was — the wash adds a second reading of "not the default"
+        // without taking the first away.
+        let style = {
+            let pal = theme::colors();
+            let ink = match kind {
+                ValueKind::Bool(on) => match on {
+                    true => pal.bool_on,
+                    false => pal.bool_off,
+                },
+                ValueKind::Cycle => pal.cycle_hue,
+                ValueKind::Number => pal.number_hue,
+                ValueKind::Text => pal.text_hue,
+            };
+            match set {
+                true => Style::default()
+                    .fg(ink)
+                    .add_modifier(Modifier::BOLD)
+                    .patch(theme::edited()),
+                false => Style::default().fg(ink),
+            }
+        };
+        // A bool is a checkbox rather than the word: `[x]` and `[ ]` are three
+        // cells of ASCII, which every terminal draws at one cell each. Emoji
+        // would say the same thing at a width no terminal agrees on, and the
+        // word was the only thing a reader without colour had.
+        let shown = match kind {
+            ValueKind::Bool(on) => match on {
+                true => "[x]".to_string(),
+                false => "[ ]".to_string(),
+            },
+            ValueKind::Cycle | ValueKind::Number | ValueKind::Text => value,
         };
         // Three ways a row can be mid-edit, in the order they can happen: a key
         // being bound, a number typed, or nothing at all.
@@ -849,12 +896,16 @@ fn settings_lines(
         } else if here && let Some(input) = &app.settings_input {
             let mut spans = input.spans(usize::MAX, style, accent, "█");
             // Padded back out to the column the other rows fill, so the marker
-            // and the description do not shift as the value is typed.
+            // and the description do not shift as the value is typed. Styled
+            // like the text above: a set value keeps its wash while edited.
             let used: usize = spans.iter().map(Span::width).sum();
-            spans.push(Span::raw(" ".repeat(14usize.saturating_sub(used))));
+            spans.push(Span::styled(
+                " ".repeat(14usize.saturating_sub(used)),
+                style,
+            ));
             spans
         } else {
-            vec![Span::styled(format!("{value:<14}"), style)]
+            vec![Span::styled(format!("{shown:<14}"), style)]
         };
         // The description is cut to the room left over rather than wrapped onto
         // a second line. A wrap is the more generous-looking choice and reads
@@ -888,9 +939,19 @@ fn settings_lines(
         lines.push(section("config.toml · [settings]"));
         for (at, entry) in rows.iter().enumerate() {
             let Item::Setting(i) = entry else { continue };
-            let (name, _, what) = cctop_core::settings::SETTINGS[*i];
+            let (name, default, what) = cctop_core::settings::SETTINGS[*i];
             let (value, set) = app.settings.value_of(name);
-            row(&mut lines, at, name, value, set, what);
+            // The schema decides the type: the parser is what knows a bool
+            // (`is_toggle`), a default the file would spell as a number makes
+            // the row numeric, and anything else is a string to read.
+            let kind = if cctop_core::settings::is_toggle(name) {
+                ValueKind::Bool(value == "true")
+            } else if default.parse::<f64>().is_ok() {
+                ValueKind::Number
+            } else {
+                ValueKind::Text
+            };
+            row(&mut lines, at, name, kind, value, set, what);
         }
     }
 
@@ -902,7 +963,14 @@ fn settings_lines(
             let (name, what, view) = &VIEWS[*i];
             let value = app.view_value(view);
             let set = app.view_is_set(view);
-            row(&mut lines, at, name, value, set, what);
+            // The variant is the type: a flag flips, a choice turns, a number
+            // is typed.
+            let kind = match view {
+                View::Flag { value: get, .. } => ValueKind::Bool(get(app)),
+                View::Choice { .. } => ValueKind::Cycle,
+                View::Number { .. } => ValueKind::Number,
+            };
+            row(&mut lines, at, name, kind, value, set, what);
         }
     }
 
@@ -917,6 +985,7 @@ fn settings_lines(
                     &mut lines,
                     at,
                     "cloudflare",
+                    ValueKind::Text,
                     value,
                     set,
                     super::settings::CLOUDFLARE_WHAT,
@@ -933,7 +1002,7 @@ fn settings_lines(
             let (action, default, what) = cctop_core::settings::BINDINGS[*i];
             let key = app.settings.key_for(action).to_string();
             let set = key != *default;
-            row(&mut lines, at, action, key, set, what);
+            row(&mut lines, at, action, ValueKind::Text, key, set, what);
         }
     }
 
@@ -4058,6 +4127,107 @@ mod tests {
         app.settings_cursor = 0;
         let text = frame_text(&mut app);
         assert!(text.contains("File "), "Home did not go back to the top");
+    }
+
+    /// Each value type in its own ink, the wash a set value wears, and a bool
+    /// as a checkbox — in every palette the page can be drawn in: dark, light,
+    /// and no colour at all.
+    ///
+    /// The glyph replaced the word, so the column arithmetic is asserted with
+    /// it: `[x]` is three cells where `true` was four, and a glyph that did not
+    /// pad back out to the value column would shift the marker and the
+    /// description under it on every row at once.
+    #[test]
+    fn each_value_type_is_painted_and_the_columns_hold() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let start = theme::variant();
+        let _restore = theme::tests::Restore(start);
+
+        let mut app = crate::tests::test_app();
+        // One bool and one number off their defaults, so the wash has something
+        // to sit behind; the rest of the page is defaults.
+        app.settings.notify = Some(true);
+        app.settings.idle_after = Some(3.0);
+
+        // The shape a palette change must not disturb: the row from just inside
+        // the gutter to the end of the value column, text only.
+        let mut shape = String::new();
+        for named in ["dark", "light", "mono"] {
+            theme::set_theme(Some(named));
+            let mut terminal = Terminal::new(TestBackend::new(100, 50)).expect("backend");
+            terminal
+                .draw(|frame| draw_settings(frame, frame.area(), &mut app, &mut Layout::default()))
+                .expect("draw");
+            let buffer = terminal.backend().buffer();
+            let pal = theme::colors();
+            // The block's border is column 0, so the row's two-space gutter
+            // puts the name at 3 and the value — `  {name:<18}` — at 21, with
+            // the three-cell marker at 35 and the description at 38.
+            let row = |name: &str| {
+                (0..buffer.area.height)
+                    .find(|&y| {
+                        (3u16..21)
+                            .map(|x| buffer[(x, y)].symbol())
+                            .collect::<String>()
+                            .starts_with(name)
+                    })
+                    .unwrap_or_else(|| panic!("{named}: no row for {name}"))
+            };
+
+            // A true bool at its default's opposite: the glyph, the green, and
+            // the wash of a value that is not the default.
+            let y = row("notify");
+            let value: String = (21u16..35).map(|x| buffer[(x, y)].symbol()).collect();
+            assert_eq!(value, format!("[x]{}", " ".repeat(11)), "{named}");
+            let cell = &buffer[(21, y)];
+            assert_eq!(cell.fg, pal.bool_on, "{named}");
+            // The marker and the description are where the word left them:
+            // this value is set, so the marker cell carries its `*`.
+            let marker: String = (35u16..38).map(|x| buffer[(x, y)].symbol()).collect();
+            assert_eq!(marker, " * ", "{named}: the marker column moved");
+            assert_eq!(buffer[(38, y)].symbol(), "B", "{named}: descriptions");
+            match theme::no_color() {
+                true => assert!(
+                    cell.modifier.contains(Modifier::UNDERLINED),
+                    "mono: a set value lost its second channel"
+                ),
+                false => assert_eq!(cell.bg, pal.edited_bg, "{named}: no wash"),
+            }
+
+            // A false bool, still on its default: red, and on the ground
+            // rather than on the wash.
+            let y = row("warn_agents");
+            assert_eq!(buffer[(21, y)].symbol(), "[", "{named}");
+            let cell = &buffer[(21, y)];
+            assert_eq!(cell.fg, pal.bool_off, "{named}");
+            assert_eq!(cell.bg, pal.ground, "{named}: a default wore the wash");
+
+            // The other three types, one hue each.
+            assert_eq!(
+                buffer[(21, row("compact_threshold"))].fg,
+                pal.number_hue,
+                "{named}"
+            );
+            assert_eq!(buffer[(21, row("theme"))].fg, pal.text_hue, "{named}");
+            assert_eq!(
+                buffer[(21, row("bottom_panel"))].fg,
+                pal.cycle_hue,
+                "{named}"
+            );
+            // A number off its default wears the wash under its own ink.
+            assert_eq!(buffer[(21, row("idle_after"))].bg, pal.edited_bg, "{named}");
+
+            // Same page, same shape, whatever the palette: mono may only change
+            // how it is inked, never where anything sits.
+            let line: String = (1u16..38).map(|x| buffer[(x, y)].symbol()).collect();
+            if shape.is_empty() {
+                shape = line;
+            } else {
+                assert_eq!(shape, line, "{named}: the row moved");
+            }
+        }
     }
 
     fn help_text(app: &mut App) -> String {
