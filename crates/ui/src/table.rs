@@ -1088,14 +1088,14 @@ mod tests {
     /// A heading lines up under the same headers as the sessions it folds,
     /// and says in its label what it holds and how many of those need you.
     ///
-    /// 204 cells rather than 200: the label needs twenty-eight of them to
-    /// print itself whole, and with CTX% widened to eight cells the flexible
-    /// column has twenty-seven left of a 200-cell frame.
+    /// 201 cells rather than 200: with CTX% seven wide the flexible column
+    /// has twenty-seven of a 200-cell frame, and the label needs twenty-eight
+    /// to print itself whole.
     #[test]
     fn a_tree_heading_keeps_the_columns_and_counts_its_sessions() {
         let now = chrono::Utc::now();
         let cols = all_columns();
-        let widths = column_widths(&cols, 204);
+        let widths = column_widths(&cols, 201);
         let g = crate::tree::Group {
             key: "repo:/r/.git".into(),
             label: "~/r".into(),

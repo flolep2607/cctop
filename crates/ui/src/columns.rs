@@ -929,17 +929,13 @@ mod tests {
         assert_eq!(ids(8), vec![ColumnId::Project]);
     }
 
-    /// The frame cctop's own dashboard is drawn in: a 120-cell screen inside a
-    /// bordered panel, so the columns share 118. Everything that row of the
-    /// dashboard shows today still fits — with CTX% at eight cells the numbers
-    /// land on the flexible column's floor exactly — and a ninth would push
-    /// CPU%, the lowest-priority measurement on screen, out of the frame. This
-    /// is the width CTX% is sized against rather than by taste.
-    /// The dashboard frame is 118 cells wide — the Sessions panel's inner
-    /// width on a 120-cell screen — and CTX% has to fit inside that without
-    /// costing a column the frame shows on purpose. The drop rule keeps CPU%
-    /// next to go, so it is the one to watch: widening CTX% is only free while
-    /// CPU% is still there.
+    /// The frame cctop's own dashboard is drawn in: a 120-cell screen inside
+    /// a bordered panel, so the columns share 118, and CTX% has to fit inside
+    /// that without costing a column the frame shows on purpose. Seven cells
+    /// — what it is now — leaves one in hand, eight uses the last of them, and
+    /// a ninth would push CPU%, the lowest-priority measurement on screen and
+    /// the next to go, out of the frame. This is the width CTX% is sized
+    /// against rather than by taste.
     #[test]
     fn the_dashboard_columns_at_120_still_include_cpu() {
         let shown = visible_columns_among(118, &[], &[], &[session("a")]);
