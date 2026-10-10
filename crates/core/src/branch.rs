@@ -208,10 +208,11 @@ static MARKS: LazyLock<Mutex<HashMap<String, MarkReading>>> =
 /// checkout git could not be asked.
 ///
 /// The count lives here for the same reason the name does — it is part of
-/// describing the session — but it is read with a subprocess rather than from
-/// a file, because a merge-base walk over the commit graph is exactly what
-/// `git rev-parse` cannot do. See [`ahead_behind`] for how that is kept cheap
-/// enough for a table to ask per visible row.
+/// describing the session — but read with a subprocess, because a merge-base
+/// walk over the commit graph is in no file: [`branch`] gets the name without
+/// starting git, and the counts are what git gets started for. See
+/// [`ahead_behind`] for how that is kept cheap enough for a table to ask per
+/// visible row.
 pub fn ahead_behind_of(s: &crate::session::Session) -> Option<(u32, u32)> {
     match &s.remote {
         // A remote row's upstream is on the other machine, and the count did
