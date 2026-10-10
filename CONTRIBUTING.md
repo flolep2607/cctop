@@ -417,17 +417,17 @@ running the loop on a machine with a checkout. Nothing on GitHub's side starts
 one. To start it, open Claude Code in the checkout and run:
 
 ```text
-/loop /issues
+/loop /issue-loop:issues
 ```
 
-With no interval the loop paces itself (see `.claude/skills/issues/SKILL.md`,
+With no interval the loop paces itself (see the `issue-loop` plugin's `issues` skill,
 "Under /loop"): each pass spawns solvers in the background, and their finishing
 wakes the loop again. When nothing is running and nothing is queued it looks
 again in about 20 minutes — soon enough that an issue filed from a phone is
 started within the half hour, without polling GitHub every minute for a queue
 that is usually empty. Press `Esc` to stop it. A self-paced loop is not
 restored by `claude --resume`, and like any recurring task it expires after
-seven days, so run `/loop /issues` again after either.
+seven days, so run `/loop /issue-loop:issues` again after either.
 
 What it picks up is decided by labels, the table in the skill:
 
@@ -439,6 +439,6 @@ What it picks up is decided by labels, the table in the skill:
 | `agent-pr` | the PR is ready for review; review comments send a solver back |
 
 So an issue filed by hand needs the `agent-ready` label to be worked on, and an
-unlabelled one is left alone. `/issues <one-line request>` files one with the
+unlabelled one is left alone. `/issue-loop:issues <one-line request>` files one with the
 issue-writer agent, which writes it up and adds the label. Merging and
 releasing stay with you: the loop never merges a PR or bumps a version.
