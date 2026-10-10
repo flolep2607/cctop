@@ -690,6 +690,7 @@ fn connect_popup() {
 
     let mut app = open(Step::Failed {
         message: Error::NoDomain.to_string(),
+        then: super::connect::Method::Browser,
     });
     snap("connect_no_domain", &mut app);
 
@@ -776,6 +777,18 @@ fn connect_access() {
         said: Vec::new(),
     });
     snap("connect_access_off", &mut app);
+
+    let mut app = open(Step::Access {
+        account: Account {
+            login: true,
+            ..account(None)
+        },
+        cursor: 0,
+        field: Some((Typing::Token, "made-up".into())),
+        confirm: false,
+        said: Vec::new(),
+    });
+    snap("connect_access_login_token", &mut app);
 }
 
 /// Choosing an address: the share panel with its `Address` line, the field
