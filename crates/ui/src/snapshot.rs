@@ -395,6 +395,7 @@ fn help_modal() {
 /// filtered.
 #[test]
 fn settings_page() {
+    use super::connect::Connected;
     let mut app = fixture();
     app.settings_open = true;
     snap("settings", &mut app);
@@ -411,6 +412,51 @@ fn settings_page() {
     app.settings_open = true;
     app.settings_filter = "cloudflare".into();
     snap("settings_cloudflare", &mut app);
+
+    // The same row with an account connected, which is the only frame in which
+    // it says anything: every mark it carries is a fact the dashboard already
+    // held and the row used to hide behind a popup. The address is made up, and
+    // the rename is a refusal so that the one mark for a negative is here too.
+    let mut app = fixture();
+    app.settings_open = true;
+    app.settings_filter = "cloudflare".into();
+    app.connected = Some(Connected {
+        hostname: Some("cctop.example.com".into()),
+        from_env: true,
+        share_hostname: Some("cctop-share.example.com".into()),
+        zone: Some("example.com".into()),
+        rename: Err("the token cannot write DNS"),
+        access_owner: Some("owner@example.com".into()),
+        link_hostname: Some("cctop-link.example.com".into()),
+        public_links: false,
+    });
+    snap("settings_cloudflare_connected", &mut app);
+}
+
+/// A binding is drawn as a cap, which no text frame can show — and the footer
+/// at the bottom of the very same frame has drawn its keys as caps all along,
+/// so this is the one place the page and the footer could have disagreed
+/// without anybody noticing. Filtered to the bindings, because on an unfiltered
+/// page the `[keys]` section is below the fold and a style snapshot of rows
+/// nobody can see proves nothing.
+#[test]
+fn settings_keys_styles() {
+    let mut app = fixture();
+    app.settings_open = true;
+    app.settings_filter = "quit".into();
+    let buffer = draw(&mut app, LARGE);
+    insta::assert_snapshot!(styles(&buffer));
+}
+
+/// And what the filter's own mark looks like, which a text frame cannot show
+/// at all. Narrowed to one row, so the grid is short enough to read.
+#[test]
+fn settings_filtered_styles() {
+    let mut app = fixture();
+    app.settings_open = true;
+    app.settings_filter = "alert_cost".into();
+    let buffer = draw(&mut app, LARGE);
+    insta::assert_snapshot!(styles(&buffer));
 }
 
 /// The settings page's colours, which the text snapshots cannot carry: each

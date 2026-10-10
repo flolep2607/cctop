@@ -806,6 +806,95 @@ enum ValueKind {
 /// cctop's own and rewritten on every change — and a page showing them as one
 /// undifferentiated list would be asking somebody to change a number without
 /// telling them where it lands.
+/// Columns a name is padded to, so that every row's description starts in the
+/// same place whatever the name happens to be.
+const NAME_W: usize = 18;
+/// Columns a value is padded to, for the same reason.
+const VALUE_W: usize = 14;
+/// What the filter marks its match with: a modifier, so it is still a mark
+/// where a hue would be nothing — the mono theme, and any terminal that owns
+/// the palette. Underlined as well as bold because the mono theme already draws
+/// a whole row in bold, and one of two shades of the same weight is not a
+/// distinction.
+const MATCHED: Modifier = Modifier::BOLD.union(Modifier::UNDERLINED);
+
+/// What a row's value is, as far as drawing it goes.
+///
+/// A key is a cap because a key is a cap everywhere else in cctop — the footer
+/// hints and the mode line both draw bindings as keys, and this page was the
+/// one place a binding read as prose. A choice carries the mark that says Enter
+/// turns it, because it is the only kind of row where Enter's effect is
+/// otherwise invisible: a flag says on or off, a number opens a field, a
+/// keybind says it is waiting, and only a choice changes without saying so.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    Plain,
+    Key,
+    Cycles,
+}
+
+/// Where `needle` first matches `text` without regard to case, as byte offsets
+/// into `text`.
+///
+/// Walked a character at a time rather than by lowercasing both and slicing the
+/// original, because lowercasing can change a string's length in bytes — an
+/// offset taken from the lowered string and applied to the original cuts a
+/// character in half. An empty needle returns `None`: it matches everywhere, so
+/// it has nothing to point at.
+fn find_fold(text: &str, needle: &str) -> Option<(usize, usize)> {
+    let want: Vec<char> = needle.chars().collect();
+    if want.is_empty() {
+        return None;
+    }
+    let at: Vec<(usize, char)> = text.char_indices().collect();
+    let last = at.len().checked_sub(want.len() - 1)?;
+    (0..last)
+        .find(|start| {
+            at[*start..*start + want.len()]
+                .iter()
+                .zip(&want)
+                .all(|((_, got), w)| got.to_lowercase().eq(w.to_lowercase()))
+        })
+        .map(|start| {
+            let stop = at.get(start + want.len()).map_or(text.len(), |(i, _)| *i);
+            (at[start].0, stop)
+        })
+}
+
+/// A row's text, split so the part the filter matched can carry a mark.
+///
+/// The filter searches the name, the default, the description and the value,
+/// and only the name and the value are on the screen — so a row that matched
+/// somewhere else comes back unmarked rather than second-guessed. Marking the
+/// description as well would mean the elision and the mark agreeing about where
+/// the cut fell, which buys a column that moves the moment a filter narrows the
+/// page. The name and the value are what the row is; that is enough to see.
+fn marked(text: &str, needle: &str, base: Style) -> Vec<Span<'static>> {
+    let Some((at, end)) = find_fold(text, needle) else {
+        return vec![Span::styled(text.to_string(), base)];
+    };
+    vec![
+        Span::styled(text[..at].to_string(), base),
+        Span::styled(text[at..end].to_string(), base.add_modifier(MATCHED)),
+        Span::styled(text[end..].to_string(), base),
+    ]
+}
+
+/// A row's gutter, its name and the padding that holds the columns, with the
+/// filter's match marked on the name.
+///
+/// The padding is a raw span of its own rather than part of the marked text, so
+/// a needle can never be drawn into the space between two names.
+fn name_spans(name: &str, needle: &str) -> Vec<Span<'static>> {
+    let mut spans = Vec::with_capacity(4);
+    spans.push(Span::raw("  ".to_string()));
+    spans.extend(marked(name, needle, Style::default()));
+    spans.push(Span::raw(
+        " ".repeat(NAME_W.saturating_sub(name.chars().count())),
+    ));
+    spans
+}
+
 fn settings_lines(
     app: &App,
     rows: &[super::settings::Item],
@@ -813,9 +902,9 @@ fn settings_lines(
     width: usize,
 ) -> (Vec<Line<'static>>, u16, Vec<(u16, usize)>) {
     use super::settings::{Item, VIEWS, View};
-    /// Columns a row spends before its description: the gutter, the name, the
-    /// value, and the set-marker.
-    const LEAD: usize = 2 + 18 + 14 + 3;
+    // Columns a row spends before its description: the gutter, the name, the
+    // value, and the set-marker.
+    const LEAD: usize = 2 + NAME_W + VALUE_W + 3;
     let section = |t: &str| Line::from(Span::styled(t.to_string(), theme::title()));
     let mut lines = Vec::new();
     let mut cursor_line = 0u16;
@@ -842,23 +931,38 @@ fn settings_lines(
     }
 
     let accent = Style::default().fg(theme::colors().accent);
+    // The filter's needle, folded once for the whole page. `settings_shown`
+    // decides what survives with this same string; the mark says which part of
+    // the row is why.
+    let needle = app.settings_filter.to_string().trim().to_lowercase();
+    // A value may claim the frame's spare room, but never a description's. The
+    // Cloudflare row carries a zone, a link state and a share hostname, and at
+    // eighty columns that and a sentence do not both fit: the value is cut
+    // first, and `Step::Connected` stays where the whole story is read. The
+    // floor is the length of the longest description this page shows in full,
+    // because below that a description stops being a phrase — and descriptions
+    // were already elided to whatever room was left over, so this only stops a
+    // long value making that worse.
+    const DESC_MIN: usize = crate::settings::CLOUDFLARE_WHAT.len();
+    let max_value = VALUE_W.saturating_add(width.saturating_sub(LEAD + DESC_MIN));
     // One row, in every section. `at` is the position in the *filtered* list,
     // which is what the cursor counts in, so a filter that moved the page
     // moves the cursor with it.
     let mut row = |lines: &mut Vec<Line<'static>>,
                    at: usize,
                    name: &str,
-                   kind: ValueKind,
+                   ty: ValueKind,
                    value: String,
                    set: bool,
-                   what: &str| {
+                   what: &str,
+                   kind: Kind| {
         let here = at == cursor;
         // The type's own ink, and for a set value a wash beside it. Bold stays
         // what it was — the wash adds a second reading of "not the default"
         // without taking the first away.
         let style = {
             let pal = theme::colors();
-            let ink = match kind {
+            let ink = match ty {
                 ValueKind::Bool(on) => match on {
                     true => pal.bool_on,
                     false => pal.bool_off,
@@ -879,33 +983,76 @@ fn settings_lines(
         // cells of ASCII, which every terminal draws at one cell each. Emoji
         // would say the same thing at a width no terminal agrees on, and the
         // word was the only thing a reader without colour had.
-        let shown = match kind {
+        let text = match ty {
             ValueKind::Bool(on) => match on {
                 true => "[x]".to_string(),
                 false => "[ ]".to_string(),
             },
             ValueKind::Cycle | ValueKind::Number | ValueKind::Text => value,
         };
+        // Padded out to the value column from whatever was drawn, so the marker
+        // and the description do not shift when a value is longer than its cap.
+        // The padding wears the value's style, so a set value's wash fills the
+        // column — except under a key, whose cap must not read as fourteen wide.
+        let pad_style = match kind {
+            Kind::Key => Style::default(),
+            Kind::Plain | Kind::Cycles => style,
+        };
+        let pad_to = |spans: &mut Vec<Span<'static>>, width: usize| {
+            let used: usize = spans.iter().map(Span::width).sum();
+            spans.push(Span::styled(
+                " ".repeat(width.saturating_sub(used)),
+                pad_style,
+            ));
+        };
         // Three ways a row can be mid-edit, in the order they can happen: a key
         // being bound, a number typed, or nothing at all.
         let value = if here && app.settings_capture {
+            // The waiting state is a cap of its own, in the amber the tabs use
+            // when a session needs you — this is the one row on the page that
+            // is waiting on the person in front of it. Deliberately not blinked:
+            // the blink phase runs off the wall clock, so no frame of it could
+            // be a snapshot, and a row that moves is a row nobody can read
+            // while it waits for them.
             vec![Span::styled(
-                format!("{:<14}", "press a key… (Esc cancels)"),
-                style,
+                "press a key… (Esc cancels)".to_string(),
+                theme::attention_lit(theme::colors().cost_mid),
             )]
         } else if here && let Some(input) = &app.settings_input {
             let mut spans = input.spans(usize::MAX, style, accent, "█");
             // Padded back out to the column the other rows fill, so the marker
             // and the description do not shift as the value is typed. Styled
             // like the text above: a set value keeps its wash while edited.
-            let used: usize = spans.iter().map(Span::width).sum();
-            spans.push(Span::styled(
-                " ".repeat(14usize.saturating_sub(used)),
-                style,
-            ));
+            pad_to(&mut spans, VALUE_W);
             spans
         } else {
-            vec![Span::styled(format!("{shown:<14}"), style)]
+            // A key's cap covers the key and nothing else — capping the padding
+            // too would read as a fourteen-column key. A choice's mark takes the
+            // value field's last column rather than sitting after it, so that
+            // saying "Enter cycles this" does not move the description sideways.
+            // A choice gives its mark the last of the columns it may claim, so
+            // the mark is never the thing that gets cut.
+            let cut = match kind {
+                Kind::Cycles => max_value.saturating_sub(1),
+                _ => max_value,
+            };
+            let shown = super::render::elide(&text, cut);
+            let mut spans = match kind {
+                Kind::Plain => marked(&shown, &needle, style),
+                Kind::Key => marked(&shown, &needle, theme::key_cap()),
+                Kind::Cycles => marked(&shown, &needle, style),
+            };
+            pad_to(
+                &mut spans,
+                match kind {
+                    Kind::Cycles => VALUE_W - 1,
+                    _ => VALUE_W,
+                },
+            );
+            if kind == Kind::Cycles {
+                spans.push(Span::styled("↻".to_string(), theme::dim()));
+            }
+            spans
         };
         // The description is cut to the room left over rather than wrapped onto
         // a second line. A wrap is the more generous-looking choice and reads
@@ -913,15 +1060,18 @@ fn settings_lines(
         // half the rows, so the eye ends up scanning a shape rather than a
         // list, and the cursor's row becomes two rows tall — which breaks the
         // arithmetic this page scrolls by.
-        let room = width.saturating_sub(LEAD);
-        let mut line = Line::from_iter(
-            std::iter::once(Span::raw(format!("  {name:<18}")))
-                .chain(value)
-                .chain([
-                    Span::styled(if set { " * " } else { "   " }, theme::dim()),
-                    Span::styled(super::render::elide(what, room), theme::dim()),
-                ]),
-        );
+        //
+        // A value wider than its column is charged its own overflow, so that
+        // the Cloudflare row can carry the zone and the link state without
+        // pushing the description off the frame. Every other row pads to
+        // exactly `VALUE_W`, so their room — and so every existing row — is
+        // untouched by this.
+        let drawn: usize = value.iter().map(Span::width).sum();
+        let room = width.saturating_sub(LEAD + drawn.saturating_sub(VALUE_W));
+        let mut line = Line::from_iter(name_spans(name, &needle).into_iter().chain(value).chain([
+            Span::styled(if set { " * " } else { "   " }, theme::dim()),
+            Span::styled(super::render::elide(what, room), theme::dim()),
+        ]));
         if here {
             cursor_line = lines.len() as u16;
             line = line.style(theme::selected());
@@ -951,7 +1101,7 @@ fn settings_lines(
             } else {
                 ValueKind::Text
             };
-            row(&mut lines, at, name, kind, value, set, what);
+            row(&mut lines, at, name, kind, value, set, what, Kind::Plain);
         }
     }
 
@@ -964,13 +1114,15 @@ fn settings_lines(
             let value = app.view_value(view);
             let set = app.view_is_set(view);
             // The variant is the type: a flag flips, a choice turns, a number
-            // is typed.
-            let kind = match view {
-                View::Flag { value: get, .. } => ValueKind::Bool(get(app)),
-                View::Choice { .. } => ValueKind::Cycle,
-                View::Number { .. } => ValueKind::Number,
+            // is typed. Only a choice turns quietly under Enter, so only it
+            // carries the mark; the flag and the number say on screen what they
+            // are about to do.
+            let (ty, kind) = match view {
+                View::Flag { value: get, .. } => (ValueKind::Bool(get(app)), Kind::Plain),
+                View::Choice { .. } => (ValueKind::Cycle, Kind::Cycles),
+                View::Number { .. } => (ValueKind::Number, Kind::Plain),
             };
-            row(&mut lines, at, name, kind, value, set, what);
+            row(&mut lines, at, name, ty, value, set, what, kind);
         }
     }
 
@@ -989,6 +1141,7 @@ fn settings_lines(
                     value,
                     set,
                     super::settings::CLOUDFLARE_WHAT,
+                    Kind::Plain,
                 );
             }
         }
@@ -1002,7 +1155,16 @@ fn settings_lines(
             let (action, default, what) = cctop_core::settings::BINDINGS[*i];
             let key = app.settings.key_for(action).to_string();
             let set = key != *default;
-            row(&mut lines, at, action, ValueKind::Text, key, set, what);
+            row(
+                &mut lines,
+                at,
+                action,
+                ValueKind::Text,
+                key,
+                set,
+                what,
+                Kind::Key,
+            );
         }
     }
 
@@ -4144,6 +4306,236 @@ mod tests {
         app.settings_cursor = 0;
         let text = frame_text(&mut app);
         assert!(text.contains("File "), "Home did not go back to the top");
+    }
+
+    /// The spans of the row the cursor is on that begin inside a column range,
+    /// so that a style can be asked about without going through a terminal.
+    fn column(app: &App, from: usize, len: usize) -> Vec<(String, Style)> {
+        let rows = app.settings_shown();
+        let cursor = app.settings_cursor.min(rows.len().saturating_sub(1));
+        let (lines, at, _) = super::settings_lines(app, &rows, cursor, 100);
+        let mut col = 0;
+        let mut out = Vec::new();
+        for span in &lines[at as usize].spans {
+            let start = col;
+            col += span.width();
+            if start >= from && start < from + len {
+                out.push((span.content.to_string(), span.style));
+            }
+        }
+        out
+    }
+
+    /// The value column, as drawn.
+    fn value(app: &App) -> Vec<(String, Style)> {
+        column(app, 2 + NAME_W, VALUE_W)
+    }
+
+    /// The name column, as drawn.
+    fn name(app: &App) -> Vec<(String, Style)> {
+        column(app, 2, NAME_W)
+    }
+
+    /// What the filter marked, put back together.
+    fn hits(spans: &[(String, Style)]) -> String {
+        spans
+            .iter()
+            .filter(|(_, s)| s.add_modifier.contains(MATCHED))
+            .map(|(t, _)| t.as_str())
+            .collect()
+    }
+
+    fn drawn_width(spans: &[(String, Style)]) -> usize {
+        spans.iter().map(|(t, _)| t.chars().count()).sum()
+    }
+
+    /// Put the cursor on the first row of a kind, which is where the page
+    /// already put it when nothing has moved it.
+    fn at_row(app: &mut App, want: fn(&crate::settings::Item) -> bool) {
+        app.settings_cursor = app
+            .settings_shown()
+            .iter()
+            .position(want)
+            .unwrap_or_else(|| panic!("the page has no row of that kind"));
+    }
+
+    /// A binding is a cap everywhere else in cctop, and this page was the one
+    /// place it read as prose. The cap covers the key and nothing else —
+    /// padding it would read as a fourteen-column key.
+    #[test]
+    fn a_keybind_is_a_cap_covering_only_the_key() {
+        let mut app = crate::tests::test_app();
+        app.settings_open = true;
+        at_row(&mut app, |i| matches!(i, crate::settings::Item::Key(_)));
+        let value = value(&app);
+        assert_eq!(value[0].1, theme::key_cap(), "not a cap: {value:?}");
+        assert!(
+            value[1..]
+                .iter()
+                .all(|(t, s)| t.chars().all(|c| c == ' ') && *s == Style::default()),
+            "the padding carried the cap too: {value:?}"
+        );
+        assert_eq!(drawn_width(&value), VALUE_W, "the column moved: {value:?}");
+    }
+
+    /// Enter turns a choice and says nothing while it does. It is the only row
+    /// on the page whose effect is invisible, so it is the only one that needs
+    /// the mark — and the mark takes the value column's last cell rather than
+    /// sitting after it, so the description does not move sideways.
+    #[test]
+    fn a_choice_says_enter_cycles_it_without_moving_the_column() {
+        use crate::settings::{VIEWS, View};
+        let mut app = crate::tests::test_app();
+        app.settings_open = true;
+        at_row(&mut app, |i| {
+            matches!(i, crate::settings::Item::View(v)
+                if matches!(VIEWS[*v].2, View::Choice { .. }))
+        });
+        let value = value(&app);
+        assert_eq!(
+            value.last().map(|(t, _)| t.as_str()),
+            Some("↻"),
+            "no cycle mark on a choice: {value:?}"
+        );
+        assert_eq!(drawn_width(&value), VALUE_W, "the column moved: {value:?}");
+    }
+
+    /// A filter that matched something should say which part of the row is
+    /// why, so the page can be read rather than scanned.
+    #[test]
+    fn a_filter_marks_exactly_the_text_that_matched() {
+        let mut app = crate::tests::test_app();
+        app.settings_open = true;
+        app.settings_filter = "alert_cost".into();
+        app.settings_cursor = 0;
+        let name = name(&app);
+        assert_eq!(
+            hits(&name),
+            "alert_cost",
+            "the name was not marked: {name:?}"
+        );
+        assert_eq!(
+            name.iter()
+                .map(|(t, _)| t.as_str())
+                .collect::<String>()
+                .trim(),
+            "alert_cost",
+            "marking moved the text"
+        );
+        assert_eq!(drawn_width(&name), NAME_W, "the column moved: {name:?}");
+    }
+
+    /// The filter searches the description too, and a row that matched only
+    /// there is drawn unmarked rather than second-guessed: the description is
+    /// elided, and a mark that guessed at the cut would move the column.
+    #[test]
+    fn a_row_that_matched_only_in_its_description_is_drawn_unmarked() {
+        let mut app = crate::tests::test_app();
+        app.settings_open = true;
+        app.settings_filter = "alert when".into();
+        app.settings_cursor = 0;
+        let marked = !hits(&name(&app)).is_empty() || !hits(&value(&app)).is_empty();
+        assert!(
+            !marked,
+            "a row that matched nothing on screen was still marked"
+        );
+    }
+
+    /// The needle is found case-insensitively, and never by an offset taken
+    /// from a lowered copy of the text: `İ` is two bytes and lowers to three,
+    /// so the byte index of everything after it moves.
+    #[test]
+    fn the_match_never_splits_a_character() {
+        assert_eq!(super::find_fold("Alert When", "alert when"), Some((0, 10)));
+        assert_eq!(super::find_fold("kÜber", "über"), Some((1, 6)));
+        assert_eq!(super::find_fold("İx", "x"), Some((2, 3)));
+        // The same answer is (3, 4) if you lowercase the haystack first and take
+        // the offset from that, which would slice the last byte off the `x`.
+        assert_eq!("İx".to_lowercase().find('x'), Some(3));
+        assert_eq!(
+            super::find_fold("abc", ""),
+            None,
+            "an empty needle matches all"
+        );
+        assert_eq!(super::find_fold("ab", "abc"), None);
+    }
+
+    /// Every fact the Cloudflare row is asked to carry, in the order the
+    /// questions are asked.
+    #[test]
+    fn the_cloudflare_row_says_what_the_dashboard_knows() {
+        use crate::connect::Connected;
+        let mut app = crate::tests::test_app();
+        assert_eq!(app.cloudflare_value(), "not connected");
+        app.connected = Some(Connected {
+            hostname: Some("cctop.example".into()),
+            from_env: true,
+            share_hostname: Some("share.cctop.example".into()),
+            zone: Some("example.com".into()),
+            rename: Err("the token cannot write DNS"),
+            access_owner: Some("me@example.com".into()),
+            link_hostname: Some("go.example.com".into()),
+            public_links: false,
+        });
+        assert_eq!(
+            app.cloudflare_value(),
+            "cctop.example · zone example.com · Access me@example.com \
+             · links go.example.com · shares share.cctop.example · from env \
+             · no DNS write: the token cannot write DNS"
+        );
+    }
+
+    /// `Ok(())` is the ordinary case, so only a refusal earns a word — a mark
+    /// on every row would train somebody to skip the column, and the next
+    /// refusal along with it. The links clause still says which of the two
+    /// states an account with no Access at all is in.
+    #[test]
+    fn the_cloudflare_row_marks_a_refusal_and_nothing_else() {
+        use crate::connect::Connected;
+        let mut app = crate::tests::test_app();
+        app.connected = Some(Connected {
+            hostname: Some("cctop.example".into()),
+            from_env: false,
+            share_hostname: None,
+            zone: None,
+            rename: Ok(()),
+            access_owner: None,
+            link_hostname: None,
+            public_links: true,
+        });
+        assert_eq!(app.cloudflare_value(), "cctop.example · links public");
+    }
+
+    /// A value wider than its column is charged its own overflow, so the
+    /// Cloudflare row can carry the zone and the link state without pushing
+    /// the description off an 80-column frame.
+    #[test]
+    fn a_long_value_leaves_the_description_on_the_frame() {
+        use crate::connect::Connected;
+        let mut app = crate::tests::test_app();
+        app.settings_open = true;
+        app.connected = Some(Connected {
+            hostname: Some("a-very-long-tunnel-hostname.example.com".into()),
+            from_env: false,
+            share_hostname: None,
+            zone: Some("example.com".into()),
+            rename: Ok(()),
+            access_owner: None,
+            link_hostname: None,
+            public_links: true,
+        });
+        at_row(&mut app, |i| *i == crate::settings::Item::Cloudflare);
+        let rows = app.settings_shown();
+        let cursor = app.settings_cursor;
+        let (lines, at, _) = super::settings_lines(&app, &rows, cursor, 80);
+        let line = &lines[at as usize];
+        let drawn = line.spans.iter().map(|s| s.width()).sum::<usize>();
+        assert!(drawn <= 80, "the row ran off the frame: {line:?}");
+        let text: String = line.spans.iter().map(|s| s.content.to_string()).collect();
+        assert!(
+            text.contains("Your Cloudflare tunnel"),
+            "the description left the frame: {line:?}"
+        );
     }
 
     /// Each value type in its own ink, the wash a set value wears, and a bool

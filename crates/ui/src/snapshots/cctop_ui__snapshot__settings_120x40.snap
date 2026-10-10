@@ -35,9 +35,9 @@ expression: screen
 │Remembered · view                                                                                                     │
 │  tree              [ ]              Draw the table as repositories and their checkouts                               │
 │  live_only         [ ]              Only sessions that are running                                                   │
-│  age               default          Hide sessions quiet for longer than                                              │
+│  age               default      ↻   Hide sessions quiet for longer than                                              │
 │  cost_floor        $0               Only sessions costing at least $X (0 for all)                                    │
-│  bottom_panel      Processes      * Which panel opens under the table                                                │
+│  bottom_panel      Processes    ↻ * Which panel opens under the table                                                │
 │  tool_show_diff    [ ]              Show each edit's diff under its row                                              │
 │  tool_live_only    [ ]              Tool Activity shows this run only                                                │
 ╰ 80   ↑↓ scroll   / filter   Esc back ────────────────────────────────────────────────────────────────────────────────╯
