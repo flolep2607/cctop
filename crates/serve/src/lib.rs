@@ -1540,6 +1540,45 @@ fn through_tunnel(shared: &Shared, request: &Request) -> bool {
         })
 }
 
+/// Whether the browser saw this request over https — the only thing that may
+/// decide `Secure` on the credential cookie.
+///
+/// `X-Forwarded-Proto` and `Cf-Visitor` are what the edge sets on everything it
+/// forwards, named tunnel and quick tunnel alike. `cf-ray`, which
+/// [`through_tunnel`] looks at, says nothing about the scheme, and the tunnel's
+/// own host name says nothing either: a loopback client can set all three.
+///
+/// Forging one costs an attacker nothing they did not have. The cookie it buys
+/// is `Secure`, so a browser sends it back only over https — and this serve is
+/// reached over https only through the edge that sets the header. So the
+/// forgery marks a plain-http connection with a cookie its own browser will not
+/// return, which is a credential that does not work, not one that does.
+fn arrived_securely(request: &Request) -> bool {
+    request.headers().iter().any(|(k, v)| {
+        let scheme = |v: &str| {
+            v.trim()
+                .split(',')
+                .next()
+                .unwrap_or_default()
+                .trim()
+                .eq_ignore_ascii_case("https")
+        };
+        match k.to_ascii_lowercase().as_str() {
+            "x-forwarded-proto" => scheme(v),
+            // `{"scheme":"https","country":"..."}` — the scheme is the field
+            // that matters and the one whose position is not fixed.
+            "cf-visitor" => {
+                v.to_ascii_lowercase()
+                    .split("\"scheme\":")
+                    .nth(1)
+                    .and_then(|rest| rest.trim_start_matches('"').split('"').next())
+                    == Some("https")
+            }
+            _ => false,
+        }
+    })
+}
+
 /// What a Cloudflare Access login on `request` is worth, with whose it is,
 /// or `None` when it carries none or one that does not check out. A refusal
 /// is logged with its reason, never with the token.
@@ -1659,6 +1698,15 @@ fn serve_connection(shared: &Shared, stream: &mut TcpStream) {
     // A full invite is not enough — it may act on sessions, not hand out
     // access.
     let admin = presented == Some(Access::Full) || owner;
+    // ponytail: no backoff per source here, and deliberately so. A token is
+    // 128 bits of `random_hex` and [`token_matches`] is constant-time, so
+    // there is nothing for an attacker to grind: a per-source counter would be
+    // a map that grows for as long as the serve runs, bought against a
+    // guessing cost that is already unreachable. What does matter is that a
+    // wrong token reaches nobody — the answer below says only that the token
+    // was wrong, the log line carries the method and path but never the token
+    // or where it came from, and every response on every route is asserted in
+    // this file not to echo one.
     let Some(access) = presented.max(login) else {
         cctop_core::elog::event(
             "http",
@@ -2484,8 +2532,16 @@ fn app_page(shared: &Shared, stream: &mut TcpStream, request: &Request, handed: 
             .cookie(&cookie_name(shared.port))
             .and_then(|c| access_for(shared, c));
         if !(handed == Some(Access::ReadOnly) && held == Some(Access::Full)) {
+            // `Secure` only where the browser actually saw https. Marking it on
+            // a plain-http loopback cookie would mean the reload that this very
+            // cookie exists for never carried it, and the page logged itself
+            // out the moment the first answer arrived.
+            let secure = match arrived_securely(request) {
+                true => "; Secure",
+                false => "",
+            };
             headers = format!(
-                "Set-Cookie: {}={credential}; Path=/; HttpOnly; SameSite=Strict\r\n",
+                "Set-Cookie: {}={credential}; Path=/; HttpOnly; SameSite=Strict{secure}\r\n",
                 cookie_name(shared.port)
             );
         }
@@ -4548,12 +4604,24 @@ mod tests {
 
     /// One request through the router, as the head and the undecoded body.
     fn exchange(shared: &Shared, target: &str, headers: &str) -> (String, Vec<u8>) {
+        exchange_as(shared, "GET", target, headers)
+    }
+
+    /// The same, for a method of the caller's choosing. Only a test that is
+    /// asking what a route does to something other than a GET needs this;
+    /// every other test wants [`exchange`].
+    fn exchange_as(
+        shared: &Shared,
+        method: &str,
+        target: &str,
+        headers: &str,
+    ) -> (String, Vec<u8>) {
         use std::io::Read;
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
         let (mut server, _) = listener.accept().unwrap();
         client
-            .write_all(format!("GET {target} HTTP/1.1\r\n{headers}\r\n").as_bytes())
+            .write_all(format!("{method} {target} HTTP/1.1\r\n{headers}\r\n").as_bytes())
             .unwrap();
         // Answered on a thread of its own: the app page is most of a megabyte,
         // more than a socket buffers, and its write would wait on this read.
@@ -4672,6 +4740,83 @@ mod tests {
         let (head, _) = exchange(&guarded, "/?t=full", &format!("If-None-Match: {full}\r\n"));
         assert!(head.starts_with("HTTP/1.1 304 "), "{head}");
         assert!(header(&head, "Set-Cookie").is_some(), "{head}");
+    }
+
+    /// `Secure` on the credential cookie, but only where the browser saw https.
+    /// Marking a loopback cookie `Secure` would mean the reload that the cookie
+    /// exists for never carried it, and the page logged itself out the moment
+    /// the first answer arrived.
+    #[test]
+    fn the_credential_cookie_is_secure_only_where_the_browser_saw_https() {
+        let guarded = shared("full", "view");
+        let cookie_of = |edge: &str| {
+            let (head, _) = exchange(&guarded, "/?t=full", edge);
+            header(&head, "Set-Cookie")
+                .unwrap_or_else(|| panic!("no cookie for {edge:?}: {head}"))
+                .to_string()
+        };
+        // Plain, which is what a reload of `http://127.0.0.1:<port>` is.
+        let plain = cookie_of("");
+        assert!(plain.contains("HttpOnly"), "{plain}");
+        assert!(
+            !plain.contains("Secure"),
+            "a loopback cookie was marked: {plain}"
+        );
+        // Over the edge, either way Cloudflare says so, and a proxied chain
+        // that appended to the list rather than replacing it.
+        for edge in [
+            "X-Forwarded-Proto: https\r\n",
+            "X-Forwarded-Proto: https, http\r\n",
+            "Cf-Visitor: {\"scheme\":\"https\"}\r\n",
+            "Cf-Visitor: {\"country\":\"SE\",\"scheme\":\"https\"}\r\n",
+        ] {
+            let cookie = cookie_of(edge);
+            assert!(
+                cookie.contains("; Secure"),
+                "{edge:?} did not mark it: {cookie}"
+            );
+        }
+        // And the scheme has to be https, not merely present.
+        for edge in [
+            "X-Forwarded-Proto: http\r\n",
+            "Cf-Visitor: {\"scheme\":\"http\"}\r\n",
+        ] {
+            let cookie = cookie_of(edge);
+            assert!(!cookie.contains("Secure"), "{edge:?} marked it: {cookie}");
+        }
+    }
+
+    /// The share host has always asserted that a 404 never echoes a token.
+    /// The main page's refusals owe it the same: whatever a route answers to a
+    /// wrong token — 403, 404, 405 — the answer carries it nowhere, in the head
+    /// or in the body, whatever method asked.
+    #[test]
+    fn no_refusal_on_the_main_page_echoes_the_token() {
+        let guarded = shared("full", "view");
+        let wrong = "0123456789abcdef0123456789abcdef";
+        assert_ne!(wrong, "full", "the fixture token would have got in");
+        let mut refused = 0;
+        for path in [
+            "/",
+            "/api/config",
+            "/api/sessions",
+            "/term/1/nope",
+            "/rmux-ws/1/nope",
+            "/no/such/route",
+        ] {
+            for method in ["GET", "POST", "HEAD"] {
+                let (head, body) = exchange_as(&guarded, method, &format!("{path}?t={wrong}"), "");
+                assert!(!head.contains(wrong), "{method} {path} echoed it: {head}");
+                assert!(
+                    !body.windows(wrong.len()).any(|w| w == wrong.as_bytes()),
+                    "{method} {path} echoed it in the body"
+                );
+                if head.contains(" 403 ") {
+                    refused += 1;
+                }
+            }
+        }
+        assert!(refused > 0, "nothing was refused, so nothing was proved");
     }
 
     #[test]

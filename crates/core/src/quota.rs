@@ -670,7 +670,7 @@ pub fn save_token(profile: &str, token: &str) -> anyhow::Result<()> {
     // a file the user is expected to open.
     let mut doc = text
         .parse::<toml_edit::DocumentMut>()
-        .map_err(|e| anyhow::anyhow!("{} is not valid TOML ({e}); fix it first", path.display()))?;
+        .map_err(|e| crate::config::not_valid_toml(path, &text, &e))?;
     // Built as real tables rather than by indexing straight through, which
     // toml_edit renders as a single inline `accounts = { work = { … } }` line.
     if !doc.contains_key("accounts") {
@@ -697,8 +697,7 @@ pub fn save_token(profile: &str, token: &str) -> anyhow::Result<()> {
     // the config, and created unreadable to anyone else from the start:
     // widening a file that already holds a secret is a window, however short.
     let tmp = temp_beside(path, "toml");
-    std::fs::write(&tmp, doc.to_string())?;
-    restrict(&tmp)?;
+    write_private(&tmp, &doc.to_string())?;
     std::fs::rename(&tmp, path)?;
     // Launchable at once, and polled at once, rather than after a restart and
     // after the next interval: the account was added to be used.
@@ -857,10 +856,29 @@ fn token_account_in(environ: &[u8], config_text: &str) -> Option<String> {
         .find(|name| pick_token(config_text, name).as_deref() == Some(token))
 }
 
-/// Owner-only permissions: the file holds a token.
-pub(crate) fn restrict(path: &Path) -> std::io::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+/// Write `text` to a file at `path`, owner-only from the moment it exists.
+///
+/// `fs::write` creates at `0666`-minus-umask and leaves it that way until
+/// something chmods it afterwards, which for a file holding a token is a window
+/// in which every other user on the machine can read it — and three writers
+/// used to carry a comment claiming the file was owner-only from the start
+/// while doing exactly this. The mode comes from the open itself, so there is
+/// no instant at which the file exists and is not yet private.
+///
+/// `create` rather than `create_new`: the name already carries the pid and a
+/// counter, and a recycled pid should cost an overwrite rather than a write
+/// that quietly did not happen.
+pub(crate) fn write_private(path: &Path, text: &str) -> std::io::Result<()> {
+    use std::fs::OpenOptions;
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)?
+        .write_all(text.as_bytes())
 }
 
 fn read_codex_token_in(dir: &Path) -> Option<String> {
@@ -1328,6 +1346,26 @@ fn codex_usage(token: &str) -> ProviderStatus {
 
 #[cfg(test)]
 mod tests {
+
+    /// The file is owner-only from the moment it exists, not from the moment
+    /// something chmods it. `fs::write` would have left it at 0644 for as long
+    /// as the write took, and this one holds a token.
+    #[test]
+    fn a_private_write_is_owner_only_before_anything_else_runs() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("cctop-write-private-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("secret.toml");
+        super::write_private(&path, "token = \"made-up\"\n").unwrap();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        // And it is what was written, so this is not a file that arrived empty.
+        assert!(std::fs::read_to_string(&path).unwrap().contains("made-up"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     /// A token account's sessions live in the default directory, so only the
     /// process can say which subscription it is spending — and a handoff that

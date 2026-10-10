@@ -3030,7 +3030,7 @@ fn read_codex(path: &Path) -> anyhow::Result<toml_edit::DocumentMut> {
     // cannot parse is one it must not rewrite. `toml_edit` is used rather than a
     // plain deserializer so the user's comments and layout survive the edit.
     text.parse::<toml_edit::DocumentMut>()
-        .map_err(|e| anyhow::anyhow!("{} is not valid TOML ({e}); fix it first", path.display()))
+        .map_err(|e| crate::config::not_valid_toml(path, &text, &e))
 }
 
 fn write_codex(path: &Path, doc: &toml_edit::DocumentMut) -> anyhow::Result<()> {
@@ -3039,7 +3039,7 @@ fn write_codex(path: &Path, doc: &toml_edit::DocumentMut) -> anyhow::Result<()> 
     }
     let path = &through_link(path);
     let tmp = temp_beside(path, "toml");
-    std::fs::write(&tmp, doc.to_string())?;
+    crate::quota::write_private(&tmp, &doc.to_string())?;
     std::fs::rename(&tmp, path)?;
     Ok(())
 }

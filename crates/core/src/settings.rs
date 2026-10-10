@@ -491,9 +491,8 @@ fn save(path: &Path, text: &str) -> std::io::Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    let tmp = path.with_extension("toml.cctop-tmp");
-    std::fs::write(&tmp, text)?;
-    crate::quota::restrict(&tmp)?;
+    let tmp = crate::quota::temp_beside(path, "toml.cctop-tmp");
+    crate::quota::write_private(&tmp, text)?;
     std::fs::rename(&tmp, path)
 }
 
@@ -519,7 +518,7 @@ pub fn write(
     };
     let mut doc = text
         .parse::<toml_edit::DocumentMut>()
-        .map_err(|e| anyhow::anyhow!("{} is not valid TOML ({e}); fix it first", path.display()))?;
+        .map_err(|e| crate::config::not_valid_toml(path, &text, &e))?;
     if !doc.contains_key(table) {
         doc.insert(table, toml_edit::Item::Table(toml_edit::Table::new()));
     }

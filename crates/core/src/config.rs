@@ -619,6 +619,39 @@ pub fn claude_login_dir(name: &str) -> PathBuf {
     HOME.join(format!(".claude-{name}"))
 }
 
+/// A config file that would not parse, said without saying what is in it.
+///
+/// `toml_edit`'s `Display` is the good error message a person wants: the line
+/// and column, a gutter, and the offending source line quoted back with a
+/// highlight under it. But `config.toml` is where the tunnel token and the API
+/// token live, and the same string reaches a TUI popup, a status line and any
+/// CLI that prints it — so a parse error was a way to have a secret read back
+/// to you in a place that logs. `message()` is the diagnosis with the snippet
+/// left off; the position is worked out here from the span, so the error still
+/// says where to look without saying what is there.
+///
+/// Every writer that refuses an unparseable config goes through here, so that
+/// there is no fourth site that forgot.
+pub(crate) fn not_valid_toml(path: &Path, text: &str, e: &toml_edit::TomlError) -> anyhow::Error {
+    let at = match e.span() {
+        Some(span) => {
+            let before = &text.as_bytes()[..span.start.min(text.len())];
+            let line = before.iter().filter(|b| **b == b'\n').count() + 1;
+            let column = before
+                .iter()
+                .rposition(|b| *b == b'\n')
+                .map_or(0, |i| before.len() - i - 1);
+            format!(" at line {line}, column {column}")
+        }
+        None => String::new(),
+    };
+    anyhow::anyhow!(
+        "{} is not valid TOML ({}{at}); fix it first",
+        path.display(),
+        e.message()
+    )
+}
+
 /// The names under `[accounts]` in cctop's config that carry a token.
 fn token_account_names() -> Vec<String> {
     let Ok(text) = std::fs::read_to_string(&*CONFIG_FILE) else {
@@ -1383,6 +1416,37 @@ pub fn mtime_ms_of(meta: &std::fs::Metadata) -> u64 {
 
 #[cfg(test)]
 mod tests {
+
+    /// A parse error is the one message that used to read the config back to
+    /// whoever broke it — and `config.toml` is where the tunnel token and the
+    /// API token are. The secret has to be gone from the message while the
+    /// place to look is still in it.
+    #[test]
+    fn a_broken_config_says_where_without_saying_what_is_there() {
+        let secret = "eyJhIjoi-not-the-real-token-but-the-same-shape";
+        let text = format!(
+            "[accounts.work]\n\
+             token = \"{secret}\n\
+             api_token = \"second-half-of-the-same-line\"\n"
+        );
+        let broken = text
+            .parse::<toml_edit::DocumentMut>()
+            .expect_err("an unterminated string does not parse");
+        let said = super::not_valid_toml(std::path::Path::new("/x/config.toml"), &text, &broken)
+            .to_string();
+        assert!(
+            !said.contains(secret),
+            "the message quoted the token: {said}"
+        );
+        assert!(
+            !said.contains("second-half"),
+            "the message quoted the line: {said}"
+        );
+        assert!(said.contains("config.toml"), "{said}");
+        assert!(said.contains("line 2"), "no position: {said}");
+        // What it does say is still worth reading.
+        assert!(said.contains(broken.message()), "{said}");
+    }
 
     /// The cache every writer below `CACHE_DIR` uses is not the developer's.
     /// Asked of the derived paths too, since those are what the writers name.

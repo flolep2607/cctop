@@ -29,6 +29,19 @@ async function read(): Promise<Config> {
 // and screenshots — and it goes before the wait for the answer, not after.
 // Captured first: a page that wants something else from the query (`?find=`)
 // reads it from here, not from a URL that has already been rewritten.
+//
+// This is the client's half of a decision that was looked at properly and made
+// this way. The server could answer `/` with a 303 to the same path without
+// `?t=`, having set the cookie on the way out, and the address bar would be
+// clean before any script ran. It does not, because the read-only link has to
+// beat a full cookie the browser is already holding: a 303 drops the `?t=`,
+// the follow-up request arrives with no token in the query, and the cookie is
+// then the only thing that decides — so opening a read-only link in a browser
+// holding the full cookie would quietly hand over the full credential. That
+// ordering is the whole point of the read-only link (see `app_page` in
+// `crates/serve/src/lib.rs`), and the try/catch below costs nothing when it
+// fails: the worst case is the URL it opened with, which is what the page was
+// going to show anyway.
 export const OPENING_QUERY = new URLSearchParams(location.search);
 try {
   const here = new URL(location.href);

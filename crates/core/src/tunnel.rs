@@ -980,14 +980,13 @@ fn edit_config(path: &Path, edit: impl FnOnce(&mut toml_edit::DocumentMut)) -> a
     };
     let mut doc = text
         .parse::<toml_edit::DocumentMut>()
-        .map_err(|e| anyhow::anyhow!("{} is not valid TOML ({e}); fix it first", path.display()))?;
+        .map_err(|e| crate::config::not_valid_toml(path, &text, &e))?;
     edit(&mut doc);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
     let tmp = crate::quota::temp_beside(path, "toml");
-    std::fs::write(&tmp, doc.to_string())?;
-    crate::quota::restrict(&tmp)?;
+    crate::quota::write_private(&tmp, &doc.to_string())?;
     std::fs::rename(&tmp, path)?;
     Ok(())
 }
