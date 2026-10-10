@@ -537,20 +537,50 @@ impl App {
     }
 
     /// What the Cloudflare row shows: whether one is connected, and where.
+    ///
+    /// A summary of what the dashboard already knows, so that a row you have to
+    /// open to understand is not a row. The Enter popup stays the place the
+    /// prose lives, and every mark here is one word wide at most — a fact worth
+    /// reading twice is a fact the popup should carry instead. The order is the
+    /// order of the questions: where is it, who may in, can they from outside,
+    /// where do shares ride, is this really mine, and may I write to it.
     pub(super) fn cloudflare_value(&self) -> String {
-        match &self.connected {
-            None => "not connected".to_string(),
-            Some(c) => {
-                let host = c
-                    .hostname
-                    .clone()
-                    .unwrap_or_else(|| "connected".to_string());
-                match c.access_owner.is_some() {
-                    true => format!("{host} · Access on"),
-                    false => host,
-                }
-            }
+        let Some(c) = &self.connected else {
+            return "not connected".to_string();
+        };
+        let mut out = c
+            .hostname
+            .clone()
+            .unwrap_or_else(|| "connected".to_string());
+        if let Some(zone) = &c.zone {
+            out.push_str(&format!(" · zone {zone}"));
         }
+        if let Some(owner) = &c.access_owner {
+            out.push_str(&format!(" · Access {owner}"));
+        }
+        // One clause for both link states: the difference worth knowing is
+        // whether a link works from outside, not which hostname it uses when it
+        // does not. `From<&Account>` calls an account with no Access public, so
+        // the clause always says which of the two you have.
+        match (&c.link_hostname, c.public_links) {
+            (_, true) => out.push_str(" · links public"),
+            (Some(where_), false) => out.push_str(&format!(" · links {where_}")),
+            (None, false) => {}
+        }
+        if let Some(shares) = &c.share_hostname {
+            out.push_str(&format!(" · shares {shares}"));
+        }
+        // A hostname the environment supplied is one `config.toml` does not
+        // carry, which is usually the reason somebody is reading this row.
+        if c.from_env {
+            out.push_str(" · from env");
+        }
+        // Only a refusal earns a word. A mark on `Ok(())` would train somebody
+        // to skip the column, and the next refusal along with it.
+        if let Err(why) = c.rename {
+            out.push_str(&format!(" · no DNS write: {why}"));
+        }
+        out
     }
 
     /// Turn a view choice to its next value, or open a field for a number.
