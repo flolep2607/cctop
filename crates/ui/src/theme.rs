@@ -8,8 +8,10 @@
 //!   which mostly means darker, more saturated ink instead of pastels.
 //! * **Mono** — `NO_COLOR`. Every colour becomes `Color::Reset` and emphasis
 //!   moves to `Modifier`, so the terminal's own scheme is left alone. The
-//!   shapes still carry the state: `●` versus `○` for running, `FREE`/`incl`
-//!   in the cost cells, `▲`/`▼` on the sorted column.
+//!   shapes still carry the state: `●` versus `○` for running, `●`/`◐`/`○` for
+//!   how much a session asks permission to do, a block bar in front of a
+//!   context percentage, `free`/`incl` in the cost cells, `▲`/`▼` on the sorted
+//!   column.
 //!
 //! Everything reads the active palette through [`colors`] rather than through
 //! constants, since the choice isn't known until the process has looked at its
