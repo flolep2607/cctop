@@ -139,6 +139,51 @@ fn agent() -> ureq::Agent {
         .into()
 }
 
+/// GET a GitHub API URL and return its body, saying plainly when the answer was
+/// the rate limit rather than leaving a bare `http status: 403`.
+fn github_get(url: &str) -> Result<String> {
+    let mut response = agent()
+        .get(url)
+        .config()
+        .http_status_as_error(false)
+        .build()
+        .call()
+        .context("could not reach GitHub")?;
+    let status = response.status().as_u16();
+    if status != 200 {
+        let header = |name| {
+            response
+                .headers()
+                .get(name)
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string)
+        };
+        let remaining = header("x-ratelimit-remaining");
+        let reset = header("x-ratelimit-reset").and_then(|r| r.parse().ok());
+        anyhow::bail!(refusal(status, remaining.as_deref(), reset, unix_secs()));
+    }
+    response
+        .body_mut()
+        .read_to_string()
+        .context("could not read GitHub's response")
+}
+
+fn refusal(status: u16, remaining: Option<&str>, reset: Option<u64>, now: u64) -> String {
+    if matches!(status, 403 | 429) && remaining == Some("0") {
+        let wait = reset.map_or(String::new(), |r| {
+            format!(
+                " for about {} min",
+                r.saturating_sub(now).div_ceil(60).max(1)
+            )
+        });
+        return format!(
+            "GitHub's API limit for this address is used up{wait}. \
+             Try again then."
+        );
+    }
+    format!("GitHub answered http status {status}")
+}
+
 /// Compare dotted numeric versions. Anything unparseable sorts as zero, so a
 /// malformed tag can never masquerade as an upgrade.
 pub(crate) fn is_newer(candidate: &str, current: &str) -> bool {
@@ -168,15 +213,21 @@ pub(crate) fn is_newer(candidate: &str, current: &str) -> bool {
 }
 
 fn fetch_latest() -> Result<Release> {
-    let text = agent()
-        .get(RELEASES_URL)
-        .call()
-        .context("could not reach GitHub")?
-        .body_mut()
-        .read_to_string()
-        .context("could not read the release response")?;
+    // When both fail, GitHub's reason is the one worth reading.
+    let text =
+        github_get(RELEASES_URL).or_else(|api| github_get(MIRROR_LATEST).map_err(|_| api))?;
     serde_json::from_str(&text).context("could not parse the release response")
 }
+
+/// GitHub's latest release as the release workflow last pushed it to a Worker
+/// (`worker/` in the repository), asked only when the API itself refuses.
+///
+/// The API allows sixty unauthenticated calls an hour per address, and an
+/// updater shares its address with everything else behind the same NAT; the
+/// Worker never asks GitHub, so it has no such limit. GitHub stays first
+/// because it is the source: the copy is only as fresh as its last push. Only
+/// the latest — enough to update by, not to show the notes in between.
+const MIRROR_LATEST: &str = "https://cctop-releases.ecorsiste.workers.dev/releases/latest";
 
 /// Newest published version, refreshed at most once an hour.
 ///
@@ -477,13 +528,7 @@ fn show_changes(from: &str, to: &str) -> bool {
 const RELEASE_PAGE: &str = "https://github.com/flolep2607/cctop/releases";
 
 fn fetch_release_list() -> Result<Vec<Release>> {
-    let text = agent()
-        .get(RELEASE_LIST_URL)
-        .call()
-        .context("could not reach GitHub")?
-        .body_mut()
-        .read_to_string()
-        .context("could not read the release list")?;
+    let text = github_get(RELEASE_LIST_URL)?;
     serde_json::from_str(&text).context("could not parse the release list")
 }
 
@@ -1774,6 +1819,26 @@ mod tests {
         set_version("9.9.9-test");
         assert_eq!(current_version(), "9.9.9-test");
         assert_eq!(user_agent(), "cctop/9.9.9-test");
+    }
+
+    /// A spent rate limit is named, with how long it lasts; any other refusal
+    /// is not mistaken for one.
+    #[test]
+    fn a_spent_rate_limit_says_so_and_for_how_long() {
+        let spent = refusal(403, Some("0"), Some(1_000 + 7 * 60), 1_000);
+        assert!(
+            spent.contains("limit") && spent.contains("about 7 min"),
+            "{spent}"
+        );
+        assert!(refusal(429, Some("0"), None, 0).contains("used up."));
+        assert_eq!(
+            refusal(403, Some("12"), None, 0),
+            "GitHub answered http status 403"
+        );
+        assert_eq!(
+            refusal(500, None, None, 0),
+            "GitHub answered http status 500"
+        );
     }
 
     /// The two things that stop a startup update before anything is looked at.

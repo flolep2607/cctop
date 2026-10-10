@@ -300,7 +300,7 @@ categories = ["command-line-utilities", "development-tools"]
 # reading this repository, on the same terms as the mirrors above.
 # /crates are the other packages of this workspace, each published on its own
 # (cargo leaves them out anyway; listed so the reason is written down).
-exclude = ["/.github", "/target", "/crates", "/docs/harnesses", "/docs/rmux", "/RnD", "/web"]
+exclude = ["/.github", "/target", "/crates", "/docs/harnesses", "/docs/rmux", "/RnD", "/web", "/worker"]
 
 # Off by default and never enabled for a release: `debug` compiles in
 # `crates/serve/src/debug.rs`, which can make the server fail on demand. Handy

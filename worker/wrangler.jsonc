@@ -1,0 +1,11 @@
+// The updater's release mirror: see src/index.js. Deploy with
+// `npx wrangler deploy` from this directory; PUSH_TOKEN is a secret
+// (`npx wrangler secret put PUSH_TOKEN`), the same value as the repository's
+// RELEASE_MIRROR_TOKEN.
+{
+  "name": "cctop-releases",
+  "main": "src/index.js",
+  "compatibility_date": "2026-09-01",
+  "workers_dev": true,
+  "kv_namespaces": [{ "binding": "RELEASES", "id": "be62ae5005234a6b97d1cf36eba5857d" }]
+}

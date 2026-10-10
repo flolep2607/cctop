@@ -1,0 +1,23 @@
+name: Release mirror
+
+# Keeps the updater's fallback copy of the latest release (worker/) in step with
+# GitHub when a release's notes are edited by hand, which is how a note that
+# landed badly gets fixed. A new release is pushed by release.yml itself.
+on:
+  release:
+    types: [edited, deleted]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  push:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+      - env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_MIRROR_TOKEN: ${{ secrets.RELEASE_MIRROR_TOKEN }}
+        run: tools/push-release-mirror.sh
