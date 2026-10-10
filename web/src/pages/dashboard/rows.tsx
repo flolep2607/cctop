@@ -14,6 +14,7 @@ import { StateDot } from "@/components/status";
 import { dotOf } from "@/lib/status";
 import { stripAnsi } from "@/lib/ansi";
 import { YoloBadge } from "@/components/yolo";
+import { useHosts } from "@/hooks/use-hosts";
 import type { Session } from "@/lib/types";
 
 // The cost a row shows. `incl`, `—` and a figure are three different claims —
@@ -23,6 +24,18 @@ function rowCost(s: Session): string {
   if (s.cost?.included) return "incl";
   if (!s.cost?.available || s.cost.total == null) return "—";
   return money(Number(s.cost.total));
+}
+
+/** The machine a remote row is on, with a dot for whether it answered last time. */
+function HostTag({ host }: { host: string }) {
+  const why = useHosts().get(host);
+  return (
+    <span className="inline-flex items-center gap-1 font-mono" title={why ? `${host} is offline: ${why}` : `On ${host}, which is answering`}>
+      <span aria-hidden className={cn("inline-block size-1.5 rounded-full", why ? "bg-destructive" : "bg-success")} />
+      {host}
+      {why && <span className="sr-only"> (offline)</span>}
+    </span>
+  );
 }
 
 /** How full the context window is: the one figure that is a proportion. */
@@ -72,6 +85,7 @@ export const SessionRow = memo(function SessionRow({
           {fresh && <span className="bg-primary size-1.5 shrink-0 self-center rounded-full" title="Activity since you last opened this session" />}
         </div>
         <div className="text-muted-foreground mt-0.5 flex flex-wrap items-center gap-x-2.5 gap-y-1 text-xs">
+          {s.host && <HostTag host={s.host} />}
           <span>{s.provider}</span>
           {s.model && <span>{shortModel(s.model)}</span>}
           {s.branch && <span className="font-mono text-[11px]">{s.branch}</span>}

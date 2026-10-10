@@ -46,6 +46,15 @@ pub struct Layout {
     /// to the modal, and a click outside it must not reach the dashboard the
     /// modal is sitting on top of.
     pub(super) modal_rect: Option<Rect>,
+    /// `(row, item_index)` for each settings row drawn, while the settings
+    /// page is what was drawn. The page is neither the table nor a modal over
+    /// it: its rows are lines of one paragraph, headed by lines with no item
+    /// behind them, so what a screen row means has to come from the draw.
+    pub(super) settings_rows: Vec<(u16, usize)>,
+    /// The rectangle the settings page's rows are drawn in — the block's
+    /// inner area — while the page is drawn. The hit test needs it because
+    /// the page takes the middle third of the frame, not the whole screen.
+    pub(super) settings_inner: Option<Rect>,
     /// `(row, choice_index)` for each row of the launcher's list.
     pub(super) launch_rows: Vec<(u16, usize)>,
     /// `(row, suggestion_index)` for each directory the `in` field is offering.
@@ -92,6 +101,24 @@ impl Layout {
 
     pub fn row_at(&self, row: u16) -> Option<usize> {
         (row >= self.rows_start && row < self.rows_end).then(|| (row - self.rows_start) as usize)
+    }
+
+    /// The settings item drawn on the row a pointer event landed on, if a row
+    /// is drawn there.
+    ///
+    /// The page records its own rows because they are not the table's: the
+    /// file line, the section headings and the trailing hint are lines with
+    /// no item behind them, and a click on those is a click on nothing.
+    pub fn settings_row_at(&self, col: u16, row: u16) -> Option<usize> {
+        self.settings_inner
+            .is_some_and(|r| r.contains((col, row).into()))
+            .then(|| {
+                self.settings_rows
+                    .iter()
+                    .find(|(y, _)| *y == row)
+                    .map(|(_, i)| *i)
+            })
+            .flatten()
     }
 
     pub fn header_column_at(&self, col: u16, row: u16) -> Option<ColumnId> {
@@ -291,7 +318,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) -> Layout {
     if app.on_settings() {
         let chunks = tab_chunks(area);
         draw_overview(frame, chunks[0], app);
-        modals::draw_settings(frame, chunks[1], app);
+        modals::draw_settings(frame, chunks[1], app, &mut layout);
         draw_footer(frame, chunks[2], app, &mut layout);
         // A modal raised from the settings tab belongs to the tab, exactly as
         // one raised from the dashboard belongs to the dashboard.
@@ -3658,6 +3685,8 @@ mod tests {
                 (19, 0, 9, panels::SubagentSort::Last),
                 (19, 9, 22, panels::SubagentSort::Type),
             ],
+            settings_rows: vec![(9, 0), (10, 3), (17, 4)],
+            settings_inner: Some(Rect::new(0, 8, 100, 10)),
         };
         // An address answers a right-click on its own row and columns only.
         assert!(layout.address_at(11, 15));
@@ -3697,6 +3726,14 @@ mod tests {
         assert_eq!(layout.menu_row_at(15, 10), Some(1));
         assert_eq!(layout.menu_row_at(15, 13), None);
         assert_eq!(layout.menu_row_at(5, 9), None);
+        // The settings page's rows are hit-tested inside the block they were
+        // drawn in: a heading shares a row with nothing, and the border is
+        // outside the rectangle the rows live in.
+        assert_eq!(layout.settings_row_at(20, 9), Some(0));
+        assert_eq!(layout.settings_row_at(20, 10), Some(3));
+        assert_eq!(layout.settings_row_at(20, 11), None);
+        assert_eq!(layout.settings_row_at(20, 7), None);
+        assert_eq!(layout.settings_row_at(20, 18), None);
         assert!(layout.in_modal(10, 8));
         assert!(!layout.in_modal(30, 8));
         // The bar's tabs and its new-tab button are separate targets, and both

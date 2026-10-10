@@ -360,9 +360,14 @@ impl Request {
 
     /// The `Host` header, or empty.
     pub fn host(&self) -> &str {
+        self.header("host")
+    }
+
+    /// The first header called `name`, any case, or empty.
+    pub fn header(&self, name: &str) -> &str {
         self.headers
             .iter()
-            .find(|(k, _)| k.eq_ignore_ascii_case("host"))
+            .find(|(k, _)| k.eq_ignore_ascii_case(name))
             .map_or("", |(_, v)| v.as_str())
     }
 

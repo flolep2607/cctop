@@ -1026,6 +1026,28 @@ impl App {
         self.settings_cursor = at.min(rows - 1);
     }
 
+    /// A click on a row: put the cursor on it and activate it, which is what
+    /// moving there with the keys and pressing Enter does.
+    ///
+    /// The two half-done states are settled first, while the cursor is still
+    /// on the row they belong to. A pending keybind wait is cancelled the way
+    /// Esc cancels it — the next key would otherwise be bound to a row the
+    /// cursor has left — and an open value field is committed the way Enter
+    /// commits it, before the cursor moves, because the field's value belongs
+    /// to the row the cursor was on. A filter left open stops being text the
+    /// way Enter stops it: the click is on a row, and Enter on a row changes
+    /// it.
+    fn settings_click(&mut self, at: usize) {
+        self.settings_capture = false;
+        if self.settings_input.is_some() {
+            self.settings_commit_input();
+        }
+        self.settings_typing = false;
+        self.settings_to(at);
+        self.settings_activate();
+        self.needs_redraw = true;
+    }
+
     /// One more key into the filter, if it changed what is shown.
     fn settings_type(&mut self, key: KeyEvent) {
         if self.settings_filter.key(key, SETTING_FILTER_MAX).changed() {
@@ -2162,6 +2184,16 @@ impl App {
             match ev.kind {
                 MouseEventKind::ScrollUp => self.settings_step(-1),
                 MouseEventKind::ScrollDown => self.settings_step(1),
+                // One click does what moving to a row with the keys and
+                // pressing Enter does: the cursor lands on the row and the
+                // row is activated. A line with no item behind it — the file
+                // line, a section heading, the hint at the bottom — is a
+                // click on nothing and moves nothing.
+                MouseEventKind::Down(MouseButton::Left) => {
+                    if let Some(at) = layout.settings_row_at(ev.column, ev.row) {
+                        self.settings_click(at);
+                    }
+                }
                 _ => {}
             }
             return;
@@ -2610,6 +2642,67 @@ mod tests {
         assert_eq!(app.selected, 0, "and moved the table underneath instead");
         app.on_mouse(wheel(event::MouseEventKind::ScrollUp), &layout);
         assert_eq!(app.settings_cursor, 1);
+    }
+
+    /// One click on a settings row moves the cursor to it and activates it,
+    /// the way moving there with the keys and pressing Enter does. A line
+    /// that is not a row — the file line, a heading, the block's border — is
+    /// a click on nothing and moves nothing.
+    #[test]
+    fn a_click_on_a_settings_row_selects_and_activates_it() {
+        use crate::settings::{Item, VIEWS};
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = test_app();
+        app.goto_settings();
+        // Tall enough that the whole page fits, so every row is on screen and
+        // the test points at a row by its index rather than by arithmetic
+        // about the scroll.
+        let mut terminal = Terminal::new(TestBackend::new(120, 90)).expect("backend");
+        let mut layout = render::Layout::default();
+        terminal
+            .draw(|frame| layout = render::draw(frame, &mut app))
+            .expect("draw");
+        // The tree toggle is a row whose activation is visible from outside
+        // the page: it flips `app.tree`, exactly as Enter does.
+        let tree = app
+            .settings_shown()
+            .iter()
+            .position(|r| matches!(r, Item::View(i) if VIEWS[*i].0 == "tree"))
+            .expect("a tree row");
+        let row = layout
+            .settings_rows
+            .iter()
+            .find(|(_, i)| *i == tree)
+            .map(|(y, _)| *y)
+            .expect("the tree row is on screen");
+        let click = |y| crossterm::event::MouseEvent {
+            kind: event::MouseEventKind::Down(event::MouseButton::Left),
+            column: 20,
+            row: y,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        };
+
+        assert!(!app.tree, "not at the default to begin with");
+        app.on_mouse(click(row), &layout);
+        assert_eq!(
+            app.settings_cursor, tree,
+            "the click did not move the cursor"
+        );
+        assert!(app.tree, "the click did not activate the row");
+        // The second click activates it again, which is the keyboard's Enter
+        // pressed twice on a row.
+        app.on_mouse(click(row), &layout);
+        assert_eq!(app.settings_cursor, tree);
+        assert!(!app.tree, "the second click did not activate it again");
+
+        // The file line and the border have no row behind them.
+        let inner = layout.settings_inner.expect("the page recorded itself");
+        app.on_mouse(click(inner.y), &layout);
+        assert_eq!(app.settings_cursor, tree, "the file line moved the cursor");
+        app.on_mouse(click(inner.y - 1), &layout);
+        assert_eq!(app.settings_cursor, tree, "the border moved the cursor");
     }
 
     #[test]
