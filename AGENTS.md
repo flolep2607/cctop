@@ -5,7 +5,8 @@ apply to any agent working here — read that file first.
 
 It exists under that name because Claude Code loads it automatically. Nothing in
 it is specific to Claude: it covers how to avoid colliding with the other agents
-working in this checkout, how to verify the way CI does, why cctop targets Linux
+working in this checkout, how to read your own edits back before trusting them,
+how to verify the way CI does, why cctop targets Linux
 alone, why `cctop hook` must never fail, and how to title a pull request so the
 release note it becomes is worth reading.
 

@@ -22,6 +22,38 @@ announce. It is a silent overwrite of someone else's uncommitted work.
 If you are already editing the main checkout and another session is too, say so
 rather than racing: whoever is further along should finish first.
 
+## Read your own edits back
+
+A command that edits files tells you almost nothing about what it just did.
+`sed -i`, `patch`, a bulk rename, an `apply_patch`: all exit 0 whether they
+changed one line or forty, and the word of the command is not evidence about
+its own effect. An agent that takes it at that word can carry a wrong or
+oversized edit — a sibling file caught by a glob, a whole file rewritten, a
+replacement that matched more than it should have — all the way to a pull
+request. It is the silent-collision failure from the worktree section above,
+with you from an hour ago as the other session.
+
+So after any command that edits files, before you go on:
+
+```bash
+git diff --stat      # which files, how many lines — the shape of the change
+git diff <path>      # the hunks themselves, read as before&after
+```
+
+`--stat` first, because it catches the edit you did not mean to make, and
+because you will only read the hunks carefully once you know which files are
+claiming your attention. Then the hunks line by line: each one is a before and
+an after, and saying "that hunk is what I intended" is the test. The command
+exiting 0 is not the test.
+
+Where there is no VCS there is no diff to read. Copy what you are about to edit
+first, or say plainly that the edit is irreversible and why you are doing it
+anyway. Either is honest; hoping is not.
+
+This is the same habit as the snapshot advice further down, which is where you
+will meet it most often: the `.snap` files are the one place a regenerating
+command overwrites something you cannot reconstruct from memory.
+
 ## Verify the way CI does
 
 CI sets `RUSTFLAGS: -D warnings`, so a warning is a build failure. Clippy output
