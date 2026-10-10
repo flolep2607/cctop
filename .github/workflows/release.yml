@@ -250,6 +250,15 @@ jobs:
           GH_REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ needs.prepare-release.outputs.tag }}
         run: gh release edit "$RELEASE_TAG" --draft=false
+      # Here and not on `release: published`, which a release made public by
+      # this workflow's own token does not fire.
+      - uses: actions/checkout@v6
+      - name: Push the latest release to the updater's mirror
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_MIRROR_TOKEN: ${{ secrets.RELEASE_MIRROR_TOKEN }}
+        run: tools/push-release-mirror.sh
 
   # Beside `build`, not after it: the crate is source, and the binaries are
   # cross-compiles of it, so neither proves anything the other needs. What
