@@ -457,6 +457,20 @@ fn session_row(
                 cell_color(c.id, s, age_secs)
             })
         };
+        // A free session's cost is a statement rather than a figure, so it is
+        // set in italic as well as dimmed — which is how it stays apart from
+        // the dash a session with no readable cost gets when the palette has
+        // nothing left to say: `dim` and `cost_mid` are both `Reset` in the
+        // mono theme, where the slant of the word is doing all the work.
+        let style = if text == "free"
+            && matches!(
+                c.id,
+                ColumnId::Cost | ColumnId::CostHour | ColumnId::CostToday
+            ) {
+            style.add_modifier(Modifier::ITALIC)
+        } else {
+            style
+        };
         // The status dot is a glyph, not text, and the numeric columns match a
         // query only by coincidence — highlighting "42" inside a cost because
         // the query was "42" is noise. The columns worth marking are the ones
@@ -471,11 +485,61 @@ fn session_row(
                 | ColumnId::Profile
                 | ColumnId::Branch
         );
-        let padded = pad(&text, *w, c.right_align);
-        if searchable && !deleting {
-            spans.extend(highlight(padded, query, style));
+        // A branch's `↑2 ↓1` trails its name as an annotation: dimmer than the
+        // name, amber when there is something to push and grey when there is
+        // only a row that fell behind. It is the half the cell can afford to
+        // lose, so when name and mark together do not fit, the mark is dropped
+        // first and the name takes the whole cell — Host leads its marker for
+        // the opposite reason, there the marker being the part worth keeping.
+        let mark = match c.id {
+            ColumnId::Branch => columns::branch_mark(s),
+            _ => None,
+        };
+        let head_and_mark = mark.as_deref().and_then(|m| {
+            let tail = format!(" {m}");
+            text.strip_suffix(tail.as_str()).map(|head| (head, m))
+        });
+        if let Some((head, mark)) = head_and_mark {
+            let mark_cells = util::cells(mark) as u16;
+            // What the name may have: the column minus the mark and the space
+            // between them, or nothing when the mark does not leave a cell for
+            // a name at all. Saturating, because the fall-through below is the
+            // answer either way.
+            let head_room = (*w).saturating_sub(mark_cells + 1);
+            if mark_cells < *w && util::cells(head) as u16 <= head_room {
+                let head = pad(head, head_room, c.right_align);
+                if searchable && !deleting {
+                    spans.extend(highlight(head, query, style));
+                } else {
+                    spans.push(Span::styled(head, style));
+                }
+                // Amber while there is work to push, dim once it is only a row
+                // that has drifted: the first is something to do from here, the
+                // second something to know. In mono both are `Reset` and the
+                // arrows are what says which.
+                let mark_style = style.fg(if mark.starts_with('↑') {
+                    theme::colors().cost_mid
+                } else {
+                    theme::colors().dim
+                });
+                spans.push(Span::styled(format!(" {mark}"), mark_style));
+                spans.push(Span::styled(" ", base));
+                continue;
+            }
+            // The mark cannot be afforded; the name keeps what there is.
+            let padded = pad(head, *w, c.right_align);
+            if searchable && !deleting {
+                spans.extend(highlight(padded, query, style));
+            } else {
+                spans.push(Span::styled(padded, style));
+            }
         } else {
-            spans.push(Span::styled(padded, style));
+            let padded = pad(&text, *w, c.right_align);
+            if searchable && !deleting {
+                spans.extend(highlight(padded, query, style));
+            } else {
+                spans.push(Span::styled(padded, style));
+            }
         }
         spans.push(Span::styled(" ", base));
     }
@@ -1023,11 +1087,15 @@ mod tests {
 
     /// A heading lines up under the same headers as the sessions it folds,
     /// and says in its label what it holds and how many of those need you.
+    ///
+    /// 204 cells rather than 200: the label needs twenty-eight of them to
+    /// print itself whole, and with CTX% widened to eight cells the flexible
+    /// column has twenty-seven left of a 200-cell frame.
     #[test]
     fn a_tree_heading_keeps_the_columns_and_counts_its_sessions() {
         let now = chrono::Utc::now();
         let cols = all_columns();
-        let widths = column_widths(&cols, 200);
+        let widths = column_widths(&cols, 204);
         let g = crate::tree::Group {
             key: "repo:/r/.git".into(),
             label: "~/r".into(),
@@ -1130,5 +1198,229 @@ mod tests {
         // included, rather than spilling into the next one.
         assert_eq!(pad("日本語のプロジェクト", 12, false), "日本語のプ… ");
         assert_eq!(util::cells(&pad("日本語のプロジェクト", 12, true)), 12);
+    }
+
+    /// An ordinary row: nothing marked, nothing selected, nothing ringing.
+    fn state() -> RowState<'static> {
+        RowState {
+            selected: false,
+            marked: false,
+            rang: false,
+            alert: None,
+            done: false,
+            deleting: false,
+            query: "",
+            expand: None,
+            indent: "",
+        }
+    }
+
+    fn column(id: ColumnId) -> &'static columns::Column {
+        COLUMNS
+            .iter()
+            .find(|c| c.id == id)
+            .unwrap_or_else(|| panic!("{id:?} is not a column"))
+    }
+
+    /// A free session's cost is `free`, italic as well as dimmed. The slant is
+    /// what separates it from the dash of a session whose cost cctop could not
+    /// read at all: in the mono palette `dimmer` and `Reset` are one colour,
+    /// and there the shape of the word is doing all the work.
+    #[test]
+    fn a_free_cost_is_set_in_italic_as_well_as_dim() {
+        let now = chrono::Utc::now();
+        let mut s = cctop_core::session::Session::new(Provider::Claude, "a".into());
+        s.cost_is_free = true;
+        s.total_cost = Some(0.0);
+        for id in [ColumnId::Cost, ColumnId::CostHour, ColumnId::CostToday] {
+            let cols: &[&'static columns::Column] = &[column(id)];
+            let line = session_row(&s, cols, &column_widths(cols, 40), &state(), &now);
+            let cell = &line.spans[0];
+            assert_eq!(cell.content.trim(), "free", "{id:?}");
+            assert!(cell.style.add_modifier.contains(Modifier::ITALIC), "{id:?}");
+            assert_eq!(cell.style.fg, Some(theme::colors().dimmer), "{id:?}");
+        }
+
+        // What the italic is not: a cost cctop could not read keeps its dash,
+        // and keeps it upright.
+        let mut blank = cctop_core::session::Session::new(Provider::Claude, "b".into());
+        blank.cost_available = false;
+        let cols: &[&'static columns::Column] = &[column(ColumnId::Cost)];
+        let line = session_row(&blank, cols, &column_widths(cols, 40), &state(), &now);
+        assert_eq!(line.spans[0].content.trim(), "─");
+        assert!(
+            !line.spans[0].style.add_modifier.contains(Modifier::ITALIC),
+            "a dash is not a statement"
+        );
+    }
+
+    /// The permission column's colour rule, which the glyph column now rides
+    /// on: only a session that asks about nothing is the hot row, and YOLO
+    /// says the same thing whatever mode is configured underneath it.
+    #[test]
+    fn only_a_session_that_asks_nothing_is_a_hot_permission_row() {
+        use cctop_core::hook::Permission;
+        let mut s = cctop_core::session::Session::new(Provider::Claude, "a".into());
+        assert_eq!(
+            cell_color(ColumnId::Permission, &s, None),
+            theme::colors().dimmer,
+            "no hooks reported: quieter still"
+        );
+        for quiet in [Permission::Plan, Permission::Ask, Permission::AcceptEdits] {
+            s.permission = Some(quiet);
+            assert_eq!(
+                cell_color(ColumnId::Permission, &s, None),
+                theme::colors().dim,
+                "{quiet:?} asks, and stays quiet"
+            );
+        }
+        s.permission = Some(Permission::Bypass);
+        assert_eq!(
+            cell_color(ColumnId::Permission, &s, None),
+            theme::colors().cost_high
+        );
+        s.yolo = Some(std::sync::Arc::new(cctop_core::yolo::Entry {
+            since: "2026-04-10T12:00:00Z".into(),
+            allowed: Vec::new(),
+            agent: None,
+        }));
+        assert_eq!(
+            cell_color(ColumnId::Permission, &s, None),
+            theme::colors().cost_high,
+            "YOLO is the same answer, in red"
+        );
+    }
+
+    /// Ahead/behind is a merge-base walk over the commit graph, so the fixture
+    /// is a real repository: no file stands in for a count git has to compute.
+    fn repo(branch: &str, ahead: u32, behind: u32) -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "cctop-ui-branch-{}-{}",
+            std::process::id(),
+            branch.replace(['/', ' '], "-")
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("temp dir");
+        git(&root, &["init", "-q", "-b", "main"]);
+        commit(&root, "base");
+        git(&root, &["branch", "peer"]);
+        git(&root, &["branch", "--set-upstream-to=peer"]);
+        for n in 0..ahead {
+            commit(&root, &format!("ahead-{n}"));
+        }
+        git(&root, &["checkout", "-q", "peer"]);
+        for n in 0..behind {
+            commit(&root, &format!("behind-{n}"));
+        }
+        git(&root, &["checkout", "-q", "main"]);
+        if branch != "main" {
+            git(&root, &["branch", "-m", branch]);
+        }
+        root
+    }
+
+    fn commit(root: &std::path::Path, file: &str) {
+        std::fs::write(root.join(file), "x").expect("file");
+        git(root, &["add", "."]);
+        git(root, &["commit", "-q", "-m", "step"]);
+    }
+
+    /// Every `GIT_*` variable is dropped before the command runs: the suite can
+    /// be invoked from inside a git hook, where git has exported `GIT_DIR` and
+    /// its kin, and they would aim this at cctop's own checkout instead of at
+    /// the fixture. The identity is set here because the machine running the
+    /// test need not have one configured globally.
+    fn git(root: &std::path::Path, args: &[&str]) {
+        let mut cmd = std::process::Command::new("git");
+        cmd.arg("-C")
+            .arg(root)
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        let inherited: Vec<std::ffi::OsString> = std::env::vars_os()
+            .map(|(key, _)| key)
+            .filter(|key| key.to_string_lossy().starts_with("GIT_"))
+            .collect();
+        for key in inherited {
+            cmd.env_remove(key);
+        }
+        let out = cmd
+            .env("GIT_AUTHOR_NAME", "cctop test")
+            .env("GIT_AUTHOR_EMAIL", "test@cctop.invalid")
+            .env("GIT_COMMITTER_NAME", "cctop test")
+            .env("GIT_COMMITTER_EMAIL", "test@cctop.invalid")
+            .output()
+            .expect("git runs");
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// A branch's `↑1 ↓1` trails the name as an annotation: the name keeps the
+    /// row's own colour and the mark is tinted — amber while there is something
+    /// to push, dim once the row is only behind — and when the column cannot
+    /// hold both, the mark is the half that goes.
+    #[test]
+    fn a_branch_cells_mark_trails_its_name_and_gives_way_first() {
+        let now = chrono::Utc::now();
+        let cols: &[&'static columns::Column] = &[column(ColumnId::Branch)];
+        let widths = column_widths(cols, 40);
+        let mut s = cctop_core::session::Session::new(Provider::Claude, "a".into());
+
+        // Ahead and behind at once: both numbers, and amber says there is
+        // something to push from this machine.
+        let root = repo("main", 1, 1);
+        s.label_source = root.to_string_lossy().into_owned();
+        assert_eq!(
+            columns::render_cell(ColumnId::Branch, &s, &now),
+            "main ↑1 ↓1"
+        );
+        let line = session_row(&s, cols, &widths, &state(), &now);
+        assert_eq!(line.spans[0].content.trim_end(), "main");
+        assert_eq!(line.spans[1].content, " ↑1 ↓1");
+        assert_eq!(line.spans[1].style.fg, Some(theme::colors().cost_mid));
+        assert_eq!(
+            line.spans[0].style.fg,
+            Some(Color::Reset),
+            "the name stays the row's own colour"
+        );
+        std::fs::remove_dir_all(&root).ok();
+
+        // Behind with nothing to push: the same mark, dimmer, and no amber.
+        let root = repo("fix", 0, 1);
+        s.label_source = root.to_string_lossy().into_owned();
+        assert_eq!(columns::render_cell(ColumnId::Branch, &s, &now), "fix ↓1");
+        let line = session_row(&s, cols, &widths, &state(), &now);
+        assert_eq!(line.spans[1].content, " ↓1");
+        assert_eq!(line.spans[1].style.fg, Some(theme::colors().dim));
+        std::fs::remove_dir_all(&root).ok();
+
+        // A name long enough that it cannot share its column: the mark goes
+        // whole rather than the name being cut short to keep part of it.
+        let root = repo("feature/add-conditional-rendering", 1, 1);
+        s.label_source = root.to_string_lossy().into_owned();
+        let line = session_row(&s, cols, &widths, &state(), &now);
+        let text: String = line.spans.iter().map(|sp| sp.content.as_ref()).collect();
+        assert!(
+            !text.contains('↑'),
+            "the mark is dropped before the name is cut: {text:?}"
+        );
+        assert_eq!(
+            text.trim_end(),
+            "feature/add…",
+            "the name keeps every cell the column has: {text:?}"
+        );
+        assert_eq!(
+            line.spans
+                .iter()
+                .map(|sp| util::cells(&sp.content))
+                .sum::<usize>(),
+            12 + 1,
+            "the cell still fills its column and its gutter"
+        );
+        std::fs::remove_dir_all(&root).ok();
     }
 }
