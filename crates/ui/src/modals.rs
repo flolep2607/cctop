@@ -655,7 +655,12 @@ fn filter_help(rows: Vec<(HelpRow, Line<'static>)>, query: &str) -> Vec<Line<'st
 /// choices and the keybinds were never going to fit either. Being a tab is what
 /// gave it the whole frame below the bar, so the row count costs scrolling
 /// instead of costing a subset of the knobs.
-pub(super) fn draw_settings(frame: &mut Frame, area: Rect, app: &mut App) {
+pub(super) fn draw_settings(
+    frame: &mut Frame,
+    area: Rect,
+    app: &mut App,
+    layout: &mut super::render::Layout,
+) {
     let rows = app.settings_shown();
     let shown = rows.len();
     let total = app.settings_items().len();
@@ -664,7 +669,7 @@ pub(super) fn draw_settings(frame: &mut Frame, area: Rect, app: &mut App) {
     // wrapped. Passed in rather than measured here because the block has not
     // been built yet, and its border is two of those columns.
     let width = area.width.saturating_sub(2) as usize;
-    let (lines, cursor_line) = settings_lines(app, &rows, cursor, width);
+    let (lines, cursor_line, item_lines) = settings_lines(app, &rows, cursor, width);
     let height = lines.len() as u16;
 
     let mut block = Block::bordered()
@@ -691,6 +696,18 @@ pub(super) fn draw_settings(frame: &mut Frame, area: Rect, app: &mut App) {
     // and it is what an `End` key needs in order to have a ceiling.
     app.settings_max_scroll = max_scroll;
     app.settings_scroll = scroll;
+    // The rows a pointer can land on, recorded while they are laid out: the
+    // page scrolls inside its block, and which item a screen row shows is
+    // arithmetic only this pass knows. Cctop holds the terminal's mouse
+    // capture, so a click here is answered here or nowhere.
+    layout.settings_inner = Some(inner);
+    layout.settings_rows = item_lines
+        .into_iter()
+        .filter_map(|(line, at)| {
+            let on_screen = line.checked_sub(scroll)?;
+            (on_screen < inner.height).then_some((inner.y + on_screen, at))
+        })
+        .collect();
     if max_scroll > 0 {
         // On the border, so it costs no content line and cannot scroll away.
         let count = match app.settings_filter.is_empty() {
@@ -777,7 +794,7 @@ fn settings_lines(
     rows: &[super::settings::Item],
     cursor: usize,
     width: usize,
-) -> (Vec<Line<'static>>, u16) {
+) -> (Vec<Line<'static>>, u16, Vec<(u16, usize)>) {
     use super::settings::{Item, VIEWS};
     /// Columns a row spends before its description: the gutter, the name, the
     /// value, and the set-marker.
@@ -785,6 +802,10 @@ fn settings_lines(
     let section = |t: &str| Line::from(Span::styled(t.to_string(), theme::title()));
     let mut lines = Vec::new();
     let mut cursor_line = 0u16;
+    // `(line index, item index)` for the lines that are a row of the list,
+    // which is what turns a screen position back into the item drawn there —
+    // the headings and the file line are lines with no item behind them.
+    let mut item_lines = Vec::new();
 
     // Cut rather than wrapped, for the reason given on the Paragraph. A config
     // path is as long as somebody's home directory made it, and a problem
@@ -854,6 +875,7 @@ fn settings_lines(
             cursor_line = lines.len() as u16;
             line = line.style(theme::selected());
         }
+        item_lines.push((lines.len() as u16, at));
         lines.push(line);
     };
 
@@ -939,7 +961,7 @@ fn settings_lines(
         ),
         theme::dim(),
     )));
-    (lines, cursor_line)
+    (lines, cursor_line, item_lines)
 }
 
 pub(super) fn draw_search(frame: &mut Frame, area: Rect, app: &App) {
@@ -4013,7 +4035,7 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(100, 15)).expect("backend");
         let mut frame_text = |app: &mut App| {
             terminal
-                .draw(|frame| draw_settings(frame, frame.area(), app))
+                .draw(|frame| draw_settings(frame, frame.area(), app, &mut Layout::default()))
                 .expect("draw");
             let buffer = terminal.backend().buffer();
             buffer
