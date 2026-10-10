@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Agents only: push every commit as it is made, so a draft PR always shows
 # where the work is. That is what lets a later session resume an issue from
-# the draft alone (see .claude/agents/issue-solver.md), and what a person
+# the draft alone (see the issue-loop plugin's issue-solver agent), and what a person
 # watching the PR sees move.
 #
 # Only a branch that already tracks one on the remote — set by the first
