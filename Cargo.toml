@@ -254,6 +254,11 @@ unicode-width = "0.2"
 qrcode = { version = "0.14", default-features = false }
 tui-qrcode = "0.2.6"
 ureq = { version = "3.3.0", default-features = false, features = ["rustls"] }
+# A sibling cctop's terminal socket, relayed over TLS (`cctop_core::peer`):
+# a WebSocket upgrade is the one request ureq does not make. Both are already
+# in the tree under ureq, with the same ring provider and Mozilla's roots.
+rustls = { version = "0.23", default-features = false, features = ["std", "ring", "tls12"] }
+webpki-roots = "1"
 vt100 = "0.16.2"
 # The corner preview of a pasted image. Only its halfblocks are used — sixel
 # and kitty are escape sequences written around ratatui's buffer rather than

@@ -4,6 +4,8 @@ export type State = "working" | "waiting" | "asking" | "error" | "idle" | string
 
 export interface Session {
   session_id: string;
+  /** The machine a remote row is on: an ssh `--host`, or a sibling on the Cloudflare account. Absent for this machine's rows. */
+  host?: string | null;
   provider: string;
   harness?: string;
   state: State;

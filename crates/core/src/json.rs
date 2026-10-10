@@ -128,6 +128,11 @@ pub struct JsonSession {
     #[serde(skip_serializing_if = "Option::is_none")]
     yolo: Option<crate::yolo::Entry>,
     session_id: String,
+    /// The machine a remote row is on — an ssh target, or a sibling on the
+    /// Cloudflare account ([`crate::peer`]). Absent for this machine's own
+    /// rows, so a peer reading this document can keep to those.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    host: Option<String>,
     started_at: String,
     last_active: String,
     project: Option<String>,
@@ -270,6 +275,7 @@ pub fn sessions(sessions: &[Session], plan: Plan, store: &crate::cache::Store) -
             });
 
             JsonSession {
+                host: s.remote.as_ref().map(|r| r.host.clone()),
                 provider: s.provider.as_str(),
                 state: match s.activity_state {
                     crate::session::ActivityState::Working => "working",

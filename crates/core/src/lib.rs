@@ -49,6 +49,8 @@ pub mod notify;
 pub mod opencode;
 pub mod paste;
 pub mod peek;
+/// The other cctops on this Cloudflare account, found and read with no host list.
+pub mod peer;
 pub mod pricing;
 pub mod proc;
 pub mod provider_status;

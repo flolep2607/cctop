@@ -304,6 +304,10 @@ struct Shared {
     /// see [`identity`]. A trait object so a test can log in with a key of
     /// its own instead of a real team's.
     identities: Arc<dyn identity::Identities>,
+    /// This machine's tunnel token, when it serves on the account's tunnel:
+    /// what a sibling on the account signs with to be let in — see
+    /// [`cctop_core::peer`]. Empty otherwise, which lets no signature in.
+    peer_secret: String,
 }
 
 /// One publish of the whole table.
@@ -660,6 +664,15 @@ pub fn start(options: Options) -> anyhow::Result<Serving> {
         is_tunnel_host: tunnel::is_tunnel_host,
         addresses: Arc::new(address::Connected),
         identities: Arc::new(identity::Configured::new()),
+        // Only the account's own tunnel brings a sibling here: a quick
+        // tunnel's hostname is on no account, and loopback is not the road a
+        // sibling takes.
+        peer_secret: tunnel
+            .as_ref()
+            .filter(|t| t.kind == tunnel::Kind::Account)
+            .and_then(|_| tunnel::account())
+            .map(|a| a.token)
+            .unwrap_or_default(),
     });
 
     let remotes = Arc::new(Mutex::new(Remotes::default()));
@@ -670,6 +683,13 @@ pub fn start(options: Options) -> anyhow::Result<Serving> {
         for host in &options.hosts {
             spawn_host_poller(host.clone(), Arc::clone(&remotes));
         }
+        // The account's other cctops, found rather than named. The same
+        // keep-the-last-rows-and-say-why as an ssh host's poller.
+        let remotes = Arc::clone(&remotes);
+        cctop_core::peer::spawn(move |machine, snapshot| {
+            remember(&remotes, machine, snapshot);
+            true
+        });
     }
     if options.scan {
         spawn_refresher(
@@ -1116,21 +1136,26 @@ fn token_matches(expected: &str, given: &str) -> bool {
 fn spawn_host_poller(host: fleet::Host, remotes: Arc<Mutex<Remotes>>) {
     std::thread::spawn(move || {
         loop {
-            let snapshot = host.poll();
-            if let Ok(mut remotes) = remotes.lock() {
-                match snapshot {
-                    fleet::Snapshot::Rows(rows) => {
-                        remotes.errors.remove(&host.target);
-                        remotes.rows.insert(host.target.clone(), rows);
-                    }
-                    fleet::Snapshot::Failed(why) => {
-                        remotes.errors.insert(host.target.clone(), why);
-                    }
-                }
-            }
+            remember(&remotes, &host.target, host.poll());
             std::thread::sleep(fleet::POLL);
         }
     });
+}
+
+/// File one machine's poll: its rows, or why it could not be read beside the
+/// rows it last gave.
+fn remember(remotes: &Mutex<Remotes>, host: &str, snapshot: fleet::Snapshot) {
+    if let Ok(mut remotes) = remotes.lock() {
+        match snapshot {
+            fleet::Snapshot::Rows(rows) => {
+                remotes.errors.remove(host);
+                remotes.rows.insert(host.to_string(), rows);
+            }
+            fleet::Snapshot::Failed(why) => {
+                remotes.errors.insert(host.to_string(), why);
+            }
+        }
+    }
 }
 
 /// Poll each provider's usage endpoint on the slow cadence they demand,
@@ -1655,11 +1680,26 @@ fn serve_connection(shared: &Shared, stream: &mut TcpStream) {
             None => (None, false),
         },
     };
+    // Another cctop on the account, signing with this machine's own tunnel
+    // token — see [`cctop_core::peer`]. Under the same lock as the tokens: it
+    // is a credential that came through the tunnel, and with public links
+    // off nothing but a login comes through. Full, because the hub relays
+    // the actions of whoever it already let act; never `handed` and never
+    // `admin`, so a sibling cannot carry a token away or change who logs in.
+    let from_peer = !tokens_refused
+        && cctop_core::peer::verify(
+            &shared.peer_secret,
+            request.header("authorization"),
+            &request.method,
+            &request.path,
+            cctop_core::peer::now(),
+        );
+    let peer = from_peer.then_some(Access::Full);
     // Who may change who logs in: the full token, or the owner's own login.
     // A full invite is not enough — it may act on sessions, not hand out
     // access.
     let admin = presented == Some(Access::Full) || owner;
-    let Some(access) = presented.max(login) else {
+    let Some(access) = presented.max(login).max(peer) else {
         cctop_core::elog::event(
             "http",
             "request",
@@ -1682,9 +1722,10 @@ fn serve_connection(shared: &Shared, stream: &mut TcpStream) {
                 Access::Full => "full",
                 Access::ReadOnly => "readonly",
             },
-            "via": match presented >= login {
-                true => "token",
-                false => "access",
+            "via": match (presented >= login, from_peer && presented.max(login) < peer) {
+                (_, true) => "peer",
+                (true, false) => "token",
+                (false, false) => "access",
             },
         }),
     );
@@ -1712,6 +1753,26 @@ fn serve_connection(shared: &Shared, stream: &mut TcpStream) {
     // [`relay_terminal`]. Before the app's files because it is not one.
     if let Some(rest) = path.strip_prefix("/rmux-ws/") {
         return relay_terminal(shared, stream, &request, rest, access);
+    }
+    // A sibling on the account, through this server — see [`forward`]. The
+    // page never talks to another origin, so the content policy stays as it
+    // is and a terminal frame keeps its same-origin URL.
+    if let Some(rest) = path.strip_prefix("/api/peer/") {
+        let (machine, tail) = rest.split_once('/').unwrap_or((rest, ""));
+        let Some(peer) = cctop_core::peer::find(machine) else {
+            return http::respond_error(
+                stream,
+                Some(&request),
+                404,
+                "no machine by that name on this Cloudflare account",
+            );
+        };
+        return forward(shared, stream, &request, &peer, &format!("/{tail}"), access);
+    }
+    // A session route for a row a sibling holds goes to that sibling, the
+    // same way: what it reads and does is about *its* disk and processes.
+    if let Some(peer) = peer_of(shared, &path) {
+        return forward(shared, stream, &request, &peer, &path, access);
     }
     // rmux's terminal app, for a session page to frame — see [`term`]. Static
     // and behind the same token as everything else, so only someone already
@@ -1756,16 +1817,36 @@ fn serve_connection(shared: &Shared, stream: &mut TcpStream) {
             // and an unchanged table should cost it a `304`. Still `no-store`:
             // the rows carry titles and prompts.
             let snapshot = current(shared);
+            // A sibling gets this machine's own rows and no one else's: the
+            // rest are either its own, coming back, or another machine's it
+            // can read for itself.
+            let local;
+            let body = match from_peer {
+                true => {
+                    local = own_rows(&snapshot);
+                    local.as_str()
+                }
+                false => snapshot.json.as_str(),
+            };
             http::respond_tagged_unkept(
                 stream,
                 &request,
                 "application/json; charset=utf-8",
-                snapshot.json.as_bytes(),
+                body.as_bytes(),
             );
         }
         "/api/hosts" => {
             let snapshot = current(shared);
-            let body = serde_json::to_string(&snapshot.host_errors).unwrap_or_default();
+            // Siblings from the process-wide poller as well as the hosts this
+            // server polled: inside the dashboard it is the dashboard's
+            // poller that reads them, and only it knows which are down.
+            let mut failed = snapshot.host_errors.clone();
+            for (machine, why) in cctop_core::peer::offline() {
+                if !failed.iter().any(|(h, _)| *h == machine) {
+                    failed.push((machine, why));
+                }
+            }
+            let body = serde_json::to_string(&failed).unwrap_or_default();
             http::respond(
                 stream,
                 Some(&request),
@@ -1993,6 +2074,180 @@ fn serve_connection(shared: &Shared, stream: &mut TcpStream) {
         }
         _ => http::respond_error(stream, Some(&request), 404, "no such page"),
     }
+}
+
+/// The table document with this machine's own rows only.
+fn own_rows(snapshot: &Snapshot) -> String {
+    let remote: std::collections::HashSet<&str> = snapshot
+        .sessions
+        .iter()
+        .filter(|s| s.remote.is_some())
+        .map(|s| s.session_id.as_str())
+        .collect();
+    let rows: Vec<&str> = snapshot
+        .rows
+        .iter()
+        .filter(|(id, _)| !remote.contains(id.as_str()))
+        .map(|(_, row)| row.as_str())
+        .collect();
+    format!("[{}]", rows.join(","))
+}
+
+/// The sibling whose row a session route names, when it is one — not this
+/// machine's row, and not an ssh host's, which [`remote_json`] reads.
+fn peer_of(shared: &Shared, path: &str) -> Option<Arc<cctop_core::peer::Peer>> {
+    let id = [
+        "/api/chat/",
+        "/api/report/",
+        "/api/access/",
+        "/api/handoff/",
+    ]
+    .iter()
+    .find_map(|prefix| path.strip_prefix(prefix))
+    .map(|rest| rest.trim_end_matches("/markdown"))
+    .or_else(|| {
+        path.strip_prefix("/api/act/")
+            .and_then(|rest| rest.split_once('/'))
+            .map(|(_, id)| id)
+    })?;
+    let snapshot = current(shared);
+    let host = &find(&snapshot.sessions, id)?.remote.as_ref()?.host;
+    if shared.hosts.contains_key(host) {
+        return None;
+    }
+    cctop_core::peer::find(host)
+}
+
+/// Relay a request to a sibling cctop, signed as this machine, and hand back
+/// what it answered.
+///
+/// The sibling takes the signature at full level, so this server decides who
+/// may ask: a read for any link, an action (a JSON `POST`) only through
+/// [`may_act`], and a terminal's socket only for a full link with actions on
+/// — the same lines [`relay_terminal`] draws for this machine's own. Only the
+/// sibling's API and terminal sockets are relayed, never its pages, and not
+/// its event stream, which this server's own already carries the rows of.
+///
+/// The browser's credentials stay here: the `t` query parameter is dropped
+/// and no header of the browser's but a socket handshake's goes on.
+fn forward(
+    shared: &Shared,
+    stream: &mut TcpStream,
+    request: &Request,
+    peer: &cctop_core::peer::Peer,
+    path: &str,
+    access: Access,
+) {
+    if path.starts_with("/rmux-ws/") {
+        if access != Access::Full || !shared.actions {
+            return http::respond_error(
+                stream,
+                Some(request),
+                403,
+                "this link cannot open terminals",
+            );
+        }
+        if !request.is_websocket() {
+            return http::respond_error(
+                stream,
+                Some(request),
+                400,
+                "a terminal socket is a WebSocket",
+            );
+        }
+        return match peer.socket(path, &without_token(request.raw_query()), request.headers()) {
+            Ok(upstream) => upstream.pump(stream),
+            Err(why) => http::respond_error(stream, Some(request), 502, &why),
+        };
+    }
+    if !path.starts_with("/api/") || path == "/api/events" {
+        return http::respond_error(
+            stream,
+            Some(request),
+            404,
+            "only a sibling's API is relayed",
+        );
+    }
+    let mut body = None;
+    let mut page_origin = None;
+    if request.method == "POST" {
+        let Some(mut json) = may_act(shared, stream, request, access) else {
+            return;
+        };
+        // A terminal is minted for the sibling's own copy of the frame app
+        // and its own relay; the link that comes back is pointed at this
+        // page's relay below.
+        if path.starts_with("/api/act/terminal/") {
+            page_origin = json
+                .get("origin")
+                .and_then(serde_json::Value::as_str)
+                .filter(|o| actions::frontend_for(o).is_some())
+                .map(str::to_string);
+            json["origin"] = serde_json::Value::String(peer.url.clone());
+        }
+        body = Some(json.to_string().into_bytes());
+    }
+    let method = match request.method.as_str() {
+        "POST" => "POST",
+        _ => "GET",
+    };
+    let answer = match peer.send(
+        method,
+        path,
+        &without_token(request.raw_query()),
+        body.as_deref(),
+    ) {
+        Ok(answer) => answer,
+        Err(why) => {
+            return http::respond_error(
+                stream,
+                Some(request),
+                502,
+                &format!("{} could not answer: {why}", peer.machine),
+            );
+        }
+    };
+    let mut answered = answer.body;
+    if let Some(origin) = page_origin
+        && answer.status == 200
+        && let Ok(mut terminal) = serde_json::from_slice::<serde_json::Value>(&answered)
+    {
+        let relayed = terminal
+            .get("url")
+            .and_then(serde_json::Value::as_str)
+            .and_then(|url| cctop_core::peer::relayed_link(url, &peer.url, &origin, &peer.machine));
+        match relayed {
+            Some(url) => terminal["url"] = serde_json::Value::String(url),
+            // A link whose socket does not go through the sibling's relay is
+            // one this page cannot reach: said, rather than framed dead.
+            None => {
+                return http::respond_error(
+                    stream,
+                    Some(request),
+                    502,
+                    &format!("{}'s terminal link cannot be relayed", peer.machine),
+                );
+            }
+        }
+        answered = terminal.to_string().into_bytes();
+    }
+    http::respond(
+        stream,
+        Some(request),
+        answer.status,
+        &answer.content_type,
+        &answered,
+    );
+}
+
+/// A raw query string less its `t` parameter, which is this server's
+/// credential and nobody else's business.
+fn without_token(query: &str) -> String {
+    query
+        .split('&')
+        .filter(|pair| !pair.is_empty() && *pair != "t" && !pair.starts_with("t="))
+        .collect::<Vec<_>>()
+        .join("&")
 }
 
 /// Both transcript-search tiers over the current snapshot.
@@ -3261,6 +3516,7 @@ mod tests {
             is_tunnel_host: |_| false,
             addresses: Arc::new(address::Nowhere),
             identities: Arc::new(identity::Nowhere),
+            peer_secret: String::new(),
         }
     }
 
@@ -4848,5 +5104,157 @@ mod tests {
         assert!(status_of(&guarded, "GET", route, &bearer("view")).contains(" 200 "));
         assert!(status_of(&guarded, "GET", route, &bearer("wrong")).contains(" 403 "));
         assert!(status_of(&guarded, "GET", route, "").contains(" 403 "));
+    }
+
+    /// A serve on the account's tunnel whose token is `SIBLING_SECRET`,
+    /// holding one row of its own and one it read from somewhere else.
+    const SIBLING_SECRET: &str = "eyJhIjoi-made-up-tunnel-token";
+
+    fn sibling() -> Shared {
+        let shared = Shared {
+            peer_secret: SIBLING_SECRET.to_string(),
+            ..shared("full", "view")
+        };
+        let own = Session::new(cctop_core::pricing::Provider::Claude, "own-row".into());
+        let mut read = Session::new(cctop_core::pricing::Provider::Claude, "read-row".into());
+        read.remote = Some(cctop_core::session::Remote {
+            host: "elsewhere".into(),
+            ..Default::default()
+        });
+        *shared.latest.lock().unwrap() = Arc::new(Snapshot {
+            version: 1,
+            json: r#"[{"session_id":"own-row"},{"session_id":"read-row","host":"elsewhere"}]"#
+                .into(),
+            rows: vec![
+                ("own-row".into(), r#"{"session_id":"own-row"}"#.into()),
+                (
+                    "read-row".into(),
+                    r#"{"session_id":"read-row","host":"elsewhere"}"#.into(),
+                ),
+            ],
+            sessions: vec![own, read],
+            host_errors: Vec::new(),
+        });
+        shared
+    }
+
+    fn signed(method: &str, path: &str, secret: &str, at: u64) -> String {
+        format!(
+            "Authorization: {}\r\n",
+            cctop_core::peer::sign(secret, at, method, path)
+        )
+    }
+
+    /// The signature is the credential, the far side's token is never handed
+    /// to it, and a sibling reading the table gets this machine's own rows —
+    /// not the ones this machine read from elsewhere, which would come back
+    /// to it as its own.
+    #[test]
+    fn a_sibling_signed_with_the_tunnel_token_reads_the_local_rows_only() {
+        let b = sibling();
+        let now = cctop_core::peer::now();
+        let ok = signed("GET", "/api/sessions", SIBLING_SECRET, now);
+        let raw = response_of(&b, "GET", "/api/sessions", &ok);
+        assert!(raw.starts_with("HTTP/1.1 200"), "{raw}");
+        assert!(
+            raw.contains("own-row") && !raw.contains("read-row"),
+            "{raw}"
+        );
+        // A browser with the token still gets every row.
+        let browser = response_of(&b, "GET", "/api/sessions?t=full", "");
+        assert!(browser.contains("read-row"));
+
+        for refused in [
+            signed("GET", "/api/sessions", "eyJhIjoi-another-token", now),
+            signed("GET", "/api/sessions", SIBLING_SECRET, now - 600),
+            signed("GET", "/api/config", SIBLING_SECRET, now),
+        ] {
+            let raw = response_of(&b, "GET", "/api/sessions", &refused);
+            assert!(raw.starts_with("HTTP/1.1 403"), "{refused}: {raw}");
+        }
+        // Not on the account's tunnel: no secret, no signature gets in.
+        let raw = response_of(&shared("full", "view"), "GET", "/api/sessions", &ok);
+        assert!(raw.starts_with("HTTP/1.1 403"), "{raw}");
+
+        let config = response_of(
+            &b,
+            "GET",
+            "/api/config",
+            &signed("GET", "/api/config", SIBLING_SECRET, now),
+        );
+        let body: serde_json::Value =
+            serde_json::from_str(config.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+        assert_eq!(body["token"], "", "a sibling is never handed a token");
+        assert_eq!(body["actions"], true);
+    }
+
+    /// The hub relays a sibling's API for its own page: a read for any link,
+    /// an action only for one that may act here, and never with the page's
+    /// token on the way out.
+    #[test]
+    fn the_hub_relays_a_siblings_api_and_draws_the_acting_line_itself() {
+        // The sibling, serving for real on loopback.
+        let b = Arc::new(sibling());
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        {
+            let b = Arc::clone(&b);
+            std::thread::spawn(move || {
+                for stream in listener.incoming() {
+                    let Ok(mut stream) = stream else { return };
+                    serve_connection(&b, &mut stream);
+                }
+            });
+        }
+        cctop_core::peer::set_known(vec![Arc::new(cctop_core::peer::Peer::fixed(
+            "box",
+            &format!("http://127.0.0.1:{port}"),
+            SIBLING_SECRET,
+        ))]);
+
+        let hub = shared("full", "view");
+        let read = response_of(&hub, "GET", "/api/peer/box/api/sessions?t=view", "");
+        assert!(read.starts_with("HTTP/1.1 200"), "{read}");
+        assert!(
+            read.contains("own-row") && !read.contains("read-row"),
+            "{read}"
+        );
+
+        let act = |token: &str| {
+            let body = r#"{"text":"hi"}"#;
+            response_of(
+                &hub,
+                "POST",
+                &format!("/api/peer/box/api/act/send/own-row?t={token}"),
+                &format!(
+                    "Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+                    body.len()
+                ),
+            )
+        };
+        // The read-only link is stopped here, before anything is sent on.
+        assert!(act("view").starts_with("HTTP/1.1 403"));
+        // The full link's action reaches the sibling, which answers for its
+        // own row (here: nothing is running it) rather than refusing the
+        // signature.
+        let full = act("full");
+        assert!(!full.starts_with("HTTP/1.1 403"), "{full}");
+        assert!(!full.starts_with("HTTP/1.1 502"), "{full}");
+
+        // Pages and the event stream are not the sibling's to relay, nor is
+        // a machine the account does not have.
+        for target in ["/api/peer/box/?t=full", "/api/peer/box/api/events?t=full"] {
+            assert!(response_of(&hub, "GET", target, "").starts_with("HTTP/1.1 404"));
+        }
+        let nobody = response_of(&hub, "GET", "/api/peer/nobody/api/sessions?t=full", "");
+        assert!(nobody.starts_with("HTTP/1.1 404"), "{nobody}");
+    }
+
+    #[test]
+    fn the_hubs_token_stays_on_the_hub() {
+        assert_eq!(without_token("t=secret&before=4"), "before=4");
+        assert_eq!(without_token("agent=x&t=secret"), "agent=x");
+        assert_eq!(without_token("t"), "");
+        assert_eq!(without_token("top=1"), "top=1");
     }
 }
