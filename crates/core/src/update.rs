@@ -225,9 +225,12 @@ fn fetch_latest() -> Result<Release> {
 /// The API allows sixty unauthenticated calls an hour per address, and an
 /// updater shares its address with everything else behind the same NAT; the
 /// Worker never asks GitHub, so it has no such limit. GitHub stays first
-/// because it is the source: the copy is only as fresh as its last push. Only
-/// the latest — enough to update by, not to show the notes in between.
+/// because it is the source: the copy is only as fresh as its last push.
 const MIRROR_LATEST: &str = "https://cctop-releases.ecorsiste.workers.dev/releases/latest";
+/// [`RELEASE_LIST_URL`]'s page on the same Worker, cut to tag and notes, which
+/// is all [`show_changes`] reads: the update that just hit the rate limit
+/// would otherwise print a link instead of what it brought.
+const MIRROR_LIST: &str = "https://cctop-releases.ecorsiste.workers.dev/releases";
 
 /// Newest published version, refreshed at most once an hour.
 ///
@@ -528,7 +531,8 @@ fn show_changes(from: &str, to: &str) -> bool {
 const RELEASE_PAGE: &str = "https://github.com/flolep2607/cctop/releases";
 
 fn fetch_release_list() -> Result<Vec<Release>> {
-    let text = github_get(RELEASE_LIST_URL)?;
+    let text =
+        github_get(RELEASE_LIST_URL).or_else(|api| github_get(MIRROR_LIST).map_err(|_| api))?;
     serde_json::from_str(&text).context("could not parse the release list")
 }
 
