@@ -284,7 +284,13 @@ const SHARE_REUSE: std::time::Duration = std::time::Duration::from_secs(20 * 60)
 
 /// How long rmux keeps a share cctop minted, stated rather than left to the
 /// daemon's default so [`SHARE_REUSE`] can be measured against it.
-const SHARE_TTL: std::time::Duration = std::time::Duration::from_secs(6 * 60 * 60);
+///
+/// Days, because a link is opened and left open: six hours cut off a terminal
+/// someone had kept in a tab since the morning. Not forever, which rmux would
+/// allow by leaving the TTL unset: a share is minted every [`SHARE_REUSE`] the
+/// page is in use and each stays a live way into the terminal until it
+/// expires, so without a bound they pile up for as long as the session runs.
+const SHARE_TTL: std::time::Duration = std::time::Duration::from_secs(3 * 24 * 60 * 60);
 
 /// [`share_link`], with `fresh` to mint a new share even when one is held —
 /// what a page asks for when the link it was given would not connect.
