@@ -409,6 +409,17 @@ agent's draft PR is always current. Enable them once per clone:
 git config core.hooksPath tools/git-hooks
 ```
 
+A fourth, `reference-transaction`, is for a main clone kept bare so that only
+worktrees are edited. The files beside such a clone are what a session started
+there reads (CLAUDE.md, agents, skills), and git never updates them. The hook
+runs `tools/refresh-checkout.sh` whenever a fetch moves `origin/main`, which
+brings them up to date unless someone has edited them by hand. The first time,
+name the commit they are at:
+
+```bash
+tools/refresh-checkout.sh --from <commit>   # later runs remember it
+```
+
 ## The issue loop
 
 GitHub issues are a work queue: an issue filed from anywhere, a phone

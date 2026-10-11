@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# Keeps the files beside a bare main clone at origin/main (see
+# tools/refresh-checkout.sh for why that copy exists and drifts): once a fetch
+# has moved origin/main, refresh it. In the background, so the fetch returns at
+# once, and logged rather than printed, since the fetch is usually an agent's.
+[ "$1" = committed ] || exit 0
+grep -q ' refs/remotes/origin/main$' || exit 0
+common=$(git rev-parse --path-format=absolute --git-common-dir)
+[ "$(git config --bool core.bare)" = true ] || exit 0
+script="$(dirname "$common")/tools/refresh-checkout.sh"
+[ -x "$script" ] || exit 0
+nohup "$script" >>"$common/refresh-checkout.log" 2>&1 </dev/null &
+exit 0
