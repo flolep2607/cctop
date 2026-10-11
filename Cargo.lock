@@ -469,7 +469,7 @@ dependencies = [
 
 [[package]]
 name = "cctop"
-version = "0.33.1"
+version = "0.33.2"
 dependencies = [
  "anyhow",
  "cctop-core",
@@ -487,7 +487,7 @@ dependencies = [
 
 [[package]]
 name = "cctop-core"
-version = "0.33.2"
+version = "0.33.3"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
