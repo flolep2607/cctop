@@ -2,10 +2,12 @@
 # What the anonymous usage reports say (crates/core/src/telemetry.rs, stored by
 # worker/src/index.js in the Analytics Engine dataset `cctop_telemetry`).
 #
-#   CLOUDFLARE_API_TOKEN=… tools/usage.sh [days]     # default 7
+#   tools/usage.sh [days]     # default 7
 #
 # The token needs "Account Analytics: Read" on the account the Worker runs in;
-# wrangler's own login does not carry that scope. Counts are weighted by
+# wrangler's own login does not carry that scope. It is read from
+# CLOUDFLARE_API_TOKEN, or else from ~/.config/cctop/usage-token, a file kept
+# private (chmod 600) so the token stays out of shell history. Counts are weighted by
 # `_sample_interval`, since Analytics Engine samples at volume, and the
 # `0.0.0-test` reports sent by hand while checking the Worker are left out.
 #
@@ -15,7 +17,9 @@
 # location with blob6 its message, and double1 is the count.
 set -euo pipefail
 
-: "${CLOUDFLARE_API_TOKEN:?needs a token with Account Analytics: Read}"
+token_file="${XDG_CONFIG_HOME:-$HOME/.config}/cctop/usage-token"
+[ -n "${CLOUDFLARE_API_TOKEN:-}" ] || CLOUDFLARE_API_TOKEN=$(cat "$token_file" 2>/dev/null || true)
+: "${CLOUDFLARE_API_TOKEN:?needs a token with Account Analytics: Read, in the environment or $token_file}"
 : "${CLOUDFLARE_ACCOUNT_ID:=e566c3eea9bb7ba66b02108291bf1646}"
 days="${1:-7}"
 case "$days" in '' | *[!0-9]*) echo "days must be a number" >&2 && exit 2 ;; esac
@@ -23,9 +27,10 @@ case "$days" in '' | *[!0-9]*) echo "days must be a number" >&2 && exit 2 ;; esa
 sql() {
     curl --fail-with-body --silent --show-error \
         -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
-        --data-binary "$1 FORMAT TabSeparatedWithNames" \
+        --data-binary "$1 FORMAT JSON" \
         "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/analytics_engine/sql" |
-        column -t -s $'\t'
+        # Analytics Engine has no TSV-with-header format; JSON carries the names.
+        jq -r '[.meta[].name], (.data[] | [.[]]) | @tsv' | column -t -s $'\t'
 }
 
 real="blob1 != '0.0.0-test'"
