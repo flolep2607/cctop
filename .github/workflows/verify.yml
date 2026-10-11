@@ -171,6 +171,18 @@ jobs:
           ref: ${{ inputs.ref }}
           fetch-depth: 0
       - run: rustup toolchain install
+      # cargo-semver-checks builds each crate's rustdoc twice, the tag's and
+      # this commit's, and each build in a target directory of its own, so
+      # without a cache every dependency compiles twice per changed crate:
+      # about six minutes of CPU for three crates. kache keys by content, not by
+      # directory, so it compiles each dependency once here and restores it in
+      # the other builds, and its Actions cache carries that to the next
+      # release. On a commit that is not a release nothing is built.
+      - uses: kunobi-ninja/kache-action@v1
+        with:
+          cache-key-prefix: kache-release-plan
+          pr-comment: false
+          runtime-dir: ${{ runner.temp }}/kache
       - id: semver-checks
         run: echo "version=$(sed -n 's/^# cargo-semver-checks //p' rust-toolchain.toml)" >>"$GITHUB_OUTPUT"
       - uses: taiki-e/install-action@v2

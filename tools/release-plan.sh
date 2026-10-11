@@ -175,6 +175,36 @@ is_breaking() { [ "$(compat "$1")" != "$(compat "$2")" ]; }
 # The pinned cargo-semver-checks, from rust-toolchain.toml.
 semver_checks_pin() { sed -n 's/^# cargo-semver-checks \([0-9][0-9.]*\)$/\1/p' rust-toolchain.toml; }
 
+# Where cargo-semver-checks' verdicts are kept, one empty `<key>.ok` or a
+# `<key>.broke` holding its report. `tools/bump.sh` asks before the bump and
+# `check` asks again after it: the same question, since the bump edits only
+# version lines, and with `--release-type minor` those are not part of it. Each
+# asking rebuilds the crate's rustdoc in a directory named after its version, so
+# the second cost as much as the first, about a minute a crate with warm caches.
+# ponytail: local only — CI starts without target/ and always asks the tool.
+verdicts=$root/target/release-plan
+# Everything a verdict depends on, hashed: the crate, the tag, the tool and the
+# toolchain, and the working tree of every internal crate and the root manifest
+# (what the tool builds, edits not yet committed included), with the version
+# lines and the internal requirements taken out — that is the part a bump
+# changes. Cargo.lock is left out because the tool does not read it: it resolves
+# each crate afresh in a project of its own.
+verdict_key() {
+    local f
+    {
+        printf '%s\n' "$1" "$2" "$(git rev-parse "$2^{commit}")" "$3"
+        cat rust-toolchain.toml
+        git ls-files -co --exclude-standard -- crates Cargo.toml | while IFS= read -r f; do
+            [ -f "$f" ] || continue
+            echo "$f"
+            case $f in
+                *Cargo.toml) sed -e '/^version = "/d' -e 's/^\(cctop[a-z-]* = .*version = \)"[^"]*"/\1/' "$f" ;;
+                *) cat "$f" ;;
+            esac
+        done
+    } | sha256sum | cut -c1-32
+}
+
 # Which of the crates named in $3.. broke their public API since $1, one per
 # line. A crate new since the tag has no API to break and is not asked.
 breaking() {
@@ -197,7 +227,7 @@ breaking() {
         die "cargo-semver-checks is not installed: cargo install cargo-semver-checks@$pin --locked, or set CCTOP_BREAKING to the crates whose API broke"
     [ "$have" = "$pin" ] ||
         die "cargo-semver-checks is $have, and rust-toolchain.toml pins $pin: it has to read this toolchain's rustdoc"
-    local out rc
+    local out rc key
     for name in "$@"; do
         jq -e --arg n "$name" 'has($n)' <<<"$base_meta" >/dev/null || continue
         # A crate that already took a breaking bump is counted as broken
@@ -211,6 +241,16 @@ breaking() {
             echo "$name"
             continue
         fi
+        key=$(verdict_key "$name" "$base" "$pin")
+        if [ -f "$verdicts/$key.ok" ]; then
+            echo "cargo-semver-checks: $name against $base, unchanged since it last passed" >&2
+            continue
+        elif [ -f "$verdicts/$key.broke" ]; then
+            echo "cargo-semver-checks: $name against $base, unchanged since it last broke" >&2
+            sed 's/^/    /' "$verdicts/$key.broke" >&2
+            echo "$name"
+            continue
+        fi
         echo "cargo-semver-checks: $name against $base" >&2
         # `--release-type minor` asks only "is anything breaking?": under it
         # just the lints that need a breaking bump fail, whichever way the
@@ -220,10 +260,13 @@ breaking() {
         rc=0
         out=$(cargo semver-checks check-release --package "$name" --baseline-rev "$base" \
             --release-type minor 2>&1) || rc=$?
+        mkdir -p "$verdicts"
         if [ "$rc" = 0 ]; then
+            : >"$verdicts/$key.ok"
             continue
         elif grep -q 'semver requires new' <<<"$out"; then
             sed 's/^/    /' <<<"$out" >&2
+            printf '%s\n' "$out" >"$verdicts/$key.broke"
             echo "$name"
         else
             # A build failure is not an API verdict: calling it breaking would
