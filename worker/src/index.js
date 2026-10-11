@@ -5,8 +5,8 @@
 // never asks GitHub anything: the release workflow pushes the latest release
 // here when one is published or its notes are edited, and readers get that copy
 // from KV, behind Cloudflare's cache. The JSON is GitHub's own, so cctop parses
-// it with the same code either way. Only the latest: that is all an update
-// needs, and the notes of the versions in between are GitHub's to give.
+// it with the same code either way: the latest release, to update by, and the
+// recent list cut to tag and notes, to show what changed in between.
 
 async function authorised(request, token) {
   if (!token) return false;
@@ -15,9 +15,24 @@ async function authorised(request, token) {
   return given.byteLength === wanted.byteLength && crypto.subtle.timingSafeEqual(given, wanted);
 }
 
+// Each path, the KV key it is kept under, and what a push to it must look like.
+const ROUTES = {
+  "/releases/latest": {
+    key: "latest",
+    valid: (r) => typeof r?.tag_name === "string" && Array.isArray(r.assets),
+    expected: "GitHub's latest release",
+  },
+  "/releases": {
+    key: "list",
+    valid: (l) => Array.isArray(l) && l.every((r) => typeof r?.tag_name === "string"),
+    expected: "a list of releases",
+  },
+};
+
 export default {
   async fetch(request, env) {
-    if (new URL(request.url).pathname !== "/releases/latest") {
+    const route = ROUTES[new URL(request.url).pathname];
+    if (!route) {
       return new Response("not found\n", { status: 404 });
     }
 
@@ -25,18 +40,18 @@ export default {
       if (!(await authorised(request, env.PUSH_TOKEN))) {
         return new Response("unauthorised\n", { status: 401 });
       }
-      const release = await request.json().catch(() => null);
-      if (typeof release?.tag_name !== "string" || !Array.isArray(release.assets)) {
-        return new Response("expected GitHub's latest release\n", { status: 400 });
+      const pushed = await request.json().catch(() => null);
+      if (!route.valid(pushed)) {
+        return new Response(`expected ${route.expected}\n`, { status: 400 });
       }
-      await env.RELEASES.put("latest", JSON.stringify(release));
-      return new Response(`stored ${release.tag_name}\n`);
+      await env.RELEASES.put(route.key, JSON.stringify(pushed));
+      return new Response(`stored ${route.key}\n`);
     }
 
     if (request.method === "GET") {
-      const latest = await env.RELEASES.get("latest");
-      return latest
-        ? new Response(latest, {
+      const stored = await env.RELEASES.get(route.key);
+      return stored
+        ? new Response(stored, {
             headers: {
               "content-type": "application/json",
               "cache-control": "public, max-age=300",
