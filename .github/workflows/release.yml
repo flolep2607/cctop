@@ -28,15 +28,58 @@ concurrency:
 
 jobs:
   # Tagging is irreversible and publishing to crates.io cannot be undone, so the
-  # full check has to pass before `prepare-release` creates the tag. CI runs
-  # these same checks independently; releasing must not depend on that run.
+  # full check has to pass before `prepare-release` creates the tag. CI's run
+  # on the same push is concurrent with this one, so releasing cannot wait on it.
+  #
+  # Unless it has already passed, on exactly this code. A release is a merged
+  # pull request, and CI ran this same verify on that pull request before it
+  # could merge. When the branch already contained main, the merge commit holds
+  # the very files that run tested, and running it again is three minutes spent
+  # proving nothing new. Anything else — a branch behind main, a push straight to
+  # main, a tag, a dispatch — gets verify here.
+  already-verified:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      verified: ${{ steps.check.outputs.verified }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          verified=false
+          if [ "${{ github.event_name }}" = push ] && [ "${{ github.ref_type }}" = branch ] &&
+             head=$(git rev-parse --verify --quiet HEAD^2) &&
+             git merge-base --is-ancestor HEAD^1 "$head" &&
+             [ "$(git rev-parse HEAD^{tree})" = "$(git rev-parse "$head^{tree}")" ]; then
+            passed=$(gh api "repos/$GH_REPO/actions/workflows/ci.yml/runs?head_sha=$head&event=pull_request&status=success" --jq .total_count) || passed=0
+            [ "$passed" -gt 0 ] && verified=true
+          fi
+          echo "verified=$verified  (pull request head: ${head:-none})"
+          echo "verified=$verified" >> "$GITHUB_OUTPUT"
+
   verify:
+    needs: already-verified
+    if: needs.already-verified.outputs.verified != 'true'
     uses: ./.github/workflows/verify.yml
     with:
       ref: ${{ inputs.tag || '' }}
 
+  # `!cancelled()` here and on every job below: GitHub skips a job when any job
+  # before it in the chain was skipped, and `verify` is skipped on purpose when
+  # the pull request's own run stands for it. `!failure()` keeps what the
+  # implicit `success()` meant: nothing runs after a job that failed.
   prepare-release:
-    needs: verify
+    needs: [already-verified, verify]
+    if: >-
+      !cancelled() && !failure() &&
+      (needs.verify.result == 'success' || needs.already-verified.outputs.verified == 'true')
     runs-on: ubuntu-24.04  # pinned on purpose: see verify.yml
     outputs:
       tag: ${{ steps.version.outputs.tag }}
@@ -98,7 +141,7 @@ jobs:
 
   create-release:
     needs: prepare-release
-    if: needs.prepare-release.outputs.release == 'true'
+    if: "!cancelled() && !failure() && needs.prepare-release.outputs.release == 'true'"
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
@@ -206,7 +249,7 @@ jobs:
 
   build:
     needs: [prepare-release, create-release]
-    if: needs.prepare-release.outputs.release == 'true'
+    if: "!cancelled() && !failure() && needs.prepare-release.outputs.release == 'true'"
     name: ${{ matrix.target }}
     runs-on: ubuntu-24.04
     strategy:
@@ -222,15 +265,28 @@ jobs:
         with:
           ref: ${{ needs.prepare-release.outputs.tag }}
       - run: rustup toolchain install && rustup target add ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@v2
+      # The same cross toolchains `verify / musl` checks with, so the build runs
+      # on this runner's cargo rather than in a container kache cannot reach.
+      - uses: taiki-e/setup-cross-toolchain-action@v1
         with:
-          key: ${{ matrix.target }}
+          target: ${{ matrix.target }}
+      # kache, as in verify.yml: rust-cache keyed the whole target/ on
+      # Cargo.lock, which every release changes, so each release built every
+      # dependency from nothing — eight of a build's nine minutes. kache
+      # restores each crate by content hash, so only what changed compiles.
+      # Its cache is saved from main, which is where releases run.
+      - uses: kunobi-ninja/kache-action@v1
+        with:
+          cache-key-prefix: kache-release-${{ matrix.target }}
+          pr-comment: false
+          runtime-dir: ${{ runner.temp }}/kache
       # Handles cross-compilation setup, archive creation, checksums, and
       # uploading the assets to the release.
       - uses: taiki-e/upload-rust-binary-action@v1
         with:
           bin: cctop
           target: ${{ matrix.target }}
+          build-tool: cargo
           archive: $bin-$target
           checksum: sha256
           ref: refs/tags/${{ needs.prepare-release.outputs.tag }}
@@ -241,7 +297,7 @@ jobs:
   # someone to look at rather than public and missing a platform.
   publish:
     needs: [prepare-release, build]
-    if: needs.prepare-release.outputs.release == 'true'
+    if: "!cancelled() && !failure() && needs.prepare-release.outputs.release == 'true'"
     runs-on: ubuntu-24.04
     steps:
       - name: Publish the draft release
@@ -267,7 +323,7 @@ jobs:
   # only made every release that much slower to reach crates.io.
   publish-crate:
     needs: prepare-release
-    if: needs.prepare-release.outputs.release == 'true'
+    if: "!cancelled() && !failure() && needs.prepare-release.outputs.release == 'true'"
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
