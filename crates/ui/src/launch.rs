@@ -810,6 +810,7 @@ impl App {
                 return;
             }
         };
+        cctop_core::telemetry::record(cctop_core::telemetry::Feature::Workspace);
         pane.resumed = resumed;
         pane.profile = profile;
         if let Some(label) = label {

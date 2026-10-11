@@ -18,7 +18,7 @@ use std::path::Path;
 
 /// Every `[settings]` key: its name, its default as the file would spell it,
 /// and what it does.
-pub const SETTINGS: [(&str, &str, &str); 18] = [
+pub const SETTINGS: [(&str, &str, &str); 19] = [
     (
         "theme",
         "\"auto\"",
@@ -33,6 +33,11 @@ pub const SETTINGS: [(&str, &str, &str); 18] = [
         "auto_update",
         "true",
         "Offer to update at startup when a newer release is out",
+    ),
+    (
+        "telemetry",
+        "true",
+        "Send an anonymous usage report once a day (see README)",
     ),
     (
         "compact_threshold",
@@ -200,6 +205,8 @@ pub struct Settings {
     pub theme: Option<String>,
     pub notify: Option<bool>,
     pub auto_update: Option<bool>,
+    /// Whether the daily usage report is sent — see [`crate::telemetry`].
+    pub telemetry: Option<bool>,
     /// A fraction, though the file spells it as a percentage — the same as
     /// `$CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`, which is what a user will compare it
     /// to.
@@ -271,6 +278,7 @@ impl Settings {
                     "theme" => item.as_str().map(|v| out.theme = Some(v.into())).is_none(),
                     "notify" => item.as_bool().map(|v| out.notify = Some(v)).is_none(),
                     "auto_update" => item.as_bool().map(|v| out.auto_update = Some(v)).is_none(),
+                    "telemetry" => item.as_bool().map(|v| out.telemetry = Some(v)).is_none(),
                     "warn_agents" => item.as_bool().map(|v| out.warn_agents = Some(v)).is_none(),
                     "read_screen" => item.as_bool().map(|v| out.read_screen = Some(v)).is_none(),
                     "compact_threshold" => item
@@ -362,6 +370,7 @@ impl Settings {
             "theme" => self.theme.as_ref().map(|v| format!("{v:?}")),
             "notify" => self.notify.map(|v| v.to_string()),
             "auto_update" => self.auto_update.map(|v| v.to_string()),
+            "telemetry" => self.telemetry.map(|v| v.to_string()),
             "warn_agents" => self.warn_agents.map(|v| v.to_string()),
             "read_screen" => self.read_screen.map(|v| v.to_string()),
             "compact_threshold" => self.compact_threshold.map(|v| format!("{}", v * 100.0)),

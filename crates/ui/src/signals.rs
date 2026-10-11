@@ -359,6 +359,7 @@ impl App {
         }
         self.yolo_at = Some(std::time::Instant::now());
         let changed = self.yolo.tick(&mut self.sessions, &self.reports);
+        cctop_core::telemetry::watched(&self.sessions);
         self.needs_redraw |= changed;
         changed
     }

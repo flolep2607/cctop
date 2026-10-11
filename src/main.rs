@@ -135,6 +135,11 @@ fn main() -> anyhow::Result<()> {
     // closed under it, so instead exactly that one panic is answered with a
     // quiet exit and every other panic still reaches the usual hook. After
     // `hook`, which installs its own and must never be changed by this.
+    //
+    // The telemetry hook goes in first, so a closed pipe is answered before it
+    // and never recorded as a crash. It writes a file and chains on; the
+    // report that carries it is sent by a later run.
+    cctop_core::telemetry::install_panic_hook();
     {
         let previous = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
@@ -202,6 +207,14 @@ fn main() -> anyhow::Result<()> {
         let argv: Vec<String> = std::env::args().collect();
         if argv.get(1).map(String::as_str) == Some("yolo") {
             std::process::exit(cctop_core::yolo_log::run(&argv[2..]));
+        }
+    }
+
+    // `cctop telemetry off|on|status` alongside `log`, and for the same reason.
+    {
+        let argv: Vec<String> = std::env::args().collect();
+        if argv.get(1).map(String::as_str) == Some("telemetry") {
+            std::process::exit(cctop_core::telemetry::run(&argv[2..]));
         }
     }
 
@@ -520,6 +533,8 @@ fn main() -> anyhow::Result<()> {
         .map(|agent| shim::host(&agent, None, ui::render::pane_size()))
         .transpose()?;
 
+    cctop_core::telemetry::record(cctop_core::telemetry::Feature::Tui);
+    cctop_core::telemetry::start();
     let code = ui::run(
         args.plan,
         args.delay,
@@ -530,6 +545,9 @@ fn main() -> anyhow::Result<()> {
     // After the UI is down, so the message is not painted over by the alternate
     // screen being restored.
     finish_trace(&args);
+    // The same, and so the first run's report waits for the next run: what
+    // `start` read above was a notice not yet shown.
+    cctop_core::telemetry::notice_once();
     std::process::exit(code)
 }
 

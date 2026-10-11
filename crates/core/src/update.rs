@@ -131,7 +131,7 @@ fn unix_secs() -> u64 {
         .unwrap_or(0)
 }
 
-fn agent() -> ureq::Agent {
+pub(crate) fn agent() -> ureq::Agent {
     ureq::Agent::config_builder()
         .timeout_global(Some(std::time::Duration::from_secs(15)))
         .user_agent(user_agent())
@@ -630,12 +630,14 @@ fn install(
         Placement::Beside(staging) => staging,
         Placement::ThroughSudo => {
             install_as_root(&body)?;
+            crate::telemetry::record(crate::telemetry::Feature::Update);
             println!("Updated {current} -> {latest}.");
             return Ok(show_changes(current, latest));
         }
     };
     let new_binary = unpack(&body, staging.path())?;
     self_replace::self_replace(&new_binary).context("could not replace the running executable")?;
+    crate::telemetry::record(crate::telemetry::Feature::Update);
 
     println!("Updated {current} -> {latest}.");
     // After the replace, so an install that worked is never held up by the

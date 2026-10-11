@@ -29,9 +29,86 @@ const ROUTES = {
   },
 };
 
+// cctop's anonymous daily usage report (crates/core/src/telemetry.rs), checked
+// key by key: anything not named here is refused, so a field can only start
+// being collected by a change to this file.
+const FEATURES = ["tui", "serve", "workspace", "tunnel", "yolo", "update"];
+const AGENTS = ["claude", "codex", "cursor", "devin", "gemini", "opencode", "pi", "windsurf"];
+const TELEMETRY_MAX = 4096;
+
+const short = (s, max) => typeof s === "string" && s.length > 0 && s.length <= max;
+const keysWithin = (o, allowed) =>
+  o !== null && typeof o === "object" && !Array.isArray(o) && Object.keys(o).every((k) => allowed.includes(k));
+const counts = (o, allowed) =>
+  keysWithin(o, allowed) &&
+  Object.values(o).every((n) => Number.isInteger(n) && n >= 0 && n <= 1_000_000);
+
+function validReport(r) {
+  return (
+    keysWithin(r, ["id", "version", "os", "arch", "features", "agents", "crash"]) &&
+    typeof r.id === "string" &&
+    /^[0-9a-f]{32}$/.test(r.id) &&
+    [r.version, r.os, r.arch].every((s) => short(s, 32) && /^[\w.+-]+$/.test(s)) &&
+    counts(r.features, FEATURES) &&
+    counts(r.agents, AGENTS) &&
+    (r.crash === undefined ||
+      (keysWithin(r.crash, ["location", "message"]) &&
+        short(r.crash.location, 200) &&
+        typeof r.crash.message === "string" &&
+        r.crash.message.length <= 200))
+  );
+}
+
+async function telemetry(request, env) {
+  if (request.method !== "POST") {
+    return new Response("method not allowed\n", { status: 405 });
+  }
+  if (Number(request.headers.get("content-length") ?? 0) > TELEMETRY_MAX) {
+    return new Response("too large\n", { status: 413 });
+  }
+  const text = await request.text();
+  if (text.length > TELEMETRY_MAX) {
+    return new Response("too large\n", { status: 413 });
+  }
+  let report;
+  try {
+    report = JSON.parse(text);
+  } catch {
+    report = null;
+  }
+  if (!validReport(report)) {
+    return new Response("expected a cctop usage report\n", { status: 400 });
+  }
+  // One row per thing counted, so each is a plain SUM(double1) grouped by
+  // blob5, with blob4 the row's kind. The index is the install's random id,
+  // which is what COUNT(DISTINCT index1) and retention are read from.
+  const base = [report.version, report.os, report.arch];
+  const indexes = [report.id];
+  const rows = [
+    ...Object.entries(report.features).map(([name, n]) => ["feature", name, n]),
+    ...Object.entries(report.agents).map(([name, n]) => ["agents", name, n]),
+  ];
+  for (const [kind, name, n] of rows) {
+    env.TELEMETRY.writeDataPoint({ indexes, blobs: [...base, kind, name], doubles: [n] });
+  }
+  env.TELEMETRY.writeDataPoint({ indexes, blobs: [...base, "report"], doubles: [1] });
+  if (report.crash) {
+    env.TELEMETRY.writeDataPoint({
+      indexes,
+      blobs: [...base, "crash", report.crash.location, report.crash.message],
+      doubles: [1],
+    });
+  }
+  return new Response(null, { status: 204 });
+}
+
 export default {
   async fetch(request, env) {
-    const route = ROUTES[new URL(request.url).pathname];
+    const path = new URL(request.url).pathname;
+    if (path === "/telemetry") {
+      return telemetry(request, env);
+    }
+    const route = ROUTES[path];
     if (!route) {
       return new Response("not found\n", { status: 404 });
     }
