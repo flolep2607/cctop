@@ -339,9 +339,15 @@ serde_json.workspace = true
 cctop-core = { workspace = true, features = ["test-support"] }
 
 [profile.release]
-# A monitoring tool is launched often and lives in the terminal; a smaller,
-# faster binary is worth the extra link time on release builds only.
-lto = true
+# A monitoring tool is launched often and lives in the terminal, so the
+# release binary is optimised across crates — but thin LTO, not fat. Measured
+# on x86_64-unknown-linux-gnu (medians, shared machine): rebuilding after an
+# edit to core and the binary took 328 s with fat LTO and 182 s with thin, a
+# clean build 472 s and 313 s. The binary grew 8% (36.7 to 39.7 MB stripped),
+# parsing 364 MB of transcripts for `--json` took the same 0.32 s, and
+# `--version` 5.0 ms against 5.3 ms, inside the runs' spread. One codegen unit
+# stays: sixteen saved another 90 s but grew the binary 41%.
+lto = "thin"
 codegen-units = 1
 strip = true
 
