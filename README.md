@@ -176,6 +176,41 @@ cctop claude          # start an agent on a pty cctop can watch and type into
 
 </details>
 
+## Telemetry
+
+cctop sends a small usage report at most once a day, from a background thread,
+to `https://cctop-releases.ecorsiste.workers.dev/telemetry`. It is on by
+default, and nothing is sent until a one-time notice has been shown on an
+interactive run (the dashboard, or `cctop serve` on a terminal). `cctop hook`
+and `cctop yolo-hook` never send anything. A report holds these fields and no
+others:
+
+- `id`: a random ID you can reset. It is 128 random bits, not derived from
+  anything about your machine or you, made at the first report.
+  `cctop telemetry reset-id` replaces it.
+- `version`: cctop's version.
+- `os`, `arch`: the OS and CPU type, such as `linux` and `x86_64`.
+- `features`: how many times each of `tui`, `serve`, `workspace`, `tunnel`,
+  `yolo` and `update` ran since the last report.
+- `agents`: the most agents of each kind (`claude`, `codex`, `opencode`, …)
+  seen running at once since the last report.
+- `crash`, only if cctop panicked: the file and line in cctop's own source,
+  and the panic message with anything that looks like a path, URL, email,
+  home dir, user name, hostname, IP or long token removed, cut to 200
+  characters.
+
+It never sends prompts, session names, working directories, account names,
+hostnames or IP addresses.
+
+To see the next report exactly, run `cctop telemetry status`. To turn it off,
+use any one of these:
+
+- `cctop telemetry off`, which also deletes the ID and whatever was counted
+  (`cctop telemetry on` turns it back on, with a new ID)
+- `telemetry = false` under `[settings]` in `config.toml`, or the toggle on the
+  settings page (`,`)
+- `CCTOP_TELEMETRY=0` or `DO_NOT_TRACK=1` in the environment
+
 ## Documentation
 
 - [Reading the table](docs/the-table.md) - every column, the status dot,

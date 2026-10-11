@@ -590,6 +590,10 @@ pub fn start(options: Options) -> anyhow::Result<Serving> {
     // "and type at your agents" is a different sentence, and not one anybody
     // reads a flag expecting.
     let actions = !options.no_actions && !options.no_token;
+    cctop_core::telemetry::record(cctop_core::telemetry::Feature::Serve);
+    if options.tunnel {
+        cctop_core::telemetry::record(cctop_core::telemetry::Feature::Tunnel);
+    }
     // Started before anything is announced, so the link works when it is read,
     // and before the accept loop because there is nothing to reach yet.
     // The account's share hostnames land on a front of their own, which is
@@ -926,6 +930,12 @@ pub fn run(argv: &[String]) -> anyhow::Result<i32> {
         scan: true,
     })?;
     announce(&serving, &bind, no_token);
+    // Only someone at a terminal can have read the notice; a serve under
+    // systemd sends nothing until one has.
+    if std::io::IsTerminal::is_terminal(&std::io::stderr()) {
+        cctop_core::telemetry::notice_once();
+    }
+    cctop_core::telemetry::start();
     // Hooks brought in line with this binary, as the dashboard does at every
     // start, and off this thread for the same reason: nothing about serving
     // waits on five agents' config files. Silent when there was nothing to do.
@@ -1362,6 +1372,7 @@ fn spawn_refresher(shared: Arc<Shared>, remotes: Arc<Mutex<Remotes>>, plan: Plan
             // After the stamp, which is what says a prompt is up: an answer
             // pressed here is a refresh tick behind the prompt at most.
             yolo.tick(&mut rows, &reports);
+            cctop_core::telemetry::watched(&rows);
             publish(
                 &shared,
                 &remotes,
@@ -1911,7 +1922,10 @@ fn serve_connection(shared: &Shared, stream: &mut TcpStream) {
         // Every tab's terminal, tiled. The page itself is harmless to a
         // read-only link — opening a terminal is the action, and that route
         // checks the credential as every action does.
-        "/workspace" => app_page(shared, stream, &request, handed),
+        "/workspace" => {
+            cctop_core::telemetry::record(cctop_core::telemetry::Feature::Workspace);
+            app_page(shared, stream, &request, handed)
+        }
         // The whole fleet's history in one document — the analytics page
         // filters and charts it client-side, so this one read-only route is
         // all the server owes it. Untrimmed buckets are affordable here
