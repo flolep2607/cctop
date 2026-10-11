@@ -565,13 +565,15 @@ fn share_with(
     let frontend = frontend.map(str::to_string);
     let public = public.map(str::to_string);
     on_daemon(move |rmux| async move {
-        let session = rmux.session(rmux_sdk::SessionName::new(name)?).await?;
+        let session = rmux
+            .session(rmux_sdk::SessionName::new(name.clone())?)
+            .await?;
         let mut builder = session.share();
         if let Some(public) = public {
             builder = builder.tunnel_url(public);
         }
-        if let Some(frontend) = frontend {
-            builder = builder.frontend_url(frontend);
+        if let Some(frontend) = &frontend {
+            builder = builder.frontend_url(frontend.clone());
         }
         // Stated, not left to the daemon: the reuse window is measured against it.
         builder = builder.ttl(SHARE_TTL);
@@ -588,6 +590,9 @@ fn share_with(
                 .dark_theme();
         }
         let handle = builder.await?;
+        if embedded {
+            retire_superseded(&rmux, &name, frontend.as_deref(), handle.id()).await;
+        }
         Ok(Share {
             operator: handle.operator_url().map(str::to_string),
             pin: handle.operator_pairing_code().map(str::to_string),
@@ -601,6 +606,47 @@ fn share_with(
         None => Err("the share came back without an operator link".to_string()),
         Some(_) => Ok(share),
     })
+}
+
+/// Stops the embedded share this one replaces, if nobody is on it.
+///
+/// A page in use is handed a new share every [`SHARE_REUSE`], and each lives
+/// [`SHARE_TTL`] unless stopped: a day of a workspace open would leave dozens
+/// of live ways into the terminal. The one replaced is stopped only when it has
+/// no one connected — a tab still attached to it keeps it, which is the reason
+/// the TTL is days — and only for embedded shares, which cctop's own page holds
+/// and asks again for when one will not connect. A `W` link may sit unopened in
+/// a chat somewhere, so it is left to expire.
+///
+/// ponytail: remembered by this process alone, so shares minted before a
+/// restart, or replaced while still in use, are left to [`SHARE_TTL`].
+async fn retire_superseded(
+    rmux: &rmux_sdk::Rmux,
+    name: &str,
+    frontend: Option<&str>,
+    minted: &str,
+) {
+    type Last = HashMap<(String, Option<String>), String>;
+    static LAST: std::sync::Mutex<Option<Last>> = std::sync::Mutex::new(None);
+    let key = (name.to_string(), frontend.map(str::to_string));
+    let previous = match LAST.lock() {
+        Ok(mut last) => last
+            .get_or_insert_with(HashMap::new)
+            .insert(key, minted.to_string()),
+        Err(_) => return,
+    };
+    let Some(previous) = previous.filter(|id| id != minted) else {
+        return;
+    };
+    // Failures are ignored: the new share is what was asked for, and an old
+    // one left standing still expires.
+    if let Ok(old) = rmux.web_share_by_id(&previous).await
+        && let Ok(now) = old.summary().await
+        && now.active_operators == 0
+        && now.active_spectators == 0
+    {
+        let _ = old.stop().await;
+    }
 }
 
 /// A rmux session name for a session being resumed.
@@ -1721,6 +1767,28 @@ mod tests {
             !operator.contains("spectator"),
             "that is not the operator link: {operator}"
         );
+    }
+
+    /// A page handed a new frame share does not leave the one it replaced
+    /// standing when nobody is on it, and a `W` share is never stopped by one.
+    #[test]
+    fn a_replaced_frame_share_nobody_is_on_is_stopped() {
+        let _daemon = crate::mux::TestDaemon::new("a_replaced_frame_share_nobody_is_on_is_stopped");
+        let name = format!("cctop-retire-{}", std::process::id());
+        start_session(&name, None, &["sleep", "30"]);
+        let live = || {
+            on_daemon(|rmux| async move { rmux.list_web_shares().await }).map(|shares| shares.len())
+        };
+
+        let counted = (|| {
+            web_share(&name, None, None)?;
+            web_share_embedded(&name, None, None)?;
+            web_share_embedded(&name, None, None)?;
+            live()
+        })();
+        end_session(&name);
+
+        assert_eq!(counted, Ok(2), "the `W` share and the newest frame share");
     }
 
     /// The road `W` takes, end to end: a share minted with no page around it
