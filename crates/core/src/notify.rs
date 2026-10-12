@@ -25,8 +25,12 @@ use std::time::{Duration, Instant};
 pub const MARK_FOR: Duration = Duration::from_secs(30);
 
 /// What a session was doing at a refresh, as far as ringing is concerned.
+///
+/// Public because the dashboard's bell and `cctop serve --notify` fire on the
+/// same edge, and two copies of what counts as one had already drifted apart
+/// once in their comments.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum State {
+pub enum State {
     Busy,
     /// The turn is over and the prompt is the user's.
     Waiting,
@@ -45,6 +49,19 @@ pub enum Reason {
     /// Blocked on a permission prompt or an elicitation.
     Asking,
     Stopped,
+}
+
+impl Reason {
+    /// The webhook's name for this crossing, or `None` for one it does not
+    /// POST. A stopped session is announced by its exit, which is not a
+    /// person's move to make, so only the two waits go out.
+    pub fn event(self) -> Option<&'static str> {
+        match self {
+            Reason::NeedsInput => Some("waiting"),
+            Reason::Asking => Some("asking"),
+            Reason::Stopped => None,
+        }
+    }
 }
 
 /// The session that rang, kept around so the bell can be traced to a row.
@@ -140,8 +157,8 @@ impl Notifier {
             // the turn end a moment later is one ring rather than two: the
             // second crossing is `Asking` to `Waiting`, and it is the same turn
             // you have already been told about.
-            if let Some((State::Busy, _)) = self.watched.remove(&key)
-                && let Some(reason) = reason_for(state)
+            if let Some((was, _)) = self.watched.remove(&key)
+                && let Some(reason) = crossing(was, state)
             {
                 crossed.push(Rang {
                     key: key.clone(),
@@ -149,14 +166,7 @@ impl Notifier {
                     reason,
                     at: Instant::now(),
                 });
-                // A stopped session is announced by its exit; the serve's
-                // webhook draws the same line, so only the two waits POST.
-                let event = match reason {
-                    Reason::NeedsInput => Some("waiting"),
-                    Reason::Asking => Some("asking"),
-                    Reason::Stopped => None,
-                };
-                if let Some(event) = event {
+                if let Some(event) = reason.event() {
                     posts.push((event, session));
                 }
             }
@@ -172,11 +182,11 @@ impl Notifier {
             // A session that was already waiting when it exited has rung once
             // already; ringing again for the exit would double-report the same
             // turn ending.
-            if state == State::Busy {
+            if let Some(reason) = crossing(state, State::Stopped) {
                 crossed.push(Rang {
                     key,
                     label,
-                    reason: Reason::Stopped,
+                    reason,
                     at: Instant::now(),
                 });
             }
@@ -345,20 +355,7 @@ impl Notifier {
     /// POST one crossing — through the same send `cctop serve --notify` uses,
     /// so a webhook sees the same document either way.
     fn post_session(&self, target: String, event: &'static str, session: &Session) {
-        let mut body = serde_json::json!({
-            "event": event,
-            "session_id": session.session_id,
-            "project": session.label_source,
-            "title": session.title,
-        });
-        if let Some(base) = &self.link_base {
-            body["url"] = session_link(base, &session.session_id).into();
-        }
-        post(
-            target,
-            body.to_string(),
-            serde_json::json!({ "event": event, "session": session.session_id }),
-        );
+        post_session(target, event, session, self.link_base.as_deref());
     }
 
     /// POST a quota window opening back up, when a webhook is configured.
@@ -377,8 +374,47 @@ impl Notifier {
     }
 }
 
+/// The document a webhook is sent for one session's crossing — the same from
+/// the dashboard and from `cctop serve --notify`, so whatever reads it has one
+/// shape to parse whichever cctop is sending.
+///
+/// `link_base` is the link the serve hands out, when one is serving; without
+/// it the payload has no `url`, since a TUI alone has no page to point at.
+pub fn session_payload(
+    event: &str,
+    session: &Session,
+    link_base: Option<&str>,
+) -> serde_json::Value {
+    let mut body = serde_json::json!({
+        "event": event,
+        "session_id": session.session_id,
+        "project": session.label_source,
+        "title": session.title,
+    });
+    if let Some(base) = link_base {
+        body["url"] = session_link(base, &session.session_id).into();
+    }
+    body
+}
+
+/// POST [`session_payload`] to `target`, off the caller's thread.
+pub fn post_session(target: String, event: &str, session: &Session, link_base: Option<&str>) {
+    post(
+        target,
+        session_payload(event, session, link_base).to_string(),
+        serde_json::json!({ "event": event, "session": session.session_id }),
+    );
+}
+
 /// The page link for a session, built off the link a serve hands out:
 /// `origin/?t=token` becomes `origin/session/<id>?t=token`.
+///
+/// Built from the handed-out link rather than from an origin and a token,
+/// because that link is where serve has already decided both: which origin
+/// (the tunnel's, its token hostname behind Access, or loopback) and whether
+/// a token belongs on it at all. Behind Access with public links off, it is
+/// the bare address on purpose, and a link assembled from parts put the
+/// full-access token back on it — in a body sent to a third party's webhook.
 fn session_link(base: &str, id: &str) -> String {
     match base.split_once("/?") {
         Some((origin, query)) => format!("{origin}/session/{id}?{query}"),
@@ -386,13 +422,42 @@ fn session_link(base: &str, id: &str) -> String {
     }
 }
 
-/// Which crossings are worth a bell, and what to call them.
-fn reason_for(state: State) -> Option<Reason> {
-    match state {
+/// Whether going from `before` to `after` is news, and which.
+///
+/// Only a crossing out of `Busy` is: answering a permission prompt and having
+/// the turn end a moment later is `Asking` to `Waiting`, the same turn already
+/// reported, and a session that was waiting when it exited has rung once
+/// already. Busy to busy, or anything back to busy, is nothing.
+pub fn crossing(before: State, after: State) -> Option<Reason> {
+    if before != State::Busy {
+        return None;
+    }
+    match after {
         State::Asking => Some(Reason::Asking),
         State::Waiting => Some(Reason::NeedsInput),
-        State::Busy | State::Stopped => None,
+        State::Stopped => Some(Reason::Stopped),
+        State::Busy => None,
     }
+}
+
+/// The sessions in `after` that crossed since `before`, matched by
+/// [`Session::key`], with why.
+///
+/// For a caller holding two whole snapshots, as `cctop serve` does. A session
+/// absent from `before` has no edge at all, which is what makes the first
+/// snapshot silent: a session found already waiting may have been waiting for
+/// a day. One absent from `after` is not reported either — there is no
+/// session left to hand back — which [`Notifier::observe`] covers with its
+/// own memory of labels.
+pub fn crossings<'a>(before: &[Session], after: &'a [Session]) -> Vec<(Reason, &'a Session)> {
+    let was: HashMap<String, State> = before.iter().map(|s| (s.key(), state_of(s))).collect();
+    after
+        .iter()
+        .filter_map(|session| {
+            let reason = crossing(*was.get(&session.key())?, state_of(session))?;
+            Some((reason, session))
+        })
+        .collect()
 }
 
 /// The session's state as the bell sees it.
@@ -410,7 +475,7 @@ fn reason_for(state: State) -> Option<Reason> {
 /// guessed at: a quiet-timer on `last_active` would fire in the middle of every
 /// long reasoning turn. `cctop hook --install` is the fix, and the doctor says
 /// so.
-fn state_of(session: &Session) -> State {
+pub fn state_of(session: &Session) -> State {
     if !session.is_running() {
         return State::Stopped;
     }
@@ -890,6 +955,30 @@ mod tests {
         let freed = n.observe_quota(&quota(false));
         assert_eq!(freed.len(), 1);
         assert!(freed[0].contains("limit has lifted"), "{freed:?}");
+    }
+
+    /// Only a crossing out of busy is news, whichever caller asks.
+    #[test]
+    fn only_a_crossing_out_of_busy_is_news() {
+        use State::*;
+        assert_eq!(crossing(Busy, Waiting), Some(Reason::NeedsInput));
+        assert_eq!(crossing(Busy, Asking), Some(Reason::Asking));
+        assert_eq!(crossing(Busy, Stopped), Some(Reason::Stopped));
+        assert_eq!(crossing(Busy, Busy), None);
+        for before in [Waiting, Asking, Stopped] {
+            for after in [Busy, Waiting, Asking, Stopped] {
+                assert_eq!(crossing(before, after), None, "{before:?} → {after:?}");
+            }
+        }
+    }
+
+    /// Without a serve there is nothing to link to, and the payload says
+    /// nothing rather than a link that opens nothing.
+    #[test]
+    fn a_payload_without_a_serve_has_no_url() {
+        let body = session_payload("asking", &session("a", true, ActivityState::Asking), None);
+        assert_eq!(body["event"], "asking");
+        assert!(body.get("url").is_none());
     }
 
     /// `origin/?t=tok` becomes `origin/session/<id>?t=tok`, keeping the token

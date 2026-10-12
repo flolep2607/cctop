@@ -610,9 +610,9 @@ pub fn start(options: Options) -> anyhow::Result<Serving> {
         (false, _) => None,
     };
 
-    // The origin a notification's link is built on: the tunnel's when there is
-    // one, since a webhook that names loopback is a link that works only on the
-    // machine that sent it.
+    // The origin a link to hand out is built on: the tunnel's when there is
+    // one, since a link that names loopback works only on the machine that
+    // made it — which is also why a notification's link is built on it.
     //
     // Behind Access, a token link goes on the token hostname — the
     // dashboard's own asks for a login first — and with public links off
@@ -628,6 +628,18 @@ pub fn start(options: Options) -> anyhow::Result<Serving> {
         .clone()
         .or_else(|| tunnel.as_ref().map(|t| t.url.clone()))
         .unwrap_or_else(|| format!("http://127.0.0.1:{}", addr.port()));
+    let query = match token.is_empty() {
+        true => String::new(),
+        false => format!("?t={token}"),
+    };
+    let local = format!("http://127.0.0.1:{}/{query}", addr.port());
+    let public = tunnel.as_ref().map(|t| match &token_origin {
+        Some(origin) => format!("{origin}/{query}"),
+        None => format!("{}/", t.url),
+    });
+    // The webhook links what `Serving::best` hands out, for the reason
+    // `cctop_core::notify::session_link` gives.
+    let link_base = public.clone().unwrap_or_else(|| local.clone());
 
     let shared = Arc::new(Shared {
         token: token.clone(),
@@ -657,7 +669,7 @@ pub fn start(options: Options) -> anyhow::Result<Serving> {
                     .ok()
                     .filter(|url| !url.is_empty())
             })
-            .map(|target| notify::Webhook::new(target, origin.clone(), token.clone())),
+            .map(|target| notify::Webhook::new(target, link_base)),
         hosts: options
             .hosts
             .iter()
@@ -711,10 +723,6 @@ pub fn start(options: Options) -> anyhow::Result<Serving> {
         spawn_provider_status_poller(Arc::clone(&shared));
     }
 
-    let query = match token.is_empty() {
-        true => String::new(),
-        false => format!("?t={token}"),
-    };
     cctop_core::elog::event(
         "serve",
         "listen",
@@ -746,13 +754,8 @@ pub fn start(options: Options) -> anyhow::Result<Serving> {
             true => String::new(),
             false => format!("{origin}/?t={}", shared.readonly),
         };
-    let public = tunnel.as_ref().map(|t| match &token_origin {
-        Some(origin) => format!("{origin}/{query}"),
-        None => format!("{}/", t.url),
-    });
-
     Ok(Serving {
-        local: format!("http://127.0.0.1:{}/{query}", addr.port()),
+        local,
         public,
         tunnel_fallback: tunnel.as_ref().and_then(|t| t.fallback.clone()),
         readonly: readonly_link,
