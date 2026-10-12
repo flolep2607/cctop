@@ -6,6 +6,7 @@ pub mod cursor;
 pub mod devin;
 pub mod extract;
 pub mod gemini;
+pub mod lookup;
 pub mod opencode;
 pub mod pi;
 pub mod search;

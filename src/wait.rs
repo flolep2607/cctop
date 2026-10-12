@@ -30,6 +30,7 @@
 use cctop_core::hook::Signal;
 use cctop_core::loader::Loader;
 use cctop_core::pricing::Plan;
+use cctop_core::session::lookup::{Lookup, lookup_by, short};
 use cctop_core::session::{ActivityState, Session};
 use std::time::{Duration, Instant};
 
@@ -162,7 +163,8 @@ pub enum Unresolved {
 /// 1. A number is a pid — the agent's own, or any process in its tree, which
 ///    is what `$PPID` inside an agent's shell gives.
 /// 2. A tab's name, as the bar shows it, or its rmux session name.
-/// 3. A prefix of a session id. Several matches with one of them running is
+/// 3. A session id, by [`lookup_by`]'s rules — the whole id beats a longer id
+///    it prefixes, then a unique prefix. Several matches with one of them running is
 ///    that one: the question is asked about something live, and an id prefix
 ///    long enough to be typed usually is.
 ///
@@ -208,28 +210,19 @@ pub fn resolve(
     {
         return Ok(found);
     }
-    let matching: Vec<usize> = sessions
-        .iter()
-        .enumerate()
-        .filter(|(_, s)| s.session_id.starts_with(target))
-        .map(|(i, _)| i)
-        .collect();
-    match matching.as_slice() {
-        [] => Err(Unresolved::Unknown),
-        [one] => Ok(*one),
-        several => {
+    match lookup_by(sessions.iter().enumerate(), target, |(_, s)| &s.session_id) {
+        Lookup::None => Err(Unresolved::Unknown),
+        Lookup::Found((one, _)) => Ok(one),
+        Lookup::Ambiguous(several) => {
             let live: Vec<usize> = several
                 .iter()
-                .copied()
-                .filter(|&i| sessions[i].is_running())
+                .filter(|(_, s)| s.is_running())
+                .map(|&(i, _)| i)
                 .collect();
             match live.as_slice() {
                 [one] => Ok(*one),
                 _ => Err(Unresolved::Ambiguous(
-                    several
-                        .iter()
-                        .map(|&i| sessions[i].session_id.clone())
-                        .collect(),
+                    several.iter().map(|(_, s)| s.session_id.clone()).collect(),
                 )),
             }
         }
@@ -292,10 +285,6 @@ impl Outcome {
             ),
         }
     }
-}
-
-fn short(id: &str) -> &str {
-    id.get(..8).unwrap_or(id)
 }
 
 /// The last thing the agent said about itself, however it reached us.

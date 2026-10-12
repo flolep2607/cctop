@@ -34,6 +34,7 @@
 
 use cctop_core::embed::index::chunks_of;
 use cctop_core::session::Session;
+use cctop_core::session::lookup::{Lookup, lookup, short};
 use cctop_core::session::search::{Query, Target};
 use rayon::prelude::*;
 use serde::Serialize;
@@ -371,14 +372,10 @@ pub fn read(
     n: usize,
     around: usize,
 ) -> Result<String, String> {
-    let matching: Vec<&Session> = sessions
-        .iter()
-        .filter(|s| s.session_id.starts_with(session))
-        .collect();
-    let s = match matching.as_slice() {
-        [one] => *one,
-        [] => return Err(format!("no session starts with {session}")),
-        many => {
+    let s = match lookup(sessions, session) {
+        Lookup::Found(one) => one,
+        Lookup::None => return Err(format!("no session starts with {session}")),
+        Lookup::Ambiguous(many) => {
             return Err(format!(
                 "{} sessions start with {session}; give more of the id",
                 many.len()
@@ -481,11 +478,6 @@ fn tilde(dir: &str) -> String {
         }
         _ => dir.to_string(),
     }
-}
-
-/// A session id short enough to read and still unique in practice.
-fn short(id: &str) -> &str {
-    id.get(..8).unwrap_or(id)
 }
 
 pub const HELP: &str = "\

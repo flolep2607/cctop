@@ -3383,17 +3383,10 @@ fn remote_json(
 ///
 /// Prefixes because session ids are uuids and the report link is a thing people
 /// paste into chat. An ambiguous prefix resolves to nothing rather than to the
-/// first match — the wrong session's costs is a worse answer than none.
+/// first match — the wrong session's costs is a worse answer than none. The
+/// rules are core's, shared with every other face that takes an id.
 fn find<'a>(sessions: &'a [Session], id: &str) -> Option<&'a Session> {
-    if id.is_empty() {
-        return None;
-    }
-    if let Some(exact) = sessions.iter().find(|s| s.session_id == id) {
-        return Some(exact);
-    }
-    let mut matches = sessions.iter().filter(|s| s.session_id.starts_with(id));
-    let first = matches.next()?;
-    matches.next().is_none().then_some(first)
+    cctop_core::session::lookup::lookup(sessions, id).found()
 }
 
 #[cfg(test)]
