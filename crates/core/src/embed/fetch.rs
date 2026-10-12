@@ -90,10 +90,8 @@ pub fn fetch() -> Result<PathBuf> {
         }
         // Written beside and renamed, so an interrupted fetch never leaves a
         // half-written file that `present` would then call a model.
-        let target = dir.join(name);
-        let tmp = target.with_extension("part");
-        std::fs::write(&tmp, &body).with_context(|| format!("could not write {name}"))?;
-        std::fs::rename(&tmp, &target).with_context(|| format!("could not place {name}"))?;
+        crate::util::write_atomic(&dir.join(name), &body, false)
+            .with_context(|| format!("could not write {name}"))?;
         println!("  {name}  {:.1} MB", body.len() as f64 / 1_048_576.0);
     }
 
@@ -111,7 +109,8 @@ mod tests {
     use std::path::Path;
 
     /// `present` is about all three files, so a partial directory is not a
-    /// model — which is what the `.part` rename protects against.
+    /// model — which is what writing each one beside and renaming it protects
+    /// against.
     #[test]
     fn a_partial_download_is_not_a_model() {
         let dir = std::env::temp_dir().join(format!("cctop-fetch-partial-{}", std::process::id()));
