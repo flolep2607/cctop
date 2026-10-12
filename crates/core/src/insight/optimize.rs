@@ -538,7 +538,7 @@ pub fn report(analyses: &[&Analysis]) -> String {
             out,
             "  {:<6} {:<52} {:>9}  {}",
             f.class.as_str(),
-            ellipsise(&f.title, 52),
+            crate::util::truncate(&f.title, 52),
             amount,
             // A note's figure is what was spent, not what could be saved, so it
             // must not read as a saving that was measured.
@@ -644,14 +644,6 @@ pub fn as_json(analyses: &[&Analysis]) -> String {
         })).collect::<Vec<_>>(),
     });
     serde_json::to_string_pretty(&doc).unwrap_or_else(|_| "{}".into())
-}
-
-/// Cut to `width`, marking that something was cut.
-fn ellipsise(s: &str, width: usize) -> String {
-    match s.chars().count() > width {
-        false => s.to_string(),
-        true => s.chars().take(width - 1).collect::<String>() + "\u{2026}",
-    }
 }
 
 #[cfg(test)]

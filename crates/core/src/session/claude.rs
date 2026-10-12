@@ -1186,14 +1186,7 @@ impl Extractor {
         {
             let joined = text.join("\n\n");
             let joined = joined.trim();
-            stats.last_text = Some(match joined.chars().count() > MAX_LAST_TEXT_CHARS {
-                true => {
-                    let mut cut: String = joined.chars().take(MAX_LAST_TEXT_CHARS).collect();
-                    cut.push('…');
-                    cut
-                }
-                false => joined.to_string(),
-            });
+            stats.last_text = Some(crate::util::clip(joined, MAX_LAST_TEXT_CHARS));
             stats.last_text_ts = ts.to_string();
         }
     }

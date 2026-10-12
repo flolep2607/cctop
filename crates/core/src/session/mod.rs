@@ -2127,13 +2127,13 @@ pub struct SessionData {
 fn trim_tool_details(details: &mut HashMap<String, Vec<ToolDetail>>) {
     for list in details.values_mut() {
         for d in list.iter_mut() {
-            truncate_chars(&mut d.d, crate::config::MAX_TOOL_DETAIL_CHARS);
+            clip_in_place(&mut d.d, crate::config::MAX_TOOL_DETAIL_CHARS);
             if let Some(full) = d.full.as_mut() {
-                truncate_chars(full, crate::config::MAX_TOOL_DETAIL_CHARS);
+                clip_in_place(full, crate::config::MAX_TOOL_DETAIL_CHARS);
             }
             if let Some(delta) = d.delta.as_mut() {
                 for line in delta.hunks.iter_mut() {
-                    truncate_chars(line, crate::config::MAX_DIFF_LINE_CHARS);
+                    clip_in_place(line, crate::config::MAX_DIFF_LINE_CHARS);
                 }
             }
         }
@@ -2236,14 +2236,11 @@ pub(crate) fn record_cost(
     *by_minute.entry(unix_minute(dt)).or_insert(0.0) += cost;
 }
 
-/// Truncate to at most `max` characters, never mid-character.
-fn truncate_chars(s: &mut String, max: usize) {
-    if s.chars().count() <= max {
-        return;
+/// [`crate::util::clip`] in place, leaving a string that fits untouched.
+fn clip_in_place(s: &mut String, max: usize) {
+    if crate::util::cells(s) > max {
+        *s = crate::util::clip(s, max);
     }
-    let end = s.char_indices().nth(max).map(|(i, _)| i).unwrap_or(s.len());
-    s.truncate(end);
-    s.push('…');
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]

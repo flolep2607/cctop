@@ -1027,10 +1027,7 @@ fn ask_of(body: &serde_json::Value) -> Option<String> {
         .chars()
         .map(|c| if c.is_control() { ' ' } else { c })
         .collect();
-    Some(match line.chars().count() > MAX_ASK {
-        true => line.chars().take(MAX_ASK - 1).chain(['…']).collect(),
-        false => line,
-    })
+    Some(crate::util::truncate(&line, MAX_ASK))
 }
 
 /// What an event says about a session, as far as the UI is concerned.

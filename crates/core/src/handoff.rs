@@ -385,21 +385,11 @@ fn closing(chat: &chat::Conversation) -> Vec<String> {
         .collect()
 }
 
-/// Cut to `max` characters, never mid-character, marking that it was cut.
-///
-/// The ellipsis is load-bearing in a document an agent reads as fact: a
-/// half-quoted instruction that ends cleanly reads as the whole instruction.
+/// Trimmed, then cut by [`crate::util::clip`], whose ellipsis is
+/// load-bearing here: a document an agent reads as fact must not end a
+/// half-quoted instruction cleanly, as though it were the whole instruction.
 fn clip(text: &str, max: usize) -> String {
-    let text = text.trim();
-    if text.chars().count() <= max {
-        return text.to_string();
-    }
-    let end = text
-        .char_indices()
-        .nth(max)
-        .map(|(i, _)| i)
-        .unwrap_or(text.len());
-    format!("{}…", text[..end].trim_end())
+    crate::util::clip(text.trim(), max)
 }
 
 /// Quote `text` as markdown, so a prompt that was itself markdown — a list, a
