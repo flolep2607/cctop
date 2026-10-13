@@ -1950,16 +1950,8 @@ fn remove_dir_if_present(path: &std::path::Path) -> std::io::Result<()> {
 mod tests {
     use super::*;
 
-    /// A unique temp path, extension-free so callers can make it a file or dir.
     fn temp_path(tag: &str) -> PathBuf {
-        std::env::temp_dir().join(format!(
-            "cctop-claude-{tag}-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("clock after epoch")
-                .as_nanos()
-        ))
+        crate::session::temp_path(&format!("claude-{tag}"))
     }
 
     /// Write a transcript to a unique temp path and parse it.

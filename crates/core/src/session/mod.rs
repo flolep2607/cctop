@@ -19,6 +19,47 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+/// Open another harness's SQLite database for reading, and only reading.
+///
+/// Read-only because the database belongs to an agent that may be writing it
+/// right now, and cctop is a monitor: it has no business taking a write lock
+/// on somebody else's state. No-mutex because each connection is used by one
+/// thread — OpenCode's are kept per thread for that reason — so SQLite's own
+/// serialisation would be a lock taken and released for nothing on every
+/// call.
+pub(crate) fn readonly(path: &Path) -> rusqlite::Result<rusqlite::Connection> {
+    use rusqlite::OpenFlags;
+    rusqlite::Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+}
+
+/// Delete a session whose whole record is its one transcript file — Codex's
+/// rollout, Gemini's and Pi's JSONL. A session with no file has nothing to
+/// remove, which is success rather than an error: the row is gone either way.
+pub fn delete_transcript(session: &Session) -> std::io::Result<()> {
+    match &session.data_file {
+        Some(path) => std::fs::remove_file(path),
+        None => Ok(()),
+    }
+}
+
+/// A path under the temp directory no other test, in this process or a
+/// concurrent one, will pick: the pid and the clock's nanoseconds. No
+/// extension, so a caller can make it a file of any kind or a directory.
+#[cfg(test)]
+pub(crate) fn temp_path(tag: &str) -> PathBuf {
+    std::env::temp_dir().join(format!(
+        "cctop-{tag}-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock after epoch")
+            .as_nanos()
+    ))
+}
+
 /// Where a session is being driven from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Surface {

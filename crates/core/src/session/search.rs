@@ -20,8 +20,8 @@
 //! disk and will not.
 
 use super::Session;
+use super::readonly;
 use crate::pricing::Provider;
-use rusqlite::{Connection, OpenFlags};
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 
@@ -517,13 +517,6 @@ fn scan_file(path: &Path, progress: &mut Progress) -> bool {
             return false;
         }
     }
-}
-
-fn readonly(path: &Path) -> rusqlite::Result<Connection> {
-    Connection::open_with_flags(
-        path,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
 }
 
 /// Scan the messages OpenCode recorded for one session.

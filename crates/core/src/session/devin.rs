@@ -15,22 +15,15 @@
 //! Windsurf are in.
 
 use super::extract::{push_tool_detail, tool_detail};
+use super::readonly;
 use super::{ActivityState, Costs, ModelBreakdown, Session, SessionData, Tokens};
 use crate::config;
 use crate::pricing::Provider;
 use crate::util;
-use rusqlite::{Connection, OpenFlags, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::Path;
-
-/// Open a read-only connection to a Devin SQLite database.
-fn readonly_db(path: &Path) -> rusqlite::Result<Connection> {
-    Connection::open_with_flags(
-        path,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-}
 
 /// The database that goes with `transcript`: `transcripts/<id>.json` sits
 /// beside `sessions.db`, in this user's home or, for root, in whoever's home
@@ -65,7 +58,7 @@ pub fn list_sessions() -> Vec<Session> {
 }
 
 fn list_in(db_path: &Path, transcripts: &Path, sessions: &mut Vec<Session>) {
-    let Ok(db) = readonly_db(db_path) else {
+    let Ok(db) = readonly(db_path) else {
         return;
     };
 
@@ -362,7 +355,7 @@ pub fn tool_statuses(session_id: Option<&str>, db: &Path) -> HashMap<String, Str
     let Some(session_id) = session_id else {
         return out;
     };
-    let Ok(db) = readonly_db(db) else {
+    let Ok(db) = readonly(db) else {
         return out;
     };
     let Ok(mut stmt) = db.prepare(
@@ -411,7 +404,7 @@ pub fn delete(session: &Session) -> std::io::Result<()> {
 
 /// Name of the most recently invoked tool, from the database's call ledger.
 pub fn extract_last_tool(session: &Session) -> String {
-    let Ok(db) = readonly_db(&db_for(session.data_file.as_deref())) else {
+    let Ok(db) = readonly(&db_for(session.data_file.as_deref())) else {
         return String::new();
     };
     db.query_row(
@@ -454,7 +447,7 @@ pub fn extract_last_tool(session: &Session) -> String {
 /// of the turn unless its tool calls are still in flight. `agent_mode` on the
 /// session row answers the second question `live_state` asks.
 pub fn live_state(session: &Session) -> (ActivityState, Option<crate::hook::Permission>) {
-    let Ok(db) = readonly_db(&db_for(session.data_file.as_deref())) else {
+    let Ok(db) = readonly(&db_for(session.data_file.as_deref())) else {
         return (ActivityState::Working, None);
     };
     (
@@ -527,7 +520,7 @@ fn permission_mode(db: &Connection, session_id: &str) -> Option<crate::hook::Per
 /// size comes from the model table, and a model it does not know simply has
 /// no context figure to show.
 pub fn extract_context(session: &Session) -> Option<crate::session::ContextUsage> {
-    let db = readonly_db(&db_for(session.data_file.as_deref())).ok()?;
+    let db = readonly(&db_for(session.data_file.as_deref())).ok()?;
     let used = db
         .query_row(
             "SELECT metadata FROM message_nodes \

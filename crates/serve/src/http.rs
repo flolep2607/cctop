@@ -1266,10 +1266,15 @@ mod tests {
     #[test]
     fn the_head_keeps_its_bounds() {
         assert_eq!(
-            parse_raw(b"DELETE / HTTP/1.1\r\n\r\n").err().map(|(s, _)| s),
+            parse_raw(b"DELETE / HTTP/1.1\r\n\r\n")
+                .err()
+                .map(|(s, _)| s),
             Some(405)
         );
-        assert_eq!(parse_raw(b"nonsense\r\n\r\n").err().map(|(s, _)| s), Some(400));
+        assert_eq!(
+            parse_raw(b"nonsense\r\n\r\n").err().map(|(s, _)| s),
+            Some(400)
+        );
         assert_eq!(parse_raw(b"").err().map(|(s, _)| s), Some(400));
         let mut huge = b"GET / HTTP/1.1\r\n".to_vec();
         for i in 0..MAX_HEADER_BYTES / 16 {
@@ -1278,7 +1283,9 @@ mod tests {
         huge.extend_from_slice(b"\r\n");
         assert_eq!(parse_raw(&huge).err().map(|(s, _)| s), Some(431));
         assert_eq!(
-            parse_raw(b"POST /api/act/x HTTP/1.1\r\n\r\n").err().map(|(s, _)| s),
+            parse_raw(b"POST /api/act/x HTTP/1.1\r\n\r\n")
+                .err()
+                .map(|(s, _)| s),
             Some(411)
         );
         let open = parse_raw(b"GET /x?a=1 HTTP/1.1\r\nCookie: k=v").unwrap();
