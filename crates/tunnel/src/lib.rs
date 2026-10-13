@@ -31,6 +31,11 @@
 // so building needs no `capnp` toolchain. They live at the crate root because
 // the generator emits absolute `crate::<schema>_capnp::…` paths between
 // schemas — hoisting them keeps the output usable verbatim.
+//
+// Regenerate them with `tools/regen-capnp.sh` after changing `schemas/` or
+// the `capnp` runtime version; it pins the matching capnpc-rust and has a
+// `--check` mode. (Upstream's changelog names `scripts/regen-schemas.sh`,
+// which did not come over with the crate.)
 #[allow(
     clippy::all,
     unused,
