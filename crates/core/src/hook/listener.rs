@@ -89,77 +89,110 @@ impl Listener {
     }
 }
 
+/// One line of cctop's own wire format, as [`envelope`] writes it.
+///
+/// The hook that wrote the line and the cctop reading it need not be the same
+/// version: an install names whatever binary was current when it was made, and
+/// a cctop that is running keeps reading after an update has replaced the one
+/// on disk. So the reader has to take a line from either side of a change to
+/// the format. Every field is optional and defaults to absent, unknown fields
+/// are ignored, and every field is [`Lenient`] — one whose value is not the
+/// type expected reads as absent rather than losing the whole event, which is
+/// what the hand-walked `serde_json::Value` this replaced did field by field.
+///
+/// Two fields are needed for there to be an event at all, and [`parse`] says
+/// which: `session_id` and `event`.
+///
+/// ponytail: a key written twice in one line refuses the line, where the
+/// `Value` walk took the last copy. [`envelope`] builds the line with
+/// `json!`, an object literal that cannot repeat a key, so no hook of any
+/// version writes one.
+#[derive(Default, serde::Deserialize)]
+#[serde(default)]
+struct Wire {
+    session_id: Lenient<String>,
+    event: Lenient<String>,
+    notification_type: Lenient<String>,
+    agent_id: Lenient<String>,
+    cwd: Lenient<String>,
+    permission_mode: Lenient<String>,
+    ask: Lenient<String>,
+    question: Lenient<bool>,
+    call: Lenient<crate::yolo_log::Call>,
+    pids: Lenient<Vec<Lenient<u64>>>,
+    sandbox: Lenient<String>,
+}
+
+/// A value that is dropped, not fatal, when it is not a `T`.
+///
+/// A plain `Option<T>` field would turn one ill-typed field into a failed
+/// line, and with it an event lost from a session that did nothing wrong.
+/// Going through [`serde_json::Value`] costs one small allocation per field,
+/// on a line read once.
+struct Lenient<T>(Option<T>);
+
+impl<T> Default for Lenient<T> {
+    fn default() -> Self {
+        Lenient(None)
+    }
+}
+
+impl<'de, T: serde::de::DeserializeOwned> serde::Deserialize<'de> for Lenient<T> {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = <serde_json::Value as serde::Deserialize>::deserialize(deserializer)?;
+        Ok(Lenient(T::deserialize(value).ok()))
+    }
+}
+
 pub(super) fn parse(line: &str) -> Option<Event> {
-    let value: serde_json::Value = serde_json::from_str(line).ok()?;
-    let session_id = value.get("session_id")?.as_str()?.to_string();
+    // A derived struct also takes its fields positionally from an array, so
+    // `["s","Stop"]` would read as an event. The wire is an object or nothing.
+    if !line.trim_start().starts_with('{') {
+        return None;
+    }
+    let wire: Wire = serde_json::from_str(line).ok()?;
+    let session_id = wire.session_id.0?;
     // A session cctop cannot name is an event it cannot apply to a row.
     if session_id.is_empty() {
         return None;
     }
+    let event = wire.event.0?;
+    let agent = wire.agent_id.0.filter(|id| !id.is_empty());
     Some(Event {
         session_id,
-        pids: value
-            .get("pids")
-            .and_then(|v| v.as_array())
-            .map(|pids| {
-                pids.iter()
-                    .filter_map(|p| p.as_u64())
-                    .map(|p| p as u32)
-                    .collect()
-            })
-            .unwrap_or_default(),
-        sandbox: value
-            .get("sandbox")
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty())
-            .map(str::to_string),
+        pids: wire
+            .pids
+            .0
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|p| p.0)
+            .map(|p| p as u32)
+            .collect(),
+        sandbox: wire.sandbox.0.filter(|s| !s.is_empty()),
         // Claude Code names it `agent_id`, and cctop stores that subagent's
         // transcript as `agent-<agent_id>.jsonl`, so the two line up directly.
-        finished_agent: matches!(
-            value.get("event").and_then(|v| v.as_str()),
-            Some("SubagentStop" | "subagentStop")
-        )
-        .then(|| value.get("agent_id").and_then(|v| v.as_str()))
-        .flatten()
-        .filter(|id| !id.is_empty())
-        .map(str::to_string),
-        agent: value
-            .get("agent_id")
-            .and_then(|v| v.as_str())
-            .filter(|id| !id.is_empty())
-            .map(str::to_string),
+        finished_agent: agent
+            .clone()
+            .filter(|_| matches!(event.as_str(), "SubagentStop" | "subagentStop")),
+        agent,
         reported: Reported {
             // The prompt that auto mode may answer on your behalf, and the only
             // one worth holding: an MCP elicitation and a plain notification
             // are questions for a person however long you wait.
-            provisional: matches!(
-                value.get("event").and_then(|v| v.as_str()),
-                Some("PermissionRequest" | "permission.asked")
-            ),
+            provisional: matches!(event.as_str(), "PermissionRequest" | "permission.asked"),
             signal: signal_of(
-                value.get("event")?.as_str()?,
-                value
-                    .get("notification_type")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default(),
+                &event,
+                wire.notification_type.0.as_deref().unwrap_or_default(),
             )?,
-            cwd: value
-                .get("cwd")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default()
-                .to_string(),
-            permission: value
-                .get("permission_mode")
-                .and_then(|v| v.as_str())
+            cwd: wire.cwd.0.unwrap_or_default(),
+            permission: wire
+                .permission_mode
+                .0
+                .as_deref()
                 .and_then(Permission::parse),
-            ask: value
-                .get("ask")
-                .and_then(|v| v.as_str())
-                .map(str::to_string),
-            question: value.get("question").and_then(|v| v.as_bool()) == Some(true),
-            call: value
-                .get("call")
-                .and_then(|v| serde_json::from_value(v.clone()).ok()),
+            ask: wire.ask.0,
+            question: wire.question.0 == Some(true),
+            call: wire.call.0,
             at: std::time::Instant::now(),
         },
     })
@@ -230,6 +263,37 @@ mod tests {
             let event = parse(std::str::from_utf8(&line).unwrap().trim()).expect("parse");
             assert!(event.finished_agent.is_none(), "{name} named a subagent");
         }
+    }
+
+    /// A line from a hook older or newer than this cctop still reads: a field
+    /// it has never heard of is ignored, one of the wrong type reads as absent,
+    /// and one that is missing means what it always meant. Only the two
+    /// without which there is no event can sink the line.
+    #[test]
+    fn a_line_from_another_version_reads_as_far_as_it_can() {
+        let event = parse(
+            r#"{"session_id":"s","event":"Stop","from_the_future":{"x":[1]},
+                "pids":[7,"eight",-1,9],"question":"yes","call":null,"cwd":42}"#,
+        )
+        .expect("parse");
+        assert_eq!(event.session_id, "s");
+        assert_eq!(event.pids, vec![7, 9]);
+        assert_eq!(event.reported.signal, signal_of("Stop", "").unwrap());
+        assert!(!event.reported.question);
+        assert!(!event.reported.provisional);
+        assert!(event.reported.call.is_none());
+        assert_eq!(event.reported.cwd, "");
+        assert!(event.reported.permission.is_none());
+        assert!(event.reported.ask.is_none());
+        assert!(event.sandbox.is_none());
+        assert!(event.agent.is_none());
+        assert!(event.finished_agent.is_none());
+
+        assert!(parse(r#"{"event":"Stop"}"#).is_none());
+        assert!(parse(r#"{"session_id":"s"}"#).is_none());
+        assert!(parse(r#"{"session_id":7,"event":"Stop"}"#).is_none());
+        assert!(parse(r#"{"session_id":"s","event":["Stop"]}"#).is_none());
+        assert!(parse(r#"["s","Stop"]"#).is_none());
     }
 
     /// The envelope must survive the payload, whatever is in it: the fields are
