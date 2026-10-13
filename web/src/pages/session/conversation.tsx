@@ -1,21 +1,20 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { ArrowDown, ChevronDown, ChevronUp, ChevronsDownUp, ChevronsUpDown, Rows3, Rows4, Search, SendHorizontal } from "lucide-react";
+import { ArrowDown, ChevronDown, ChevronUp, ChevronsDownUp, ChevronsUpDown, Rows3, Rows4, Search } from "lucide-react";
 import { toast } from "sonner";
-import { cn } from "@/lib/utils";
-import { act } from "@/lib/api";
-import { CAN_ACT, OPENING_QUERY, withToken } from "@/lib/config";
+import { OPENING_QUERY, withToken } from "@/lib/config";
 import { copyText } from "@/lib/format";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Kbd } from "@/components/ui/kbd";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
-import { PromptBar } from "@/components/prompt-bar";
+import { seenSeq, writeSeen } from "@/lib/seen";
 import { useStored } from "@/hooks/use-live";
 import type { Session, Turn } from "@/lib/types";
 import { TurnView } from "./turn";
 import { AgentsContext, aboutAgent, agentCalls, type Agents } from "./agents";
 import { useChat } from "./use-chat";
+import { Composer } from "./composer";
 
 // How many of a long conversation's turns are drawn at once: the newest
 // CHUNK, one chunk more per click. The tail is what is live; drawing all of a
@@ -32,28 +31,6 @@ const turnText = (t: Turn) =>
     .filter(Boolean)
     .join(" ")
     .toLowerCase();
-
-// localStorage["cctop-seen"], shared with the dashboard: {id: {seq, at}} — the
-// newest turn seq this session was last seen at. Read once per visit, so the
-// line between read and new does not move under the reader.
-function readSeen(id: string): number | null {
-  try {
-    const seq = Number(JSON.parse(localStorage.getItem("cctop-seen") || "{}")[id]?.seq);
-    return isFinite(seq) ? seq : null;
-  } catch {
-    return null;
-  }
-}
-function writeSeen(id: string, seq: number) {
-  try {
-    const all = JSON.parse(localStorage.getItem("cctop-seen") || "{}");
-    const prev = Number(all[id]?.seq);
-    all[id] = { seq: Math.max(seq, isFinite(prev) ? prev : 0), at: Date.now() };
-    localStorage.setItem("cctop-seen", JSON.stringify(all));
-  } catch {
-    /* bookkeeping only */
-  }
-}
 
 const typing = (t: EventTarget | null) =>
   t instanceof HTMLElement && (t.isContentEditable || /^(INPUT|SELECT|TEXTAREA)$/.test(t.tagName));
@@ -80,7 +57,7 @@ export function Conversation({ id, live, active }: { id: string; live: Session |
   const wantTurn = useRef<number | null>(null);
   const [scrollTo, setScrollTo] = useState<number | null>(null);
 
-  if (seenBase.current === undefined) seenBase.current = readSeen(id);
+  if (seenBase.current === undefined) seenBase.current = seenSeq(id);
   const base = seenBase.current;
 
   // A "#chat/turn-12" link opens on that turn once the conversation is drawn.
@@ -413,60 +390,6 @@ export function Conversation({ id, live, active }: { id: string; live: Session |
       </div>
 
       <Composer id={id} live={live} />
-    </div>
-  );
-}
-
-// The prompt box, pinned under the conversation rather than inside it, so it
-// is always on screen. One line, because that is what a pty submit is. While
-// the session is stopped it is the Resume button instead.
-function Composer({ id, live }: { id: string; live: Session | null }) {
-  const [text, setText] = useState("");
-  const [busy, setBusy] = useState(false);
-  if (!CAN_ACT)
-    return (
-      <div className="text-muted-foreground shrink-0 border-t px-4 py-2.5 text-xs">
-        View-only link — replies, Allow/Deny and resume need the “serving on” link <code>cctop serve</code> printed first.
-      </div>
-    );
-  const running = !!live?.running;
-  const asking = running && live?.state === "asking";
-  const submit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setBusy(true);
-    try {
-      if (!running) {
-        const done = await act("resume", id);
-        toast.success(done.message || "Resumed");
-      } else {
-        if (!text.trim()) return;
-        const done = await act("send", id, { text: text.trim() });
-        toast.success(done.message || "Sent");
-        setText("");
-      }
-    } catch (err) {
-      toast.error(String((err as Error).message || err));
-    } finally {
-      setBusy(false);
-    }
-  };
-  return (
-    <div className="bg-background shrink-0 border-t px-4 py-2.5">
-      {asking && live && <PromptBar key={live.asking_for ?? ""} session={live} className="mb-2" />}
-      <form onSubmit={submit} className="flex gap-2">
-        <Input
-          value={text}
-          onChange={(e) => setText(e.target.value)}
-          disabled={!running || busy}
-          maxLength={4000}
-          placeholder={running ? "Answer this session…" : "Nothing is running this session"}
-          className={cn("h-9", !running && "opacity-60")}
-        />
-        <Button type="submit" disabled={busy} className="h-9" title={running ? "" : "Start this session's harness back up on this transcript"}>
-          {running ? <SendHorizontal /> : null}
-          {running ? "Send" : "Resume"}
-        </Button>
-      </form>
     </div>
   );
 }

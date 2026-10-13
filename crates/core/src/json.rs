@@ -10,14 +10,18 @@ use crate::util;
 use serde::Serialize;
 
 #[derive(Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct JsonAccount {
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional = nullable))]
     email: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional = nullable))]
     organization: Option<String>,
 }
 
 #[derive(Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct JsonCost {
     available: bool,
     /// `null` when the plan bundles this provider's usage.
@@ -48,6 +52,7 @@ pub struct JsonCost {
     /// `YYYY-MM-DDTHH` -> USD, trimmed to [`JSON_HOURS`] hours.
     by_hour: std::collections::BTreeMap<String, f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional = nullable))]
     breakdown: Option<crate::session::Costs>,
 }
 
@@ -77,6 +82,7 @@ fn trimmed_buckets(
 }
 
 #[derive(Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct JsonTokens {
     input: u64,
     output: u64,
@@ -85,15 +91,18 @@ pub struct JsonTokens {
 }
 
 #[derive(Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct JsonActivity {
     tool_count: u64,
     /// Calls the transcript reported as failed. Absent — rather than zero —
     /// where the harness records no per-call outcome, since the two mean very
     /// different things to anything totalling them up.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional = nullable))]
     tool_errors: Option<u64>,
     /// Compactions the session has been through. Claude Code only.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional = nullable))]
     compactions: Option<u32>,
     tools: std::collections::HashMap<String, u64>,
     skill_count: u64,
@@ -109,6 +118,7 @@ pub struct JsonActivity {
 }
 
 #[derive(Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct JsonSession {
     provider: &'static str,
     surface: &'static str,
@@ -117,21 +127,25 @@ pub struct JsonSession {
     state: &'static str,
     /// What an `asking` session wants to do, when its hook or its screen said.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional = nullable))]
     asking_for: Option<String>,
     /// Present, and true, when what an `asking` session holds is a question
     /// with choices rather than a permission prompt: Allow and Deny do not
     /// apply to it.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
+    #[cfg_attr(feature = "ts", ts(optional = nullable))]
     asking_question: bool,
     /// Present when cctop allows every permission prompt this session raises:
     /// since when, and what it has allowed. See [`crate::yolo`].
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional = nullable))]
     yolo: Option<crate::yolo::Entry>,
     session_id: String,
     /// The machine a remote row is on — an ssh target, or a sibling on the
     /// Cloudflare account ([`crate::peer`]). Absent for this machine's own
     /// rows, so a peer reading this document can keep to those.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional = nullable))]
     host: Option<String>,
     started_at: String,
     last_active: String,
@@ -140,29 +154,36 @@ pub struct JsonSession {
     /// Login name of the user the session belongs to, when cctop is reading
     /// every user's homes and this one is not the reader's own.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional = nullable))]
     user: Option<String>,
     /// Which Claude profile — which `$CLAUDE_CONFIG_DIR` — the session was read
     /// out of. Absent for every other harness, none of which has the concept.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional = nullable))]
     profile: Option<String>,
     /// Where the session is working when `cctop sandbox` launched it: the
     /// agent runs here, its commands and `path` are on `host`.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional = nullable))]
     sandbox: Option<JsonSandbox>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional = nullable))]
     account: Option<JsonAccount>,
     model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional = nullable))]
     harness: Option<String>,
     /// Branch checked out in the working directory, read on the machine the
     /// session is on — which is why it is carried rather than looked up by
     /// whoever reads this.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional = nullable))]
     branch: Option<String>,
     /// How much the session asks before it acts, when its own hooks said.
     /// Absent for a session with no cctop hooks installed — nothing in a
     /// transcript records this, so it cannot be inferred.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional = nullable))]
     permission: Option<&'static str>,
     models: Vec<String>,
     plan: &'static str,
@@ -170,6 +191,7 @@ pub struct JsonSession {
     /// CPU and resident memory across the session's process tree. Absent where
     /// no per-session process exists to measure.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional = nullable))]
     process: Option<JsonProcess>,
     cost: JsonCost,
     tokens: JsonTokens,
@@ -177,26 +199,33 @@ pub struct JsonSession {
     tokens_per_min: f64,
     activity: JsonActivity,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional = nullable))]
     rates: Option<crate::session::CodexRates>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[cfg_attr(feature = "ts", ts(optional = nullable))]
     subagents: Vec<crate::session::Subagent>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional = nullable))]
     context: Option<crate::session::ContextUsage>,
     /// Other running agents on this session's ground. Absent when there are
     /// none, which is the ordinary case.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional = nullable))]
     conflict: Option<JsonConflict>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional = nullable))]
     error: Option<String>,
 }
 
 #[derive(Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct JsonSandbox {
     host: String,
     path: String,
 }
 
 #[derive(Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct JsonProcess {
     cpu: f32,
     memory: u64,
@@ -206,6 +235,7 @@ pub struct JsonProcess {
 }
 
 #[derive(Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct JsonConflict {
     /// `file` when a peer has written a file this session also wrote,
     /// `directory` when they merely share a repository.

@@ -1,18 +1,21 @@
 import { Badge } from "@/components/ui/badge";
 import { DataTable, Panel, Section, Stat } from "@/components/section";
-import { clock, money, secs, tokens } from "@/lib/format";
+import { clock, costLabel, money, secs, tokens } from "@/lib/format";
 import { Ansi } from "@/components/ansi";
 import { stripAnsi } from "@/lib/ansi";
 import type { Report } from "@/lib/types";
+import type { ReportBreakdown } from "@/lib/gen/ReportBreakdown";
+import type { ReportCall } from "@/lib/gen/ReportCall";
 
 const when = (ts?: string) => (ts || "").replace("T", " ").replace(/\..*$/, "");
 
 function Tiles({ r }: { r: Report }) {
   // "incl" and "—" are different claims: the plan bundles this, or the
   // transcript records no billable usage at all.
-  const cost = r.cost.included ? "incl" : r.cost.available ? money(r.cost.total) : "—";
+  const cost = costLabel(r.cost);
   const pct = r.activity.error_rate != null ? Math.round(r.activity.error_rate * 100) : null;
-  const ctx = r.context ? Math.round(r.context.percent_to_compact) : null;
+  const c = r.context;
+  const ctx = c ? Math.round(c.percent_to_compact) : null;
   return (
     <div className="mb-7 grid grid-cols-2 gap-2.5 sm:grid-cols-[repeat(auto-fit,minmax(140px,1fr))]">
       <Stat label="Cost" value={cost} note={r.cost.included ? "bundled by this plan" : undefined} />
@@ -25,10 +28,10 @@ function Tiles({ r }: { r: Report }) {
       {pct !== null && (
         <Stat label="Tool errors" value={pct + "%"} note={(r.activity.tool_errors || 0) + " failed"} tone={pct >= 25 ? "bad" : pct >= 10 ? "warn" : null} />
       )}
-      {ctx !== null && (
-        <Stat label="Context" value={ctx + "%"} note={`${tokens(r.context.used)} of ${tokens(r.context.max)}`} tone={ctx >= 90 ? "bad" : ctx >= 70 ? "warn" : null} />
+      {c && ctx !== null && (
+        <Stat label="Context" value={ctx + "%"} note={`${tokens(c.used)} of ${tokens(c.max)}`} tone={ctx >= 90 ? "bad" : ctx >= 70 ? "warn" : null} />
       )}
-      {r.context?.compactions > 0 && <Stat label="Compactions" value={r.context.compactions} tone={r.context.compactions >= 3 ? "warn" : null} />}
+      {c && c.compactions > 0 && <Stat label="Compactions" value={c.compactions} tone={c.compactions >= 3 ? "warn" : null} />}
       {(r.activity.lines_added || r.activity.lines_removed) ? (
         <Stat label="Lines" value={"+" + r.activity.lines_added} note={"−" + r.activity.lines_removed} />
       ) : null}
@@ -67,7 +70,8 @@ function Failures({ r }: { r: Report }) {
   );
 }
 
-const PARTS: [string, string, string][] = [
+// The parts the window is made of: every count but the total and the gap.
+const PARTS: [Exclude<keyof ReportBreakdown, "total" | "unaccounted" | "after_compaction" | "superseded">, string, string][] = [
   ["startup", "Startup", "var(--muted-foreground)"],
   ["tool_output", "Tool output", "var(--chart-1)"],
   ["tool_input", "Tool input", "var(--chart-4)"],
@@ -188,7 +192,7 @@ function Spend({ r }: { r: Report }) {
           <DataTable
             head={[["Model"], ["Input", "num"], ["Output", "num"], ["Cost", "num"]]}
             rows={byModel.map((m: { model: string; tokens: { input: number; output: number }; total: number }) => [
-              m.model, tokens(m.tokens.input), tokens(m.tokens.output), r.cost.included ? "incl" : money(m.total),
+              m.model, tokens(m.tokens.input), tokens(m.tokens.output), costLabel({ total: m.total, included: r.cost.included }),
             ])}
           />
         )}
@@ -197,7 +201,7 @@ function Spend({ r }: { r: Report }) {
   );
 }
 
-type Call = { tool: string; detail: string; failed?: boolean; origin?: string; duration_ms?: number | null; window_growth?: number | null; shared?: number; ts?: string };
+type Call = ReportCall;
 
 const callCell = (c: Call, extra?: string | null) => (
   <span className="flex flex-wrap items-baseline gap-1.5">
@@ -291,7 +295,7 @@ function Subagents({ r }: { r: Report }) {
         <DataTable
           head={[["Type"], ["Description"], ["Tools", "num"], ["Cost", "num"]]}
           rows={r.subagents.map((a: { type: string; description: string; tool_count: number; cost: number }) => [
-            <span key="type" className="font-mono text-xs">{a.type}</span>, a.description, a.tool_count, r.cost.included ? "incl" : money(a.cost),
+            <span key="type" className="font-mono text-xs">{a.type}</span>, a.description, a.tool_count, costLabel({ total: a.cost, included: r.cost.included }),
           ])}
         />
       </Panel>

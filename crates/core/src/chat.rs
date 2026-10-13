@@ -116,6 +116,7 @@ const MAX_DIFF_LINES: usize = 200;
 /// cctops: a remote row's conversation is this, read off an ssh pipe rather
 /// than off a transcript — see [`crate::fleet`].
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct Conversation {
     /// Whether this harness has a reader at all. False carries a `note` saying
     /// why, and is not an error: the rest of the report is still true.
@@ -192,6 +193,7 @@ impl Conversation {
 
 /// One thing that was said, and what it caused.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct Turn {
     /// The turn's place in the whole transcript, oldest counting from zero.
     ///
@@ -227,6 +229,11 @@ pub struct Turn {
     pub clipped: bool,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub tools: Vec<ToolUse>,
+    /// `text` rendered from markdown to HTML, safe to set as markup: filled
+    /// by the web server for the page it answers, and absent everywhere else —
+    /// the TUI, an export and a peer's `--chat` all read `text`.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub html: Option<String>,
 }
 
 impl Turn {
@@ -242,6 +249,7 @@ impl Turn {
             tools: Vec::new(),
             from: None,
             agent: None,
+            html: None,
         }
     }
 
@@ -279,6 +287,7 @@ impl Turn {
 
 /// One tool call, with whatever came back from it.
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct ToolUse {
     /// The name as the transcript spelled it, with an MCP server's prefix made
     /// readable — `mcp__linear__list_issues` is `linear: list issues` on screen
@@ -319,6 +328,7 @@ pub struct ToolUse {
 /// work under the call that started it, rather than read every agent's traffic
 /// as one channel.
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct AgentCall {
     /// What [`build_agent`] takes: the subagent's transcript stem, or the call
     /// id for one whose transcript is gone.
@@ -367,6 +377,9 @@ pub struct AgentCall {
     /// a reader must not present as the agent's conclusion.
     #[serde(skip_serializing_if = "std::ops::Not::not", default)]
     pub last_message: bool,
+    /// `report` rendered to HTML, as [`Turn::html`] is.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub report_html: Option<String>,
 }
 
 /// How a reader labels a report that is only an agent's last message.

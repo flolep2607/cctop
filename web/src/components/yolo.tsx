@@ -5,6 +5,7 @@ import { cn } from "@/lib/utils";
 import { ANSWERABLE, setYolo } from "@/lib/api";
 import { CAN_ACT } from "@/lib/config";
 import { ago } from "@/lib/format";
+import { useTick } from "@/hooks/use-live";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -167,6 +168,7 @@ export function YoloLog({ session, className }: { session: Session; className?: 
   const newest = allowed.at(-1)?.at ?? "";
   const newestAsk = allowed.at(-1)?.ask ?? "";
   const seen = useRef<string | null>(null);
+  const now = useTick();
   useEffect(() => {
     // The first look is history, not news.
     if (seen.current !== null && newest && newest !== seen.current) toast.message("Auto-allowed", { description: newestAsk });
@@ -179,17 +181,17 @@ export function YoloLog({ session, className }: { session: Session; className?: 
         <Zap className="text-destructive size-3 fill-current" />
         {allowed.length ? (
           <span>
-            Auto-allowed {allowed.length === 1 ? "one prompt" : allowed.length + " prompts"} since YOLO went on {ago(session.yolo.since)}
+            Auto-allowed {allowed.length === 1 ? "one prompt" : allowed.length + " prompts"} since YOLO went on {ago(session.yolo.since, now)}
           </span>
         ) : (
-          <span>YOLO is on — nothing asked yet since {ago(session.yolo.since)}</span>
+          <span>YOLO is on — nothing asked yet since {ago(session.yolo.since, now)}</span>
         )}
       </div>
       {allowed.length > 0 && (
         <ul className="mt-1 max-h-24 space-y-0.5 overflow-y-auto">
           {[...allowed].reverse().map((a, i) => (
             <li key={a.at + i} className="flex min-w-0 items-baseline gap-2">
-              <span className="text-muted-foreground w-14 shrink-0 tabular-nums">{ago(a.at)}</span>
+              <span className="text-muted-foreground w-14 shrink-0 tabular-nums">{ago(a.at, now)}</span>
               <code className="text-foreground min-w-0 truncate font-mono" title={a.ask}>
                 {a.ask}
               </code>

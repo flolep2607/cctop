@@ -76,6 +76,7 @@ pub struct Topics {
 
 /// One entry in the answer's `hits` list.
 #[derive(Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS), ts(rename = "SearchHit"))]
 pub struct Hit {
     /// [`Session::key`], so the page can address the row.
     pub key: String,

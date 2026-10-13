@@ -89,6 +89,7 @@ pub struct MacMeta {
 
 /// Context-window consumption for a session or subagent.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct ContextUsage {
     pub used: u64,
     pub max: u64,
@@ -134,6 +135,7 @@ impl ContextUsage {
 ///
 /// [`unaccounted`]: ContextBreakdown::unaccounted
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct ContextBreakdown {
     /// Window size at the last request, from its own usage figures. Exact.
     pub total: u64,
@@ -164,6 +166,7 @@ pub struct ContextBreakdown {
 
 /// One request's measurement of the context window.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct CtxPoint {
     pub ts: String,
     pub window: u64,
@@ -1511,6 +1514,7 @@ mod tests {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct Tokens {
     #[serde(default)]
     pub input: u64,
@@ -1541,6 +1545,7 @@ impl Tokens {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct Costs {
     #[serde(default)]
     pub input: f64,
@@ -1734,12 +1739,14 @@ pub struct Metrics {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub enum SubagentStatus {
     Running,
     Done,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct Subagent {
     pub agent_id: String,
     #[serde(rename = "type")]
@@ -2244,6 +2251,7 @@ fn clip_in_place(s: &mut String, max: usize) {
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct CodexRates {
     pub input: f64,
     pub cached_input: f64,

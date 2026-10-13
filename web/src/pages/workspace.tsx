@@ -10,6 +10,7 @@ import { Badge } from "@/components/ui/badge";
 import { Kbd } from "@/components/ui/kbd";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { AppShell } from "@/components/app-shell";
+import { Empty } from "@/components/empty";
 import { PromptBar } from "@/components/prompt-bar";
 import { StateDot } from "@/components/status";
 import { dotOfTab } from "@/lib/status";
@@ -105,7 +106,7 @@ const Tile = memo(function Tile({
   // An open frame outranks everything: a tab missing from one poll must not
   // cost the reader their terminal. The header says "closed"; the frame stays.
   let body: React.ReactNode;
-  if (popped) body = <Empty>In a window of its own. Close that window to bring the terminal back here.</Empty>;
+  if (popped) body = <Empty on="terminal">In a window of its own. Close that window to bring the terminal back here.</Empty>;
   else if (terminal)
     body = (
       <TerminalFrame
@@ -127,10 +128,10 @@ const Tile = memo(function Tile({
         }}
       />
     );
-  else if (!CAN_ACT) body = <Empty>This is the view-only link, which cannot open terminals. Open the first link <code className="text-neutral-300">cctop serve</code> printed — “serving on …” — to type into agents here.</Empty>;
-  else if (!exists) body = <Empty>This tab has closed — its agent exited or was moved.<Button size="sm" variant="secondary" onClick={onClose}>Remove</Button></Empty>;
-  else if (error) body = <Empty bad>{error}<Button size="sm" variant="secondary" onClick={() => setAttempt(attempt + 1)}>Retry</Button></Empty>;
-  else body = <Empty>Opening the terminal…</Empty>;
+  else if (!CAN_ACT) body = <Empty on="terminal">This is the view-only link, which cannot open terminals. Open the first link <code className="text-terminal-muted">cctop serve</code> printed — “serving on …” — to type into agents here.</Empty>;
+  else if (!exists) body = <Empty on="terminal">This tab has closed — its agent exited or was moved.<Button size="sm" variant="secondary" onClick={onClose}>Remove</Button></Empty>;
+  else if (error) body = <Empty on="terminal" bad>{error}<Button size="sm" variant="secondary" onClick={() => setAttempt(attempt + 1)}>Retry</Button></Empty>;
+  else body = <Empty on="terminal">Opening the terminal…</Empty>;
 
   const cost = session?.cost?.available && !session.cost.included ? money(session.cost.total) : null;
   return (
@@ -188,10 +189,6 @@ const Tile = memo(function Tile({
     </section>
   );
 });
-
-function Empty({ children, bad }: { children: React.ReactNode; bad?: boolean }) {
-  return <div className={cn("m-auto grid max-w-sm justify-items-center gap-3 p-6 text-center text-sm", bad ? "text-red-400" : "text-neutral-400")}>{children}</div>;
-}
 
 export function WorkspacePage() {
   const { tabs, error } = useTabs();
@@ -288,7 +285,7 @@ export function WorkspacePage() {
   const n = cols === "auto" ? autoCols(order.length) : Number(cols);
 
   return (
-    <AppShell>
+    <AppShell live={{ sessions, tabs }}>
       <div className="flex shrink-0 flex-wrap items-center gap-2 px-4 py-2.5" data-rendered={tabs !== null || error ? "" : undefined}>
         <div className="flex min-w-0 flex-wrap items-center gap-1.5" aria-label="Tabs not on screen">
           {tabs === null ? (

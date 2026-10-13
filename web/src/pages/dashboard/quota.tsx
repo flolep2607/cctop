@@ -1,5 +1,4 @@
-import { useEffect, useState } from "react";
-import { getJson } from "@/lib/api";
+import { usePoll } from "@/hooks/use-poll";
 import { ContextBar } from "./rows";
 
 type Window = { label: string; pct: number; limit_reached?: boolean; resets_at?: number };
@@ -17,13 +16,7 @@ const hhmm = (secs?: number) => {
 // minutes, so it polls on its own slow clock; a server without the route
 // leaves the strip empty, and empty draws nothing.
 export function Quota() {
-  const [data, setData] = useState<Record<string, Entry[]>>({});
-  useEffect(() => {
-    const poll = () => getJson<Record<string, Entry[]>>("/api/quota").then((d) => setData(d ?? {}), () => {});
-    poll();
-    const t = setInterval(poll, 60000);
-    return () => clearInterval(t);
-  }, []);
+  const data = usePoll<Record<string, Entry[]>>("/api/quota", 60000).data ?? {};
   const items: React.ReactNode[] = [];
   for (const [provider, entries] of Object.entries(data)) {
     for (const e of entries ?? []) {

@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Kbd } from "@/components/ui/kbd";
 import { Badge } from "@/components/ui/badge";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { CommandPalette } from "./command-palette";
+import { CommandPalette, type Shared } from "./command-palette";
 import { DashboardAddress } from "./address";
 import { AccessButton } from "./access";
 import { ThemeToggle } from "./theme";
@@ -18,7 +18,10 @@ const mac = /Mac|iPhone|iPad/.test(navigator.platform || "");
 // The frame every page sits in: one row of header — name, pages, the palette,
 // the theme — and the page below it filling the rest of the window. Pages
 // decide for themselves what scrolls; the header never does.
-export function AppShell({ children, right }: { children: ReactNode; right?: ReactNode }) {
+//
+// `live` is what a page already holds of the session table and the tabs, for
+// the palette to list rather than fetch again — see `CommandPalette`.
+export function AppShell({ children, right, live }: { children: ReactNode; right?: ReactNode; live?: Shared }) {
   const [open, setOpen] = useState(false);
   const [pathname, navigate] = useLocation();
   const current = (p: string) => (p === "/" ? pathname === "/" : pathname.startsWith(p));
@@ -91,7 +94,7 @@ export function AppShell({ children, right }: { children: ReactNode; right?: Rea
         <ThemeToggle />
       </header>
       <main className="flex min-h-0 flex-1 flex-col">{children}</main>
-      <CommandPalette open={open} setOpen={setOpen} />
+      <CommandPalette open={open} setOpen={setOpen} shared={live} />
     </div>
   );
 }

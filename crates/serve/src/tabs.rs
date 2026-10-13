@@ -22,6 +22,7 @@ const QUIET_SECS: u64 = 2;
 
 /// One tab, as the page draws it.
 #[derive(Debug, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct Tab {
     /// The rmux session name: the handle `/api/tab/<name>/terminal` takes.
     pub name: String,
