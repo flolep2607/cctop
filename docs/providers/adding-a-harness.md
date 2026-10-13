@@ -92,7 +92,7 @@ the same as free.
 | `session/search.rs` | how `/` searches its transcripts — the default line scan, or a query if the store is shared |
 | `serve/chat.rs` | a conversation reader, if you want the browser view; Windsurf is the only one without one today, and it says so rather than looking empty |
 | `cli.rs` | the `--list` grouping and the `--json` account block |
-| `hook.rs` | `Harness` and its `configs`, if the harness has hooks to install into |
+| `hook/installers.rs` | `Harness` and its `configs`, if the harness has hooks to install into |
 
 `ui/table.rs` has a test asserting every provider appears in the empty state.
 It will fail until you add yours, which is the intended reminder.
