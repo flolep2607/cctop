@@ -49,13 +49,18 @@ export function AppShell({ children, right, live }: { children: ReactNode; right
                 go(navigate, p.path);
               }}
               aria-current={current(p.path) ? "page" : undefined}
+              title={p.label}
               className={cn(
                 "text-muted-foreground hover:text-foreground hover:bg-muted rounded-md px-2 py-1 text-sm transition-colors",
                 current(p.path) && "bg-muted text-foreground font-medium",
               )}
             >
-              <p.icon className="mr-1 inline size-3.5 align-[-2px] max-sm:hidden" />
-              {p.label}
+              {/* A phone gets the icons alone: three labels beside the name,
+                  the search and the theme are wider than 390px, and a header
+                  that overflows drags the whole page sideways. The label stays
+                  for screen readers, and the title for a long press. */}
+              <p.icon className="inline size-4 align-[-3px] sm:mr-1 sm:size-3.5 sm:align-[-2px]" />
+              <span className="max-sm:sr-only">{p.label}</span>
             </a>
           ))}
         </nav>
@@ -72,9 +77,9 @@ export function AppShell({ children, right, live }: { children: ReactNode; right
         {!CAN_ACT && (
           <Tooltip>
             <TooltipTrigger asChild>
-              <Badge variant="outline" className="text-warning border-warning/40 cursor-help gap-1 font-normal">
+              <Badge variant="outline" className="text-warning border-warning/40 cursor-help gap-1 font-normal max-sm:gap-0">
                 <Eye className="size-3" />
-                View only
+                <span className="max-sm:sr-only">View only</span>
               </Badge>
             </TooltipTrigger>
             <TooltipContent className="max-w-72 text-xs leading-relaxed">
