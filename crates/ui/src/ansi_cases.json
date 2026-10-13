@@ -1,0 +1,165 @@
+{
+  "about": [
+    "Escape-sequence cases the TUI (crates/ui/src/ansi.rs) and the web page (web/src/lib/ansi.ts) must read the same way. Both test suites load this file.",
+    "lines: one array per output line, each holding its spans in order. Adjacent spans with the same style are one span.",
+    "A span is its text plus only the style it has: fg and bg ('n0'-'n15' for the sixteen by SGR number, 'i0'-'i255' for 38;5, '#rrggbb' for 24-bit), and bold, dim, italic, underline, inverse, strike when true.",
+    "Tabs are left out on purpose: the TUI expands them to columns, the web keeps the tab and lets the browser do the same."
+  ],
+  "cases": [
+    {
+      "name": "cargo's header: bold green, then a reset back to the base",
+      "input": "\u001b[1m\u001b[32m   Compiling\u001b[0m cctop",
+      "lines": [[{ "text": "   Compiling", "fg": "n2", "bold": true }, { "text": " cctop" }]]
+    },
+    {
+      "name": "an empty SGR is a reset",
+      "input": "\u001b[31ma\u001b[mb",
+      "lines": [[{ "text": "a", "fg": "n1" }, { "text": "b" }]]
+    },
+    {
+      "name": "an empty parameter in a list is a reset too",
+      "input": "\u001b[31;;1ma",
+      "lines": [[{ "text": "a", "bold": true }]]
+    },
+    {
+      "name": "each attribute on, then off by its own code",
+      "input": "\u001b[1;2;3;4;7;9mA\u001b[22mB\u001b[23;24mC\u001b[27;29mD",
+      "lines": [[
+        { "text": "A", "bold": true, "dim": true, "italic": true, "underline": true, "inverse": true, "strike": true },
+        { "text": "B", "italic": true, "underline": true, "inverse": true, "strike": true },
+        { "text": "C", "inverse": true, "strike": true },
+        { "text": "D" }
+      ]]
+    },
+    {
+      "name": "bright colours and the default-colour codes",
+      "input": "\u001b[91ma\u001b[102mb\u001b[39mc\u001b[49md",
+      "lines": [[
+        { "text": "a", "fg": "n9" },
+        { "text": "b", "fg": "n9", "bg": "n10" },
+        { "text": "c", "bg": "n10" },
+        { "text": "d" }
+      ]]
+    },
+    {
+      "name": "256 colours on both sides",
+      "input": "\u001b[38;5;196ma\u001b[48;5;21mb",
+      "lines": [[{ "text": "a", "fg": "i196" }, { "text": "b", "fg": "i196", "bg": "i21" }]]
+    },
+    {
+      "name": "truecolour, semicolons and every colon spelling",
+      "input": "\u001b[38;2;1;2;3ma\u001b[38:2::4:5:6mb\u001b[48:2:0:7:8:9mc\u001b[38:2:10:11:12md",
+      "lines": [[
+        { "text": "a", "fg": "#010203" },
+        { "text": "b", "fg": "#040506" },
+        { "text": "c", "fg": "#040506", "bg": "#070809" },
+        { "text": "d", "fg": "#0a0b0c", "bg": "#070809" }
+      ]]
+    },
+    {
+      "name": "a colon underline style is an underline, not an italic",
+      "input": "\u001b[4:3ma\u001b[4:0mb",
+      "lines": [[{ "text": "a", "underline": true }, { "text": "b" }]]
+    },
+    {
+      "name": "underline colour is skipped without eating what follows it",
+      "input": "\u001b[58;5;9;1ma\u001b[58;2;1;2;3;3mb",
+      "lines": [[{ "text": "a", "bold": true }, { "text": "b", "bold": true, "italic": true }]]
+    },
+    {
+      "name": "a hyperlink closed by ST keeps its label and only its label",
+      "input": "\u001b]8;;file:///x\u001b\\path\u001b]8;;\u001b\\ after",
+      "lines": [[{ "text": "path after" }]]
+    },
+    {
+      "name": "an OSC closed by BEL",
+      "input": "\u001b]0;title\u0007text",
+      "lines": [[{ "text": "text" }]]
+    },
+    {
+      "name": "the eight-bit CSI",
+      "input": "\u009b31ma\u009b0mb",
+      "lines": [[{ "text": "a", "fg": "n1" }, { "text": "b" }]]
+    },
+    {
+      "name": "DCS and APC strings vanish whole",
+      "input": "a\u001bPq#0\u001b\\b\u001b_apc\u0007c",
+      "lines": [[{ "text": "abc" }]]
+    },
+    {
+      "name": "charset shifts and two-byte escapes",
+      "input": "\u001b(Ba\u001b7b\u001b=c\u001bMd",
+      "lines": [[{ "text": "abcd" }]]
+    },
+    {
+      "name": "cursor, erase, private modes and intermediates are dropped",
+      "input": "\u001b[2K\u001b[1Ga\u001b[?25lb\u001b[1 qc\u001b[>4;1md\u001b[?1me",
+      "lines": [[{ "text": "abcde" }]]
+    },
+    {
+      "name": "a progress bar leaves its last frame; CRLF is a newline",
+      "input": "10%\r55%\r100%\r\nnext",
+      "lines": [[{ "text": "100%" }], [{ "text": "next" }]]
+    },
+    {
+      "name": "a carriage return keeps the style it was in",
+      "input": "\u001b[31m10%\r100%",
+      "lines": [[{ "text": "100%", "fg": "n1" }]]
+    },
+    {
+      "name": "a carriage return at the end of a line leaves the line",
+      "input": "done\r\nabc\r\r\nend\r",
+      "lines": [[{ "text": "done" }], [{ "text": "abc" }], [{ "text": "end" }]]
+    },
+    {
+      "name": "a carriage return then an erase clears the line",
+      "input": "50%\r\u001b[Kdone",
+      "lines": [[{ "text": "done" }]]
+    },
+    {
+      "name": "backspace takes back a character, as man's overstrike does",
+      "input": "ab\bc _\bx",
+      "lines": [[{ "text": "ac x" }]]
+    },
+    {
+      "name": "other control characters are dropped",
+      "input": "a\u0007b\u000fc\u007fd",
+      "lines": [[{ "text": "abcd" }]]
+    },
+    {
+      "name": "a CSI cut off at the end",
+      "input": "next\u001b[3",
+      "lines": [[{ "text": "next" }]]
+    },
+    {
+      "name": "a lone ESC at the end",
+      "input": "end\u001b",
+      "lines": [[{ "text": "end" }]]
+    },
+    {
+      "name": "an unterminated OSC stops at the newline",
+      "input": "a\u001b]8;;http://cut\nnext",
+      "lines": [[{ "text": "a" }], [{ "text": "next" }]]
+    },
+    {
+      "name": "a CSI cut by a newline leaves the newline",
+      "input": "a\u001b[31\nb",
+      "lines": [[{ "text": "a" }], [{ "text": "b" }]]
+    },
+    {
+      "name": "style carries across lines",
+      "input": "\u001b[32ma\nb\u001b[0m",
+      "lines": [[{ "text": "a", "fg": "n2" }], [{ "text": "b", "fg": "n2" }]]
+    },
+    {
+      "name": "empty input is one empty line",
+      "input": "",
+      "lines": [[]]
+    },
+    {
+      "name": "a trailing newline ends the last line rather than starting one",
+      "input": "a\n\n",
+      "lines": [[{ "text": "a" }], []]
+    }
+  ]
+}
