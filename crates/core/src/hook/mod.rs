@@ -3125,7 +3125,7 @@ const PLUGIN_MARKER: &str = "const CCTOP = ";
 /// The one line that is per-install is a placeholder: `PLUGIN_PATH`, replaced
 /// with this binary's path at install time, and read back out of the installed
 /// file by [`plugin_exe`].
-const PLUGIN: &str = include_str!("assets/opencode-plugin.ts");
+const PLUGIN: &str = include_str!("../assets/opencode-plugin.ts");
 
 /// What the placeholder is written as, quoted, so the substitution is one
 /// replacement of a whole JSON string rather than a splice inside one.
