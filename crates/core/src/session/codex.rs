@@ -1,6 +1,8 @@
 //! Codex session discovery and rollout extraction.
 
-use super::extract::{self, for_each_jsonl, read_first_lines};
+use super::codex_line::{self, Line, Payload, TokenUsage};
+use super::extract;
+use super::lenient::{Lenient, Object, Str};
 use super::{
     CodexRates, ContextUsage, Costs, Metrics, ModelBreakdown, Session, SessionData, Tokens,
 };
@@ -355,9 +357,16 @@ fn collect_static(path: &Path) -> StaticParts {
         parts.session_id = uuid.to_string();
     }
 
-    for item in read_first_lines(path, 50) {
-        let payload = item.get("payload");
-        match item.get("type").and_then(Value::as_str) {
+    let mut done = false;
+    extract::scan_first_lines(path, 50, |bytes| {
+        if done {
+            return true;
+        }
+        let Some(item) = Line::parse(bytes) else {
+            return false;
+        };
+        let payload = item.payload.get();
+        match item.kind.get() {
             Some("session_meta") => {
                 if let Some(p) = payload {
                     // A forked rollout carries a second session_meta naming the
@@ -365,40 +374,35 @@ fn collect_static(path: &Path) -> StaticParts {
                     // the first session_meta) is this file's own identity; later
                     // session_meta entries must not overwrite it.
                     if parts.session_id.is_empty()
-                        && let Some(id) = p.get("id").and_then(Value::as_str)
+                        && let Some(id) = p.id.get()
                     {
                         parts.session_id = id.to_string();
                     }
                     if parts.started_at.is_empty()
-                        && let Some(ts) = p
-                            .get("timestamp")
-                            .and_then(Value::as_str)
-                            .or_else(|| item.get("timestamp").and_then(Value::as_str))
+                        && let Some(ts) = p.timestamp.get().or_else(|| item.timestamp.get())
                     {
                         parts.started_at = ts.to_string();
                     }
                     if parts.cwd.is_empty()
-                        && let Some(cwd) = p.get("cwd").and_then(Value::as_str)
+                        && let Some(cwd) = p.cwd.get()
                     {
                         parts.cwd = cwd.to_string();
                     }
                 }
             }
             Some("turn_context") => {
-                if let Some(m) = payload.and_then(|p| p.get("model")).and_then(Value::as_str) {
+                if let Some(m) = payload.and_then(|p| p.model.get()) {
                     parts.model = m.to_string();
                 }
             }
             _ => {}
         }
-        if !parts.session_id.is_empty()
+        done = !parts.session_id.is_empty()
             && !parts.started_at.is_empty()
             && !parts.model.is_empty()
-            && !parts.cwd.is_empty()
-        {
-            break;
-        }
-    }
+            && !parts.cwd.is_empty();
+        true
+    });
 
     if !parts.session_id.is_empty()
         && let Ok(mut cache) = STATIC_CACHE.lock()
@@ -483,33 +487,23 @@ pub fn extract(path: &Path) -> SessionData {
     let mut failed_calls: HashSet<String> = HashSet::new();
     let mut ultracode_at: Option<String> = None;
 
-    let read = for_each_jsonl(path, |item| {
-        let item_type = item.get("type").and_then(Value::as_str).unwrap_or("");
-        let payload = item.get("payload");
-        let ts = item.get("timestamp").and_then(Value::as_str).unwrap_or("");
+    let read = codex_line::for_each(path, |item| {
+        let item_type = item.kind.or_empty();
+        let payload = item.payload.get();
+        let ts = item.timestamp.or_empty();
 
         // What the person typed. `user_message` is the event Codex raises for
         // it; a rollout without one still carries the prompt as a user
         // message, beside the environment and instructions Codex injects in
         // the same role, which are all tagged blocks starting with `<`.
-        let typed: Vec<&str> = match (
-            item_type,
-            payload.and_then(|p| p.get("type")).and_then(Value::as_str),
-        ) {
-            ("event_msg", Some("user_message")) => payload
-                .and_then(|p| p.get("message"))
-                .and_then(Value::as_str)
-                .into_iter()
-                .collect(),
-            ("response_item", Some("message"))
-                if payload.and_then(|p| p.get("role")).and_then(Value::as_str) == Some("user") =>
-            {
+        let typed: Vec<&str> = match (item_type, payload.and_then(|p| p.kind.get())) {
+            ("event_msg", Some("user_message")) => {
+                payload.and_then(|p| p.message.get()).into_iter().collect()
+            }
+            ("response_item", Some("message")) if payload.is_some_and(|p| p.role.is("user")) => {
                 payload
-                    .and_then(|p| p.get("content"))
-                    .and_then(Value::as_array)
                     .into_iter()
-                    .flatten()
-                    .filter_map(|b| b.get("text").and_then(Value::as_str))
+                    .flat_map(Payload::texts)
                     .filter(|t| !t.trim_start().starts_with('<'))
                     .collect()
             }
@@ -520,45 +514,48 @@ pub fn extract(path: &Path) -> SessionData {
         }
 
         if item_type == "turn_context"
-            && let Some(m) = payload.and_then(|p| p.get("model")).and_then(Value::as_str)
+            && let Some(m) = payload.and_then(|p| p.model.get())
         {
             model = m.to_string();
         }
         if item_type == "turn_context"
-            && let Some(effort) = payload
-                .and_then(|p| p.get("effort").or_else(|| p.get("reasoning_effort")))
-                .and_then(Value::as_str)
+            && let Some(effort) =
+                payload.and_then(|p| p.effort.get().or_else(|| p.reasoning_effort.get()))
         {
             reasoning_effort = Some(effort.to_string());
         }
 
+        let info = payload
+            .filter(|p| p.kind.is("token_count"))
+            .and_then(|p| p.info.get());
         if item_type == "event_msg"
-            && payload.and_then(|p| p.get("type")).and_then(Value::as_str) == Some("token_count")
-            && let Some(last) = payload
-                .and_then(|p| p.get("info"))
-                .and_then(|i| i.get("last_token_usage"))
-            && last.is_object()
+            && let Some(info) = info
+            && let Some(last) = info.last_token_usage.read::<Object<TokenUsage>>()
+            && let Some(last) = last.0
             && {
-                let total = payload
-                    .and_then(|p| p.get("info"))
-                    .and_then(|i| i.get("total_token_usage"));
-                let repeat = total.is_some() && total == counted_total.as_ref();
-                counted_total = total.cloned();
+                // Compared as values, as before, so two spellings of one
+                // total are still the same total.
+                let total = info
+                    .total_token_usage
+                    .0
+                    .map(|_| info.total_token_usage.value());
+                let repeat = total.is_some() && total == counted_total;
+                counted_total = total;
                 !repeat
             }
         {
             saw_usage = true;
-            let g = |k: &str| last.get(k).and_then(Value::as_u64).unwrap_or(0);
+            let g = |n: &Lenient<u64>| n.value().unwrap_or(0);
             let (inp, cached, out) = (
-                g("input_tokens"),
-                g("cached_input_tokens"),
-                g("output_tokens"),
+                g(&last.input_tokens),
+                g(&last.cached_input_tokens),
+                g(&last.output_tokens),
             );
             totals.input_total += inp;
             totals.cached_input += cached;
             totals.output += out;
-            totals.reasoning_output += g("reasoning_output_tokens");
-            totals.total += g("total_tokens");
+            totals.reasoning_output += g(&last.reasoning_output_tokens);
+            totals.total += g(&last.total_tokens);
 
             if let Some(dt) = util::parse_ts(ts) {
                 for (map, key) in [
@@ -579,19 +576,12 @@ pub fn extract(path: &Path) -> SessionData {
 
         // Function calls appear either at the top level or wrapped in a
         // `response_item`; in both cases the details live under `payload`.
-        let effective_type = if item_type == "response_item" {
-            payload
-                .and_then(|p| p.get("type"))
-                .and_then(Value::as_str)
-                .unwrap_or("")
-        } else {
-            item_type
-        };
+        let effective_type = item.effective_kind();
         let Some(p) = payload else { return };
 
         match effective_type {
             "function_call" | "custom_tool_call" => {
-                if let Some(call_id) = p.get("call_id").and_then(Value::as_str)
+                if let Some(call_id) = p.call_id.get()
                     && !seen_call_ids.insert(call_id.to_string())
                 {
                     return;
@@ -600,14 +590,9 @@ pub fn extract(path: &Path) -> SessionData {
                 // (notably `apply_patch`) pass a raw payload instead.
                 // `function_call` carries `arguments`; `custom_tool_call` (which
                 // is how `apply_patch` arrives) carries `input` instead.
-                let raw_field = p.get("arguments").or_else(|| p.get("input"));
-                let raw_args = raw_field.and_then(Value::as_str);
-                let mut args: Value = match raw_field {
-                    Some(Value::String(s)) => serde_json::from_str(s).unwrap_or(Value::Null),
-                    Some(other) => other.clone(),
-                    None => Value::Null,
-                };
-                let outer_name = p.get("name").and_then(Value::as_str).unwrap_or("unknown");
+                let (raw_args, mut args) = p.call_args();
+                let raw_args = raw_args.as_ref().and_then(Str::get);
+                let outer_name = p.name.get().unwrap_or("unknown");
                 // An `exec` entry can delegate to more than one tool, so collect
                 // every delegated call and record each of them. Anything that
                 // resolves to nothing stays attributed to the wrapper itself.
@@ -664,7 +649,7 @@ pub fn extract(path: &Path) -> SessionData {
                         short,
                         full,
                         ts.to_string(),
-                        p.get("call_id").and_then(Value::as_str).map(str::to_string),
+                        p.call_id.get().map(str::to_string),
                         None,
                     );
                     if let Some(d) = delta
@@ -678,20 +663,17 @@ pub fn extract(path: &Path) -> SessionData {
                 }
             }
             "function_call_output" | "custom_tool_call_output" => {
-                if let Some(call_id) = p.get("call_id").and_then(Value::as_str) {
+                if let Some(call_id) = p.call_id.get() {
                     if !ts.is_empty() {
                         result_ts.insert(call_id.to_string(), ts.to_string());
                     }
-                    if output_failed(p.get("output")) {
+                    if output_failed(p.output.to_value().as_ref()) {
                         failed_calls.insert(call_id.to_string());
                     }
                 }
             }
             "web_search_call" => {
-                if let Some(q) = p
-                    .get("action")
-                    .and_then(|a| a.get("query"))
-                    .and_then(Value::as_str)
+                if let Some(q) = p.action.get().and_then(|a| a.query.get())
                     && !q.is_empty()
                     && seen_queries.len() < 50
                     && seen_queries.insert(q.to_string())
@@ -821,25 +803,30 @@ pub fn extract_context(session: &Session) -> Option<ContextUsage> {
     let text = util::read_tail(file, 65_536)?;
 
     for line in text.lines().rev() {
-        let Ok(item) = serde_json::from_str::<Value>(line.trim()) else {
+        let Some(item) = Line::parse(line.trim().as_bytes()) else {
             continue;
         };
-        if item.get("type").and_then(Value::as_str) != Some("event_msg") {
+        if !item.kind.is("event_msg") {
             continue;
         }
-        let Some(p) = item.get("payload") else {
+        let Some(p) = item.payload.get() else {
             continue;
         };
-        if p.get("type").and_then(Value::as_str) != Some("token_count") {
+        if !p.kind.is("token_count") {
             continue;
         }
-        let Some(info) = p.get("info") else { continue };
-        let last = info
-            .get("last_token_usage")
-            .or_else(|| info.get("total_token_usage"))?;
+        let Some(info) = p.info.get() else { continue };
+        let last = match info.last_token_usage.0 {
+            Some(_) => info.last_token_usage,
+            None => info.total_token_usage,
+        };
+        // Neither usage at all: the event says nothing about the window, and
+        // nor will an older one.
+        last.0?;
         let used = last
-            .get("input_tokens")
-            .and_then(Value::as_u64)
+            .read::<Object<TokenUsage>>()
+            .and_then(|u| u.0)
+            .and_then(|u| u.input_tokens.value())
             .unwrap_or(0);
         if used == 0 {
             continue;
@@ -847,8 +834,8 @@ pub fn extract_context(session: &Session) -> Option<ContextUsage> {
         return Some(ContextUsage {
             used,
             max: info
-                .get("model_context_window")
-                .and_then(Value::as_u64)
+                .model_context_window
+                .value()
                 .unwrap_or(CODEX_DEFAULT_CTX),
             compacted: false,
         });
@@ -865,22 +852,19 @@ pub fn extract_last_tool(session: &Session) -> String {
         return String::new();
     };
     for line in text.lines().rev() {
-        let Ok(item) = serde_json::from_str::<Value>(line.trim()) else {
+        let Some(item) = Line::parse(line.trim().as_bytes()) else {
             continue;
         };
-        let t = item.get("type").and_then(Value::as_str).unwrap_or("");
-        let Some(p) = item.get("payload") else {
+        let t = item.kind.or_empty();
+        let Some(p) = item.payload.get() else {
             continue;
         };
         let is_call = matches!(t, "function_call" | "custom_tool_call")
-            || (t == "response_item"
-                && p.get("type").and_then(Value::as_str) == Some("function_call"));
-        if is_call && let Some(name) = p.get("name").and_then(Value::as_str) {
+            || (t == "response_item" && p.kind.is("function_call"));
+        if is_call && let Some(name) = p.name.get() {
             if name == "exec"
-                && let Some(source) = p
-                    .get("arguments")
-                    .or_else(|| p.get("input"))
-                    .and_then(Value::as_str)
+                && let Some(source) = p.args_field().read::<Str>()
+                && let Some(source) = source.get()
                 && let Some((nested_name, nested_args)) = unwrap_exec(source)
             {
                 return normalise_exec_tool(nested_name, nested_args).0;
@@ -1120,6 +1104,43 @@ const result = await tools.apply_patch(patch);"#;
         let days: f64 = data.costs_by_day.values().flat_map(|m| m.values()).sum();
         assert!((minutes - days).abs() < 1e-12);
         assert_eq!(data.costs_by_minute.len(), 1);
+    }
+
+    /// A rollout from a Codex that has added fields, changed the type of
+    /// some, and dropped others still counts what it can: each line is read
+    /// for the fields that are right, and none is lost for the ones that are
+    /// not.
+    #[test]
+    fn a_changed_schema_loses_fields_not_lines() {
+        let path =
+            std::env::temp_dir().join(format!("cctop-codex-schema-{}.jsonl", std::process::id()));
+        let lines = [
+            // A new top-level field, and a model under a new sibling.
+            json!({"type": "turn_context", "timestamp": "2026-08-06T00:00:00Z", "brand_new": [1],
+                   "payload": {"model": "gpt-5", "effort": 3, "reasoning_effort": "high"}}),
+            // A count that became a string reads as nothing; its neighbours count.
+            json!({"type": "event_msg", "timestamp": "2026-08-06T00:00:01Z",
+                   "payload": {"type": "token_count", "info": {
+                       "last_token_usage": {"input_tokens": 100, "output_tokens": "7", "new": {}},
+                       "total_token_usage": {"input_tokens": 100}}}}),
+            // A call whose id is no longer a string is still a call.
+            json!({"type": "response_item", "timestamp": "2026-08-06T00:00:02Z",
+                   "payload": {"type": "function_call", "name": "shell", "call_id": {"v": 2},
+                               "arguments": "{\"command\":[\"ls\"]}"}}),
+            // No payload at all, and a payload of the wrong type.
+            json!({"type": "event_msg", "timestamp": "2026-08-06T00:00:03Z"}),
+            json!({"type": "response_item", "payload": "gone"}),
+        ];
+        let text: String = lines.iter().map(|l| format!("{l}\n")).collect();
+        std::fs::write(&path, text).expect("write rollout");
+
+        let data = extract(&path);
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(data.last_model, "gpt-5");
+        assert_eq!(data.reasoning_effort.as_deref(), Some("high"));
+        assert_eq!(data.tokens.input_total, 100);
+        assert_eq!(data.tokens.output, 0);
+        assert_eq!(data.metrics.tool_count, 1);
     }
 
     #[test]

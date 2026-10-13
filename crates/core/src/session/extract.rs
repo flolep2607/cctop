@@ -16,6 +16,24 @@ use std::sync::LazyLock;
 /// Malformed lines (truncated or null-padded tails from a crashed writer) are
 /// skipped rather than fatal.
 pub fn for_each_jsonl<F: FnMut(&Value)>(path: &Path, mut f: F) -> std::io::Result<()> {
+    for_each_line(path, |line, oversized| {
+        if oversized {
+            if let Some(slim) = slim_oversized(line) {
+                f(&slim);
+            }
+        } else if let Ok(v) = serde_json::from_slice::<Value>(line) {
+            f(&v);
+        }
+    })
+}
+
+/// Stream a `.jsonl` file's non-blank lines, trimmed, to a reader that parses
+/// them into its own type.
+///
+/// The second argument says the line is over [`MAX_JSONL_LINE_BYTES`]: a
+/// reader should take only what it cannot do without from such a line, as
+/// [`for_each_jsonl`] does, rather than all of it.
+pub fn for_each_line<F: FnMut(&[u8], bool)>(path: &Path, mut f: F) -> std::io::Result<()> {
     let file = std::fs::File::open(path)?;
     let mut reader = BufReader::with_capacity(256 * 1024, file);
     let mut buf = Vec::with_capacity(8 * 1024);
@@ -31,16 +49,12 @@ pub fn for_each_jsonl<F: FnMut(&Value)>(path: &Path, mut f: F) -> std::io::Resul
             continue;
         }
         if line.len() > MAX_JSONL_LINE_BYTES {
-            if let Some(slim) = slim_oversized(line) {
-                f(&slim);
-            }
+            f(line, true);
             // Don't let one giant line keep its buffer for the rest of the file.
             buf = Vec::with_capacity(8 * 1024);
             continue;
         }
-        if let Ok(v) = serde_json::from_slice::<Value>(line) {
-            f(&v);
-        }
+        f(line, false);
     }
     Ok(())
 }
@@ -101,24 +115,35 @@ fn slim_oversized(line: &[u8]) -> Option<Value> {
 
 /// Parse up to `max_lines` objects from the head of a file.
 pub fn read_first_lines(path: &Path, max_lines: usize) -> Vec<Value> {
+    let mut out = Vec::new();
+    scan_first_lines(path, max_lines, |line| {
+        serde_json::from_slice::<Value>(line)
+            .map(|v| out.push(v))
+            .is_ok()
+    });
+    out
+}
+
+/// Hand lines from the head of a file to `f`, which says whether it could
+/// read each one, until `max_lines` of them have been read.
+pub fn scan_first_lines<F: FnMut(&[u8]) -> bool>(path: &Path, max_lines: usize, mut f: F) {
     let Ok(file) = std::fs::File::open(path) else {
-        return Vec::new();
+        return;
     };
     let reader = BufReader::with_capacity(64 * 1024, file);
-    let mut out = Vec::new();
+    let mut read = 0;
     for line in reader.lines().map_while(Result::ok) {
-        if out.len() >= max_lines {
+        if read >= max_lines {
             break;
         }
         let line = line.trim();
         if line.is_empty() {
             continue;
         }
-        if let Ok(v) = serde_json::from_str::<Value>(line) {
-            out.push(v);
+        if f(line.as_bytes()) {
+            read += 1;
         }
     }
-    out
 }
 
 /// Parse up to `max_lines` objects from the tail of a file, newest first.
@@ -126,19 +151,32 @@ pub fn read_first_lines(path: &Path, max_lines: usize) -> Vec<Value> {
 /// Reads backwards in chunks so this stays cheap on multi-hundred-megabyte
 /// transcripts where we only care about the most recent entries.
 pub fn read_last_lines(path: &Path, max_lines: usize) -> Vec<Value> {
+    let mut out = Vec::new();
+    scan_last_lines(path, max_lines, |line| {
+        serde_json::from_slice::<Value>(line)
+            .map(|v| out.push(v))
+            .is_ok()
+    });
+    out
+}
+
+/// Hand lines from the tail of a file to `f`, newest first, until it has
+/// read `max_lines` of them; `f` says whether it could read each one. See
+/// [`read_last_lines`].
+pub fn scan_last_lines<F: FnMut(&[u8]) -> bool>(path: &Path, max_lines: usize, mut f: F) {
     const CHUNK: u64 = 64 * 1024;
     let Ok(mut file) = std::fs::File::open(path) else {
-        return Vec::new();
+        return;
     };
     let Ok(size) = file.metadata().map(|m| m.len()) else {
-        return Vec::new();
+        return;
     };
 
     let mut pos = size;
     let mut carry: Vec<u8> = Vec::new();
-    let mut out = Vec::new();
+    let mut read = 0;
 
-    while pos > 0 && out.len() < max_lines {
+    while pos > 0 && read < max_lines {
         let read_size = CHUNK.min(pos);
         pos -= read_size;
         if file.seek(SeekFrom::Start(pos)).is_err() {
@@ -163,19 +201,18 @@ pub fn read_last_lines(path: &Path, max_lines: usize) -> Vec<Value> {
         };
 
         for line in lines.iter().rev() {
-            if out.len() >= max_lines {
+            if read >= max_lines {
                 break;
             }
             let line = line.trim_ascii();
             if line.is_empty() {
                 continue;
             }
-            if let Ok(v) = serde_json::from_str::<Value>(&String::from_utf8_lossy(line)) {
-                out.push(v);
+            if f(String::from_utf8_lossy(line).as_bytes()) {
+                read += 1;
             }
         }
     }
-    out
 }
 
 // ---------------------------------------------------------------------------

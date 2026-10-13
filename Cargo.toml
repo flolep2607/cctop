@@ -176,7 +176,11 @@ serde = { version = "1.0.229", features = ["derive"] }
 # transcript, and the cache never notices because the wrong value is now what
 # it stores. It costs about 2% on a float-heavy parse (15.6ms -> 15.9ms for
 # 1.3 MB of rate tables), which is startup and paid once.
-serde_json = { version = "1.0.151", features = ["preserve_order", "float_roundtrip"] }
+#
+# `raw_value` so a transcript reader can keep a field it may not need as the
+# slice of the line it occupies, and build it only if it does: see
+# `crates/core/src/session/claude_line.rs`.
+serde_json = { version = "1.0.151", features = ["preserve_order", "float_roundtrip", "raw_value"] }
 sysinfo = "0.39.6"
 # Hashes the binary `--update` downloaded as the user, so the root step that
 # installs it can check it is the same file. Already in the tree under the TLS
