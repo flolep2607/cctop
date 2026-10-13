@@ -201,13 +201,6 @@ fn digest_rates(entries: &HashMap<String, LitellmEntry>) -> u64 {
     hash.max(1)
 }
 
-fn unix_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-}
-
 /// Above this, a per-token rate is a unit error rather than an expensive model.
 ///
 /// A few upstream rows quote dollars per *million* (or per thousand) tokens in
@@ -351,7 +344,7 @@ pub fn load_cached_pricing() -> bool {
     let Ok(cache) = serde_json::from_str::<PricingCache>(&text) else {
         return false;
     };
-    let age = unix_secs().saturating_sub(cache.fetched_at);
+    let age = crate::util::now_secs().saturating_sub(cache.fetched_at);
     let fresh = age < config::PRICING_CACHE_MAX_AGE_SECS;
     crate::trace::fact(
         "pricing table",
@@ -390,7 +383,7 @@ pub fn refresh_pricing_blocking() {
 
     let Some(data) = fetched else { return }; // keep whatever the stale load installed
 
-    let now = unix_secs();
+    let now = crate::util::now_secs();
     let _ = std::fs::create_dir_all(&*config::CACHE_DIR);
     if let Ok(text) = serde_json::to_string(&PricingCache {
         fetched_at: now,

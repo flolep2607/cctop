@@ -11,7 +11,8 @@
 //! down by kind of work, because most of "this model is worse" turns out to be
 //! "this model was given the debugging".
 
-use super::{Analysis, Task, plural, substantive};
+use super::{Analysis, Task, substantive};
+use crate::util::plural;
 use std::collections::HashMap;
 
 #[derive(Debug, Clone, Default)]

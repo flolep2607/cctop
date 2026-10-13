@@ -98,13 +98,6 @@ struct DiskCacheRef<'a> {
 /// every single run.
 const MAX_ENTRIES: usize = 20_000;
 
-fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
-}
-
 /// Where a session's cache entry lives, and which version of the transcript that
 /// entry holds. `None` where no honest identity can be formed.
 ///
@@ -315,7 +308,7 @@ impl CostCache {
                     path: path.to_path_buf(),
                     session: session.to_string(),
                     stamp: id.stamp,
-                    stored_at: now_ms(),
+                    stored_at: u64::try_from(crate::util::now_ms()).unwrap_or(0),
                     data: data.clone(),
                 },
             );

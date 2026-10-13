@@ -16,7 +16,8 @@
 //! is a separate feature and a much larger commitment than reading.
 
 use super::inventory::{Inventory, Roots};
-use super::{Analysis, Task, plural, substantive, unused};
+use super::{Analysis, Task, substantive, unused};
+use crate::util::plural;
 use std::collections::HashMap;
 
 /// How actionable a finding is.

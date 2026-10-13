@@ -1389,10 +1389,7 @@ fn context_timeline(session: &Session, data: &SessionData, width: usize) -> Vec<
                 // Named on the chart because they are the only drops in it: a
                 // fall with no compaction behind it would be a measurement
                 // error, and telling the two apart matters.
-                n => dim(format!(
-                    "   {n} compaction{}",
-                    if n == 1 { "" } else { "s" }
-                )),
+                n => dim(format!("   {}", util::plural(n, "compaction"))),
             },
         ]),
     ];

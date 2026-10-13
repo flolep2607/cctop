@@ -42,6 +42,10 @@
 //! paragraph was the plan.
 
 use crate::chat;
+// Quoted as markdown the way an export quotes a turn, so a prompt that was
+// itself markdown — a list, a fenced block — cannot be read as part of the
+// brief's own structure.
+use crate::export::quote;
 use crate::session::{EDIT_TOOLS, Session, SessionData, ToolDetail};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -390,18 +394,6 @@ fn closing(chat: &chat::Conversation) -> Vec<String> {
 /// half-quoted instruction cleanly, as though it were the whole instruction.
 fn clip(text: &str, max: usize) -> String {
     crate::util::clip(text.trim(), max)
-}
-
-/// Quote `text` as markdown, so a prompt that was itself markdown — a list, a
-/// fenced block — cannot be read as part of the brief's own structure.
-fn quote(text: &str) -> String {
-    text.lines()
-        .map(|line| match line.trim().is_empty() {
-            true => ">".to_string(),
-            false => format!("> {line}"),
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
 }
 
 impl Brief {

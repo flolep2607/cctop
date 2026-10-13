@@ -1634,10 +1634,9 @@ fn draw_bottom(frame: &mut Frame, area: Rect, app: &mut App, layout: &mut Layout
         // rather than implying the cursor is on nothing.
         let said = match app.selected_group() {
             Some(g) => format!(
-                "{} — {} session{}. Enter folds or unfolds it.",
+                "{} — {}. Enter folds or unfolds it.",
                 g.label,
-                g.sessions,
-                if g.sessions == 1 { "" } else { "s" }
+                util::plural(g.sessions, "session")
             ),
             None => "No session selected".to_string(),
         };
@@ -3057,7 +3056,7 @@ mod tests {
                 order: None,
                 state: Some(cctop_core::rmux::State {
                     signal: cctop_core::hook::Signal::NeedsInput,
-                    at: cctop_core::rmux::now_secs(),
+                    at: cctop_core::util::now_secs(),
                 }),
                 color: color.map(str::to_string),
                 tab: None,

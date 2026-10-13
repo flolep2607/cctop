@@ -1203,10 +1203,9 @@ pub(super) fn draw_search(frame: &mut Frame, area: Rect, app: &App) {
         input_line(&app.search),
         Line::from(Span::styled(
             format!(
-                " {} of {} session{}",
+                " {} of {}",
                 app.matched,
-                app.sessions.len(),
-                if app.sessions.len() == 1 { "" } else { "s" }
+                util::plural(app.sessions.len(), "session")
             ),
             theme::dim(),
         )),
@@ -2670,8 +2669,8 @@ fn draw_reclaim_confirm(frame: &mut Frame, area: Rect, app: &App, layout: &mut L
     let mut lines = vec![
         Line::from(Span::styled(
             format!(
-                "  Stop {n} idle session{}, freeing {}",
-                if n == 1 { "" } else { "s" },
+                "  Stop {}, freeing {}",
+                util::plural(n, "idle session"),
                 util::compact_bytes(plan.bytes)
             ),
             theme::value(),
@@ -4898,7 +4897,7 @@ mod tests {
                 order: None,
                 state: signal.map(|signal| cctop_core::rmux::State {
                     signal,
-                    at: cctop_core::rmux::now_secs(),
+                    at: cctop_core::util::now_secs(),
                 }),
                 color: None,
                 tab: None,

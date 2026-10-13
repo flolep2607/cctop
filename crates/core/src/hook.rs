@@ -2836,15 +2836,7 @@ fn yolo_hook_command(exe: &str, event: &str) -> String {
 }
 
 fn command_line(exe: &str, marker: &str, event: &str) -> String {
-    let plain = !exe.is_empty()
-        && exe
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || "/._-+,:=@%".contains(c));
-    if plain {
-        format!("{exe}{marker}{event}")
-    } else {
-        format!("'{}'{marker}{event}", exe.replace('\'', r"'\''"))
-    }
+    format!("{}{marker}{event}", crate::sandbox::sh_quote(exe))
 }
 
 /// A command line cut at whichever of cctop's two words it carries, into the

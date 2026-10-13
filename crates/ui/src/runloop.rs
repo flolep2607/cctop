@@ -265,9 +265,8 @@ pub fn run(
     // rather than inside the alternate screen that is about to be torn down.
     if !left_running.is_empty() {
         println!(
-            "{} agent{} still running in rmux; `cctop` then `t` to get back to {}.",
-            left_running.len(),
-            if left_running.len() == 1 { "" } else { "s" },
+            "{} still running in rmux; `cctop` then `t` to get back to {}.",
+            cctop_core::util::plural(left_running.len(), "agent"),
             if left_running.len() == 1 {
                 "it"
             } else {
