@@ -42,6 +42,10 @@
 //! paragraph was the plan.
 
 use crate::chat;
+// Quoted as markdown the way an export quotes a turn, so a prompt that was
+// itself markdown — a list, a fenced block — cannot be read as part of the
+// brief's own structure.
+use crate::export::quote;
 use crate::session::{EDIT_TOOLS, Session, SessionData, ToolDetail};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -385,33 +389,11 @@ fn closing(chat: &chat::Conversation) -> Vec<String> {
         .collect()
 }
 
-/// Cut to `max` characters, never mid-character, marking that it was cut.
-///
-/// The ellipsis is load-bearing in a document an agent reads as fact: a
-/// half-quoted instruction that ends cleanly reads as the whole instruction.
+/// Trimmed, then cut by [`crate::util::clip`], whose ellipsis is
+/// load-bearing here: a document an agent reads as fact must not end a
+/// half-quoted instruction cleanly, as though it were the whole instruction.
 fn clip(text: &str, max: usize) -> String {
-    let text = text.trim();
-    if text.chars().count() <= max {
-        return text.to_string();
-    }
-    let end = text
-        .char_indices()
-        .nth(max)
-        .map(|(i, _)| i)
-        .unwrap_or(text.len());
-    format!("{}…", text[..end].trim_end())
-}
-
-/// Quote `text` as markdown, so a prompt that was itself markdown — a list, a
-/// fenced block — cannot be read as part of the brief's own structure.
-fn quote(text: &str) -> String {
-    text.lines()
-        .map(|line| match line.trim().is_empty() {
-            true => ">".to_string(),
-            false => format!("> {line}"),
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
+    crate::util::clip(text.trim(), max)
 }
 
 impl Brief {
@@ -1082,20 +1064,7 @@ fn current(session: &Session, accounts: &[String]) -> Target {
 
 /// A session id of the shape the harness writes: a version-4 UUID.
 fn new_session_id() -> String {
-    let mut bytes = crate::util::random_bytes(16);
-    // The version and variant bits. Nothing checks them, but a file whose name
-    // is not a UUID is one a person reading the directory cannot place.
-    bytes[6] = (bytes[6] & 0x0f) | 0x40;
-    bytes[8] = (bytes[8] & 0x3f) | 0x80;
-    let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
-    format!(
-        "{}-{}-{}-{}-{}",
-        &hex[0..8],
-        &hex[8..12],
-        &hex[12..16],
-        &hex[16..20],
-        &hex[20..32]
-    )
+    crate::util::new_uuid()
 }
 
 /// The brief as text, having left a record beside it where one could be
@@ -1212,6 +1181,7 @@ mod tests {
             tools: Vec::new(),
             from: None,
             agent: None,
+            html: None,
         }
     }
 

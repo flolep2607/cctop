@@ -140,12 +140,6 @@ fn due(off: Option<&str>, notice_shown: bool, last_sent: u64, now: u64) -> bool 
     off.is_none() && notice_shown && now.saturating_sub(last_sent) >= DAY
 }
 
-fn now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs())
-}
-
 fn read<T: for<'de> Deserialize<'de>>(path: &Path) -> Option<T> {
     serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()
 }
@@ -272,7 +266,7 @@ pub fn start() {
     std::thread::spawn(|| {
         let mut prefs = crate::cache::UiPrefs::load();
         let mut pending: Pending = read(&PENDING_FILE).unwrap_or_default();
-        let now = now();
+        let now = crate::util::now_secs();
         if !due(
             off_now(),
             prefs.telemetry_notice_shown,

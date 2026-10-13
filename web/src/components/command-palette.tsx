@@ -11,16 +11,25 @@ import type { Session, Tab } from "@/lib/types";
 import { StateDot } from "./status";
 import { dotOf, dotOfTab } from "@/lib/status";
 import { useTheme } from "@/hooks/use-theme";
+import { useTick } from "@/hooks/use-live";
 import { go, PAGES } from "./nav";
 
+/** What a page already holds live: the whole session table, the tabs. Null while it is still arriving. */
+export type Shared = { sessions?: Session[] | null; tabs?: Tab[] | null };
+
 // Ctrl+K / ⌘K on every page: every page, open tab and session, a few letters
-// away. Sessions and tabs are fetched as it opens, so it is never stale and
-// costs nothing while closed.
-export function CommandPalette({ open, setOpen }: { open: boolean; setOpen: (o: boolean) => void }) {
+// away. A page that already follows the table or the tabs — the dashboard,
+// the workspace — hands them in, and the palette lists those as they move. On
+// any other page they are fetched as it opens: the session page follows one
+// row, and a second, whole-table stream on every page for a palette that is
+// mostly closed would cost more than one read per opening.
+export function CommandPalette({ open, setOpen, shared }: { open: boolean; setOpen: (o: boolean) => void; shared?: Shared }) {
   const [, navigate] = useLocation();
   const { cycle } = useTheme();
-  const [sessions, setSessions] = useState<Session[]>([]);
-  const [tabs, setTabs] = useState<Tab[]>([]);
+  const [fetched, setFetched] = useState<{ sessions: Session[]; tabs: Tab[] }>({ sessions: [], tabs: [] });
+  const sessions = shared?.sessions ?? fetched.sessions;
+  const tabs = shared?.tabs ?? fetched.tabs;
+  const now = useTick(60000);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -33,11 +42,13 @@ export function CommandPalette({ open, setOpen }: { open: boolean; setOpen: (o: 
     return () => document.removeEventListener("keydown", onKey);
   }, [open, setOpen]);
 
+  const ownSessions = !shared?.sessions;
+  const ownTabs = !shared?.tabs;
   useEffect(() => {
     if (!open) return;
-    getJson<Session[]>("/api/sessions").then((s) => setSessions(Array.isArray(s) ? s : [])).catch(() => {});
-    getJson<{ tabs?: Tab[] }>("/api/tabs").then((b) => setTabs(b.tabs ?? [])).catch(() => {});
-  }, [open]);
+    if (ownSessions) getJson<Session[]>("/api/sessions").then((s) => setFetched((f) => ({ ...f, sessions: Array.isArray(s) ? s : [] })), () => {});
+    if (ownTabs) getJson<{ tabs?: Tab[] }>("/api/tabs").then((b) => setFetched((f) => ({ ...f, tabs: b.tabs ?? [] })), () => {});
+  }, [open, ownSessions, ownTabs]);
 
   const run = (fn: () => void) => {
     setOpen(false);
@@ -103,7 +114,7 @@ export function CommandPalette({ open, setOpen }: { open: boolean; setOpen: (o: 
                   <StateDot state={dotOf(s)} />
                   <span className="truncate">{s.title || where || s.session_id}</span>
                   <span className="text-muted-foreground truncate text-xs">
-                    {[s.title ? where : "", s.harness, shortModel(s.model), ago(s.last_active)].filter(Boolean).join(" · ")}
+                    {[s.title ? where : "", s.harness, shortModel(s.model), ago(s.last_active, now)].filter(Boolean).join(" · ")}
                   </span>
                 </CommandItem>
               );

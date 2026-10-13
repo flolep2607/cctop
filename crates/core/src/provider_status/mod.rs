@@ -43,6 +43,7 @@ const HTTP_TIMEOUT: Duration = Duration::from_secs(5);
 /// line that might be about your outage is worse than none.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(rename = "StatusPage"))]
 pub enum Page {
     Anthropic,
     OpenAi,
@@ -77,6 +78,7 @@ impl Page {
 /// Statuspage's severity ladder, ordered so `max` picks the worst.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "lowercase")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(rename = "StatusLevel"))]
 pub enum Level {
     #[default]
     Operational,
@@ -114,6 +116,7 @@ impl Level {
 
 /// One unresolved incident.
 #[derive(Debug, Clone, PartialEq, Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct Incident {
     pub name: String,
     /// Where the vendor is in handling it: investigating, identified, monitoring.
@@ -151,6 +154,7 @@ pub struct Incident {
 /// machine while their proxy is down.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub enum Standing {
     /// Open, recent, and on something an agent talks to: it counts towards the
     /// line and towards explaining failing sessions.
@@ -166,6 +170,7 @@ pub enum Standing {
 
 /// A component the page reports as not operational.
 #[derive(Debug, Clone, PartialEq, Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(rename = "StatusComponent"))]
 pub struct Component {
     pub name: String,
     pub level: Level,
@@ -215,6 +220,7 @@ impl Page {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(rename = "StatusReport"))]
 pub struct Report {
     pub level: Level,
     /// The vendor's own one-line summary, e.g. "Partial System Degradation".
@@ -423,6 +429,7 @@ pub fn erroring_by_page<'a>(sessions: impl IntoIterator<Item = &'a Session>) -> 
 
 /// A page's state set against how many of the user's sessions fail against it.
 #[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(as = "wire::Alert"))]
 pub struct Alert {
     pub page: Page,
     /// Running sessions attributed to this page that are in an API error state.
@@ -591,6 +598,7 @@ pub fn alerts_at(status: &Status, erroring: &[(Page, usize)], now: i64) -> Vec<A
 /// screen keeps its own palette.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(rename = "StatusTone"))]
 pub enum Tone {
     /// The vendor reports an outage.
     Outage,
@@ -650,6 +658,7 @@ pub fn summary_line(alerts: &[Alert]) -> Option<(String, Level)> {
 /// The answer to "is it me?", which every detailed view leads with: on a bad
 /// day it is the only sentence that gets read.
 #[derive(Debug, Clone, PartialEq, Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct Verdict {
     pub text: String,
     /// A second line, for the case that needs telling where to look.
@@ -701,6 +710,7 @@ pub fn verdict(alerts: &[Alert], erroring: &[(Page, usize)]) -> Verdict {
 /// Everything a reader needs to draw both the line and the panel, from the
 /// pages' last answers and the sessions on screen.
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(rename = "ProviderStatus"))]
 pub struct Document {
     /// Every page, answered or not, in [`Page::ALL`] order.
     pub pages: Vec<PageDocument>,
@@ -712,6 +722,7 @@ pub struct Document {
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(as = "wire::PageDocument"))]
 pub struct PageDocument {
     pub page: Page,
     pub label: &'static str,
@@ -724,6 +735,7 @@ pub struct PageDocument {
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(rename = "StatusLine"))]
 pub struct Line {
     pub text: String,
     pub tone: Tone,
@@ -985,6 +997,56 @@ pub mod fixtures {
     /// OpenAI's page with an image-generation incident that, incident.io
     /// style, names no components; only the flagged component says what it is.
     pub const OPENAI_OTHER: &str = include_str!("fixtures/openai_other.json");
+}
+
+/// The shapes [`PageDocument`] and [`Alert`] are written in, for the web UI's
+/// generated types: [`PageStatus`] and [`Alert`] serialise by hand, so their
+/// declarations are taken from these mirrors of what `serialize` emits.
+#[cfg(feature = "ts")]
+mod wire {
+    #[derive(ts_rs::TS)]
+    #[ts(rename = "StatusPageBase")]
+    #[allow(dead_code)]
+    pub struct PageBase {
+        page: super::Page,
+        label: String,
+        site: String,
+        erroring: usize,
+    }
+
+    #[derive(ts_rs::TS)]
+    #[ts(tag = "state", rename_all = "lowercase", rename = "PageDocument")]
+    #[allow(dead_code)]
+    pub enum PageDocument {
+        Pending {
+            #[ts(flatten)]
+            base: PageBase,
+        },
+        Ok {
+            #[ts(flatten)]
+            base: PageBase,
+            #[ts(flatten)]
+            report: super::Report,
+        },
+        Unavailable {
+            #[ts(flatten)]
+            base: PageBase,
+            reason: String,
+        },
+    }
+
+    #[derive(ts_rs::TS)]
+    #[ts(rename = "StatusAlert")]
+    #[allow(dead_code)]
+    pub struct Alert {
+        page: super::Page,
+        erroring: usize,
+        level: super::Level,
+        headline: String,
+        elsewhere: usize,
+        confirmed: bool,
+        probably_local: bool,
+    }
 }
 
 #[cfg(test)]

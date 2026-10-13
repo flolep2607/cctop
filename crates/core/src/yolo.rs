@@ -151,6 +151,7 @@ const OWNER: &str = "yolo.owner";
 
 /// One prompt cctop allowed, for the page to list.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(rename = "YoloAllowed"))]
 pub struct Allowed {
     /// RFC 3339, like every other time a row carries.
     pub at: String,
@@ -168,6 +169,7 @@ pub struct Allowed {
 /// never share it, and the runtime directory the file lives in does not
 /// outlive the boot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(rename = "YoloAgent"))]
 pub struct Agent {
     pub pid: u32,
     pub start: u64,
@@ -207,6 +209,7 @@ fn start_time(pid: u32) -> Option<u64> {
 
 /// One session with YOLO on.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(rename = "YoloEntry"))]
 pub struct Entry {
     /// When it was switched on, RFC 3339.
     pub since: String,
@@ -241,21 +244,6 @@ fn read_state(dir: &Path) -> State {
         .unwrap_or_default()
 }
 
-/// An exclusive `flock`, held until the file is dropped.
-fn flock(file: &std::fs::File) -> bool {
-    use std::os::fd::AsRawFd;
-    // SAFETY: flock on a descriptor the caller owns for the call.
-    unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) == 0 }
-}
-
-fn open_lock(path: &Path) -> std::io::Result<std::fs::File> {
-    std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(path)
-}
-
 /// Read, change and write the switch, with every other writer kept out.
 fn update(dir: &Path, change: impl FnOnce(&mut State)) -> std::io::Result<()> {
     update_within(dir, LOCK_PATIENCE, change)
@@ -267,24 +255,18 @@ fn update_within(
     change: impl FnOnce(&mut State),
 ) -> std::io::Result<()> {
     std::fs::create_dir_all(dir)?;
-    let lock = open_lock(&dir.join(LOCK))?;
-    let started = Instant::now();
-    while !flock(&lock) {
-        if started.elapsed() >= patience {
-            return Err(std::io::Error::new(
+    let _lock =
+        crate::util::lock_within(&dir.join(LOCK), patience).map_err(|e| match e.kind() {
+            std::io::ErrorKind::WouldBlock => std::io::Error::new(
                 std::io::ErrorKind::WouldBlock,
                 "another cctop is holding the YOLO file",
-            ));
-        }
-        std::thread::sleep(Duration::from_millis(2));
-    }
+            ),
+            _ => e,
+        })?;
     let mut state = read_state(dir);
     change(&mut state);
     let json = serde_json::to_vec(&state).map_err(std::io::Error::other)?;
-    // One name is enough: only the lock holder writes it.
-    let tmp = dir.join("yolo.json.tmp");
-    std::fs::write(&tmp, json)?;
-    std::fs::rename(&tmp, dir.join(STATE))
+    crate::util::write_atomic(&dir.join(STATE), &json, false)
 }
 
 /// Who threw a switch, and about which session, for the lasting record.
@@ -830,12 +812,9 @@ impl Auto {
             return true;
         }
         let _ = std::fs::create_dir_all(&self.dir);
-        let Ok(file) = open_lock(&self.dir.join(OWNER)) else {
+        let Ok(file) = crate::util::lock_within(&self.dir.join(OWNER), Duration::ZERO) else {
             return false;
         };
-        if !flock(&file) {
-            return false;
-        }
         crate::elog::event(
             "yolo",
             "owner",
@@ -1454,8 +1433,8 @@ mod tests {
     fn the_hooks_allow_never_waits_long() {
         let dir = scratch("record-busy");
         switched_on_unlocked(&dir, "a");
-        let held = open_lock(&dir.join(LOCK)).unwrap();
-        assert!(flock(&held), "a lock file nobody else opened was taken");
+        let held = crate::util::lock_within(&dir.join(LOCK), Duration::ZERO)
+            .expect("a lock file nobody else opened was taken");
         let started = Instant::now();
         record_allowed_in(
             &dir,

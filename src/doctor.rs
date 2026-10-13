@@ -20,6 +20,7 @@ mod parsers;
 
 use cctop_core::config;
 use cctop_core::pricing::Provider;
+use cctop_core::util::plural;
 use std::io::IsTerminal;
 use std::path::Path;
 
@@ -586,13 +587,6 @@ fn mux_check() -> Check {
         );
     }
     check
-}
-
-fn plural(n: usize, what: &str) -> String {
-    match n {
-        1 => format!("1 {what}"),
-        _ => format!("{n} {what}s"),
-    }
 }
 
 /// The `TIOCSTI` backend's availability.

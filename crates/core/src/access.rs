@@ -53,6 +53,7 @@ const MAX_WRITES: usize = 20;
 
 /// Everything in scope for one session.
 #[derive(Debug, Default, Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct Access {
     /// The working directory as the transcript recorded it, spelled with `~`.
     pub cwd: String,
@@ -60,18 +61,22 @@ pub struct Access {
     /// deleted cannot be resumed into it, and this is why.
     pub cwd_exists: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional = nullable))]
     pub branch: Option<String>,
     pub harness: String,
     pub model: String,
     /// How much this session asks before it acts, when something has said.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional = nullable))]
     pub permission: Option<String>,
     /// What that mode means, in a sentence, since the labels are terse and the
     /// difference between two of them is the whole safety story.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional = nullable))]
     pub permission_detail: Option<&'static str>,
     /// PID of the live agent, when there is one.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional = nullable))]
     pub pid: Option<u32>,
     /// Instruction files that apply here, global first.
     pub instructions: Vec<FileRef>,
@@ -82,6 +87,7 @@ pub struct Access {
     /// candidates and naming the ones that are not there is noise, not an
     /// answer. (Devin alone has five documented locations.)
     #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[cfg_attr(feature = "ts", ts(optional = nullable))]
     pub skills_dirs: Vec<String>,
     pub skills: Vec<Skill>,
     pub mcp: Vec<McpServer>,
@@ -93,6 +99,7 @@ pub struct Access {
     pub writes: Vec<String>,
     /// A limit of this harness worth stating rather than leaving as a gap.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional = nullable))]
     pub note: Option<&'static str>,
 }
 
@@ -102,6 +109,7 @@ pub struct Access {
 /// is the answer to a question people ask, and a list that silently omits it
 /// cannot be told from one that never looked.
 #[derive(Debug, Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct FileRef {
     /// Spelled with `~`, since the browser may not be on this machine.
     pub path: String,
@@ -112,18 +120,22 @@ pub struct FileRef {
     pub bytes: u64,
     /// The head of it, capped at [`MAX_FILE_CHARS`].
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional = nullable))]
     pub head: Option<String>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
+    #[cfg_attr(feature = "ts", ts(optional = nullable))]
     pub clipped: bool,
 }
 
 #[derive(Debug, Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct Skill {
     pub name: String,
     pub description: String,
 }
 
 #[derive(Debug, Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct McpServer {
     pub name: String,
     /// `user`, `project`, or `local`, which is the difference between a server
@@ -134,11 +146,13 @@ pub struct McpServer {
     /// configured by URL has none, and inventing one would be a lie about where
     /// the agent's tool calls are going.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional = nullable))]
     pub command: Option<String>,
 }
 
 /// Whether cctop hears from this harness, per file it installs into.
 #[derive(Debug, Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct HookState {
     pub harness: String,
     pub scope: &'static str,
@@ -146,10 +160,12 @@ pub struct HookState {
     /// One word: `installed`, `absent`, `partial`, `other`, `broken`.
     pub state: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional = nullable))]
     pub detail: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct ToolCount {
     pub name: String,
     pub count: u64,

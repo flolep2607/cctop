@@ -1,27 +1,27 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useLocation } from "wouter";
-import { Bell, BellOff, ExternalLink, FileSearch, Play, RotateCw, Search, SendHorizontal, SquareTerminal, X } from "lucide-react";
-import { toast } from "sonner";
-import { cn } from "@/lib/utils";
-import { act, ask, getJson } from "@/lib/api";
+import { Bell, BellOff, FileSearch, Play, Search } from "lucide-react";
 import { CAN_ACT, withToken } from "@/lib/config";
-import { money, shortPath } from "@/lib/format";
+import { money } from "@/lib/format";
+import { readSeen } from "@/lib/seen";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Kbd } from "@/components/ui/kbd";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { AppShell } from "@/components/app-shell";
 import { StateDot } from "@/components/status";
-import { dotOfTab } from "@/lib/status";
-import { TerminalFrame } from "@/components/terminal";
-import { popOut, type Terminal } from "@/lib/terminal";
 import { POLL_EVERY, useSessions, useStored, useTabs, useTick } from "@/hooks/use-live";
-import { useHosts } from "@/hooks/use-hosts";
-import type { Session, Tab } from "@/lib/types";
+import type { Session } from "@/lib/types";
 import { SessionRow, WantingRow } from "./rows";
 import { Quota } from "./quota";
 import { ProviderStatus } from "./provider-status";
 import { Launcher } from "./launcher";
+import { HostBanners } from "./host-banners";
+import { Tabs } from "./tabs";
+import { FindResults, type Find } from "./find-results";
+import { BulkBar } from "./bulk-bar";
+import { searchTranscripts, useTranscriptSearch } from "./use-transcript-search";
+import { useWantingNotifications } from "./use-wanting-notifications";
 
 type Sort = "recent" | "cost" | "tokens" | "context";
 // Every order is descending: each is a "which is the most" question.
@@ -43,24 +43,16 @@ const matches = (s: Session, needle: string) => {
 const typing = (t: EventTarget | null) =>
   t instanceof HTMLElement && (t.isContentEditable || /^(INPUT|SELECT|TEXTAREA)$/.test(t.tagName));
 
-type Hit = { session_id: string; snippet?: string; project?: string; title?: string; provider?: string; model?: string };
-
 // What the reader chose, kept across reloads. Not the bulk selection — a mark
 // that survived a reload could act on a session nobody remembers choosing —
 // and not the bell, whose permission belongs to the browser.
 type Prefs = { filter: string; sort: Sort; running: boolean; pins: string[]; dismissed: Record<string, string> };
 const DEFAULT_PREFS: Prefs = { filter: "", sort: "recent", running: false, pins: [], dismissed: {} };
 
-function readSeen(): Record<string, { at?: number }> {
-  try {
-    return JSON.parse(localStorage.getItem("cctop-seen") || "{}") || {};
-  } catch {
-    return {};
-  }
-}
-
 export function DashboardPage() {
   const { sessions, feed } = useSessions();
+  // Here rather than in the tab bar, so the palette lists the same tabs.
+  const { tabs } = useTabs(5000);
   const [prefs, setPrefs] = useStored<Prefs>("cctop-dash", DEFAULT_PREFS, (v): v is Prefs => !!v && typeof v === "object");
   // Held across renders so `p.pins` and the rest keep their identity until the
   // stored prefs change, which is what the memos below key on.
@@ -68,38 +60,19 @@ export function DashboardPage() {
   const update = (patch: Partial<Prefs>) => setPrefs({ ...p, ...patch });
   const [filterText, setFilterText] = useState(p.filter);
   const filter = filterText.trim().toLowerCase();
-  const [hits, setHits] = useState<{ q: string; map: Map<string, string> }>({ q: "", map: new Map() });
-  const [find, setFind] = useState<{ q: string; hits: Hit[] | null; error?: string } | null>(null);
+  const searchHits = useTranscriptSearch(filter);
+  const [find, setFind] = useState<Find | null>(null);
   const [pickedRaw, setPicked] = useState<Set<string>>(new Set());
   const [selId, setSelId] = useState<string | null>(null);
-  const [notify, setNotify] = useState(false);
+  const { notify, toggle: toggleNotify } = useWantingNotifications(sessions);
   const filterRef = useRef<HTMLInputElement>(null);
   const [, navigate] = useLocation();
-  useTick();
-
-  // The transcript is asked once typing pauses, for a query long enough to
-  // mean something; hits are gated on the query that produced them.
-  useEffect(() => {
-    if (filter.length < 3 || filter === hits.q) return;
-    const t = setTimeout(async () => {
-      try {
-        const data = await getJson<{ hits?: Hit[] } | Hit[]>("/api/search", { q: filter });
-        const list = Array.isArray(data) ? data : data.hits ?? [];
-        const map = new Map<string, string>();
-        for (const h of list) if (h?.session_id && h.snippet && !map.has(h.session_id)) map.set(h.session_id, String(h.snippet));
-        setHits({ q: filter, map });
-      } catch {
-        /* no search route, no extra rows */
-      }
-    }, 400);
-    return () => clearTimeout(t);
-  }, [filter, hits.q]);
+  const now = useTick();
 
   const pins = useMemo(() => new Set(p.pins), [p.pins]);
   const seen = readSeen();
   const all = useMemo(() => sessions ?? [], [sessions]);
   const byId = useMemo(() => new Map(all.map((s) => [s.session_id, s])), [all]);
-  const searchHits = hits.q === filter ? hits.map : new Map<string, string>();
 
   const shown = all
     .filter((s) => matches(s, filter) || searchHits.has(s.session_id))
@@ -115,22 +88,6 @@ export function DashboardPage() {
   useEffect(() => {
     document.title = wanting.length ? `(${wanting.length}) cctop` : "cctop";
   }, [wanting.length]);
-
-  // A desktop notification on the transition into waiting or asking — not for
-  // a session already waiting when the page opened.
-  const prev = useRef<Map<string, string> | null>(null);
-  useEffect(() => {
-    if (!sessions) return;
-    if (prev.current && notify) {
-      for (const s of sessions) {
-        const was = prev.current.get(s.session_id);
-        const body = (s.project || s.session_id.slice(0, 8)) + (s.title ? " · " + s.title : "");
-        if (was && was !== "asking" && s.state === "asking") new Notification("Needs permission", { body, tag: s.session_id });
-        if (was && was !== "waiting" && s.state === "waiting") new Notification("Waiting on you", { body, tag: s.session_id });
-      }
-    }
-    prev.current = new Map(sessions.map((s) => [s.session_id, s.state]));
-  }, [sessions, notify]);
 
   // Marks hold while their sessions exist, not while they are shown: a mark
   // whose session has gone is dropped here rather than acted on.
@@ -152,20 +109,10 @@ export function DashboardPage() {
     if (q.length < 3) return setFind({ q, hits: [], error: "Three characters or more to search transcripts." });
     setFind({ q, hits: null });
     try {
-      const data = await getJson<{ hits?: Hit[] } | Hit[]>("/api/search", { q });
-      setFind({ q, hits: Array.isArray(data) ? data : data.hits ?? [] });
+      setFind({ q, hits: await searchTranscripts(q) });
     } catch (e) {
       setFind({ q, hits: [], error: String((e as Error).message || e) });
     }
-  };
-
-  const toggleNotify = async () => {
-    if (notify) return setNotify(false);
-    if (!("Notification" in window)) return toast.error("This browser has no notifications");
-    // Inside the click: a permission prompt no gesture asked for is refused.
-    const granted = await Notification.requestPermission();
-    setNotify(granted === "granted");
-    if (granted !== "granted") toast.error("The browser refused notification permission for this page");
   };
 
   // --- keys ------------------------------------------------------------------
@@ -210,12 +157,13 @@ export function DashboardPage() {
   const hour = all.reduce((sum, s) => sum + (s.cost?.last_hour || 0), 0);
   const running = all.filter((s) => s.running).length;
   const isFresh = (s: Session) => {
-    const at = Number(seen[s.session_id]?.at);
-    return isFinite(at) && at > 0 && Date.parse(s.last_active ?? "") > at;
+    const at = seen[s.session_id]?.at;
+    return at !== undefined && at > 0 && Date.parse(s.last_active ?? "") > at;
   };
 
   return (
     <AppShell
+      live={{ sessions, tabs }}
       right={
         <div className="hidden items-baseline gap-4 font-mono text-sm md:flex">
           <span><b className="font-semibold">{money(today)}</b> <span className="text-muted-foreground font-sans text-[11px] tracking-wider uppercase">today</span></span>
@@ -227,7 +175,7 @@ export function DashboardPage() {
         <Quota />
         <HostBanners />
         <ProviderStatus />
-        <Tabs />
+        <Tabs tabs={tabs} />
         <div className="flex flex-wrap items-center gap-2">
           <div className="relative min-w-52 flex-1 max-sm:basis-full">
             <Search className="text-muted-foreground pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2" />
@@ -280,7 +228,7 @@ export function DashboardPage() {
 
       <div className="min-h-0 flex-1 overflow-y-auto px-3 pt-3 pb-4 sm:px-4">
         {find ? (
-          <FindResults find={find} byId={byId} onClose={() => setFind(null)} />
+          <FindResults find={find} byId={byId} now={now} onClose={() => setFind(null)} />
         ) : (
           <>
             {wanting.length > 0 && (
@@ -292,6 +240,7 @@ export function DashboardPage() {
                   <WantingRow
                     key={s.session_id}
                     s={s}
+                    now={now}
                     picked={picked.has(s.session_id)}
                     onPick={togglePick}
                     onDismiss={() => update({ dismissed: { ...p.dismissed, [s.session_id]: s.state } })}
@@ -311,6 +260,7 @@ export function DashboardPage() {
                   <SessionRow
                     key={s.session_id}
                     s={s}
+                    now={now}
                     selected={selId === s.session_id}
                     picked={picked.has(s.session_id)}
                     pinned={pins.has(s.session_id)}
@@ -350,206 +300,5 @@ export function DashboardPage() {
         <a className="hover:text-foreground underline-offset-2 hover:underline" href={withToken("/insight/compare")}>compare</a>
       </footer>
     </AppShell>
-  );
-}
-
-// Machines that could not be read — ssh hosts and siblings on the account —
-// for as long as they cannot be.
-function HostBanners() {
-  const failed = [...useHosts()];
-  return (
-    <>
-      {failed.map(([host, why]) => (
-        <div key={host} className="border-destructive/40 bg-destructive/5 text-destructive rounded-md border px-3 py-1.5 text-xs">
-          {host} could not be read: {why}
-        </div>
-      ))}
-    </>
-  );
-}
-
-// The TUI's tab bar, read from rmux: every agent cctop has open. A tab opens
-// its terminal in a drawer under the bar.
-function Tabs() {
-  const { tabs } = useTabs(5000);
-  const [open, setOpen] = useState<{ tab: Tab; term?: Terminal; error?: string } | null>(null);
-  const mint = (name: string, fresh = false): Promise<Terminal> =>
-    ask("/api/tab/" + encodeURIComponent(name) + "/terminal", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ origin: location.origin, fresh }),
-    }).then((r) => r.json());
-  const toggle = async (t: Tab) => {
-    if (open?.tab.name === t.name) return setOpen(null);
-    setOpen({ tab: t });
-    try {
-      const res = await ask("/api/tab/" + encodeURIComponent(t.name) + "/terminal", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ origin: location.origin }),
-      });
-      const term = await res.json();
-      setOpen((o) => (o?.tab.name === t.name ? { tab: t, term } : o));
-    } catch (e) {
-      setOpen((o) => (o?.tab.name === t.name ? { tab: t, error: String((e as Error).message || e) } : o));
-    }
-  };
-  if (!tabs?.length) return null;
-  return (
-    <>
-      <nav className="flex flex-wrap gap-1.5" aria-label="Open tabs">
-        {tabs.map((t) => (
-          <Button
-            key={t.name}
-            variant={open?.tab.name === t.name ? "secondary" : "outline"}
-            size="sm"
-            className="max-w-64 rounded-full"
-            aria-pressed={open?.tab.name === t.name}
-            disabled={!CAN_ACT}
-            onClick={() => toggle(t)}
-            title={(t.cwd ? shortPath(t.cwd) + " · " : "") + (CAN_ACT ? "open this tab's terminal" : "this link cannot open terminals")}
-          >
-            <StateDot state={dotOfTab(t.state)} />
-            <span className="truncate">{t.label}</span>
-          </Button>
-        ))}
-      </nav>
-      {open && (
-        <div className="bg-card overflow-hidden rounded-xl border shadow-xs">
-          <div className="text-muted-foreground flex items-center gap-2 border-b px-3 py-1.5 text-xs">
-            <SquareTerminal className="size-3.5" />
-            {open.tab.label}
-            {open.tab.cwd && <span>· {shortPath(open.tab.cwd)}</span>}
-            <span className="flex-1" />
-            {open.term && (
-              <button
-                type="button"
-                className="hover:text-foreground inline-flex items-center gap-1"
-                title="Open in a window of its own — the drawer closes, since a share admits one browser"
-                onClick={() => {
-                  const tab = open.tab;
-                  popOut({ key: tab.name, title: tab.label + " — cctop", release: () => setOpen(null), mint: () => mint(tab.name, true), onClosed: () => {} });
-                }}
-              >
-                <ExternalLink className="size-3" /> pop out
-              </button>
-            )}
-            <Button variant="ghost" size="icon-xs" onClick={() => setOpen(null)} aria-label="Close the terminal">
-              <X />
-            </Button>
-          </div>
-          <div className="bg-terminal flex h-[min(60vh,640px)]">
-            {open.term ? (
-              <TerminalFrame
-                url={open.term.url}
-                name={open.term.name ?? open.tab.name}
-                title="Terminal"
-                onBroken={() => {
-                  const tab = open.tab;
-                  mint(tab.name, true).then((term) => setOpen((o) => (o?.tab.name === tab.name && o.term?.url !== term.url ? { tab, term } : o)), () => {});
-                }}
-              />
-            ) : (
-              <div className={cn("m-auto text-sm", open.error ? "text-red-400" : "text-neutral-400")}>{open.error || "Opening this tab's terminal…"}</div>
-            )}
-          </div>
-        </div>
-      )}
-    </>
-  );
-}
-
-// Which transcripts hold these words at all — every session the server knows,
-// not only the rows on screen. A hit opens the chat with its find box seeded.
-function FindResults({ find, byId, onClose }: { find: { q: string; hits: Hit[] | null; error?: string }; byId: Map<string, Session>; onClose: () => void }) {
-  return (
-    <section className="bg-card relative overflow-hidden rounded-xl border shadow-xs" data-rendered="">
-      <h2 className="text-muted-foreground px-4 pt-3 pb-1 text-xs font-semibold tracking-wider uppercase">Transcript search — “{find.q}”</h2>
-      <Button variant="ghost" size="icon-xs" className="absolute top-2 right-2" onClick={onClose} aria-label="Back to the session table">
-        <X />
-      </Button>
-      {find.error ? (
-        <div className="text-muted-foreground p-10 text-center text-sm">{find.error}</div>
-      ) : find.hits === null ? (
-        <div className="text-muted-foreground p-10 text-center text-sm">Searching every transcript…</div>
-      ) : !find.hits.length ? (
-        <div className="text-muted-foreground p-10 text-center text-sm">No transcript mentions that.</div>
-      ) : (
-        find.hits.map((h) => {
-          const s = byId.get(h.session_id) ?? ({ session_id: h.session_id, provider: h.provider ?? "", state: "idle", running: false, project: h.project, title: h.title, model: h.model } as Session);
-          return (
-            <SessionRow
-              key={h.session_id}
-              s={s}
-              selected={false}
-              picked={false}
-              pinned={false}
-              fresh={false}
-              snippet={h.snippet}
-              href={"/session/" + encodeURIComponent(h.session_id) + "?find=" + encodeURIComponent(find.q)}
-            />
-          );
-        })
-      )}
-    </section>
-  );
-}
-
-// One verb against every marked session, one request at a time — these type
-// at real terminals and start real agents. The summary names the failures.
-function BulkBar({ picked, byId, onClear }: { picked: Set<string>; byId: Map<string, Session>; onClear: () => void }) {
-  const [text, setText] = useState("");
-  const [composing, setComposing] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const run = async (verb: "send" | "resume") => {
-    setBusy(true);
-    const failed: string[] = [];
-    let done = 0;
-    for (const id of picked) {
-      try {
-        await act(verb, id, verb === "send" ? { text } : {});
-        done++;
-      } catch (e) {
-        failed.push((shortPath(byId.get(id)?.project) || id.slice(0, 8)) + " — " + String((e as Error).message || e));
-      }
-    }
-    setBusy(false);
-    const summary = (verb === "send" ? "Sent to " : "Resumed ") + done;
-    if (failed.length) toast.error(summary + " · failed: " + failed.map((f) => f.split(" — ")[0]).join(", "), { description: failed.join("\n") });
-    else {
-      toast.success(summary);
-      if (verb === "send") {
-        setText("");
-        setComposing(false);
-      }
-    }
-  };
-  return (
-    <div className="bg-background flex shrink-0 flex-wrap items-center gap-2 border-t px-3 py-2 text-sm sm:px-4">
-      <span className="font-medium">{picked.size} selected</span>
-      <Button size="sm" variant="outline" disabled={busy} onClick={() => setComposing(!composing)}>
-        <SendHorizontal /> Send…
-      </Button>
-      <Button size="sm" variant="outline" disabled={busy} onClick={() => run("resume")}>
-        <RotateCw /> Resume
-      </Button>
-      <Button size="sm" variant="ghost" disabled={busy} onClick={onClear}>
-        Clear
-      </Button>
-      {composing && (
-        <form
-          className="flex min-w-64 flex-1 gap-2"
-          onSubmit={(e) => {
-            e.preventDefault();
-            if (text.trim()) run("send");
-          }}
-        >
-          <Input autoFocus value={text} onChange={(e) => setText(e.target.value)} onKeyDown={(e) => e.key === "Escape" && setComposing(false)} maxLength={4000} placeholder="One line, sent to each selected session" className="h-8" />
-          <Button type="submit" size="sm" disabled={busy || !text.trim()}>
-            Send
-          </Button>
-        </form>
-      )}
-    </div>
   );
 }

@@ -84,7 +84,6 @@ impl Log {
     }
 
     pub fn save(&self) {
-        let _ = std::fs::create_dir_all(&*config::CACHE_DIR);
         self.save_to(&config::BURN_LOG_FILE);
     }
 
@@ -95,10 +94,7 @@ impl Log {
         let Ok(text) = serde_json::to_string(self) else {
             return;
         };
-        let tmp = path.with_extension("json.tmp");
-        if std::fs::write(&tmp, text).is_ok() && std::fs::rename(&tmp, path).is_err() {
-            let _ = std::fs::remove_file(&tmp);
-        }
+        let _ = crate::util::write_atomic(path, text.as_bytes(), false);
     }
 
     /// Add a reading, unless it says exactly what the last one said.

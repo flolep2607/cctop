@@ -89,6 +89,7 @@ pub struct MacMeta {
 
 /// Context-window consumption for a session or subagent.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct ContextUsage {
     pub used: u64,
     pub max: u64,
@@ -134,6 +135,7 @@ impl ContextUsage {
 ///
 /// [`unaccounted`]: ContextBreakdown::unaccounted
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct ContextBreakdown {
     /// Window size at the last request, from its own usage figures. Exact.
     pub total: u64,
@@ -164,6 +166,7 @@ pub struct ContextBreakdown {
 
 /// One request's measurement of the context window.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct CtxPoint {
     pub ts: String,
     pub window: u64,
@@ -1511,6 +1514,7 @@ mod tests {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct Tokens {
     #[serde(default)]
     pub input: u64,
@@ -1541,6 +1545,7 @@ impl Tokens {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct Costs {
     #[serde(default)]
     pub input: f64,
@@ -1734,12 +1739,14 @@ pub struct Metrics {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub enum SubagentStatus {
     Running,
     Done,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct Subagent {
     pub agent_id: String,
     #[serde(rename = "type")]
@@ -2127,13 +2134,13 @@ pub struct SessionData {
 fn trim_tool_details(details: &mut HashMap<String, Vec<ToolDetail>>) {
     for list in details.values_mut() {
         for d in list.iter_mut() {
-            truncate_chars(&mut d.d, crate::config::MAX_TOOL_DETAIL_CHARS);
+            clip_in_place(&mut d.d, crate::config::MAX_TOOL_DETAIL_CHARS);
             if let Some(full) = d.full.as_mut() {
-                truncate_chars(full, crate::config::MAX_TOOL_DETAIL_CHARS);
+                clip_in_place(full, crate::config::MAX_TOOL_DETAIL_CHARS);
             }
             if let Some(delta) = d.delta.as_mut() {
                 for line in delta.hunks.iter_mut() {
-                    truncate_chars(line, crate::config::MAX_DIFF_LINE_CHARS);
+                    clip_in_place(line, crate::config::MAX_DIFF_LINE_CHARS);
                 }
             }
         }
@@ -2236,17 +2243,15 @@ pub(crate) fn record_cost(
     *by_minute.entry(unix_minute(dt)).or_insert(0.0) += cost;
 }
 
-/// Truncate to at most `max` characters, never mid-character.
-fn truncate_chars(s: &mut String, max: usize) {
-    if s.chars().count() <= max {
-        return;
+/// [`crate::util::clip`] in place, leaving a string that fits untouched.
+fn clip_in_place(s: &mut String, max: usize) {
+    if crate::util::cells(s) > max {
+        *s = crate::util::clip(s, max);
     }
-    let end = s.char_indices().nth(max).map(|(i, _)| i).unwrap_or(s.len());
-    s.truncate(end);
-    s.push('…');
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct CodexRates {
     pub input: f64,
     pub cached_input: f64,

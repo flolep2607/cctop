@@ -98,13 +98,6 @@ struct DiskCacheRef<'a> {
 /// every single run.
 const MAX_ENTRIES: usize = 20_000;
 
-fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
-}
-
 /// Where a session's cache entry lives, and which version of the transcript that
 /// entry holds. `None` where no honest identity can be formed.
 ///
@@ -315,7 +308,7 @@ impl CostCache {
                     path: path.to_path_buf(),
                     session: session.to_string(),
                     stamp: id.stamp,
-                    stored_at: now_ms(),
+                    stored_at: u64::try_from(crate::util::now_ms()).unwrap_or(0),
                     data: data.clone(),
                 },
             );
@@ -341,7 +334,6 @@ impl CostCache {
         };
         evict_oldest(&mut entries);
 
-        let _ = std::fs::create_dir_all(&*config::CACHE_DIR);
         if write_atomically(&config::COST_CACHE_FILE, &entries).is_ok()
             && let Ok(mut d) = self.dirty.lock()
         {
@@ -353,40 +345,24 @@ impl CostCache {
 /// Serialize `entries` to `path`, leaving the old file untouched unless the new
 /// one was written whole.
 ///
-/// Write-then-rename, because a crash or a full disk mid-write would otherwise
-/// leave truncated JSON in place of every cached session.
+/// Write-then-rename ([`crate::util::write_atomic`]), because a crash or a
+/// full disk mid-write would otherwise leave truncated JSON in place of every
+/// cached session.
 ///
-/// The buffer is flushed by hand rather than left to `BufWriter`'s drop, which
-/// flushes and then discards whatever the flush said. `to_writer` returns `Ok`
-/// once the bytes are *buffered*, so without this a write failing on its last
-/// block — a full disk, a quota, a disconnected network home — still reported
-/// success and renamed a truncated file over a good cache. Nothing could read
-/// it afterwards, and a cache that parses as nothing is indistinguishable from
-/// an empty one, so every session re-parsed on every run from then on.
+/// Serialized into memory first rather than streamed to the file: a stream
+/// through `BufWriter` reported `Ok` once the bytes were *buffered*, and a write
+/// failing on its last block — a full disk, a quota, a disconnected network
+/// home — renamed a truncated file over a good cache. Nothing could read it
+/// afterwards, and a cache that parses as nothing is indistinguishable from an
+/// empty one, so every session re-parsed on every run from then on. One
+/// `write_all` of the whole buffer reports that failure, and the cache is a few
+/// megabytes at most.
 fn write_atomically(path: &Path, entries: &HashMap<String, Entry>) -> std::io::Result<()> {
-    use std::io::Write;
-    let tmp = path.with_extension("json.tmp");
-    let written = (|| -> std::io::Result<()> {
-        let mut out = std::io::BufWriter::new(std::fs::File::create(&tmp)?);
-        serde_json::to_writer(
-            &mut out,
-            &DiskCacheRef {
-                version: CACHE_VERSION,
-                entries,
-            },
-        )?;
-        out.flush()
-    })();
-    if written.is_ok()
-        && let Err(error) = std::fs::rename(&tmp, path)
-    {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(error);
-    }
-    if written.is_err() {
-        let _ = std::fs::remove_file(&tmp);
-    }
-    written
+    let json = serde_json::to_vec(&DiskCacheRef {
+        version: CACHE_VERSION,
+        entries,
+    })?;
+    crate::util::write_atomic(path, &json, false)
 }
 
 /// Drop the least recently stored entries once the cache exceeds `MAX_ENTRIES`.
@@ -832,9 +808,10 @@ impl UiPrefs {
         if crate::under_test() {
             return;
         }
-        let _ = std::fs::create_dir_all(&*config::CACHE_DIR);
+        // Atomically, because every cctop running reads it at start: a write
+        // torn by a second one would parse as nothing and reset them all.
         if let Ok(text) = serde_json::to_string(self) {
-            let _ = std::fs::write(&*config::UI_PREFS_FILE, text);
+            let _ = crate::util::write_atomic(&config::UI_PREFS_FILE, text.as_bytes(), false);
         }
     }
 }
@@ -1324,7 +1301,11 @@ mod tests {
         assert_eq!(back.entries.len(), 500);
         assert_eq!(back.entries["k499"].data.costs.total, 499.0);
         // The scratch file must not be left behind next to the real one.
-        assert!(!file.with_extension("json.tmp").exists());
+        let left: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(left.len(), 2, "{left:?}");
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -1398,8 +1379,13 @@ mod tests {
     /// re-parsing everything on every run with nothing to show for it.
     #[test]
     fn an_unwritable_destination_is_an_error() {
-        let path = Path::new("/nonexistent-directory-cctop/cost-cache.json");
-        assert!(write_atomically(path, &HashMap::new()).is_err());
+        // Under a regular file, which no directory can be made in — even as
+        // root, which a path under `/` would not stop.
+        let dir = tempfile::tempdir().unwrap();
+        let blocker = dir.path().join("file");
+        std::fs::write(&blocker, "").unwrap();
+        let path = blocker.join("cost-cache.json");
+        assert!(write_atomically(&path, &HashMap::new()).is_err());
     }
 
     /// Every OpenCode session names the same database file, so the key has to

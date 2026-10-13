@@ -646,50 +646,6 @@ pub(super) fn provider_color(session: &Session) -> ratatui::style::Color {
     }
 }
 
-/// Wrap text to `width`, breaking on the last space that fits.
-///
-/// `pub(super)` for the conversation view in `modals`, which lays a session's
-/// turns out in the same fixed-width way.
-pub(super) fn wrap(text: &str, width: usize) -> Vec<String> {
-    let mut out = Vec::new();
-    for raw in text.lines() {
-        let mut line = raw;
-        if line.is_empty() {
-            out.push(String::new());
-            continue;
-        }
-        while line.chars().count() > width {
-            // Prefer the last space that still fits; fall back to a hard cut
-            // when a single token is longer than the whole line.
-            let mut cut = None;
-            for (i, c) in line.char_indices().take(width + 1) {
-                if c == ' ' {
-                    cut = Some(i);
-                }
-            }
-            // The hard cut is a character count too: `line.len()` is bytes, and
-            // slicing at it lands inside a multi-byte character, which panics.
-            // A line starting with a space is the case that reaches this — its
-            // only break candidate in range is byte 0, which would emit an
-            // empty line and never make progress, so the fallback stands in.
-            let hard = || {
-                line.char_indices()
-                    .nth(width)
-                    .map(|(i, _)| i)
-                    .unwrap_or(line.len())
-            };
-            let cut = match cut {
-                Some(0) | None => hard(),
-                Some(at) => at,
-            };
-            out.push(line[..cut].to_string());
-            line = line[cut..].trim_start();
-        }
-        out.push(line.to_string());
-    }
-    out
-}
-
 /// Rendered rows plus, for each rendered line, the invocation it belongs to.
 ///
 /// The caller needs that mapping to turn a mouse click on a screen row back into
@@ -1433,10 +1389,7 @@ fn context_timeline(session: &Session, data: &SessionData, width: usize) -> Vec<
                 // Named on the chart because they are the only drops in it: a
                 // fall with no compaction behind it would be a measurement
                 // error, and telling the two apart matters.
-                n => dim(format!(
-                    "   {n} compaction{}",
-                    if n == 1 { "" } else { "s" }
-                )),
+                n => dim(format!("   {}", util::plural(n, "compaction"))),
             },
         ]),
     ];
@@ -1774,7 +1727,7 @@ fn context_footnotes(
         format!("{rest}{marker}{grain}{superseded}"),
     ]
     .iter()
-    .flat_map(|note| wrap(note, width.max(20)))
+    .flat_map(|note| util::wrap(note, width.max(20)))
     .map(|l| Line::from(dim(l)))
     .collect()
 }
@@ -2597,15 +2550,15 @@ mod tests {
         assert_eq!(tabs[2].0, "Read");
     }
 
-    /// Wrapping counts characters, and the hard cut has to as well: a line whose
+    /// Wrapping counts cells, and the hard cut has to as well: a line whose
     /// only space in range is the one it starts with fell back to a byte offset
     /// and sliced a multi-byte character in half, panicking the whole frame.
     #[test]
     fn wrapping_survives_a_line_that_starts_with_a_space() {
         for width in 4..=8 {
-            let lines = wrap(" ab日本x", width);
+            let lines = util::wrap(" ab日本x", width);
             assert!(
-                lines.iter().all(|l| l.chars().count() <= width),
+                lines.iter().all(|l| util::cells(l) <= width),
                 "width {width}: {lines:?}"
             );
             assert_eq!(
@@ -2620,11 +2573,13 @@ mod tests {
     /// a human typed, so the same multi-byte case arrives there too.
     #[test]
     fn wrapping_a_multi_byte_turn_breaks_it_on_a_boundary() {
-        assert_eq!(wrap("ab日本x", 4), ["ab日本", "x"]);
-        assert_eq!(wrap(" one two", 4), [" one", "two"]);
+        // Two cells a character: `ab日本` is six columns, and counted in
+        // chars it was let through as four and ran off the panel's edge.
+        assert_eq!(util::wrap("ab日本x", 4), ["ab日", "本x"]);
+        assert_eq!(util::wrap(" one two", 4), [" one", "two"]);
         // A leading space must not become a line of its own — the hard cut
         // stands in for it, exactly as it does in ASCII.
-        assert_eq!(wrap(" one", 4), [" one"]);
+        assert_eq!(util::wrap(" one", 4), [" one"]);
     }
 
     /// A subagent's tag is a transcript file stem read lossily, so it can hold a

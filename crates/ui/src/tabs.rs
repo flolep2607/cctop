@@ -896,7 +896,7 @@ impl Shared {
     fn recorded(&self) -> Option<cctop_core::hook::Signal> {
         let state = self.state?;
         state
-            .is_current(cctop_core::rmux::now_secs())
+            .is_current(cctop_core::util::now_secs())
             .then_some(state.signal)
     }
 
@@ -912,10 +912,7 @@ impl Shared {
         let Some(activity) = self.activity else {
             return false;
         };
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
+        let now = cctop_core::util::now_secs();
         now.saturating_sub(activity) > QUIET_IS_IDLE.as_secs()
     }
 }
@@ -2009,10 +2006,7 @@ Enter to select · ↑/↓ to navigate · Esc to cancel";
     /// A session as rmux would describe it, with `ago` seconds since it last
     /// drew anything.
     fn session(name: &str, label: Option<&str>, ago: u64) -> cctop_core::rmux::Running {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
+        let now = cctop_core::util::now_secs();
         cctop_core::rmux::Running {
             name: name.to_string(),
             pid: Some(4321),
@@ -2045,7 +2039,7 @@ Enter to select · ↑/↓ to navigate · Esc to cancel";
             let mut agent = session("cctop-x", Some("claude"), 0);
             agent.state = Some(cctop_core::rmux::State {
                 signal,
-                at: cctop_core::rmux::now_secs().saturating_sub(ago),
+                at: cctop_core::util::now_secs().saturating_sub(ago),
             });
             Tab::for_agent(&agent)
         };
