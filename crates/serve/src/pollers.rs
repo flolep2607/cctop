@@ -5,9 +5,9 @@
 //! poller per `--host`, the quota and the providers' status pages. Split out of
 //! `lib.rs` so the router reads as a router.
 
-use crate::{FULL_WALK, QUOTA_INTERVAL_SECS, QUOTA_TICK, Remotes, Shared, Snapshot, quota};
 #[cfg(feature = "debug")]
 use crate::debug;
+use crate::{FULL_WALK, QUOTA_INTERVAL_SECS, QUOTA_TICK, Remotes, Shared, Snapshot, quota};
 use cctop_core::fleet;
 use cctop_core::loader::Loader;
 use cctop_core::pricing::Plan;
