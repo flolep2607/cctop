@@ -133,6 +133,13 @@ impl Hosted {
             Ok(None) => None,
         }
     }
+
+    /// How the agent ended, once it has: the whole status rather than
+    /// [`Hosted::finished`]'s code, so a kill by signal can be told from an
+    /// exit and said as one.
+    pub fn exit_status(&mut self) -> Option<std::process::ExitStatus> {
+        self.child.try_wait().ok().flatten()
+    }
 }
 
 impl Drop for Hosted {
@@ -680,7 +687,18 @@ fn spawn_on_pty_at_env(
             Ok(())
         })
     };
-    let child = cmd.spawn()?;
+    // Said in words, because the bare `No such file or directory (os error 2)`
+    // never names the thing that was missing — and a missing agent, or one a
+    // profile's PATH does not reach, is the usual reason a tab will not start.
+    let child = cmd.spawn().map_err(|error| match error.kind() {
+        std::io::ErrorKind::NotFound => {
+            anyhow::anyhow!("`{}` was not found — is it installed and on PATH?", argv[0])
+        }
+        std::io::ErrorKind::PermissionDenied => {
+            anyhow::anyhow!("`{}` could not be run: permission denied", argv[0])
+        }
+        _ => anyhow::anyhow!("`{}` could not be run: {error}", argv[0]),
+    })?;
     // The parent must drop its slave handle or reads on the master never see EOF
     // when the child exits.
     drop(slave);

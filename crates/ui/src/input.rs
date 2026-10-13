@@ -257,6 +257,12 @@ impl App {
         let Some(pane) = self.focused_pane() else {
             return;
         };
+        // A kept dead pane has nobody to type to. It is on screen to be read,
+        // and the banner on it promises that any key puts it away.
+        if pane.dead.is_some() {
+            self.close_pane();
+            return;
+        }
         // Paging through history, which the wheel could already do and the
         // keyboard could not. Both ask the screen first, so an agent in
         // fullscreen still gets these keys for its own scrolling.

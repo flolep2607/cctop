@@ -786,12 +786,18 @@ fn event_loop(
             app.set_status(note);
         }
         let mut saved = Vec::new();
+        let mut died = Vec::new();
         let closed = app
             .tabs
             .iter_mut()
-            .fold(false, |any, tab| tab.reap(&mut saved) | any);
+            .fold(false, |any, tab| tab.reap(&mut saved, &mut died) | any);
         for (path, finished) in &saved {
             app.set_status(cctop_core::cast::stopped_message(path, finished));
+        }
+        // On the status line as well as the pane, because the pane is only
+        // seen from its own tab and an agent that dies in another is news.
+        for note in died {
+            app.set_status(note);
         }
         if closed {
             app.drop_empty_tabs();

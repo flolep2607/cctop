@@ -24,6 +24,23 @@ pub(super) const SETTINGS_TITLE: &str = "Settings";
 /// windows to look for it, and long enough that the subprocess is nothing.
 pub(super) const SHARE_EVERY: Duration = Duration::from_secs(2);
 
+/// How long a session kept for its dead agent may sit with nobody looking at
+/// it before any cctop's sweep ends it.
+///
+/// Not at once, because "nobody looking" is briefly true of every session: a
+/// launch makes the session first and attaches its client a moment later, and
+/// an agent that died in between is exactly the one whose pane is about to
+/// show why. A minute is far past that moment and short of anything a person
+/// would call lingering — and the death is in the event log either way.
+const ORPHAN_AFTER_SECS: u64 = 60;
+
+/// What one sweep of rmux read: the live sessions, and the dead ones with
+/// the last thing each said. See [`App::sync_shared_tabs`].
+pub(crate) type Sweep = (
+    Vec<cctop_core::rmux::Running>,
+    Vec<(cctop_core::rmux::Ended, Option<String>)>,
+);
+
 /// Which tabs the switcher lists, by what their agents are doing.
 ///
 /// Cycled with Tab rather than given letters, as herdr's picker gives them:
@@ -452,9 +469,9 @@ impl App {
         // every frame.
         let landed = match &self.shared_listing {
             Some(rx) => match rx.try_recv() {
-                Ok(running) => {
+                Ok(sweep) => {
                     self.shared_listing = None;
-                    Some(running)
+                    Some(sweep)
                 }
                 // Still being asked: nothing new to reconcile yet.
                 Err(std::sync::mpsc::TryRecvError::Empty) => return,
@@ -465,8 +482,8 @@ impl App {
             },
             None => None,
         };
-        let running = match landed {
-            Some(running) => running,
+        let (running, ended) = match landed {
+            Some(sweep) => sweep,
             // Nothing has landed: ask, if the interval is up and no listing is
             // already in flight. Asking is what `shared_at` times, so a wedged
             // rmux costs one unanswered sweep rather than a spawn per tick.
@@ -480,11 +497,23 @@ impl App {
                 let (tx, rx) = std::sync::mpsc::channel();
                 self.shared_listing = Some(rx);
                 std::thread::spawn(move || {
-                    let _ = tx.send(cctop_core::rmux::running());
+                    let running = cctop_core::rmux::running();
+                    // What a dead session said last is read here, off the draw
+                    // loop: for one no pane of ours holds it is all there will
+                    // be to say why. Dead sessions are few and short-lived.
+                    let ended = cctop_core::rmux::ended()
+                        .into_iter()
+                        .map(|gone| {
+                            let said = cctop_core::rmux::last_said(&gone.name);
+                            (gone, said)
+                        })
+                        .collect();
+                    let _ = tx.send((running, ended));
                 });
                 return;
             }
         };
+        self.settle_ended(&ended);
 
         let was = self.tab;
         let mut index = 0;
@@ -499,7 +528,8 @@ impl App {
                 // about a tab already on its way out, so it costs nothing per
                 // sweep.
                 !running.iter().any(|agent| agent.name == s.name)
-                    && !cctop_core::rmux::exists(&s.name)
+                    && (ended.iter().any(|(gone, _)| gone.name == s.name)
+                        || !cctop_core::rmux::exists(&s.name))
             });
             if !gone {
                 return true;
@@ -617,6 +647,74 @@ impl App {
         self.set_status(said);
     }
 
+    /// Act on the sessions whose agent died and whose pane rmux kept: see
+    /// [`mux::REMAIN_ON_EXIT`](cctop_core::mux::REMAIN_ON_EXIT).
+    ///
+    /// Three cases, by who is there to read it. A pane of ours on it is kept
+    /// on screen with the [`Death`](tabs::Death) on it, and ends the session
+    /// itself when dismissed. A tab standing for it with no client of ours
+    /// says how it ended on the status line — the screen is not ours to show
+    /// — and leaves the bar. And a session nobody anywhere is looking at is
+    /// ended after [`ORPHAN_AFTER_SECS`], so a kept session never outlives
+    /// every cctop's interest in it.
+    fn settle_ended(&mut self, ended: &[(cctop_core::rmux::Ended, Option<String>)]) {
+        let now = cctop_core::util::now_secs();
+        let mut notes = Vec::new();
+        for (gone, line) in ended {
+            // Seconds since it died: rmux's clock, not this pane's, says when.
+            let dead_for = gone.at.map_or(0, |at| now.saturating_sub(at));
+            let death = |lived: Option<Duration>| tabs::Death {
+                code: gone.status,
+                signal: gone.signal,
+                lived,
+                last_line: line.clone(),
+            };
+            let mut held = false;
+            for pane in self.tabs.iter_mut().flat_map(|tab| tab.panes.iter_mut()) {
+                if pane.rmux.as_deref() != Some(gone.name.as_str()) {
+                    continue;
+                }
+                held = true;
+                // In whole seconds, the only grain rmux's clock has.
+                let lived = pane
+                    .lived()
+                    .map(|lived| Duration::from_secs(lived.as_secs().saturating_sub(dead_for)));
+                notes.extend(pane.died(death(lived)));
+            }
+            if held {
+                continue;
+            }
+            let standing = self.tabs.iter_mut().find_map(|tab| {
+                if let Some(shared) = tab.shared.as_ref().filter(|s| s.name == gone.name) {
+                    return Some(shared.label.clone());
+                }
+                let at = tab.extra.iter().position(|s| s.name == gone.name)?;
+                Some(tab.extra.remove(at).label)
+            });
+            if let Some(label) = &standing {
+                notes.push(death(None).note(label));
+            }
+            // Someone else's client on it is someone reading it.
+            if gone.attached || (standing.is_none() && dead_for < ORPHAN_AFTER_SECS) {
+                continue;
+            }
+            cctop_core::elog::event(
+                "rmux",
+                "ended",
+                serde_json::json!({
+                    "session": gone.name,
+                    "code": gone.status,
+                    "signal": gone.signal,
+                    "last_line": line,
+                }),
+            );
+            let _ = cctop_core::rmux::kill(&gone.name);
+        }
+        for note in notes {
+            self.set_status(note);
+        }
+    }
+
     /// Close the focused pane, ending the agent behind it.
     ///
     /// Closing used to detach from a rmux-backed agent and leave it running,
@@ -661,6 +759,7 @@ impl App {
         let mut pane = tab.panes.remove(tab.focus);
         tab.focus = tab.focus.min(tab.panes.len().saturating_sub(1));
         let label = pane.label.clone();
+        let was_dead = pane.dead.is_some();
         let stopped = pane.owns_agent().then(|| pane.kill_agent());
         // Stopped before the pane goes rather than left to its drop, so where
         // the file went is said: closing is how most recordings will end.
@@ -672,6 +771,10 @@ impl App {
         }
 
         self.set_status(match stopped {
+            // Nothing was running to stop: the session ending is only clearing
+            // away what was kept to show how it died, and if something else
+            // cleared it first that is the same outcome.
+            _ if was_dead => format!("Closed {label}"),
             Some(Err(error)) => format!("Closed {label}, but could not stop it: {error}"),
             Some(Ok(())) => format!("Stopped {label}"),
             None => format!("Closed the view of {label} — it is not cctop's to stop"),
@@ -831,6 +934,28 @@ mod tests {
     use crate::tests::{key, test_app};
     use ratatui::crossterm::event;
     use ratatui::crossterm::event::KeyCode;
+
+    /// A kept dead pane is there to be read, and its banner promises any key
+    /// puts it away: the key closes the tab rather than going to a process
+    /// that is no longer there, and says so plainly.
+    #[test]
+    fn any_key_on_a_dead_pane_closes_it() {
+        let mut app = test_app();
+        let mut pane = tabs::Pane::for_test("claude");
+        pane.dead = Some(tabs::Death {
+            code: Some(1),
+            signal: None,
+            lived: Some(Duration::from_millis(400)),
+            last_line: Some("error: not logged in".into()),
+        });
+        app.tabs.push(tabs::Tab::new(pane));
+        app.tab = 1;
+
+        app.on_key(key(KeyCode::Char('x')));
+
+        assert!(app.tabs.is_empty(), "the dead pane is still open");
+        assert_eq!(app.status(), Some("Closed claude"));
+    }
 
     /// The settings tab is at the end of the bar, always, and nothing that
     /// happens to a workspace tab can take it away or move it.

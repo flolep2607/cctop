@@ -1033,9 +1033,12 @@ fn draw_panes(frame: &mut Frame, area: Rect, app: &mut App, layout: &mut Layout)
             block = block
                 .border_style(Style::default().fg(theme::colors().border_hi))
                 .title_bottom(Span::styled(
-                    match zoomed {
-                        true => " F12 back · Alt+z unzoom ",
-                        false => " F12 back · Alt+w close ",
+                    match (pane.dead.is_some(), zoomed) {
+                        // Every key is "close" on a dead pane, so the hint
+                        // naming one would undersell it.
+                        (true, _) => " any key closes · F12 back ",
+                        (false, true) => " F12 back · Alt+z unzoom ",
+                        (false, false) => " F12 back · Alt+w close ",
                     },
                     theme::title(),
                 ));
@@ -1071,7 +1074,11 @@ fn draw_panes(frame: &mut Frame, area: Rect, app: &mut App, layout: &mut Layout)
         };
         frame.render_widget(block, slots[i]);
         frame.render_widget(
-            tui_term::widget::PseudoTerminal::new(pane.view.parser.screen()),
+            tui_term::widget::PseudoTerminal::new(pane.view.parser.screen()).cursor(
+                // A cursor sitting in a dead pane reads as a prompt waiting
+                // for input, which is the one thing it is not.
+                tui_term::widget::Cursor::default().visibility(pane.dead.is_none()),
+            ),
             screen,
         );
         // While another client holds a smaller rmux window, the agent fills
@@ -1091,8 +1098,36 @@ fn draw_panes(frame: &mut Frame, area: Rect, app: &mut App, layout: &mut Layout)
                 }
             }
         }
+        if let Some(death) = &pane.dead {
+            dead_banner(frame, inner, &death.banner(&pane.label));
+        }
         layout.pane_rects.push(screen);
     }
+}
+
+/// The line across the bottom of a pane whose agent has died, saying how.
+///
+/// Inside the pane, over its last row, rather than on the border: the border
+/// is already the label, the quota and the key hints, and this is the one
+/// thing on the pane that has to be read. The agent's last screen stays above
+/// it, which is the other half of the answer.
+fn dead_banner(frame: &mut Frame, inner: Rect, text: &str) {
+    if inner.height == 0 {
+        return;
+    }
+    let row = Rect {
+        y: inner.y + inner.height - 1,
+        height: 1,
+        ..inner
+    };
+    let style = theme::failed()
+        .fg(theme::colors().value)
+        .add_modifier(Modifier::BOLD);
+    frame.render_widget(Clear, row);
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(format!(" {text}"), style))).style(style),
+        row,
+    );
 }
 
 /// Whether pane `i` is off screen behind a zoomed one.
