@@ -675,8 +675,8 @@ pub fn main(args: &[String]) -> i32 {
         // A session of this machine's, opened from a tab on another: see
         // [`crate::remote_open`]. `open` runs here; `reach` is the other
         // machine's end of a sibling's terminal.
-        Some("open") => crate::remote_open::open_here(&args[1..]),
-        Some("reach") => crate::remote_open::bridge(&args[1..]),
+        Some("open") => crate::remote_open::held(crate::remote_open::open_here(&args[1..])),
+        Some("reach") => crate::remote_open::held(crate::remote_open::bridge(&args[1..])),
         Some("kill-session") => match args.get(1..) {
             Some([flag, name]) if flag == "-t" => kill_session(name),
             _ => Err("usage: cctop mux kill-session -t <name>".to_string()),

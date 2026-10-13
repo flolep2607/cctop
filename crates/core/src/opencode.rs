@@ -90,6 +90,13 @@ const CLI_CONFIG_ENV: &str = "OPENCODE_CLI_CONFIG_CONTENT";
 /// Empty for every agent but OpenCode 2, and for OpenCode 1, whose client has no
 /// tab strip.
 pub fn launch_env(argv: &[String]) -> Vec<(String, String)> {
+    // Asked before the version, which runs `opencode`: every tab is launched
+    // through here on the thread that draws, and an OpenCode that is slow to
+    // answer — a first run setting itself up took half a minute — froze the
+    // dashboard for an ssh tab that had nothing to do with it.
+    if !argv.first().is_some_and(|word| is_opencode(word)) {
+        return Vec::new();
+    }
     launch_env_for(api(), argv)
 }
 
