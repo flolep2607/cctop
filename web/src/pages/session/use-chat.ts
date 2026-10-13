@@ -1,6 +1,10 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useContext, useEffect, useRef, useState } from "react";
 import { getJson } from "@/lib/api";
 import type { Chat, Turn } from "@/lib/types";
+import { ChatSignal } from "./chat-signal";
+
+/** How often a running conversation is fetched while the event stream is not getting through. */
+const FALLBACK_EVERY = 10_000;
 
 // The conversation, as the server pages it out.
 //
@@ -64,18 +68,28 @@ export function useChat(id: string, running: boolean, agent?: string) {
     refresh();
   }, [refresh]);
 
-  // Followed while the stream says the session runs — not the once-read
-  // report, which would poll a stopped session forever or never follow one
-  // that started. One last read on stopping: the final turns can postdate the
-  // last poll.
+  // Followed by the session stream's `chat` mark, which moves when the
+  // transcript does: a quiet session costs nothing, and a busy one is read
+  // as soon as the server notices rather than on the next five-second tick.
+  // The read is narrowed by `since`, so a mark that moved for some other
+  // conversation in the same file (a sibling subagent) comes back empty.
+  const { mark, live } = useContext(ChatSignal);
+  useEffect(() => {
+    if (mark !== null) refresh();
+  }, [mark, refresh]);
+
+  // Polled only while the stream is not getting through and the session runs
+  // — not the once-read report, which would poll a stopped session forever or
+  // never follow one that started. One last read on stopping: the final turns
+  // can postdate the last read.
   const wasRunning = useRef(running);
   useEffect(() => {
     if (wasRunning.current && !running) refresh();
     wasRunning.current = running;
-    if (!running) return;
-    const t = setInterval(refresh, 5000);
+    if (!running || live) return;
+    const t = setInterval(refresh, FALLBACK_EVERY);
     return () => clearInterval(t);
-  }, [running, refresh]);
+  }, [running, live, refresh]);
 
   return { turns, meta, error, earlier, loadEarlier, refresh, held };
 }

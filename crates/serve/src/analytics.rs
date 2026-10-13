@@ -18,6 +18,7 @@ use std::path::Path;
 /// The whole response: a timestamp, the plan the figures were read under, and
 /// one row per session.
 #[derive(Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct Analytics {
     /// When the document was built, RFC-3339.
     pub generated: String,
@@ -30,6 +31,7 @@ pub struct Analytics {
 
 /// Billed tokens, flattened to the four kinds a chart draws.
 #[derive(Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct AnalyticsTokens {
     /// Input billed at the full rate — the uncached remainder. On a remote row
     /// it is everything billed as input instead: the wire carries the
@@ -51,6 +53,7 @@ pub struct AnalyticsTokens {
 
 /// One session, everything the analytics page draws on.
 #[derive(Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct AnalyticsSession {
     pub id: String,
     pub provider: &'static str,
@@ -143,9 +146,11 @@ pub struct AnalyticsSession {
     /// used to make of each session's history was the largest thing in building
     /// it.
     #[serde(with = "cctop_core::session::arc_as_map")]
+    #[cfg_attr(test, ts(as = "cctop_core::session::CostBuckets"))]
     pub by_day: std::sync::Arc<cctop_core::session::CostBuckets>,
     /// `YYYY-MM-DDTHH` -> model -> USD.
     #[serde(with = "cctop_core::session::arc_as_map")]
+    #[cfg_attr(test, ts(as = "cctop_core::session::CostBuckets"))]
     pub by_hour: std::sync::Arc<cctop_core::session::CostBuckets>,
     /// `YYYY-MM-DD` -> model -> billed tokens.
     ///

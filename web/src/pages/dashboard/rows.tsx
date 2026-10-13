@@ -6,7 +6,7 @@ import { cn } from "@/lib/utils";
 import { act, ANSWERABLE, ask, isNotAsking } from "@/lib/api";
 import { dropPrompt } from "@/hooks/use-live";
 import { CAN_ACT } from "@/lib/config";
-import { ago, money, shortModel, shortPath, tokens } from "@/lib/format";
+import { ago, costLabel, shortModel, shortPath, tokens } from "@/lib/format";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -16,15 +16,6 @@ import { stripAnsi } from "@/lib/ansi";
 import { YoloBadge } from "@/components/yolo";
 import { useHosts } from "@/hooks/use-hosts";
 import type { Session } from "@/lib/types";
-
-// The cost a row shows. `incl`, `—` and a figure are three different claims —
-// the plan bundles this, nothing billable was recorded, here is what it cost —
-// and none may be drawn as another.
-function rowCost(s: Session): string {
-  if (s.cost?.included) return "incl";
-  if (!s.cost?.available || s.cost.total == null) return "—";
-  return money(Number(s.cost.total));
-}
 
 /** The machine a remote row is on, with a dot for whether it answered last time. */
 function HostTag({ host }: { host: string }) {
@@ -49,13 +40,13 @@ export function ContextBar({ used, max, className }: { used: number; max: number
 }
 
 export const SessionRow = memo(function SessionRow({
-  s, selected, picked, pinned, fresh, snippet, href, onPick,
+  s, now, selected, picked, pinned, fresh, snippet, href, onPick,
 }: {
-  s: Session; selected: boolean; picked: boolean; pinned: boolean; fresh: boolean; snippet?: string; href?: string;
+  s: Session; now: number; selected: boolean; picked: boolean; pinned: boolean; fresh: boolean; snippet?: string; href?: string;
   onPick?: (id: string) => void;
 }) {
   const state = dotOf(s);
-  const errRate = s.activity && s.activity.tool_count > 0 ? s.activity.tool_errors / s.activity.tool_count : 0;
+  const errRate = s.activity && s.activity.tool_count > 0 ? (s.activity.tool_errors ?? 0) / s.activity.tool_count : 0;
   return (
     <div
       data-id={s.session_id}
@@ -89,10 +80,10 @@ export const SessionRow = memo(function SessionRow({
           <span>{s.provider}</span>
           {s.model && <span>{shortModel(s.model)}</span>}
           {s.branch && <span className="font-mono text-[11px]">{s.branch}</span>}
-          <span>{ago(s.last_active)}</span>
+          <span>{ago(s.last_active, now)}</span>
           {/* The figures column is gone at phone width; the cost is the one
               figure worth keeping, so it moves into this line there. */}
-          <span className="text-foreground font-mono sm:hidden">{rowCost(s)}</span>
+          <span className="text-foreground font-mono sm:hidden">{costLabel(s.cost)}</span>
           {s.running && s.state === "waiting" && <Badge variant="outline" className="text-warning border-warning/40 font-normal">waiting on you</Badge>}
           {s.running && s.state === "asking" &&
             (s.asking_question ? (
@@ -120,7 +111,7 @@ export const SessionRow = memo(function SessionRow({
         </div>
       </Link>
       <div className="shrink-0 text-right font-mono text-[13px] tabular-nums max-sm:hidden">
-        <div>{rowCost(s)}</div>
+        <div>{costLabel(s.cost)}</div>
         <div className="text-muted-foreground text-[11px]">{tokens(s.tokens?.total)} tok</div>
       </div>
     </div>
@@ -131,7 +122,7 @@ export const SessionRow = memo(function SessionRow({
 // answering it — one line, since that is what a pty submit is. The one-tap
 // answers are the commonest replies: Allow/Deny for a permission menu (pressing
 // the key the harness's own menu names), Continue for a turn that ended.
-export function WantingRow({ s, picked, onPick, onDismiss }: { s: Session; picked: boolean; onPick: (id: string) => void; onDismiss: () => void }) {
+export function WantingRow({ s, now, picked, onPick, onDismiss }: { s: Session; now: number; picked: boolean; onPick: (id: string) => void; onDismiss: () => void }) {
   const [text, setText] = useState("");
   const [busy, setBusy] = useState(false);
   const post = async (verb: string, body: object, label?: string) => {
@@ -182,7 +173,7 @@ export function WantingRow({ s, picked, onPick, onDismiss }: { s: Session; picke
   const asking = s.running && s.state === "asking";
   return (
     <div className="relative border-t first:border-t-0">
-      <SessionRow s={s} selected={false} picked={picked} pinned={false} fresh={false} onPick={onPick} />
+      <SessionRow s={s} now={now} selected={false} picked={picked} pinned={false} fresh={false} onPick={onPick} />
       <Button variant="ghost" size="icon-xs" className="text-muted-foreground absolute top-2 right-2 z-10" onClick={onDismiss} title="Dismiss until its state changes" aria-label="Dismiss until its state changes">
         <X />
       </Button>

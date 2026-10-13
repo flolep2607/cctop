@@ -83,6 +83,8 @@ mod http;
 mod identity;
 /// `/api/access`: who may log in, changed from the page.
 mod invites;
+/// Replies rendered from markdown to HTML for the conversation page.
+mod markdown;
 /// `/metrics`, the snapshot in Prometheus's text format.
 mod metrics;
 /// The `--notify` webhook. Its send is `cctop_core::notify::post`, which the
@@ -101,6 +103,10 @@ mod tabs;
 mod term;
 /// The run's credentials, and `--token-file`, which keeps them across runs.
 pub mod tokens;
+/// The web UI's TypeScript types, generated from the structs above and checked
+/// against `web/src/lib/gen/`.
+#[cfg(test)]
+mod ts_types;
 
 // What the page reads and does to a session is core's, shared with the
 // dashboard and the command line: the conversation, the report, the export,
@@ -2347,7 +2353,7 @@ fn api_chat(shared: &Shared, stream: &mut TcpStream, request: &Request, id: &str
     }
     if let Some(agent) = agent {
         return match chat::build_agent(session, agent, before) {
-            Some(conversation) => json(stream, request, &conversation.narrowed(&since)),
+            Some(conversation) => chat_json(stream, request, conversation.narrowed(&since)),
             None => {
                 http::respond_error(stream, Some(request), 404, "no such agent in this session")
             }
@@ -2370,11 +2376,20 @@ fn api_chat(shared: &Shared, stream: &mut TcpStream, request: &Request, id: &str
             },
         );
     }
-    json(
+    chat_json(
         stream,
         request,
-        &chat::build(session, before).narrowed(&since),
+        chat::build(session, before).narrowed(&since),
     );
+}
+
+/// Answer with a conversation, its replies rendered to HTML for the page —
+/// see [`markdown`]. Rendered here, on the way out, rather than where it is
+/// read: a peer's `--chat` and the TUI have no use for it, and a remote
+/// session's turns arrive without it from a cctop of any age.
+fn chat_json(stream: &mut TcpStream, request: &Request, mut conversation: chat::Conversation) {
+    markdown::render(&mut conversation);
+    json(stream, request, &conversation);
 }
 
 /// A remote session's conversation, narrowed to what the page lacks.
@@ -2382,6 +2397,9 @@ fn api_chat(shared: &Shared, stream: &mut TcpStream, request: &Request, id: &str
 /// A remote row has no file here to stamp, so its stamp is a hash of the
 /// answer itself: the same conversation hashes the same, which is all a stamp
 /// has to do.
+///
+/// Parsed even when there is nothing to narrow, because the replies are
+/// rendered to HTML here and not on the far side — see [`chat_json`].
 fn remote_chat(
     shared: &Shared,
     stream: &mut TcpStream,
@@ -2390,9 +2408,6 @@ fn remote_chat(
     args: &[String],
     since: &chat::Since,
 ) {
-    if since.stamp.is_none() && since.after.is_none() {
-        return remote_json(shared, stream, request, session, args);
-    }
     let Some(host) = session
         .remote
         .as_ref()
@@ -2412,7 +2427,7 @@ fn remote_chat(
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     body.hash(&mut hasher);
     conversation.stamp = Some(format!("r{:016x}", hasher.finish()));
-    json(stream, request, &conversation.narrowed(since));
+    chat_json(stream, request, conversation.narrowed(since));
 }
 
 /// Serve one session's conversation as a markdown document to paste elsewhere.
@@ -2926,6 +2941,8 @@ fn events_every(shared: &Shared, stream: &mut TcpStream, request: &Request, keep
     // than silently dropping every patch it was sent.
     let fine = request.query.get("rows").is_some_and(|v| v == "patch");
     let mut last_row: Option<String> = None;
+    // The last `chat` mark this stream sent its session page — see [`chat_mark`].
+    let mut last_chat: Option<String> = None;
     // The table this stream last wrote, which is what the next delta is taken
     // against. Per stream rather than per snapshot: a stream that fell behind
     // skips snapshots, and its delta has to cover everything it skipped.
@@ -3009,6 +3026,19 @@ fn events_every(shared: &Shared, stream: &mut TcpStream, request: &Request, keep
                 }
                 wrote = Instant::now();
             }
+            // The conversation moved: the page refetches it on this rather than
+            // polling `/api/chat` on a timer of its own.
+            if let Some(id) = &only {
+                let mark = chat_mark(&snapshot, id);
+                if mark.is_some() && mark != last_chat {
+                    let body = serde_json::to_string(&mark).unwrap_or_default();
+                    if sse.send("chat", &body).is_err() {
+                        break "send";
+                    }
+                    wrote = Instant::now();
+                    last_chat = mark;
+                }
+            }
             if only.is_none() {
                 last_table = Some(Arc::clone(&snapshot));
             }
@@ -3030,6 +3060,39 @@ fn events_every(shared: &Shared, stream: &mut TcpStream, request: &Request, keep
         "close",
         serde_json::json!({ "by": by, "sent": sent }),
     );
+}
+
+/// A token that changes when session `id`'s conversation may have, sent to its
+/// page as a `chat` event so the page refetches `/api/chat` when there is
+/// something to fetch rather than every few seconds in case there is.
+///
+/// For a session read here, the stamps ([`chat::stamp_of`]) of its transcript
+/// and of every subagent's beside it — a subagent's page follows its own file,
+/// which the main transcript does not move while the agent works. A stat per
+/// file per refresh, for a stream a session page holds open. For a remote row,
+/// whose files are on another machine, the row itself: its activity time and
+/// counts move when its transcript does.
+fn chat_mark(snapshot: &Snapshot, id: &str) -> Option<String> {
+    let session = find(&snapshot.sessions, id)?;
+    match (&session.remote, &session.data_file) {
+        (None, Some(main)) => Some(
+            cctop_core::session::transcript_files(main)
+                .iter()
+                .map(|f| chat::stamp_of(f).unwrap_or_default())
+                .collect::<Vec<_>>()
+                .join(","),
+        ),
+        _ => {
+            use std::hash::{Hash, Hasher};
+            let row = snapshot
+                .rows
+                .iter()
+                .find(|(sid, _)| *sid == session.session_id)?;
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            row.1.hash(&mut hasher);
+            Some(format!("r{:016x}", hasher.finish()))
+        }
+    }
 }
 
 /// What a stream that last sent the table `before` needs to be told to be
@@ -4669,6 +4732,42 @@ mod tests {
         stop.store(true, std::sync::atomic::Ordering::Relaxed);
         churn.join().unwrap();
         assert_eq!(pinged, ("ping".into(), "1".into()));
+    }
+
+    /// A session page is told when its conversation moved, as a `chat` event,
+    /// and is not told again for a refresh that left the transcript alone —
+    /// which is what lets the page stop polling `/api/chat`.
+    #[test]
+    fn a_session_stream_says_when_the_conversation_moved() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("abc.jsonl");
+        std::fs::write(&path, "{}\n").unwrap();
+        let mut s = session("abc");
+        s.data_file = Some(path.clone());
+        let shared = Arc::new(shared("", ""));
+        let publish = |version: u64| {
+            *shared.latest.lock().unwrap() = Arc::new(Snapshot {
+                version,
+                json: "[{}]".into(),
+                rows: vec![("abc".into(), "{}".into())],
+                sessions: vec![s.clone()],
+                host_errors: Vec::new(),
+            });
+            shared.updated.notify_all();
+        };
+        publish(1);
+        let mut next = open_stream(&shared, "?session=abc", Duration::from_secs(30));
+        assert_eq!(next().0, "sessions");
+        let (event, first) = next();
+        assert_eq!(event, "chat");
+
+        // Unchanged, then grown: only the second is news.
+        publish(2);
+        std::fs::write(&path, "{}\n{}\n").unwrap();
+        publish(3);
+        let (event, second) = next();
+        assert_eq!(event, "chat");
+        assert_ne!(first, second);
     }
 
     #[test]

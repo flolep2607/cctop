@@ -1668,6 +1668,7 @@ mod tests {
             tools: Vec::new(),
             from: None,
             agent: None,
+            html: None,
         };
         let page = |seqs: &[usize], earlier: usize| {
             Box::new(cctop_core::chat::Conversation {

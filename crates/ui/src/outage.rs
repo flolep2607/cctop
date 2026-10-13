@@ -168,12 +168,12 @@ fn incident_lines(lines: &mut Vec<Line<'static>>, incident: &Incident, now: i64,
     // The update body is the "why": the one thing here the red dot in the
     // table could never have said.
     if let Some(update) = &incident.update {
-        for line in super::panels::wrap(update, text_w) {
+        for line in cctop_core::util::wrap(update, text_w) {
             lines.push(Line::from(Span::styled(format!("     {line}"), body_style)));
         }
     }
     if !incident.components.is_empty() {
-        for line in super::panels::wrap(&incident.components.join(", "), text_w - 6) {
+        for line in cctop_core::util::wrap(&incident.components.join(", "), text_w - 6) {
             lines.push(Line::from(vec![
                 Span::styled("     on ", theme::dim()),
                 Span::styled(line, body_style),
@@ -200,7 +200,7 @@ pub(super) fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
         ps::Tone::Warning => footer_style(Level::Maintenance),
         ps::Tone::Quiet => theme::dim(),
     };
-    for line in super::panels::wrap(&verdict.text, WIDTH as usize - 4) {
+    for line in cctop_core::util::wrap(&verdict.text, WIDTH as usize - 4) {
         lines.push(Line::from(Span::styled(format!(" {line}"), verdict_style)));
     }
     if let Some(detail) = verdict.detail {
@@ -259,7 +259,7 @@ pub(super) fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
             .map(|c| c.name.as_str())
             .collect();
         if !affected.is_empty() {
-            for line in super::panels::wrap(&affected.join(", "), text_w - 6) {
+            for line in cctop_core::util::wrap(&affected.join(", "), text_w - 6) {
                 lines.push(Line::from(vec![
                     Span::styled("   affected  ", theme::dim()),
                     Span::styled(line, Style::default().fg(theme::colors().cost_mid)),
@@ -281,7 +281,7 @@ pub(super) fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
                 incident_lines(&mut lines, incident, now, text_w);
             }
             if !other_components.is_empty() {
-                for line in super::panels::wrap(&other_components.join(", "), text_w - 6) {
+                for line in cctop_core::util::wrap(&other_components.join(", "), text_w - 6) {
                     lines.push(Line::from(vec![
                         Span::styled("   affected  ", theme::dim()),
                         Span::styled(line, theme::dim()),

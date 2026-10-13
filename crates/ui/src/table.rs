@@ -146,9 +146,9 @@ pub(super) fn draw_table(frame: &mut Frame, area: Rect, app: &mut App, layout: &
     if app.idle_only {
         let (n, bytes) = app.reclaimable();
         title.push_str(&format!(
-            " — idle ≥{}: {n} session{}, {} reclaimable",
+            " — idle ≥{}: {}, {} reclaimable",
             super::idle::threshold_label(app.settings.idle_after_ms()),
-            if n == 1 { "" } else { "s" },
+            util::plural(n, "session"),
             match bytes {
                 0 => "nothing".to_string(),
                 b => util::compact_bytes(b),
@@ -643,12 +643,11 @@ fn group_row(
             ColumnId::Branch => (g.branch.clone().unwrap_or_default(), None),
             ColumnId::Project => {
                 let fold = if g.collapsed { '▸' } else { '▾' };
-                let noun = if g.sessions == 1 {
-                    "session"
-                } else {
-                    "sessions"
-                };
-                let mut label = format!("{indent}{fold} {}  {} {noun}", g.label, g.sessions);
+                let mut label = format!(
+                    "{indent}{fold} {}  {}",
+                    g.label,
+                    util::plural(g.sessions, "session")
+                );
                 // Waiting before running: a narrow PROJECT column truncates
                 // from the right, and "needs you" is the part worth keeping.
                 if g.waiting > 0 {

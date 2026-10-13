@@ -30,10 +30,11 @@
 //! - **Often enough**: [`MIN_SESSIONS`] sessions offered it, so one week of
 //!   not needing a tool is not a verdict on it.
 
+use super::Analysis;
 use super::inventory::{Inventory, Resolved, Source};
 use super::optimize::{Basis, Class, Finding, short_path};
-use super::{Analysis, plural};
 use crate::session::claude::CHARS_PER_TOKEN;
+use crate::util::plural;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// How many sessions have to have been offered something, without using it,

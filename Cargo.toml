@@ -21,7 +21,7 @@
 [workspace.package]
 version = "0.34.0"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.89"
 license = "MIT"
 repository = "https://github.com/flolep2607/cctop"
 homepage = "https://github.com/flolep2607/cctop"
@@ -151,6 +151,13 @@ notify = { version = "8.2.0", default-features = false }
 # no way to make them OSC 8 — which is why the renderer is cctop's own.
 pulldown-cmark = { version = "0.13.4", default-features = false }
 ratatui = "0.30.2"
+# The web UI's TypeScript types are generated from the serde structs the API
+# answers with (`web/src/lib/gen/`), so the page and the server cannot drift
+# apart without a test saying so. Only under `cargo test`: core derives them
+# behind its `ts` feature, which cctop-serve's dev-dependencies turn on, and
+# serve takes it as a dev-dependency — so a release build never compiles it.
+# Lighter than specta, which needs a second crate to write TypeScript at all.
+ts-rs = { version = "12.0.1", default-features = false, features = ["serde-compat", "serde-json-impl", "no-serde-warnings"] }
 rayon = "1.12.0"
 regex = "1.13.1"
 rusqlite = { version = "0.37.0", features = ["bundled"] }

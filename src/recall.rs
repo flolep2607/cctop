@@ -444,7 +444,7 @@ pub fn render(r: &Recall) -> String {
             "[{}] {} · {} · {} · {}{}",
             k + 1,
             p.harness,
-            tilde(&p.directory),
+            cctop_core::util::tildify(&p.directory),
             day,
             p.title.as_deref().unwrap_or("untitled"),
             match p.passage {
@@ -468,16 +468,6 @@ pub fn render(r: &Recall) -> String {
         );
     }
     out
-}
-
-/// A directory with the home prefix folded to `~`, as a person writes it.
-fn tilde(dir: &str) -> String {
-    match std::env::var("HOME") {
-        Ok(home) if !home.is_empty() && dir.starts_with(&home) => {
-            format!("~{}", &dir[home.len()..])
-        }
-        _ => dir.to_string(),
-    }
 }
 
 pub const HELP: &str = "\

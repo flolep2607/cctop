@@ -5,9 +5,9 @@ import { getJson } from "@/lib/api";
 import { bytes } from "@/lib/format";
 import { Badge } from "@/components/ui/badge";
 import { DataTable, Panel, Section } from "@/components/section";
-import type { Report } from "@/lib/types";
+import type { Access, FileRef } from "@/lib/types";
 
-type RuleFile = { path: string; scope: string; present: boolean; bytes: number; head?: string; clipped?: boolean };
+type RuleFile = FileRef;
 
 function Rule({ file }: { file: RuleFile }) {
   const [open, setOpen] = useState(false);
@@ -49,10 +49,10 @@ function Rules({ title, files }: { title: string; files?: RuleFile[] }) {
 // What a session in this directory can reach. Read on first sight of the view
 // — another pass over the disk — and read again if that read failed.
 export function AccessView({ id }: { id: string }) {
-  const [a, setA] = useState<Report | null>(null);
+  const [a, setA] = useState<Access | null>(null);
   const [error, setError] = useState("");
   useEffect(() => {
-    getJson<Report>("/api/access/" + encodeURIComponent(id)).then(setA, (e) => setError(String(e.message || e)));
+    getJson<Access>("/api/access/" + encodeURIComponent(id)).then(setA, (e) => setError(String(e.message || e)));
   }, [id]);
   if (error) return <Panel className="text-destructive p-10 text-center text-sm">{error}</Panel>;
   if (!a) return <Panel className="text-muted-foreground p-10 text-center text-sm">Reading what it can reach…</Panel>;
@@ -81,22 +81,22 @@ export function AccessView({ id }: { id: string }) {
       </Section>
       <Rules title="Instructions" files={a.instructions} />
       <Rules title="Settings" files={a.configs} />
-      {a.mcp?.length > 0 && (
+      {a.mcp.length > 0 && (
         <Section title="MCP servers" note="Tools reaching outside this machine's filesystem come from here.">
           <Panel>
             <DataTable
               head={[["Server"], ["Scope"], ["Command"]]}
-              rows={a.mcp.map((s: { name: string; scope: string; command?: string }) => [
+              rows={a.mcp.map((s) => [
                 <span key="name" className="font-mono text-xs">{s.name}</span>, s.scope, <span key="command" className="text-muted-foreground font-mono text-xs break-all">{s.command || "—"}</span>,
               ])}
             />
           </Panel>
         </Section>
       )}
-      {a.skills?.length > 0 && (
+      {a.skills.length > 0 && (
         <Section title="Skills" note={(a.skills_dirs ?? []).join("  ")}>
           <Panel pad={false}>
-            {a.skills.map((s: { name: string; description?: string }) => (
+            {a.skills.map((s) => (
               <div key={s.name} className="border-t px-4 py-2 text-[13px] first:border-t-0">
                 <span className="font-mono">{s.name}</span>
                 {s.description && <span className="text-muted-foreground"> {s.description}</span>}
@@ -105,11 +105,11 @@ export function AccessView({ id }: { id: string }) {
           </Panel>
         </Section>
       )}
-      {a.tools?.length > 0 && (
+      {a.tools.length > 0 && (
         <Section title="Tools it has used" note="What it reached for, not what it was offered.">
           <Panel>
             <div className="flex flex-wrap gap-1.5">
-              {a.tools.map((t: { name: string; count: number }) => (
+              {a.tools.map((t) => (
                 <Badge key={t.name} variant="outline" className="gap-1.5 font-normal">
                   {t.name}
                   <span className="text-muted-foreground font-mono">{t.count}</span>
@@ -119,12 +119,12 @@ export function AccessView({ id }: { id: string }) {
           </Panel>
         </Section>
       )}
-      {a.hooks?.length > 0 && (
+      {a.hooks.length > 0 && (
         <Section title="cctop's own hooks" note="Whether this harness reports its state to cctop as it happens, rather than being read off disk after the fact.">
           <Panel>
             <DataTable
               head={[["Harness"], ["Scope"], ["State"], ["File"]]}
-              rows={a.hooks.map((h: { harness: string; scope: string; state: string; detail?: string; path: string }) => [
+              rows={a.hooks.map((h) => [
                 h.harness,
                 h.scope,
                 <span key="state">
@@ -137,11 +137,11 @@ export function AccessView({ id }: { id: string }) {
           </Panel>
         </Section>
       )}
-      {a.writes?.length > 0 && (
+      {a.writes.length > 0 && (
         <Section title="Written lately">
           <Panel>
             <div className="columns-1 gap-6 font-mono text-xs md:columns-2">
-              {a.writes.map((p: string) => (
+              {a.writes.map((p) => (
                 <div key={p} className="text-muted-foreground break-inside-avoid py-0.5 break-all">{p}</div>
               ))}
             </div>

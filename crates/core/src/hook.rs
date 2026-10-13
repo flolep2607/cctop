@@ -108,39 +108,18 @@ fn claims_path() -> Option<PathBuf> {
 /// Written whenever the map changes, which is rare: a session states its tree
 /// once and then repeats it. Written through a temporary file so a second cctop
 /// reading at the wrong moment sees the old map rather than half of the new one.
+///
+/// The temporary is unique to the write ([`crate::util::write_atomic`]):
+/// this runs on every change to the map, and every cctop on the machine both
+/// writes and reads it, so two writers at once is the ordinary case.
 pub fn save_claims(claims: &std::collections::HashMap<String, Vec<u32>>) {
     let Some(path) = claims_path() else { return };
-    let Some(dir) = path.parent() else { return };
-    let _ = std::fs::create_dir_all(dir);
     let Ok(json) = serde_json::to_vec(claims) else {
         return;
     };
     // Nothing here is worth reporting: the map is an optimisation over waiting
     // for the next hook event, and a cctop that cannot write it simply waits.
-    let tmp = temp_beside(&path, "json");
-    if std::fs::write(&tmp, &json).is_ok() {
-        let _ = std::fs::rename(&tmp, &path);
-    }
-}
-
-/// A temporary name beside `path` that no other writer can already be holding.
-///
-/// `save_claims` runs on every change to the claims map — many times a minute —
-/// and every cctop on the machine reads the file it produces, so two writers
-/// arriving at one fixed temporary name is not a rare interleaving but the
-/// ordinary case. They `File::create` the same inode, and whichever renames
-/// first publishes a file the other is still writing into: what lands is
-/// neither map, `load_claims` finds JSON it cannot read, and sessions go back
-/// to pairing their processes against transcripts by recency.
-///
-/// The pid separates processes, which is the direction that matters here since
-/// each cctop is its own writer; the counter separates threads inside one,
-/// which a pid alone would call the same writer.
-fn temp_beside(path: &Path, extension: &str) -> PathBuf {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static WRITES: AtomicU64 = AtomicU64::new(0);
-    let seq = WRITES.fetch_add(1, Ordering::Relaxed);
-    path.with_extension(format!("{extension}.{}.{seq}", std::process::id()))
+    let _ = crate::util::write_atomic(&path, &json, false);
 }
 
 /// What the agents had reported when some cctop last heard from them.
@@ -1048,10 +1027,7 @@ fn ask_of(body: &serde_json::Value) -> Option<String> {
         .chars()
         .map(|c| if c.is_control() { ' ' } else { c })
         .collect();
-    Some(match line.chars().count() > MAX_ASK {
-        true => line.chars().take(MAX_ASK - 1).chain(['…']).collect(),
-        false => line,
-    })
+    Some(crate::util::truncate(&line, MAX_ASK))
 }
 
 /// What an event says about a session, as far as the UI is concerned.
@@ -2860,15 +2836,7 @@ fn yolo_hook_command(exe: &str, event: &str) -> String {
 }
 
 fn command_line(exe: &str, marker: &str, event: &str) -> String {
-    let plain = !exe.is_empty()
-        && exe
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || "/._-+,:=@%".contains(c));
-    if plain {
-        format!("{exe}{marker}{event}")
-    } else {
-        format!("'{}'{marker}{event}", exe.replace('\'', r"'\''"))
-    }
+    format!("{}{marker}{event}", crate::sandbox::sh_quote(exe))
 }
 
 /// A command line cut at whichever of cctop's two words it carries, into the
@@ -2935,16 +2903,11 @@ fn write_settings(
     path: &Path,
     root: &serde_json::Map<String, serde_json::Value>,
 ) -> anyhow::Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let path = &through_link(path);
     // Written beside the target and renamed: a crash mid-write would otherwise
     // leave the user with no settings at all, which breaks their agent far more
     // thoroughly than a missing hook.
-    let tmp = temp_beside(path, "json");
-    std::fs::write(&tmp, format!("{}\n", serde_json::to_string_pretty(root)?))?;
-    std::fs::rename(&tmp, path)?;
+    let text = format!("{}\n", serde_json::to_string_pretty(root)?);
+    crate::util::write_atomic(&through_link(path), text.as_bytes(), false)?;
     Ok(())
 }
 
@@ -3035,15 +2998,9 @@ fn read_codex(path: &Path) -> anyhow::Result<toml_edit::DocumentMut> {
 }
 
 fn write_codex(path: &Path, doc: &toml_edit::DocumentMut) -> anyhow::Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let path = &through_link(path);
-    let tmp = temp_beside(path, "toml");
     // Owner-only from the moment it exists, like every other writer of a file
     // cctop rewrites: this one can hold an auth token.
-    crate::quota::write_secret(&tmp, &doc.to_string())?;
-    std::fs::rename(&tmp, path)?;
+    crate::util::write_atomic(&through_link(path), doc.to_string().as_bytes(), true)?;
     Ok(())
 }
 
@@ -3240,17 +3197,12 @@ fn plugin_source_for(exe: &str, api: crate::opencode::Api) -> String {
 
 /// Write the plugin, replacing whatever cctop left there before.
 fn plugin_install(path: &Path, exe: &str) -> anyhow::Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
     let source = plugin_source(exe);
     // Already this, exactly: nothing to write. See [`json_install`].
     if std::fs::read_to_string(path).is_ok_and(|text| text == source) {
         return Ok(());
     }
-    let tmp = temp_beside(path, "ts");
-    std::fs::write(&tmp, source)?;
-    std::fs::rename(&tmp, path)?;
+    crate::util::write_atomic(path, source.as_bytes(), false)?;
     Ok(())
 }
 
@@ -3370,12 +3322,7 @@ fn skill_install(path: &Path, commands: &Path, exe: &str) -> anyhow::Result<()> 
     if before.is_some_and(|text| text == source) {
         return Ok(());
     }
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let tmp = temp_beside(path, "md");
-    std::fs::write(&tmp, source)?;
-    std::fs::rename(&tmp, path)?;
+    crate::util::write_atomic(path, source.as_bytes(), false)?;
     Ok(())
 }
 

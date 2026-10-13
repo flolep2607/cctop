@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { withToken } from "@/lib/config";
-import { getJson } from "@/lib/api";
+import { usePoll } from "@/hooks/use-poll";
 import { applyRows, settleAsking, type RowsDelta } from "@/lib/stream";
 import type { Session, Tab } from "@/lib/types";
 
@@ -77,9 +77,13 @@ function pick(list: Session[], only: string): Session[] {
  * table, so nothing is lost in the handover. `open` alone does not count: a
  * proxy that holds the body can still pass the head.
  */
-export function useSessions(only?: string): { sessions: Session[] | null; feed: Feed } {
+export function useSessions(only?: string): { sessions: Session[] | null; feed: Feed; chat: string | null } {
   const [sessions, setSessions] = useState<Session[] | null>(null);
   const [feed, setFeed] = useState<Feed>("connecting");
+  // With `only`: the server's mark for that session's conversation, which
+  // changes when it may have (`chat_mark` in crates/serve/src/lib.rs). The
+  // conversation refetches on it rather than on a timer — see `useChat`.
+  const [chat, setChat] = useState<string | null>(null);
   useEffect(() => {
     let source: EventSource | null = null;
     let retry: ReturnType<typeof setTimeout> | undefined;
@@ -186,6 +190,15 @@ export function useSessions(only?: string): { sessions: Session[] | null; feed: 
           /* a bad event is skipped, not fatal */
         }
       });
+      mine.addEventListener("chat", (event) => {
+        if (!fresh()) return;
+        try {
+          const mark = JSON.parse((event as MessageEvent).data);
+          if (typeof mark === "string") setChat(mark);
+        } catch {
+          /* a bad event is skipped, not fatal */
+        }
+      });
       mine.addEventListener("ping", () => {
         fresh();
       });
@@ -221,33 +234,13 @@ export function useSessions(only?: string): { sessions: Session[] | null; feed: 
       source?.close();
     };
   }, [only]);
-  return { sessions, feed };
+  return { sessions, feed, chat };
 }
 
 /** The tabs cctop has open in its multiplexer, every few seconds. */
 export function useTabs(every = 3000): { tabs: Tab[] | null; error: string } {
-  const [tabs, setTabs] = useState<Tab[] | null>(null);
-  const [error, setError] = useState("");
-  useEffect(() => {
-    let live = true;
-    const poll = async () => {
-      try {
-        const body = await getJson<{ tabs?: Tab[] }>("/api/tabs");
-        if (!live) return;
-        setTabs(body.tabs ?? []);
-        setError("");
-      } catch (e) {
-        if (live) setError(String((e as Error).message || e));
-      }
-    };
-    poll();
-    const timer = setInterval(poll, every);
-    return () => {
-      live = false;
-      clearInterval(timer);
-    };
-  }, [every]);
-  return { tabs, error };
+  const { data, error } = usePoll<{ tabs?: Tab[] }>("/api/tabs", every);
+  return { tabs: data ? data.tabs ?? [] : null, error };
 }
 
 /**

@@ -344,7 +344,7 @@ pub fn wait(
     let mut refreshed = Instant::now();
     let mut reread_rmux = Instant::now();
     loop {
-        let now_secs = cctop_core::rmux::now_secs();
+        let now_secs = cctop_core::util::now_secs();
         // Followed by key, then by pid: an agent that had written nothing yet
         // is a `_pid_` row until its transcript appears, and the row that
         // replaces it has a new key and the same process.
@@ -401,7 +401,7 @@ pub fn wait(
                         &mut heard,
                         Heard {
                             signal: event.reported.signal,
-                            at: cctop_core::rmux::now_secs(),
+                            at: cctop_core::util::now_secs(),
                             provisional: event.reported.provisional,
                         },
                     );
@@ -425,33 +425,24 @@ pub fn wait(
     }
 }
 
-/// Parse a timeout: `90`, `90s`, `10m`, `2h`. `0` is no limit, and parses to
-/// zero rather than `None`: clap reads an `Option` field as "the flag may be
-/// absent", which this one, with its default, never is.
+/// Parse a timeout: `90`, `90s`, `10m`, `2h`, `1d` — [`cctop_core::util::parse_duration`],
+/// with seconds for a bare number. `0` is no limit, and parses to zero rather
+/// than `None`: clap reads an `Option` field as "the flag may be absent",
+/// which this one, with its default, never is.
 pub fn parse_timeout(text: &str) -> Result<Duration, String> {
     let text = text.trim();
-    let (number, unit) = match text.find(|c: char| !c.is_ascii_digit() && c != '.') {
-        Some(at) => text.split_at(at),
-        None => (text, "s"),
-    };
-    let scale = match unit {
-        "s" => 1.0,
-        "m" => 60.0,
-        "h" => 3600.0,
-        _ => {
-            return Err(format!(
-                "'{text}': use a number of seconds, or 30s, 10m, 2h"
-            ));
-        }
-    };
-    let value: f64 = number
-        .parse()
-        .map_err(|_| format!("'{text}': use a number of seconds, or 30s, 10m, 2h"))?;
-    let secs = value * scale;
-    if !secs.is_finite() || secs < 0.0 || secs > u32::MAX as f64 {
+    let bare = !text.is_empty() && text.chars().all(|c| c.is_ascii_digit() || c == '.');
+    let span = match bare {
+        true => cctop_core::util::parse_duration(&format!("{text}s")),
+        false => cctop_core::util::parse_duration(text),
+    }
+    .ok_or_else(|| format!("'{text}': use a number of seconds, or 30s, 10m, 2h"))?;
+    // The wait is a poll loop counting in `Instant`s, which a span of
+    // centuries would overflow: past that it is not a timeout this can wait.
+    if span.as_secs() > u64::from(u32::MAX) {
         return Err(format!("'{text}' is not a timeout this can wait"));
     }
-    Ok(Duration::from_secs_f64(secs))
+    Ok(span)
 }
 
 /// `cctop wait`, from its parsed arguments. Returns the exit code.
@@ -669,7 +660,8 @@ mod tests {
         assert_eq!(parse_timeout("2h"), Ok(Duration::from_secs(7200)));
         assert_eq!(parse_timeout("1.5m"), Ok(Duration::from_secs(90)));
         assert_eq!(parse_timeout("0"), Ok(Duration::ZERO), "0 is no limit");
-        assert!(parse_timeout("10d").is_err());
+        assert_eq!(parse_timeout("1d"), Ok(Duration::from_secs(86_400)));
+        assert!(parse_timeout("99999999999999w").is_err());
         assert!(parse_timeout("soon").is_err());
         assert!(parse_timeout("").is_err());
     }

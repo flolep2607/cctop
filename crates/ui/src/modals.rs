@@ -918,14 +918,14 @@ fn settings_lines(
     // carries whatever the TOML parser had to say.
     lines.push(Line::from(vec![
         Span::styled("  File ", theme::dim()),
-        Span::raw(super::render::elide(
+        Span::raw(util::truncate(
             &cctop_core::util::tildify(&cctop_core::config::CONFIG_FILE.to_string_lossy()),
             width.saturating_sub(8),
         )),
     ]));
     for problem in &app.settings.problems {
         lines.push(Line::from(Span::styled(
-            super::render::elide(&format!("  ! {problem}"), width),
+            util::truncate(&format!("  ! {problem}"), width),
             theme::failed(),
         )));
     }
@@ -1036,7 +1036,7 @@ fn settings_lines(
                 Kind::Cycles => max_value.saturating_sub(1),
                 _ => max_value,
             };
-            let shown = super::render::elide(&text, cut);
+            let shown = util::truncate(&text, cut);
             let mut spans = match kind {
                 Kind::Plain => marked(&shown, &needle, style),
                 Kind::Key => marked(&shown, &needle, theme::key_cap()),
@@ -1070,7 +1070,7 @@ fn settings_lines(
         let room = width.saturating_sub(LEAD + drawn.saturating_sub(VALUE_W));
         let mut line = Line::from_iter(name_spans(name, &needle).into_iter().chain(value).chain([
             Span::styled(if set { " * " } else { "   " }, theme::dim()),
-            Span::styled(super::render::elide(what, room), theme::dim()),
+            Span::styled(util::truncate(what, room), theme::dim()),
         ]));
         if here {
             cursor_line = lines.len() as u16;
@@ -1172,7 +1172,7 @@ fn settings_lines(
     if rows.is_empty() {
         lines.push(Line::default());
         lines.push(Line::from(Span::styled(
-            super::render::elide(
+            util::truncate(
                 &format!("  Nothing matches {}.", app.settings_filter),
                 width,
             ),
@@ -1186,7 +1186,7 @@ fn settings_lines(
 
     lines.push(Line::default());
     lines.push(Line::from(Span::styled(
-        super::render::elide(
+        util::truncate(
             "  ↵ change   ⌫ reset   e open the file in an editor   Esc back to the table",
             width,
         ),
@@ -1203,10 +1203,9 @@ pub(super) fn draw_search(frame: &mut Frame, area: Rect, app: &App) {
         input_line(&app.search),
         Line::from(Span::styled(
             format!(
-                " {} of {} session{}",
+                " {} of {}",
                 app.matched,
-                app.sessions.len(),
-                if app.sessions.len() == 1 { "" } else { "s" }
+                util::plural(app.sessions.len(), "session")
             ),
             theme::dim(),
         )),
@@ -2670,8 +2669,8 @@ fn draw_reclaim_confirm(frame: &mut Frame, area: Rect, app: &App, layout: &mut L
     let mut lines = vec![
         Line::from(Span::styled(
             format!(
-                "  Stop {n} idle session{}, freeing {}",
-                if n == 1 { "" } else { "s" },
+                "  Stop {}, freeing {}",
+                util::plural(n, "idle session"),
                 util::compact_bytes(plan.bytes)
             ),
             theme::value(),
@@ -3041,7 +3040,7 @@ pub(super) fn draw_switch_tab(
         spans.push(Span::styled(
             format!(
                 "{:<width$}",
-                super::render::elide(&title, TITLE_W),
+                util::truncate(&title, TITLE_W),
                 width = TITLE_W
             ),
             theme::value(),
@@ -3675,38 +3674,20 @@ pub(super) fn draw_connect(frame: &mut Frame, area: Rect, app: &mut App, layout:
     confirm_chips(layout, outer, inner, row, &hint, &keys);
 }
 
-/// `text` in rows of at most `width` columns, broken between words, and
-/// inside a word only where one is longer than a row — a URL, usually.
+/// `text` in rows of at most `width` cells, broken between words, and inside
+/// a word only where one is longer than a row — a URL, usually.
+///
+/// [`util::wrap`] with the whitespace collapsed first, because what arrives
+/// here is a sentence from a server whose own line breaks mean nothing in a
+/// box this size; and always one row, so an empty message still has its line.
 fn wrap_words(text: &str, width: usize) -> Vec<String> {
-    let width = width.max(1);
-    let mut rows = Vec::new();
-    let mut row = String::new();
-    for word in text.split_whitespace() {
-        let mut word: Vec<char> = word.chars().collect();
-        loop {
-            let used = row.chars().count();
-            let gap = usize::from(used > 0);
-            if used + gap + word.len() <= width {
-                if gap == 1 {
-                    row.push(' ');
-                }
-                row.extend(word);
-                break;
-            }
-            // Not on this row: on the next, unless it is longer than a whole
-            // row, which is cut at the edge and carried on below.
-            if used > 0 {
-                rows.push(std::mem::take(&mut row));
-                continue;
-            }
-            row.extend(word.drain(..width));
-            rows.push(std::mem::take(&mut row));
-        }
+    let words = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let rows = util::wrap(&words, width);
+    if rows.is_empty() {
+        vec![String::new()]
+    } else {
+        rows
     }
-    if !row.is_empty() || rows.is_empty() {
-        rows.push(row);
-    }
-    rows
 }
 
 /// The paste field, masked: as many dots as characters, up to a line's worth,
@@ -4916,7 +4897,7 @@ mod tests {
                 order: None,
                 state: signal.map(|signal| cctop_core::rmux::State {
                     signal,
-                    at: cctop_core::rmux::now_secs(),
+                    at: cctop_core::util::now_secs(),
                 }),
                 color: None,
                 tab: None,
@@ -5003,8 +4984,10 @@ mod tests {
                 "/long/path then"
             ]
         );
-        assert!(rows.iter().all(|r| r.chars().count() <= 16));
+        assert!(rows.iter().all(|r| util::cells(r) <= 16));
         assert_eq!(wrap_words("", 10), [""]);
+        // Cells, not chars: eight CJK characters are sixteen columns.
+        assert_eq!(wrap_words("日本語の テキスト", 8), ["日本語の", "テキスト"]);
     }
 
     #[test]
