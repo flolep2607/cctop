@@ -1811,7 +1811,10 @@ impl App {
             // none of those here, and the same path on this filesystem is a
             // different file. Refused with the host named, rather than left to
             // fail further in with a message about a missing process.
-            KeyCode::Char('d' | 's' | 'a' | 'R' | 'O') if self.selected_is_remote() => {
+            //
+            // `a` and `R` are not here: on a remote row they open it on its
+            // own machine, which is where acting on it belongs.
+            KeyCode::Char('d' | 's' | 'O') if self.selected_is_remote() => {
                 let why = self.selected_session().and_then(App::remote_refusal);
                 if let Some(why) = why {
                     self.set_status(why);

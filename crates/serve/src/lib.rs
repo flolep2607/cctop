@@ -96,6 +96,8 @@ mod metrics;
 /// TUI POSTs crossings to `$CCTOP_NOTIFY_URL` through too — one transport, two
 /// triggers.
 mod notify;
+/// `/api/term/…`: a session of this machine's, opened in a tab on another.
+mod open;
 /// The threads that keep the snapshot, the quota and the provider status fresh.
 mod pollers;
 mod quota;
@@ -1437,6 +1439,12 @@ fn serve_connection(shared: &Shared, stream: &mut TcpStream) {
     // [`relay_terminal`]. Before the app's files because it is not one.
     if let Some(rest) = path.strip_prefix("/rmux-ws/") {
         return relay_terminal(shared, stream, &request, rest, access);
+    }
+    // One of this machine's sessions, opened as a terminal from a tab on
+    // another — see [`open`]. Before the sibling routes: it is about this
+    // machine's sessions, never relayed on.
+    if let Some(rest) = path.strip_prefix("/api/term/") {
+        return open::route(shared, stream, &request, rest, access);
     }
     // A sibling on the account, through this server — see [`forward`]. The
     // page never talks to another origin, so the content policy stays as it

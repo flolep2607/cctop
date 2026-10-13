@@ -672,12 +672,21 @@ pub fn main(args: &[String]) -> i32 {
         },
         Some("attach") => attach(&args[1..]),
         Some("ls") => ls(),
+        // A session of this machine's, opened from a tab on another: see
+        // [`crate::remote_open`]. `open` runs here; `reach` is the other
+        // machine's end of a sibling's terminal.
+        Some("open") => crate::remote_open::open_here(&args[1..]),
+        Some("reach") => crate::remote_open::bridge(&args[1..]),
         Some("kill-session") => match args.get(1..) {
             Some([flag, name]) if flag == "-t" => kill_session(name),
             _ => Err("usage: cctop mux kill-session -t <name>".to_string()),
         },
         Some("socket") => socket().map(|path| println!("{}", path.display())),
-        _ => Err("usage: cctop mux <attach NAME | ls | kill-session -t NAME | socket>".to_string()),
+        _ => Err(
+            "usage: cctop mux <attach NAME | ls | kill-session -t NAME | socket | \
+             open PROVIDER ID [DIR] | reach MACHINE PROVIDER ID>"
+                .to_string(),
+        ),
     };
     match result {
         Ok(()) => 0,

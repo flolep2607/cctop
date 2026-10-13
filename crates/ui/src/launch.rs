@@ -142,9 +142,43 @@ impl App {
         // A host goes the same way: a split stays beside its tab's work, which
         // may be on a host; a fresh tab starts on this machine.
         if into == LaunchInto::Tab {
-            self.launch_remote = None;
+            self.launch_remote = self.selected_remote_project();
         }
         self.mode = Mode::Launch;
+    }
+
+    /// Where a new agent goes when the launcher is opened on a remote row:
+    /// that row's project, on its machine, as `host:path`.
+    ///
+    /// The one place the selected row does move the launch. A local row is
+    /// for inspecting or resuming, and this machine's own directory is the
+    /// sensible default. A remote row is the reverse: what you are looking at
+    /// is another machine, and an agent beside it is the likelier want — and
+    /// one keystroke in the directory field puts it back here.
+    ///
+    /// Only for an ssh `--host`, which `host:path` launches over; a sibling
+    /// on the Cloudflare account may have no ssh route at all, and is left to
+    /// open its sessions with `R`. Taken unchecked, as an offline host is,
+    /// and checked by the sandbox in the tab.
+    fn selected_remote_project(&self) -> Option<location::RemoteTarget> {
+        let session = self.selected_session()?;
+        let host = &session.remote.as_ref()?.host;
+        match self.reach_of(host).ok()? {
+            cctop_core::reach::Reach::Ssh(_) => {}
+            cctop_core::reach::Reach::Peer(_) => return None,
+        }
+        let path = match session.label_source.trim() {
+            "" => "~".to_string(),
+            path => path.to_string(),
+        };
+        Some(location::RemoteTarget {
+            host: host.clone(),
+            path,
+            resolved: None,
+            facts: None,
+            problem: None,
+            unchecked: Some("the selected row's project".to_string()),
+        })
     }
 
     /// Write the selected session's context brief and offer it to a new agent.
@@ -286,6 +320,10 @@ impl App {
     /// it the transcript, which is what the harnesses themselves offer and works
     /// whether the session ended an hour ago or is running in another window.
     pub(super) fn resume_selected(&mut self) {
+        // On another machine, resuming is that machine's to do.
+        if self.selected_is_remote() {
+            return self.open_remote_selected();
+        }
         let Some(session) = self.selected_session() else {
             return;
         };
@@ -829,6 +867,30 @@ impl App {
         self.set_status(format!("{verb} {what}{where_}{kept}"));
     }
 
+    /// A tab whose pane runs `argv`, a transport to another machine, in the
+    /// local rmux session `name`. See [`App::open_remote_selected`].
+    pub(super) fn open_remote_tab(
+        &mut self,
+        argv: &[String],
+        what: &str,
+        name: String,
+        label: String,
+    ) {
+        self.open_tab(
+            argv,
+            NewTab {
+                cwd: None,
+                what,
+                own: tabs::Own::Mux(name.clone()),
+                verb: "Opened",
+                resumed: Some(name),
+                label: Some(label),
+                // The account is the far machine's business.
+                profile: None,
+            },
+        );
+    }
+
     /// The rmux sessions this cctop already has a pane onto.
     pub fn open_rmux(&self) -> Vec<String> {
         self.tabs
@@ -1179,6 +1241,11 @@ impl App {
     /// instead. Either way this only *looks* at the agent — closing the pane
     /// detaches from it and never ends it.
     pub(super) fn attach_selected(&mut self) {
+        // Attaching to an agent on another machine is the same open as `R`:
+        // the far side attaches when it can and resumes when it cannot.
+        if self.selected_is_remote() {
+            return self.open_remote_selected();
+        }
         let Some(session) = self.selected_session() else {
             return;
         };
