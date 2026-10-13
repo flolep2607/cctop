@@ -36,7 +36,6 @@ doctest = false
 # with upstream. Already in the lock under the `[patch]` this crate replaces, so
 # moving it here added nothing to the tree.
 [dependencies]
-anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "io-util", "net", "time", "sync"] }
@@ -46,17 +45,24 @@ capnp = "0.20"
 capnp-futures = "0.20"
 capnp-rpc = "0.20"
 futures = "0.3"
-hickory-resolver = { version = "0.24", default-features = false, features = ["dns-over-rustls", "tokio-runtime"] }
+# 0.25, on the rustls 0.23 the rest of the tree uses; 0.24 brought a second,
+# older rustls of its own. `tls-ring` is the DoT fallback; its roots are set in
+# `cloudflare::edge` from `webpki-roots` rather than by a feature that would
+# pull in an older copy of that crate.
+hickory-resolver = { version = "0.25", default-features = false, features = ["tokio", "tls-ring"] }
 httparse = "1"
 quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls", "ring"] }
-reqwest = { version = "0.12", default-features = false, features = ["json", "charset", "rustls-tls"] }
 rustls = { version = "0.23", default-features = false, features = ["std", "ring", "tls12", "logging"] }
 rustls-native-certs = "0.7"
 rustls-pemfile = "2"
-thiserror = "1"
+thiserror = "2"
 tokio-util = { version = "0.7", features = ["compat"] }
 tracing = "0.1"
+# The one POST a quick tunnel makes (`cloudflare::api`), on the HTTP client the
+# rest of cctop already links, rather than a second async stack beside it.
+ureq.workspace = true
 uuid = { version = "1", features = ["v4", "serde"] }
+webpki-roots.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full"] }

@@ -27,10 +27,9 @@ chrono.workspace = true
 dirs.workspace = true
 flate2.workspace = true
 libc.workspace = true
-rusqlite.workspace = true
+percent-encoding.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-tempfile.workspace = true
 
 # The web UI is compressed when this crate is built (`build.rs`), so the
 # brotli encoder runs on the build machine and is not linked into cctop.
@@ -46,3 +45,4 @@ brotli-decompressor.workspace = true
 # Only for the constant the pinned share page has to agree with: see
 # `term::tests::the_pinned_share_page_speaks_the_linked_servers_protocol`.
 rmux-server.workspace = true
+tempfile.workspace = true

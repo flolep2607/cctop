@@ -1064,20 +1064,7 @@ fn current(session: &Session, accounts: &[String]) -> Target {
 
 /// A session id of the shape the harness writes: a version-4 UUID.
 fn new_session_id() -> String {
-    let mut bytes = crate::util::random_bytes(16);
-    // The version and variant bits. Nothing checks them, but a file whose name
-    // is not a UUID is one a person reading the directory cannot place.
-    bytes[6] = (bytes[6] & 0x0f) | 0x40;
-    bytes[8] = (bytes[8] & 0x3f) | 0x80;
-    let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
-    format!(
-        "{}-{}-{}-{}-{}",
-        &hex[0..8],
-        &hex[8..12],
-        &hex[12..16],
-        &hex[16..20],
-        &hex[20..32]
-    )
+    crate::util::new_uuid()
 }
 
 /// The brief as text, having left a record beside it where one could be
