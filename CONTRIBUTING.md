@@ -223,7 +223,7 @@ which `-D warnings` rejects.
 Code reads its exit code as a *decision*: non-zero blocks the tool call and
 feeds stderr back to the model. So it exits 0 always, writes nothing to stdout,
 and returns inside a deadline — by construction, not by care. See the module
-docs in `crates/core/src/hook.rs`.
+docs in `crates/core/src/hook/mod.rs`.
 
 A hook that fell through to clap would exit non-zero on every fire, so the
 `hook` dispatch in `main.rs` is never gated behind anything.
