@@ -688,6 +688,26 @@ fn idle_view_and_reclaim() {
     snap("idle_reclaim", &mut app);
 }
 
+/// A tab whose agent died at once: its last screen, frozen, and the line
+/// across the bottom saying how it ended and that any key closes it.
+#[test]
+fn dead_pane() {
+    let mut app = fixture();
+    let mut pane = tabs::Pane::for_test("claude");
+    pane.view
+        .parser
+        .process(b"Starting claude...\r\nerror: not logged in - run `claude /login`\r\n");
+    pane.dead = Some(tabs::Death {
+        code: Some(1),
+        signal: None,
+        lived: Some(std::time::Duration::from_millis(400)),
+        last_line: Some("error: not logged in - run `claude /login`".into()),
+    });
+    app.tabs.push(tabs::Tab::new(pane));
+    app.tab = 1;
+    snap("dead_pane", &mut app);
+}
+
 /// The Cloudflare popup at the steps worth a look: the browser login, and its
 /// address shown for a browser elsewhere; the link with a paste in the field
 /// (masked); the domain picker, the no-domain refusal, and done.
