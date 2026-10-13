@@ -173,6 +173,14 @@ impl Peer {
         }
     }
 
+    /// This sibling as one whose last poll failed with `why` — what a page's
+    /// offline dot, and [`crate::reach`], read — for a test.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn failing(self, why: &str) -> Peer {
+        *self.last_error.lock().expect("fresh") = Some(why.to_string());
+        self
+    }
+
     /// The tunnel token to sign with: the cached one, or a fresh fetch.
     fn secret(&self, fresh: bool) -> Result<String, String> {
         if !fresh && let Some(token) = self.token.lock().ok().and_then(|t| t.clone()) {
@@ -344,7 +352,7 @@ impl Peer {
 }
 
 /// A refusal in the sibling's own words when it gave some.
-fn refusal(answer: &Answer) -> String {
+pub(crate) fn refusal(answer: &Answer) -> String {
     let said = String::from_utf8_lossy(&answer.body);
     let said = said.lines().next().unwrap_or("").trim();
     match said.is_empty() || answer.content_type.starts_with("text/html") {
@@ -589,6 +597,77 @@ pub fn offline() -> Vec<(String, String)> {
 pub fn set_known(peers: Vec<Arc<Peer>>) {
     if let Ok(mut known) = KNOWN.lock() {
         *known = peers;
+    }
+}
+
+/// Add `peer` to the known siblings, in place of one by the same name — for
+/// a test that shares the process's list with others running beside it.
+#[cfg(any(test, feature = "test-support"))]
+pub fn add_known(peer: Arc<Peer>) {
+    if let Ok(mut known) = KNOWN.lock() {
+        known.retain(|p| p.machine != peer.machine);
+        known.push(peer);
+    }
+}
+
+/// A sibling's serve on loopback, for the tests of whoever asks one.
+#[cfg(any(test, feature = "test-support"))]
+pub mod fake {
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::TcpListener;
+    use std::sync::{Arc, Mutex};
+
+    /// The tunnel token the fake signs are checked against. Made up.
+    pub const SECRET: &str = "made-up-tunnel-token";
+
+    /// Answer every `GET` signed with [`SECRET`] with `status` and `body`,
+    /// refuse an unsigned one with 401, and record each request's target.
+    /// Returns the origin to hand [`Peer::fixed`](super::Peer::fixed).
+    pub fn sibling(status: u16, body: &'static str) -> (String, Arc<Mutex<Vec<String>>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let seen: Arc<Mutex<Vec<String>>> = Arc::default();
+        let log = seen.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(stream) = stream else { return };
+                let mut reader = BufReader::new(stream);
+                let mut line = String::new();
+                if reader.read_line(&mut line).is_err() {
+                    continue;
+                }
+                let target = line
+                    .split_whitespace()
+                    .nth(1)
+                    .unwrap_or_default()
+                    .to_string();
+                let path = target.split('?').next().unwrap_or_default().to_string();
+                let mut signed = false;
+                loop {
+                    let mut header = String::new();
+                    if reader.read_line(&mut header).is_err() || header.trim().is_empty() {
+                        break;
+                    }
+                    if let Some((name, value)) = header.split_once(':')
+                        && name.eq_ignore_ascii_case("authorization")
+                    {
+                        signed = super::verify(SECRET, value.trim(), "GET", &path, super::now());
+                    }
+                }
+                log.lock().unwrap().push(target);
+                let (status, body) = match signed {
+                    true => (status, body),
+                    false => (401, "unsigned"),
+                };
+                let mut stream = reader.into_inner();
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+            }
+        });
+        (url, seen)
     }
 }
 
