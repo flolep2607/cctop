@@ -9,10 +9,12 @@
 //! edge.
 
 use std::net::{IpAddr, SocketAddr};
+use std::sync::Arc;
 use std::time::Duration;
 
-use hickory_resolver::TokioAsyncResolver;
-use hickory_resolver::config::{NameServerConfigGroup, ResolverConfig, ResolverOpts};
+use hickory_resolver::TokioResolver;
+use hickory_resolver::config::{NameServerConfigGroup, ResolverConfig};
+use hickory_resolver::name_server::TokioConnectionProvider;
 use tracing::warn;
 
 use crate::Error;
@@ -41,7 +43,11 @@ impl EdgeAddr {
 /// One-shot discovery without caching. System resolver first; on
 /// failure / empty answer, falls back to DoT via `1.1.1.1`.
 pub async fn discover() -> Result<Vec<EdgeAddr>, Error> {
-    let primary = TokioAsyncResolver::tokio(ResolverConfig::default(), ResolverOpts::default());
+    let primary = TokioResolver::builder_with_config(
+        ResolverConfig::default(),
+        TokioConnectionProvider::default(),
+    )
+    .build();
     match resolve_srv(&primary).await {
         Ok(edges) if !edges.is_empty() => return Ok(shuffled(&edges)),
         Ok(_) => warn!("system resolver returned zero edges; falling back to DoT"),
@@ -60,7 +66,7 @@ pub async fn discover() -> Result<Vec<EdgeAddr>, Error> {
 
 // ── Internals ─────────────────────────────────────────────────────────────────
 
-fn build_dot_resolver() -> Result<TokioAsyncResolver, Error> {
+fn build_dot_resolver() -> Result<TokioResolver, Error> {
     let addr: SocketAddr = DOT_SERVER_ADDR
         .parse()
         .map_err(|e| Error::Discovery(format!("DoT addr parse: {e}")))?;
@@ -71,12 +77,27 @@ fn build_dot_resolver() -> Result<TokioAsyncResolver, Error> {
         true,
     );
     let cfg = ResolverConfig::from_parts(None, vec![], ns);
-    let mut opts = ResolverOpts::default();
+    let mut builder = TokioResolver::builder_with_config(cfg, TokioConnectionProvider::default());
+    let opts = builder.options_mut();
     opts.timeout = Duration::from_secs(15);
-    Ok(TokioAsyncResolver::tokio(cfg, opts))
+    // Mozilla's roots, which the rest of cctop's TLS already carries. Without
+    // a store of its own hickory's default is an empty one unless one of its
+    // root features is on, and then every DoT handshake fails to verify and
+    // the fallback never answers — which is how it shipped on 0.24.
+    let roots = rustls::RootCertStore {
+        roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
+    };
+    opts.tls_config = rustls::ClientConfig::builder_with_provider(Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .map_err(|e| Error::Discovery(format!("DoT TLS config: {e}")))?
+    .with_root_certificates(roots)
+    .with_no_client_auth();
+    Ok(builder.build())
 }
 
-async fn resolve_srv(resolver: &TokioAsyncResolver) -> Result<Vec<EdgeAddr>, Error> {
+async fn resolve_srv(resolver: &TokioResolver) -> Result<Vec<EdgeAddr>, Error> {
     let srv = resolver
         .srv_lookup(SRV_NAME)
         .await

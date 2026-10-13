@@ -253,6 +253,112 @@ pub fn tui(event: &crossterm::event::Event) {
     }
 }
 
+/// Send what the tunnel and the rmux crates log through `tracing` into this
+/// log, as lines with the event's target for `src` and its level for `kind`.
+///
+/// Those crates log the way libraries do — they emit and leave the collecting
+/// to whoever links them — and with no subscriber installed every warning they
+/// wrote (an edge that refused a tunnel, a retry, a pane that died) went
+/// nowhere. They go here rather than to stderr because stderr is the TUI's
+/// screen, and here they obey `CCTOP_LOG` like everything else: off unless it
+/// is set, `info` and above at `events`, `debug` too at `io`, `trace` never —
+/// rmux traces every frame, which is what `io`'s byte previews are already for.
+///
+/// Hand-written rather than `tracing-subscriber`: a forwarder needs no span
+/// registry, no filter syntax and no formatter, which is most of that crate.
+/// Call once, early; a second call, or one after something else installed a
+/// subscriber, leaves the first in place.
+pub fn forward_tracing() {
+    let _ = tracing::subscriber::set_global_default(Forward);
+}
+
+/// The subscriber [`forward_tracing`] installs. Spans are accepted and
+/// forgotten: nothing that logs here leans on them, and an event without its
+/// span's fields is still the event.
+struct Forward;
+
+impl Forward {
+    fn wants(level: &tracing::Level) -> bool {
+        match self::level() {
+            Level::Off => false,
+            Level::Events => *level <= tracing::Level::INFO,
+            Level::Io => *level <= tracing::Level::DEBUG,
+        }
+    }
+}
+
+impl tracing::Subscriber for Forward {
+    fn register_callsite(
+        &self,
+        _: &'static tracing::Metadata<'static>,
+    ) -> tracing::subscriber::Interest {
+        // "Ask each time", not a verdict cached per callsite, because the
+        // level can move on a running server (the debug route).
+        tracing::subscriber::Interest::sometimes()
+    }
+
+    fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+        metadata.is_span() || Self::wants(metadata.level())
+    }
+
+    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
+    }
+
+    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+
+    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+
+    fn event(&self, event: &tracing::Event<'_>) {
+        let meta = event.metadata();
+        if Self::wants(meta.level()) {
+            write(meta.target(), level_word(meta.level()), fields_of(event));
+        }
+    }
+
+    fn enter(&self, _: &tracing::span::Id) {}
+
+    fn exit(&self, _: &tracing::span::Id) {}
+}
+
+fn level_word(level: &tracing::Level) -> &'static str {
+    match *level {
+        tracing::Level::ERROR => "error",
+        tracing::Level::WARN => "warn",
+        tracing::Level::INFO => "info",
+        tracing::Level::DEBUG => "debug",
+        tracing::Level::TRACE => "trace",
+    }
+}
+
+/// An event's fields as a JSON object, `message` among them. Numbers and
+/// booleans stay what they are, so `cctop log` can filter on them; everything
+/// else is its `Debug`, which is what the emitter chose to show.
+fn fields_of(event: &tracing::Event<'_>) -> serde_json::Value {
+    struct Fields(serde_json::Map<String, serde_json::Value>);
+    impl tracing::field::Visit for Fields {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            self.0
+                .insert(field.name().to_string(), format!("{value:?}").into());
+        }
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            self.0.insert(field.name().to_string(), value.into());
+        }
+        fn record_i64(&mut self, field: &tracing::field::Field, value: i64) {
+            self.0.insert(field.name().to_string(), value.into());
+        }
+        fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
+            self.0.insert(field.name().to_string(), value.into());
+        }
+        fn record_bool(&mut self, field: &tracing::field::Field, value: bool) {
+            self.0.insert(field.name().to_string(), value.into());
+        }
+    }
+    let mut fields = Fields(serde_json::Map::new());
+    event.record(&mut fields);
+    serde_json::Value::Object(fields.0)
+}
+
 /// Write the line. The lock orders writers inside this process; `O_APPEND`
 /// does the same between processes.
 fn write(src: &'static str, kind: &'static str, fields: serde_json::Value) {
@@ -478,6 +584,55 @@ pub fn run(argv: &[String]) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A `tracing` event arrives as its message and fields, typed, with the
+    /// level that decides whether it is written at all.
+    #[test]
+    fn a_tracing_event_becomes_its_fields() {
+        use std::sync::{Arc, Mutex};
+        struct Capture(Arc<Mutex<Vec<serde_json::Value>>>);
+        impl tracing::Subscriber for Capture {
+            fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+                true
+            }
+            fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+                tracing::span::Id::from_u64(1)
+            }
+            fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+            fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+            fn event(&self, event: &tracing::Event<'_>) {
+                let mut fields = super::fields_of(event);
+                fields["kind"] = super::level_word(event.metadata().level()).into();
+                self.0.lock().unwrap().push(fields);
+            }
+            fn enter(&self, _: &tracing::span::Id) {}
+            fn exit(&self, _: &tracing::span::Id) {}
+        }
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        tracing::subscriber::with_default(Capture(seen.clone()), || {
+            tracing::warn!(attempt = 2u32, ok = false, url = %"https://x", "retrying");
+        });
+        let seen = seen.lock().unwrap();
+        assert_eq!(
+            seen[0],
+            serde_json::json!({
+                "message": "retrying",
+                "attempt": 2,
+                "ok": false,
+                "url": "https://x",
+                "kind": "warn",
+            })
+        );
+    }
+
+    #[test]
+    fn trace_is_never_forwarded_and_debug_only_at_io() {
+        // Read through the level the process has, which a test leaves off.
+        if super::level() == super::Level::Off {
+            assert!(!super::Forward::wants(&tracing::Level::ERROR));
+        }
+        assert!(!super::Forward::wants(&tracing::Level::TRACE));
+    }
 
     /// The escape in a mouse report must not reach the terminal tailing the
     /// log — that is the whole reason previews are escaped.

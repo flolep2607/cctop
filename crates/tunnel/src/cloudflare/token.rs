@@ -16,7 +16,7 @@
 use std::fmt;
 
 use base64::Engine;
-use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD, URL_SAFE, URL_SAFE_NO_PAD};
+use base64::engine::{DecodePaddingMode, GeneralPurpose, GeneralPurposeConfig};
 use serde::Deserialize;
 use uuid::Uuid;
 
@@ -114,10 +114,16 @@ pub(super) fn decode(token: &str) -> Result<Credentials, TokenError> {
 /// Base64 in whichever alphabet and padding it arrived in. Dashboard tokens
 /// are standard and padded, but a token that went through a URL or a shell
 /// may have lost its padding or been made URL-safe, and the bytes are the same.
+///
+/// One engine, padding-indifferent, over the input folded onto the standard
+/// alphabet, rather than four engines tried in turn.
 fn decode_base64(text: &str) -> Option<Vec<u8>> {
-    [STANDARD, STANDARD_NO_PAD, URL_SAFE, URL_SAFE_NO_PAD]
-        .iter()
-        .find_map(|engine| engine.decode(text).ok())
+    const LENIENT: GeneralPurpose = GeneralPurpose::new(
+        &base64::alphabet::STANDARD,
+        GeneralPurposeConfig::new().with_decode_padding_mode(DecodePaddingMode::Indifferent),
+    );
+    let folded = text.replace('-', "+").replace('_', "/");
+    LENIENT.decode(folded).ok()
 }
 
 #[cfg(test)]
@@ -126,7 +132,7 @@ mod tests {
 
     /// A made-up token: base64 of JSON written here, naming nobody's tunnel.
     fn token(json: &str) -> String {
-        STANDARD.encode(json)
+        base64::engine::general_purpose::STANDARD.encode(json)
     }
 
     const SECRET_B64: &str = "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA=";

@@ -76,18 +76,28 @@ pub const MAX_RETRIES: u32 = 3;
 /// [`Error::ApiBusiness`].
 pub async fn request_tunnel(service_url: &str, user_agent: &str) -> Result<QuickTunnel, Error> {
     let url = format!("{}/tunnel", service_url.trim_end_matches('/'));
-    let client = reqwest::Client::builder()
+    // ureq rather than an async client: one POST at startup does not need a
+    // second HTTP stack beside the one the rest of cctop already links, and a
+    // blocking call on tokio's blocking pool costs one thread for its length.
+    let agent: ureq::Agent = ureq::Agent::config_builder()
         .user_agent(user_agent)
-        .timeout(DEFAULT_HTTP_TIMEOUT)
+        .timeout_global(Some(DEFAULT_HTTP_TIMEOUT))
+        // The status is ours to read: a 5xx is retried and a 4xx with a JSON
+        // envelope carries the edge's reason, neither of which an `Err` keeps.
+        .http_status_as_error(false)
         .build()
-        .map_err(Error::Api)?;
+        .into();
 
     let mut backoff = Duration::from_secs(1);
     let mut last_err: Option<Error> = None;
 
     for attempt in 0..=MAX_RETRIES {
         debug!(attempt, %url, "POST /tunnel");
-        match try_once(&client, &url).await {
+        let (agent, target) = (agent.clone(), url.clone());
+        let outcome = tokio::task::spawn_blocking(move || try_once(&agent, &target))
+            .await
+            .unwrap_or_else(|e| Err(Error::Internal(format!("POST /tunnel task failed: {e}"))));
+        match outcome {
             Ok(tunnel) => return Ok(tunnel),
             Err(err) => {
                 if !err.is_transient() || attempt == MAX_RETRIES {
@@ -110,15 +120,14 @@ pub async fn request_tunnel(service_url: &str, user_agent: &str) -> Result<Quick
     }))
 }
 
-async fn try_once(client: &reqwest::Client, url: &str) -> Result<QuickTunnel, Error> {
-    let resp = client
+fn try_once(agent: &ureq::Agent, url: &str) -> Result<QuickTunnel, Error> {
+    let mut resp = agent
         .post(url)
         .header("Content-Type", "application/json")
-        .send()
-        .await?;
+        .send_empty()?;
 
     let status = resp.status();
-    let body = resp.bytes().await?;
+    let body = resp.body_mut().read_to_vec()?;
 
     // 5xx with non-JSON body must surface as a transient error so
     // the retry loop kicks in. JSON 5xx envelopes are rare but
@@ -177,12 +186,14 @@ impl Error {
     /// Errors a retry could plausibly recover (network / 5xx).
     pub(crate) fn is_transient(&self) -> bool {
         match self {
-            Error::Api(e) => {
-                e.is_timeout()
-                    || e.is_connect()
-                    || e.is_request()
-                    || e.status().is_some_and(|s| s.is_server_error())
-            }
+            Error::Api(e) => matches!(
+                e,
+                ureq::Error::Timeout(_)
+                    | ureq::Error::Io(_)
+                    | ureq::Error::ConnectionFailed
+                    | ureq::Error::HostNotFound
+                    | ureq::Error::BodyStalled
+            ),
             Error::ApiNonJson { status, .. } => (500..600).contains(status),
             _ => false,
         }

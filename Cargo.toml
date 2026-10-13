@@ -247,13 +247,25 @@ tui-term = "0.3.4"
 unicode-segmentation = "1.13"
 unicode-width = "0.2"
 # A QR code of a link meant for a phone, drawn in half-blocks inside the panel
-# that hands the link out (`ui::qr`). `qrcode` is the encoder the widget takes;
-# its default features are image rendering, which a terminal has no use for.
-# The widget also drags in `color-eyre` — a normal dependency though only its
-# example uses it. Pure Rust all the way down, so the musl builds are unmoved.
+# that hands the link out (`ui::qr`). The encoder only: its default features
+# are image rendering, which a terminal has no use for, and the modules are
+# drawn into ratatui's buffer by `ui::qr` itself. `tui-qrcode` did that once,
+# and brought `color-eyre`, `backtrace` and `tracing-subscriber` as normal
+# dependencies though only its example used them.
 qrcode = { version = "0.14", default-features = false }
-tui-qrcode = "0.2.6"
 ureq = { version = "3.3.0", default-features = false, features = ["rustls"] }
+# Session ids of the shape every harness writes (`util::new_uuid`). Already in
+# the tree under the tunnel crate, as is getrandom behind `v4`.
+uuid = { version = "1", features = ["v4"] }
+# The `%XX` in a request path and query, and in the URLs cctop builds. Already
+# in the tree under ureq's `url`, and its decoder refuses `%+A`, which a
+# hand-written one built on `from_str_radix` did not.
+percent-encoding = "2.3"
+# What the tunnel and rmux log through. cctop installs one subscriber
+# (`cctop_core::elog::forward_tracing`) that hands their events to the event log, and
+# `tracing-subscriber` is not used for it: its registry and formatting are
+# more than a forwarder needs. Already in the tree under all of them.
+tracing = { version = "0.1", default-features = false, features = ["std"] }
 # A sibling cctop's terminal socket, relayed over TLS (`cctop_core::peer`):
 # a WebSocket upgrade is the one request ureq does not make. Both are already
 # in the tree under ureq, with the same ring provider and Mozilla's roots.
