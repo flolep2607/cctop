@@ -101,6 +101,7 @@ pub(super) fn draw_bottom(frame: &mut Frame, area: Rect, app: &mut App, layout: 
             .and_then(|s| s.remote.as_ref())
             .map(|r| r.host.clone())
     {
+        let via = app.remote_via(&host);
         frame.render_widget(
             Paragraph::new(vec![
                 Line::from(Span::styled(
@@ -109,8 +110,10 @@ pub(super) fn draw_bottom(frame: &mut Frame, area: Rect, app: &mut App, layout: 
                 )),
                 Line::default(),
                 Line::from(Span::styled(
-                    "cctop reads that machine's summary over ssh; the transcript this panel \
-                     would break down stays there. Info has everything that crossed.",
+                    format!(
+                        "cctop reads that machine's summary {via}; the transcript this panel \
+                         would break down stays there. Info has everything that crossed."
+                    ),
                     theme::dim(),
                 )),
             ])
@@ -141,7 +144,16 @@ pub(super) fn draw_bottom(frame: &mut Frame, area: Rect, app: &mut App, layout: 
         let data = app.panel_data.as_ref();
         match app.bottom_tab {
             0 => (
-                panels::info(session, data, app.plan, app.clash_of(session).as_ref()),
+                panels::info(
+                    session,
+                    data,
+                    app.plan,
+                    app.clash_of(session).as_ref(),
+                    session
+                        .remote
+                        .as_ref()
+                        .map_or("over ssh", |r| app.remote_via(&r.host)),
+                ),
                 app.info_scroll,
             ),
             2 => (panels::processes(session, width), app.proc_scroll),

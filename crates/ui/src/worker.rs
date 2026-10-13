@@ -34,12 +34,12 @@ pub(super) enum Request {
     Insight {
         which: &'static str,
     },
-    /// A window of the open conversation view. `host` is the machine to ask
-    /// over ssh when the row is remote; `before` pages backwards through a
-    /// session longer than one window.
+    /// A window of the open conversation view. `reach` is the machine to ask
+    /// when the row is remote; `before` pages backwards through a session
+    /// longer than one window.
     Chat {
         session: Box<Session>,
-        host: Option<cctop_core::fleet::Host>,
+        reach: Option<cctop_core::reach::Reach>,
         before: Option<usize>,
         /// One of the session's subagents, by [`AgentCall::id`], to read its
         /// own transcript rather than the session's.
@@ -552,7 +552,7 @@ pub(super) fn spawn_worker(
                 }
                 Request::Chat {
                     session,
-                    host,
+                    reach,
                     before,
                     agent,
                 } => {
@@ -565,28 +565,13 @@ pub(super) fn spawn_worker(
                     // selection it has already left, so a late one is safe.
                     let tx = tx.clone();
                     loader.gently_spawn(move || {
-                        let result = match host {
+                        let result = match reach {
                             // The transcript lives on the far side — ask the
                             // cctop there for the same document the local build
                             // would make, rather than parsing a local file that
                             // happens to share the path.
-                            Some(host) => {
-                                let marker = before.map(|b| b.to_string());
-                                let mut args = vec!["--chat", session.session_id.as_str()];
-                                if let Some(marker) = marker.as_deref() {
-                                    args.extend(["--before", marker]);
-                                }
-                                if let Some(agent) = agent.as_deref() {
-                                    args.extend(["--agent", agent]);
-                                }
-                                host.run(&args).and_then(|json| {
-                                    serde_json::from_str(&json).map_err(|e| {
-                                        format!(
-                                            "{} returned an unreadable conversation: {e}",
-                                            host.target
-                                        )
-                                    })
-                                })
+                            Some(reach) => {
+                                reach.chat(&session.session_id, before, agent.as_deref())
                             }
                             None => Ok(match agent.as_deref() {
                                 Some(agent) => cctop_core::chat::build_agent(

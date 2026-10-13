@@ -1284,8 +1284,9 @@ impl App {
     ///
     /// Read-only: it never resumes, attaches to, or types into the session —
     /// it only reads the transcript the way the report page does. A remote
-    /// row's transcript is read on the machine that has it, over the same ssh
-    /// channel the row arrived by.
+    /// row's transcript is read on the machine that has it: over ssh for a
+    /// `--host`, through its tunnel for a sibling on the Cloudflare account
+    /// ([`cctop_core::reach`]).
     pub(crate) fn open_conversation(&mut self) {
         // A subagent row opens that agent's own turns, which are read through
         // its session: the session is what lists the agent, and listing it is
@@ -1296,25 +1297,23 @@ impl App {
         let Some(session) = self.selected_session() else {
             return;
         };
-        let host = session.remote.as_ref().and_then(|remote| {
-            self.remote_hosts
-                .iter()
-                .find(|h| h.target == remote.host)
-                .cloned()
-        });
-        if let Some(remote) = &session.remote
-            && host.is_none()
-        {
-            // A remote row with no `Host` in hand is one whose spec went away
-            // since the poll — nothing to ask, and the machine's name is the
-            // useful part of the answer.
-            self.set_status(format!(
-                "{} is on {}, which this run is not connected to",
-                session.display_label(),
-                remote.host
-            ));
-            return;
-        }
+        let reach = match &session.remote {
+            None => None,
+            Some(remote) => {
+                match self.reach_of(&remote.host) {
+                    Ok(reach) => Some(reach),
+                    // Nothing to ask: a spec dropped since the poll, a sibling
+                    // gone from the account, or one that is down. The reason
+                    // names which, because "not connected" alone left the user
+                    // guessing at a connection they never made.
+                    Err(why) => {
+                        let label = session.display_label();
+                        self.set_status(format!("Can't open {label}: {why}"));
+                        return;
+                    }
+                }
+            }
+        };
         // Opened *for* a match: the table's transcript search picked this row by a
         // term, so arrive at the term rather than at the top of a conversation
         // it may be thousands of lines below. Only when the row really is a
@@ -1324,7 +1323,7 @@ impl App {
             Some(_) => reader::Search::for_match(&self.scan_query),
             None => reader::Search::default(),
         };
-        let mut view = ChatView::new(session.clone(), host);
+        let mut view = ChatView::new(session.clone(), reach);
         view.search = search;
         view.agent = agent;
         self.chat = Some(view);
@@ -1343,7 +1342,7 @@ impl App {
         view.fetching = true;
         let _ = self.tx.send(Request::Chat {
             session: Box::new(view.session.clone()),
-            host: view.host.clone(),
+            reach: view.reach.clone(),
             before,
             agent: view.agent.as_ref().map(|a| a.id.clone()),
         });
@@ -1421,10 +1420,10 @@ pub struct ChatView {
     /// The session the view is about — kept because a page of older turns is
     /// asked for on the same row the view was opened on.
     pub session: Session,
-    /// The host that can read it, when the row is remote. `Some` exactly when
-    /// `session.remote` is — the fetch then goes over ssh rather than to the
+    /// The machine that can read it, when the row is remote. `Some` exactly
+    /// when `session.remote` is — the fetch then goes there rather than to the
     /// local transcript path, which does not exist on this machine.
-    pub host: Option<cctop_core::fleet::Host>,
+    pub reach: Option<cctop_core::reach::Reach>,
     /// What has been read so far. `None` while the first read is in flight;
     /// `error` says why it came back without one when it did.
     pub conversation: Option<cctop_core::chat::Conversation>,
@@ -1470,10 +1469,10 @@ pub struct ChatView {
 }
 
 impl ChatView {
-    pub(crate) fn new(session: Session, host: Option<cctop_core::fleet::Host>) -> Self {
+    pub(crate) fn new(session: Session, reach: Option<cctop_core::reach::Reach>) -> Self {
         ChatView {
             session,
-            host,
+            reach,
             conversation: None,
             error: None,
             back: 0,

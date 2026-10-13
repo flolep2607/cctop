@@ -409,7 +409,7 @@ impl App {
             self.set_status("No agent call on screen — scroll one into view");
             return;
         };
-        let mut child = ChatView::new(view.session.clone(), view.host.clone());
+        let mut child = ChatView::new(view.session.clone(), view.reach.clone());
         child.agent = Some(agent);
         child.parent = Some(Box::new(view));
         self.chat = Some(child);
@@ -1037,9 +1037,9 @@ pub(super) fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
 
     match (&view.conversation, &view.error) {
         (None, None) => {
-            let msg = match view.host.is_some() {
-                true => "  Reading it over ssh…",
-                false => "  Reading the transcript…",
+            let msg = match &view.reach {
+                Some(reach) => format!("  Reading it {}…", reach.via()),
+                None => "  Reading the transcript…".to_string(),
             };
             let line = Line::from(vec![
                 Span::styled(format!("  {}", share::spinner_frame()), theme::title()),

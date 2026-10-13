@@ -258,6 +258,7 @@ pub fn info(
     data: Option<&SessionData>,
     plan: Plan,
     clash: Option<&Clash>,
+    via: &str,
 ) -> Vec<Line<'static>> {
     // A remote row has no extraction behind it and never will — its transcript
     // is on the other machine. Everything below that reads `data` is optional,
@@ -321,7 +322,7 @@ pub fn info(
                     .add_modifier(Modifier::BOLD),
             ),
             Span::raw("  "),
-            dim("read over ssh; cctop acts only on this machine"),
+            dim(format!("read {via}; cctop acts only on this machine")),
         ]));
         // Only when the two differ: a matching version is the expected state
         // and a line saying so on every remote row would be read past, which
@@ -2648,7 +2649,7 @@ mod tests {
             error: Some("boom".into()),
             ..Default::default()
         };
-        let lines = info(&s, Some(&data), Plan::Retail, None);
+        let lines = info(&s, Some(&data), Plan::Retail, None, "over ssh");
         let text: String = lines
             .iter()
             .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))

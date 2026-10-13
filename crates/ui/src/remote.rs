@@ -208,10 +208,23 @@ impl App {
                 "{host} runs {v}, newer than this cctop — update this one instead"
             )),
             Some(Skew::Missing) => Some(format!("{host} has no cctop to update")),
-            None => Some(match self.remote_versions.get(host) {
-                Some(cctop_core::fleet::Probe::Version(v)) => format!("{host} already runs {v}"),
-                _ => format!("{host}'s cctop version is not known yet"),
-            }),
+            None => Some(
+                match (self.remote_versions.get(host), self.reach_of(host)) {
+                    (Some(cctop_core::fleet::Probe::Version(v)), _) => {
+                        format!("{host} already runs {v}")
+                    }
+                    // Only an ssh host is ever asked its version, and `--update`
+                    // is a command run over ssh — so for anything else "not known
+                    // yet" would be a wait with no end.
+                    (_, Ok(cctop_core::reach::Reach::Ssh(_))) => {
+                        format!("{host}'s cctop version is not known yet")
+                    }
+                    (_, Ok(cctop_core::reach::Reach::Peer(_))) => format!(
+                        "{host} is reached through its Cloudflare tunnel, not ssh — run cctop --update there"
+                    ),
+                    (_, Err(why)) => why.to_string(),
+                },
+            ),
         }
     }
 
@@ -236,6 +249,27 @@ impl App {
     /// and what the update runs.
     pub fn remote_host(&self, target: &str) -> Option<&cctop_core::fleet::Host> {
         self.remote_hosts.iter().find(|h| h.target == target)
+    }
+
+    /// The way back to a remote row's machine: its `--host`, or a sibling on
+    /// the Cloudflare account — see [`cctop_core::reach`]. Every feature that
+    /// goes back to the machine for more asks this rather than `remote_hosts`
+    /// alone, which knows nothing of the siblings.
+    pub fn reach_of(
+        &self,
+        machine: &str,
+    ) -> Result<cctop_core::reach::Reach, cctop_core::reach::Unreached> {
+        cctop_core::reach::reach(machine, self.remote_host(machine))
+    }
+
+    /// How a remote row's machine is read, for the lines that say so. A
+    /// machine with no way back any more was most likely a `--host`.
+    pub fn remote_via(&self, machine: &str) -> &'static str {
+        match self.reach_of(machine) {
+            Ok(reach) => reach.via(),
+            Err(cctop_core::reach::Unreached::Offline { .. }) => "through its Cloudflare tunnel",
+            Err(cctop_core::reach::Unreached::Unknown { .. }) => "over ssh",
+        }
     }
 
     /// The answer to the confirmation. Anything but `y` is a no.
@@ -561,5 +595,111 @@ mod tests {
         }
         // And the cursor never rests on one of the refusals.
         assert!(items[menu::first_enabled(&items)].enabled());
+    }
+
+    /// A row from a sibling on the Cloudflare account — no `--host` anywhere —
+    /// opens its conversation, read from the sibling, instead of being refused
+    /// as a machine this run is not connected to.
+    #[test]
+    fn a_siblings_row_opens_its_conversation() {
+        use cctop_core::peer::{Peer, add_known, fake};
+        let (url, seen) = fake::sibling(
+            200,
+            r#"{"supported":true,"earlier":0,"turns":[{"seq":0,"role":"user","kind":"message","ts":"","text":"library suggestions","tools":[]}]}"#,
+        );
+        add_known(std::sync::Arc::new(Peer::fixed(
+            "ui-test-computer36",
+            &url,
+            fake::SECRET,
+        )));
+        let (tx, rx) = channel();
+        let mut app = App::new(Plan::Retail, tx);
+        let mut s = session("away", true, "/home/me/work");
+        s.remote = Some(cctop_core::session::Remote {
+            host: "ui-test-computer36".into(),
+            ..Default::default()
+        });
+        app.sessions = vec![s];
+        app.refilter();
+        app.selected = 0;
+        app.open_conversation();
+        assert_eq!(app.mode, Mode::Conversation, "{:?}", app.status());
+
+        // The worker's half: what the view asked for, asked of the sibling.
+        let (session, reach, before, agent) = std::iter::from_fn(|| rx.try_recv().ok())
+            .find_map(|r| match r {
+                Request::Chat {
+                    session,
+                    reach,
+                    before,
+                    agent,
+                } => Some((session, reach, before, agent)),
+                _ => None,
+            })
+            .expect("the read went to the worker");
+        let reach = reach.expect("a remote row is read where it lives");
+        assert_eq!(reach.via(), "through its Cloudflare tunnel");
+        let conversation = reach
+            .chat(&session.session_id, before, agent.as_deref())
+            .expect("the sibling answered");
+        assert_eq!(conversation.turns[0].text, "library suggestions");
+        assert_eq!(
+            seen.lock().unwrap().as_slice(),
+            [format!("/api/chat/{}", session.session_id)]
+        );
+        app.got_chat(session.key(), None, None, Ok(Box::new(conversation)));
+        assert!(
+            app.chat
+                .as_ref()
+                .and_then(|v| v.conversation.as_ref())
+                .is_some()
+        );
+    }
+
+    /// A row whose machine is neither says which of the two it is not, and a
+    /// sibling that is down says that instead.
+    #[test]
+    fn an_unreachable_row_says_why() {
+        use cctop_core::peer::{Peer, add_known};
+        add_known(std::sync::Arc::new(
+            Peer::fixed("ui-test-asleep", "http://127.0.0.1:9", "made-up")
+                .failing("offline — its tunnel has no connector"),
+        ));
+        let mut app = test_app();
+        let row = |host: &str| {
+            let mut s = session(host, true, "/home/me/work");
+            s.remote = Some(cctop_core::session::Remote {
+                host: host.into(),
+                ..Default::default()
+            });
+            s
+        };
+        for (machine, expected) in [
+            (
+                "ui-test-gone",
+                "ui-test-gone is neither a --host of this run nor a cctop on its Cloudflare account",
+            ),
+            (
+                "ui-test-asleep",
+                "ui-test-asleep is not answering: offline — its tunnel has no connector",
+            ),
+        ] {
+            app.sessions = vec![row(machine)];
+            app.refilter();
+            app.selected = 0;
+            app.open_conversation();
+            assert_eq!(app.mode, Mode::List);
+            assert!(app.chat.is_none());
+            let said = app.status().expect("a reason").to_string();
+            assert!(said.ends_with(expected), "{said}");
+            assert!(!said.contains("not connected"), "{said}");
+        }
+        // The same reason is why `--update` is not offered there.
+        assert_eq!(
+            app.remote_update_refusal("ui-test-gone").as_deref(),
+            Some(
+                "ui-test-gone is neither a --host of this run nor a cctop on its Cloudflare account"
+            )
+        );
     }
 }

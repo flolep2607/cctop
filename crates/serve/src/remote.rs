@@ -7,6 +7,7 @@
 
 use crate::api::{chat_json, find, may_act};
 use crate::{Access, Shared, current, http};
+use cctop_core::reach::Reach;
 use cctop_core::session::Session;
 use cctop_core::{actions, chat, export};
 use http::Request;
@@ -32,10 +33,12 @@ pub(crate) fn peer_of(shared: &Shared, path: &str) -> Option<Arc<cctop_core::pee
     })?;
     let snapshot = current(shared);
     let host = &find(&snapshot.sessions, id)?.remote.as_ref()?.host;
-    if shared.hosts.contains_key(host) {
-        return None;
+    // An offline sibling is not forwarded to: the route falls through to
+    // [`remote_text`], which says it is offline rather than timing out on it.
+    match cctop_core::reach::reach(host, shared.hosts.get(host)) {
+        Ok(Reach::Peer(peer)) => Some(peer),
+        Ok(Reach::Ssh(_)) | Err(_) => None,
     }
-    cctop_core::peer::find(host)
 }
 
 /// Relay a request to a sibling cctop, signed as this machine, and hand back
@@ -244,11 +247,18 @@ pub(crate) fn remote_text(
         .remote
         .as_ref()
         .expect("only a remote row reaches remote_text or remote_json");
-    let Some(host) = shared.hosts.get(&remote.host) else {
-        return Err(format!(
-            "this session is on {}, which this run is not connected to",
-            remote.host
-        ));
+    let host = match cctop_core::reach::reach(&remote.host, shared.hosts.get(&remote.host)) {
+        Ok(Reach::Ssh(host)) => host,
+        // A sibling's routes are forwarded to it whole before they get here
+        // ([`peer_of`]), so this is one asked between its discovery and the
+        // route's — the next request goes through.
+        Ok(Reach::Peer(_)) => {
+            return Err(format!(
+                "{} was found on the Cloudflare account mid-request — ask again",
+                remote.host
+            ));
+        }
+        Err(why) => return Err(format!("cannot reach this session: {why}")),
     };
     // The far side's own words are usually the answer: "command not found",
     // "no session id starts with …", or — for a cctop older than these flags —

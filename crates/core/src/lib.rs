@@ -55,6 +55,8 @@ pub mod pricing;
 pub mod proc;
 pub mod provider_status;
 pub mod quota;
+/// How to reach the machine a remote row came from: ssh or a sibling.
+pub mod reach;
 pub mod remote_fs;
 pub mod remote_launch;
 /// The per-session postmortem: `--report`, and `/api/report`.
