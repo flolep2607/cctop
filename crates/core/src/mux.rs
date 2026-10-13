@@ -106,6 +106,7 @@ pub const HISTORY_LINES: &str = "50000";
 /// - `set-clipboard on`: at `external`, clipboard writes from inside a pane are
 ///   dropped, so a copy in Claude Code went nowhere.
 /// - `remain-on-exit failed`: see [`REMAIN_ON_EXIT`].
+/// - `extended-keys on`: see [`EXTENDED_KEYS`].
 fn defaults() -> String {
     format!(
         "\
@@ -116,6 +117,7 @@ set-option -g window-size latest
 set-option -g allow-passthrough on
 set-option -s set-clipboard on
 set-option -wg remain-on-exit {REMAIN_ON_EXIT}
+set-option -s extended-keys {EXTENDED_KEYS}
 "
     )
 }
@@ -136,6 +138,24 @@ set-option -wg remain-on-exit {REMAIN_ON_EXIT}
 /// cctop showing it, once dismissed, or swept by any cctop once nobody is; see
 /// `ui::panes::App::sync_shared_tabs`.
 pub const REMAIN_ON_EXIT: &str = "failed";
+
+/// Whether rmux asks the terminal its client runs in for keys that have no
+/// legacy encoding, so that Shift+Enter reaches an agent as Shift+Enter — a
+/// newline in Claude Code — rather than as the Enter that submits.
+///
+/// At rmux's default, `off`, it never asks, and a terminal that was not asked
+/// sends Shift+Enter as a bare carriage return, which nothing downstream can
+/// tell from Enter. cctop's own panes got by without it, because cctop sends
+/// the extended form unasked (`attach::Attach::assume_extended_keys`); a person
+/// running `cctop mux attach` in their own terminal had no such help, and
+/// Shift+Enter submitted. `on` is what Claude Code's documentation asks of
+/// tmux, and does no more than ask: rmux still hands a pane's program the
+/// extended form only when that program asked for it, and the plain key
+/// otherwise, so a shell is never given `[13;2u` to print. The terminals that
+/// are asked are the ones rmux knows to understand it, xterm's family among
+/// them, which is why tmux's companion `terminal-features 'xterm*:extkeys'` is
+/// not needed here: rmux has that one built in.
+pub const EXTENDED_KEYS: &str = "on";
 
 /// How long cctop waits for its daemon to come up, or to answer.
 const DEADLINE: Duration = Duration::from_secs(30);
@@ -317,20 +337,25 @@ pub fn new_session(
 ) -> Result<(), String> {
     start()?;
     // Also set here, and not only in [`defaults`], because a daemon started by
-    // an older cctop read a config without it and runs until its last session
+    // an older cctop read a config without them and runs until its last session
     // ends. Before the session is made: an agent that fails does so at once,
     // and an option set after it would be set on a pane that had already gone.
-    let _ = ask(Request::SetOptionByName(Box::new(SetOptionByNameRequest {
-        scope: OptionScopeSelector::WindowGlobal,
-        name: "remain-on-exit".to_string(),
-        value: Some(REMAIN_ON_EXIT.to_string()),
-        mode: SetOptionMode::Replace,
-        only_if_unset: false,
-        unset: false,
-        unset_pane_overrides: false,
-        format: false,
-        format_target: None,
-    })));
+    // A client already attached to that daemon is asked for extended keys as
+    // soon as the option changes, without reattaching.
+    for (scope, name, value) in [
+        (
+            OptionScopeSelector::WindowGlobal,
+            "remain-on-exit",
+            REMAIN_ON_EXIT,
+        ),
+        (
+            OptionScopeSelector::ServerGlobal,
+            "extended-keys",
+            EXTENDED_KEYS,
+        ),
+    ] {
+        let _ = set_option(scope, name, value);
+    }
     let request = NewSessionExtRequest {
         session_name: Some(session(name)?),
         working_directory: cwd
@@ -372,8 +397,13 @@ pub fn kill_session(name: &str) -> Result<(), String> {
 
 /// Set a session option — one of the `@cctop_*` records, usually.
 pub fn set_session_option(name: &str, option: &str, value: &str) -> Result<(), String> {
+    set_option(OptionScopeSelector::Session(session(name)?), option, value)
+}
+
+/// Set `option` at `scope`, replacing whatever it held.
+fn set_option(scope: OptionScopeSelector, option: &str, value: &str) -> Result<(), String> {
     ask(Request::SetOptionByName(Box::new(SetOptionByNameRequest {
-        scope: OptionScopeSelector::Session(session(name)?),
+        scope,
         name: option.to_string(),
         value: Some(value.to_string()),
         mode: SetOptionMode::Replace,
@@ -1027,5 +1057,29 @@ mod tests {
         assert_eq!(size.split_whitespace().count(), 2, "{size}");
         kill_session("cctop-t").expect("killed");
         assert!(!has_session("cctop-t"));
+    }
+
+    /// A terminal rmux never asked for extended keys sends Shift+Enter as the
+    /// Enter that submits, so every session must be made on a daemon that asks
+    /// — including one an older cctop started, whose config said nothing.
+    #[test]
+    fn every_session_is_made_on_a_daemon_that_asks_for_extended_keys() {
+        let _daemon = TestDaemon::new("mux-extended-keys");
+        let sleeper = || vec!["sleep".to_string(), "30".to_string()];
+        let asks = || display("cctop-k", "#{extended-keys}").map(|s| s.trim().to_string());
+        new_session("cctop-k", None, Vec::new(), &sleeper()).expect("session made");
+        assert_eq!(asks().as_deref(), Some(EXTENDED_KEYS));
+
+        // What a daemon started before the option was cctop's holds.
+        set_option(OptionScopeSelector::ServerGlobal, "extended-keys", "off").expect("option set");
+        assert_eq!(asks().as_deref(), Some("off"));
+        new_session("cctop-l", None, Vec::new(), &sleeper()).expect("session made");
+        assert_eq!(
+            asks().as_deref(),
+            Some(EXTENDED_KEYS),
+            "a newer cctop left an older daemon not asking"
+        );
+        kill_session("cctop-k").expect("killed");
+        kill_session("cctop-l").expect("killed");
     }
 }
