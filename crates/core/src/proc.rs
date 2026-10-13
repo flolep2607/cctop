@@ -302,8 +302,8 @@ fn index_by<'a>(
     }
     for candidates in index.values_mut() {
         candidates.sort_by(|a, b| {
-            b.last_active
-                .cmp(&a.last_active)
+            b.touched()
+                .cmp(a.touched())
                 .then_with(|| a.session_id.cmp(&b.session_id))
         });
     }
@@ -938,8 +938,8 @@ fn hook_claims(
         .filter(|s| claims.contains_key(&s.session_id))
         .collect();
     claimants.sort_by(|a, b| {
-        b.last_active
-            .cmp(&a.last_active)
+        b.touched()
+            .cmp(a.touched())
             .then_with(|| a.session_id.cmp(&b.session_id))
     });
 

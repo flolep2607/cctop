@@ -136,14 +136,46 @@ fn scan_custom_title(transcript: &Path) -> Option<String> {
     title
 }
 
-/// Newest mtime across the main transcript and any subagent transcripts.
-fn latest_activity(transcript: &Path) -> String {
-    let newest = transcript_files(transcript)
+/// When a transcript line is a turn — something said, or a tool called or
+/// answered — its time in Unix milliseconds.
+///
+/// Every other kind of line is metadata a session writes about itself: a
+/// title, a summary, a file-history snapshot, a permission-mode switch, hook
+/// progress. Claude Code writes several of those on a resume before anything
+/// is asked, and a row whose "last" moved for one of them claimed activity
+/// that never happened. `isMeta` user lines are the harness talking to
+/// itself (a local command's caveat, an injected skill) and are left out on
+/// the same grounds.
+fn turn_ms(bytes: &[u8]) -> Option<i64> {
+    let item = Line::parse(bytes)?;
+    if !(item.kind.is("user") || item.kind.is("assistant")) || item.meta() {
+        return None;
+    }
+    util::parse_ts(item.timestamp.get()?).map(|d| d.timestamp_millis())
+}
+
+/// The newest turn across the main transcript and any subagent transcripts,
+/// and the newest mtime across the same files, as RFC 3339.
+///
+/// The turn is what the row shows as "last"; the mtime is any write at all,
+/// which is what liveness wants. A transcript with no turn in its tail
+/// answers with its mtime, so a session is never dated earlier than it was
+/// when this read the files alone.
+fn latest_activity(transcript: &Path) -> (String, String) {
+    let files = transcript_files(transcript);
+    let touched = files
         .iter()
         .map(|p| config::file_mtime_ms(p))
         .max()
         .unwrap_or(0);
-    util::ms_to_rfc3339(newest as i64)
+    let turn = files
+        .iter()
+        .filter_map(|p| extract::last_entry_ms(p, turn_ms))
+        .max();
+    (
+        util::ms_to_rfc3339(turn.unwrap_or(touched as i64)),
+        util::ms_to_rfc3339(touched as i64),
+    )
 }
 
 fn summarize(transcript: &Path) -> Option<Session> {
@@ -162,7 +194,7 @@ fn summarize(transcript: &Path) -> Option<Session> {
         return None;
     }
     let custom_title = scan_custom_title(transcript);
-    let last_active = latest_activity(transcript);
+    let (last_active, touched_at) = latest_activity(transcript);
 
     let mut s = Session::new(Provider::Claude, session_id);
     s.started_at = statics.started_at.clone();
@@ -171,6 +203,7 @@ fn summarize(transcript: &Path) -> Option<Session> {
     } else {
         last_active
     };
+    s.touched_at = touched_at;
     s.model = statics.model;
     s.label_source = statics.cwd;
     s.launch_id = statics.launch_id;
@@ -2696,6 +2729,122 @@ mod tests {
         assert_eq!(session.session_id, "forked");
         assert_eq!(session.launch_id, "original");
         assert_eq!(session.launched_as(), "original");
+    }
+
+    /// Set a file's mtime to `rfc3339`, as a later write that changed nothing
+    /// would leave it.
+    fn touch_at(path: &Path, rfc3339: &str) {
+        let at = util::parse_ts(rfc3339).expect("a timestamp");
+        let at =
+            std::time::UNIX_EPOCH + std::time::Duration::from_millis(at.timestamp_millis() as u64);
+        std::fs::File::options()
+            .append(true)
+            .open(path)
+            .and_then(|f| f.set_modified(at))
+            .expect("set mtime");
+    }
+
+    /// "Last" is the newest thing said or done, not the newest write. Claude Code
+    /// appends titles, summaries and file-history snapshots after the last turn
+    /// — on a resume, before anything is asked — and each one moves the mtime
+    /// without the session having done anything.
+    #[test]
+    fn last_active_is_the_newest_turn_not_the_newest_write() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("quiet.jsonl");
+        std::fs::write(
+            &path,
+            [
+                r#"{"type":"user","timestamp":"2026-01-01T10:00:00Z","cwd":"/w","message":{"role":"user","content":"go"}}"#,
+                r#"{"type":"assistant","timestamp":"2026-01-01T10:05:00Z","message":{"model":"claude-opus-5","content":[]}}"#,
+                r#"{"type":"user","timestamp":"2026-01-01T10:06:00Z","isMeta":true,"message":{"role":"user","content":"caveat"}}"#,
+                r#"{"type":"file-history-snapshot","timestamp":"2026-01-02T09:00:00Z","snapshot":{}}"#,
+                r#"{"type":"custom-title","customTitle":"renamed"}"#,
+                r#"{"type":"summary","summary":"what happened"}"#,
+            ]
+            .join("\n"),
+        )
+        .expect("write transcript");
+        touch_at(&path, "2026-01-03T00:00:00Z");
+
+        let session = summarize(&path).expect("a transcript with a model");
+        assert_eq!(session.last_active, "2026-01-01T10:05:00+00:00");
+        // Liveness still sees the write.
+        assert_eq!(session.touched_at, "2026-01-03T00:00:00+00:00");
+        assert_eq!(session.touched(), "2026-01-03T00:00:00+00:00");
+    }
+
+    /// A subagent works in a transcript of its own, and its turns are the
+    /// session's turns: the parent is not idle while one of them is talking.
+    #[test]
+    fn last_active_counts_a_subagent_turn() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("parent.jsonl");
+        std::fs::write(
+            &path,
+            r#"{"type":"assistant","timestamp":"2026-01-01T10:05:00Z","cwd":"/w","message":{"model":"claude-opus-5","content":[]}}"#,
+        )
+        .expect("write transcript");
+        let subagents = dir.path().join("parent").join("subagents");
+        std::fs::create_dir_all(&subagents).expect("subagents dir");
+        let sub = subagents.join("agent-a1.jsonl");
+        std::fs::write(
+            &sub,
+            [
+                r#"{"type":"assistant","timestamp":"2026-01-01T10:30:00Z","message":{"model":"claude-opus-5","content":[]}}"#,
+                r#"{"type":"progress","timestamp":"2026-01-01T11:00:00Z"}"#,
+            ]
+            .join("\n"),
+        )
+        .expect("write subagent transcript");
+        touch_at(&path, "2026-01-01T10:05:00Z");
+        touch_at(&sub, "2026-01-01T11:00:00Z");
+
+        let session = summarize(&path).expect("a transcript with a model");
+        assert_eq!(session.last_active, "2026-01-01T10:30:00+00:00");
+        assert_eq!(session.touched_at, "2026-01-01T11:00:00+00:00");
+    }
+
+    /// A transcript with no dated turn in it has only its mtime to go on, and
+    /// says so rather than dating the session to the epoch.
+    #[test]
+    fn last_active_falls_back_to_the_mtime_without_a_dated_turn() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("undated.jsonl");
+        std::fs::write(
+            &path,
+            r#"{"type":"assistant","cwd":"/w","message":{"model":"claude-opus-5","content":[]}}"#,
+        )
+        .expect("write transcript");
+        touch_at(&path, "2026-01-03T00:00:00Z");
+
+        let session = summarize(&path).expect("a transcript with a model");
+        assert_eq!(session.last_active, "2026-01-03T00:00:00+00:00");
+    }
+
+    /// The answer is kept against the file's size and mtime, so a turn appended
+    /// later is seen and an unchanged file is not read again.
+    #[test]
+    fn last_active_follows_an_append() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("growing.jsonl");
+        std::fs::write(
+            &path,
+            r#"{"type":"assistant","timestamp":"2026-01-01T10:05:00Z","cwd":"/w","message":{"model":"claude-opus-5","content":[]}}"#,
+        )
+        .expect("write transcript");
+        assert_eq!(
+            summarize(&path).expect("a session").last_active,
+            "2026-01-01T10:05:00+00:00"
+        );
+        let mut more = std::fs::read_to_string(&path).expect("read back");
+        more.push('\n');
+        more.push_str(r#"{"type":"user","timestamp":"2026-01-01T10:09:00Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"x","content":"ok"}]}}"#);
+        std::fs::write(&path, more).expect("append");
+        assert_eq!(
+            summarize(&path).expect("a session").last_active,
+            "2026-01-01T10:09:00+00:00"
+        );
     }
 
     /// A session nobody resumed records itself, and one from a Claude Code old

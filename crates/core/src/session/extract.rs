@@ -3,9 +3,10 @@
 use crate::config::MAX_JSONL_LINE_BYTES;
 use regex::Regex;
 use serde_json::Value;
+use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
-use std::path::Path;
-use std::sync::LazyLock;
+use std::path::{Path, PathBuf};
+use std::sync::{LazyLock, Mutex};
 
 /// Stream a `.jsonl` file, invoking `f` for each parseable object.
 ///
@@ -213,6 +214,49 @@ pub fn scan_last_lines<F: FnMut(&[u8]) -> bool>(path: &Path, max_lines: usize, m
             }
         }
     }
+}
+
+/// How far back from the end [`last_entry_ms`] looks for a real entry.
+///
+/// Metadata a harness writes after the last turn — a title, a summary, a usage
+/// tally — runs to a handful of lines, not hundreds; a tail with nothing real
+/// in it this far up falls back to the file's mtime.
+const LAST_ENTRY_LINES: usize = 200;
+
+/// What [`last_entry_ms`] found for a file, and the `(mtime, size)` it was read at.
+type LastEntry = (u64, u64, Option<i64>);
+
+static LAST_ENTRY: LazyLock<Mutex<HashMap<PathBuf, LastEntry>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// The newest timestamp, in Unix milliseconds, among the entries near the end
+/// of `path` that `entry_ms` recognises as a message or tool call, or `None`
+/// when there is none — the file missing, or nothing in its tail that counts.
+///
+/// Discovery asks this of every transcript on every walk, so the answer is
+/// kept against the file's mtime and size: a finished session costs a `stat`,
+/// and only a file that has been written to since is read again — its tail,
+/// not the whole of it.
+pub fn last_entry_ms(path: &Path, entry_ms: impl Fn(&[u8]) -> Option<i64>) -> Option<i64> {
+    let meta = std::fs::metadata(path).ok()?;
+    let stamp = (crate::config::mtime_ms_of(&meta), meta.len());
+    if let Ok(cache) = LAST_ENTRY.lock()
+        && let Some(&(mtime, size, found)) = cache.get(path)
+        && (mtime, size) == stamp
+    {
+        return found;
+    }
+    let mut newest: Option<i64> = None;
+    scan_last_lines(path, LAST_ENTRY_LINES, |bytes| {
+        if let Some(ms) = entry_ms(bytes) {
+            newest = Some(newest.map_or(ms, |n| n.max(ms)));
+        }
+        true
+    });
+    if let Ok(mut cache) = LAST_ENTRY.lock() {
+        cache.insert(path.to_path_buf(), (stamp.0, stamp.1, newest));
+    }
+    newest
 }
 
 // ---------------------------------------------------------------------------

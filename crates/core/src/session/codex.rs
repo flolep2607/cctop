@@ -412,6 +412,24 @@ fn collect_static(path: &Path) -> StaticParts {
     parts
 }
 
+/// When a rollout line is a turn — a message, a tool call or its output, the
+/// model's reasoning — its time in Unix milliseconds.
+///
+/// The event stream beside it (`token_count`, `turn_context`, the
+/// `session_meta` a resume repeats) is bookkeeping, and so is a `developer`
+/// or `system` message: Codex writes its own instructions in that shape.
+fn turn_ms(bytes: &[u8]) -> Option<i64> {
+    let item = Line::parse(bytes)?;
+    if !item.kind.is("response_item") {
+        return None;
+    }
+    let payload = item.payload.get()?;
+    if payload.kind.is("message") && !(payload.role.is("user") || payload.role.is("assistant")) {
+        return None;
+    }
+    util::parse_ts(item.timestamp.get()?).map(|d| d.timestamp_millis())
+}
+
 /// All Codex rollout sessions, newest file first.
 pub fn list_sessions() -> Vec<Session> {
     let mut files: Vec<_> = config::codex_sessions_roots()
@@ -431,14 +449,19 @@ pub fn list_sessions() -> Vec<Session> {
         .into_par_iter()
         .map(|path| {
             let statics = collect_static(&path);
-            let mtime = config::file_mtime_ms(&path);
-            let last_active = chrono::DateTime::from_timestamp_millis(mtime as i64)
+            let mtime = config::file_mtime_ms(&path) as i64;
+            let touched_at = chrono::DateTime::from_timestamp_millis(mtime)
                 .map(|d| d.to_rfc3339())
                 .unwrap_or_else(|| statics.started_at.clone());
+            let last_active = extract::last_entry_ms(&path, turn_ms)
+                .and_then(chrono::DateTime::from_timestamp_millis)
+                .map(|d| d.to_rfc3339())
+                .unwrap_or_else(|| touched_at.clone());
 
             let mut s = Session::new(Provider::Codex, statics.session_id);
             s.started_at = statics.started_at;
             s.last_active = last_active;
+            s.touched_at = touched_at;
             s.model = statics.model;
             s.label_source = statics.cwd;
             // A session cctop wrote as a handoff into Codex says where it came
@@ -882,6 +905,32 @@ pub use super::delete_transcript as delete;
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// "Last" is the newest message, tool call or reasoning in the rollout. The
+    /// token tallies and turn contexts after it, and Codex's own `developer`
+    /// instructions, are bookkeeping and do not date it.
+    #[test]
+    fn the_last_turn_ignores_bookkeeping_after_it() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("rollout.jsonl");
+        let lines = [
+            json!({"type": "session_meta", "timestamp": "2026-01-01T10:00:00Z", "payload": {"id": "x"}}),
+            json!({"type": "response_item", "timestamp": "2026-01-01T10:01:00Z",
+                "payload": {"type": "message", "role": "user", "content": []}}),
+            json!({"type": "response_item", "timestamp": "2026-01-01T10:02:00Z",
+                "payload": {"type": "function_call_output", "call_id": "c"}}),
+            json!({"type": "response_item", "timestamp": "2026-01-01T10:03:00Z",
+                "payload": {"type": "message", "role": "developer", "content": []}}),
+            json!({"type": "event_msg", "timestamp": "2026-01-01T10:04:00Z",
+                "payload": {"type": "token_count"}}),
+            json!({"type": "turn_context", "timestamp": "2026-01-01T10:05:00Z", "payload": {}}),
+        ];
+        let body: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
+        std::fs::write(&path, body.join("\n")).expect("write rollout");
+
+        let expected = util::parse_ts("2026-01-01T10:02:00Z").map(|d| d.timestamp_millis());
+        assert_eq!(extract::last_entry_ms(&path, turn_ms), expected);
+    }
 
     #[test]
     fn unwraps_exec_command_into_bash_with_its_command() {
