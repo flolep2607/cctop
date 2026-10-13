@@ -1,11 +1,17 @@
 //! Session discovery and the extracted-data model.
 
 pub mod claude;
+pub(crate) mod claude_line;
 pub mod codex;
+pub(crate) mod codex_line;
 pub mod cursor;
 pub mod devin;
 pub mod extract;
 pub mod gemini;
+// Here rather than at the top of the crate because the session cache's version
+// is derived from this directory's sources (see build.rs), and what a parser
+// reads as absent is part of what it extracts.
+pub(crate) mod lenient;
 pub mod lookup;
 pub mod opencode;
 pub mod pi;
@@ -1922,6 +1928,21 @@ impl Loadout {
     pub fn listed(&self) -> bool {
         self.skills_listed || self.agents_listed || self.mcp_listed
     }
+
+    /// The attachment `type`s [`Loadout::note`] reads; every other kind it
+    /// ignores.
+    ///
+    /// So the extractor can leave the others unbuilt: an attachment is any
+    /// file the person @-mentioned, too, and can be most of its line. A kind
+    /// added to `note` and not here is never handed to it.
+    pub(crate) const NOTED: &[&str] = &[
+        "skill_listing",
+        "agent_listing_delta",
+        "deferred_tools_delta",
+        "mcp_instructions_delta",
+        "instructions",
+        "nested_memory",
+    ];
 
     /// Fold in one `attachment` entry from the main conversation.
     pub fn note(&mut self, attachment: &serde_json::Value) {

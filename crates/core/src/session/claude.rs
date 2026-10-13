@@ -1,6 +1,8 @@
 //! Claude session discovery and transcript extraction.
 
-use super::extract::{self, for_each_jsonl, read_first_lines, read_last_lines};
+use super::claude_line::{self, Line, Message, ToolUseResult};
+use super::extract;
+use super::lenient::{Lenient, Raw, Shape};
 use super::{
     ContextBreakdown, ContextUsage, Costs, MacMeta, Metrics, ModelBreakdown, Session, SessionData,
     Subagent, SubagentStatus, Surface, Tokens, transcript_files,
@@ -61,24 +63,24 @@ fn collect_static(transcript: &Path) -> StaticParts {
     let mut parts = StaticParts::default();
     let mut earliest: Option<chrono::DateTime<chrono::Utc>> = None;
 
-    for item in read_first_lines(transcript, 50) {
-        if let Some(ts) = item.get("timestamp").and_then(Value::as_str)
+    extract::scan_first_lines(transcript, 50, |bytes| {
+        let Some(item) = Line::parse(bytes) else {
+            return false;
+        };
+        if let Some(ts) = item.timestamp.get()
             && let Some(parsed) = util::parse_ts(ts)
             && earliest.is_none_or(|e| parsed < e)
         {
             earliest = Some(parsed);
         }
         if parts.cwd.is_empty()
-            && let Some(cwd) = item.get("cwd").and_then(Value::as_str)
+            && let Some(cwd) = item.cwd.get()
         {
             parts.cwd = cwd.to_string();
         }
         if parts.model.is_empty()
-            && item.get("type").and_then(Value::as_str) == Some("assistant")
-            && let Some(m) = item
-                .get("message")
-                .and_then(|m| m.get("model"))
-                .and_then(Value::as_str)
+            && item.kind.is("assistant")
+            && let Some(m) = item.message.get().and_then(|m| m.model.get())
             && m != "<synthetic>"
         {
             parts.model = m.to_string();
@@ -87,26 +89,26 @@ fn collect_static(transcript: &Path) -> StaticParts {
         // on the command line that started it — the same thing until a resume,
         // and the only record of the fork afterwards.
         if parts.launch_id.is_empty()
-            && let Some(id) = item.get("session_id").and_then(Value::as_str)
+            && let Some(id) = item.session_id.get()
         {
             parts.launch_id = id.to_string();
         }
-        if item.get("type").and_then(Value::as_str) == Some("user")
+        if item.kind.is("user")
             && item
-                .get("message")
-                .and_then(|m| m.get("content"))
-                .and_then(Value::as_str)
+                .content()
+                .text()
                 .and_then(super::effort_switch)
                 .is_some()
         {
             parts.switched_effort = true;
         }
-        if item.get("type").and_then(Value::as_str) == Some("ai-title")
-            && let Some(t) = item.get("aiTitle").and_then(Value::as_str)
+        if item.kind.is("ai-title")
+            && let Some(t) = item.ai_title.get()
         {
             parts.ai_title = Some(t.to_string());
         }
-    }
+        true
+    });
 
     parts.started_at = earliest.map(|d| d.to_rfc3339()).unwrap_or_default();
 
@@ -121,17 +123,17 @@ fn collect_static(transcript: &Path) -> StaticParts {
 
 /// A `/rename` title, which is usually written late in the session.
 fn scan_custom_title(transcript: &Path) -> Option<String> {
-    read_last_lines(transcript, 200)
-        .into_iter()
-        .find_map(|item| {
-            (item.get("type").and_then(Value::as_str) == Some("custom-title"))
-                .then(|| {
-                    item.get("customTitle")
-                        .and_then(Value::as_str)
-                        .map(str::to_string)
-                })
-                .flatten()
-        })
+    let mut title = None;
+    extract::scan_last_lines(transcript, 200, |bytes| {
+        let Some(item) = Line::parse(bytes) else {
+            return false;
+        };
+        if title.is_none() && item.kind.is("custom-title") {
+            title = item.custom_title.get().map(str::to_string);
+        }
+        true
+    });
+    title
 }
 
 /// Newest mtime across the main transcript and any subagent transcripts.
@@ -504,20 +506,8 @@ pub(crate) const CHARS_PER_TOKEN: f64 = 2.75;
 /// output to this session and let its usage figures move the window size itself.
 /// Costs still count them, which is why this is separate from `is_main`: they
 /// were billed to this session even though they were never in its context.
-fn in_context(item: &Value, is_main: bool) -> bool {
-    is_main && item.get("isSidechain").and_then(Value::as_bool) != Some(true)
-}
-
-/// Serialized size of a content value, as a stand-in for its share of the window.
-///
-/// Strings are measured directly so the common case allocates nothing; anything
-/// structured is measured as the JSON the API is handed.
-fn content_chars(v: Option<&Value>) -> u64 {
-    match v {
-        Some(Value::String(s)) => s.len() as u64,
-        None | Some(Value::Null) => 0,
-        Some(other) => other.to_string().len() as u64,
-    }
+fn in_context(item: &Line, is_main: bool) -> bool {
+    is_main && !item.sidechain()
 }
 
 /// A parent-side `Agent` tool_use block.
@@ -783,33 +773,25 @@ impl Extractor {
         }
     }
 
-    fn visit_user(&mut self, item: &Value, is_main: bool) {
-        let ts = item.get("timestamp").and_then(Value::as_str).unwrap_or("");
+    fn visit_user(&mut self, item: &Line, is_main: bool) {
+        let ts = item.timestamp.or_empty();
         let ctx = in_context(item, is_main);
+        let result = item.tool_use_result.get();
 
         // Line counts, and the diff itself, from edit tool results.
         let mut delta: Option<super::Delta> = None;
-        if let Some(patch) = item
-            .get("toolUseResult")
-            .and_then(|r| r.get("structuredPatch"))
-            .and_then(Value::as_array)
-        {
+        if let Some(patch) = result.and_then(ToolUseResult::patch_lines) {
             let mut d = super::Delta::default();
-            for hunk in patch {
-                let Some(lines) = hunk.get("lines").and_then(Value::as_array) else {
-                    continue;
-                };
-                for line in lines.iter().filter_map(Value::as_str) {
-                    if line.starts_with('+') {
-                        self.metrics.lines_added += 1;
-                        d.added += 1;
-                    } else if line.starts_with('-') {
-                        self.metrics.lines_removed += 1;
-                        d.removed += 1;
-                    }
-                    if d.hunks.len() < crate::config::MAX_DIFF_LINES {
-                        d.hunks.push(line.to_string());
-                    }
+            for line in patch {
+                if line.starts_with('+') {
+                    self.metrics.lines_added += 1;
+                    d.added += 1;
+                } else if line.starts_with('-') {
+                    self.metrics.lines_removed += 1;
+                    d.removed += 1;
+                }
+                if d.hunks.len() < crate::config::MAX_DIFF_LINES {
+                    d.hunks.push(line.to_string());
                 }
             }
             if d.added > 0 || d.removed > 0 {
@@ -821,9 +803,8 @@ impl Extractor {
         // session created used to be missing from what it changed, however
         // much of the work it was. It is all added lines, and is counted so.
         if delta.is_none()
-            && let Some(result) = item.get("toolUseResult")
-            && result.get("type").and_then(Value::as_str) == Some("create")
-            && let Some(content) = result.get("content").and_then(Value::as_str)
+            && let Some(created) = result.and_then(ToolUseResult::created)
+            && let Some(content) = created.get()
             && !content.is_empty()
         {
             let mut d = super::Delta::default();
@@ -837,26 +818,24 @@ impl Extractor {
             delta = Some(d);
         }
 
-        let content = item.get("message").and_then(|m| m.get("content"));
         let mut texts: Vec<&str> = Vec::new();
         let mut had_result = false;
-        match content {
-            Some(Value::String(s)) => texts.push(s),
-            Some(Value::Array(blocks)) => {
+        match item.content() {
+            Shape::Text(s) => texts.push(s),
+            Shape::List(blocks) => {
                 for block in blocks {
                     match block {
-                        Value::String(s) => texts.push(s),
-                        Value::Object(_) => {
-                            if let Some(t) = block.get("text").and_then(Value::as_str) {
+                        Shape::Text(s) => texts.push(s),
+                        Shape::Object(block) => {
+                            if let Some(t) = block.text.get() {
                                 texts.push(t);
                             }
-                            if block.get("type").and_then(Value::as_str) == Some("tool_result")
-                                && let Some(id) = block.get("tool_use_id").and_then(Value::as_str)
+                            if block.kind.is("tool_result")
+                                && let Some(id) = block.tool_use_id.get()
                             {
                                 had_result = true;
                                 if ctx {
-                                    self.ctx.chars.tool_output +=
-                                        content_chars(block.get("content"));
+                                    self.ctx.chars.tool_output += block.content.content_chars();
                                 }
                                 if is_main {
                                     self.agent_results.insert(id.to_string());
@@ -864,7 +843,7 @@ impl Extractor {
                                 if !ts.is_empty() {
                                     self.tool_result_ts.insert(id.to_string(), ts.to_string());
                                 }
-                                if block.get("is_error").and_then(Value::as_bool) == Some(true) {
+                                if block.is_error.value() == Some(true) {
                                     self.tool_failed.insert(id.to_string());
                                 }
                                 if let Some(d) = delta.take() {
@@ -890,9 +869,9 @@ impl Extractor {
             let joined = texts.join("\n\n");
             // A hook's output riding on a tool result is the harness's, as the
             // conversation view decides it.
-            let by = match had_result && item.get("isMeta").and_then(Value::as_bool) == Some(true) {
+            let by = match had_result && item.meta() {
                 true => Speaker::Harness,
-                false => crate::chat::speaker(item.get("origin"), None, &joined),
+                false => crate::chat::speaker(item.origin.get(), None, &joined),
             };
             self.ctx.chars.add_said(by, said);
         }
@@ -903,10 +882,10 @@ impl Extractor {
         // older transcript marked as a sidechain of this one — and not a
         // message another agent sent in, which its `origin` names.
         let typed = is_main
-            && item.get("isSidechain").and_then(Value::as_bool) != Some(true)
-            && item.get("isMeta").and_then(Value::as_bool) != Some(true)
-            && item.get("isCompactSummary").and_then(Value::as_bool) != Some(true)
-            && !crate::chat::from_someone_else(item);
+            && !item.sidechain()
+            && !item.meta()
+            && !item.compact_summary()
+            && !crate::chat::from_someone_else(item.origin.get());
         if typed {
             for text in &texts {
                 match super::effort_switch(text) {
@@ -935,14 +914,11 @@ impl Extractor {
     /// CLAUDE.md and the skills index, with nothing of the conversation in front
     /// of it yet. Everything counted before it is discarded rather than added,
     /// since that content is already inside the number.
-    fn note_window(&mut self, message: &Value, ts: &str) {
-        let Some(usage) = message.get("usage") else {
+    fn note_window(&mut self, message: &Message, ts: &str) {
+        let Some(usage) = message.usage.get() else {
             return;
         };
-        let u = |k: &str| usage.get(k).and_then(Value::as_u64).unwrap_or(0);
-        let window = u("input_tokens")
-            .saturating_add(u("cache_read_input_tokens"))
-            .saturating_add(u("cache_creation_input_tokens"));
+        let window = usage.window();
         if window == 0 {
             return;
         }
@@ -985,15 +961,15 @@ impl Extractor {
 
     fn visit_assistant(
         &mut self,
-        item: &Value,
+        item: &Line,
         file: &Path,
         is_main: bool,
         last_by_key: &mut HashMap<String, Snapshot>,
     ) {
-        let Some(message) = item.get("message") else {
+        let Some(message) = item.message.get() else {
             return;
         };
-        let ts = item.get("timestamp").and_then(Value::as_str).unwrap_or("");
+        let ts = item.timestamp.or_empty();
 
         // Before anything is counted: the request's own view of how full the
         // window is. Done first so the segment's opening request resets the
@@ -1006,9 +982,9 @@ impl Extractor {
         // The request key identifies the turn; tokens are attributed to it and
         // resolved once the file's streaming partials have been deduped.
         let turn_key = item
-            .get("requestId")
-            .and_then(Value::as_str)
-            .or_else(|| message.get("id").and_then(Value::as_str))
+            .request_id
+            .get()
+            .or_else(|| message.id.get())
             .map(str::to_string);
         if ctx && let Some(key) = &turn_key {
             self.main_requests.insert(key.clone());
@@ -1019,82 +995,69 @@ impl Extractor {
         // Tool scanning runs independently of the token dedup below: a streaming
         // partial and its final entry share a requestId, but each tool_use block
         // carries its own id, so global id dedup is what prevents double-counting.
-        if let Some(blocks) = message.get("content").and_then(Value::as_array) {
-            for block in blocks {
-                if block.get("type").and_then(Value::as_str) != Some("tool_use") {
+        if let Some(blocks) = message.content.list() {
+            for block in blocks.iter().filter_map(Shape::object) {
+                if !block.kind.is("tool_use") {
                     // What the assistant said back. Its thinking is deliberately
                     // not counted: Claude Code writes those blocks with an empty
                     // `thinking` string and only the signature survives, so there
                     // is nothing to measure and it stays in the unaccounted gap.
-                    if ctx && block.get("type").and_then(Value::as_str) == Some("text") {
-                        self.ctx.chars.assistant_text += content_chars(block.get("text"));
+                    if ctx && block.kind.is("text") {
+                        self.ctx.chars.assistant_text += block.text.or_empty().len() as u64;
                     }
                     continue;
                 }
-                let Some(name) = block.get("name").and_then(Value::as_str) else {
+                let Some(name) = block.name.get() else {
                     continue;
                 };
-                if let Some(id) = block.get("id").and_then(Value::as_str) {
+                if let Some(id) = block.id.get() {
                     if !self.seen_tool_ids.insert(id.to_string()) {
                         continue;
                     }
                     if is_main && name == "Agent" {
-                        let inp = block.get("input").cloned().unwrap_or(Value::Null);
+                        let input = block.input.value();
+                        let arg = |key: &str| {
+                            input
+                                .get(key)
+                                .and_then(Value::as_str)
+                                .unwrap_or("")
+                                .to_string()
+                        };
                         self.agent_uses.push((
                             id.to_string(),
                             AgentUse {
-                                description: inp
-                                    .get("description")
-                                    .and_then(Value::as_str)
-                                    .unwrap_or("")
-                                    .to_string(),
-                                subagent_type: inp
-                                    .get("subagent_type")
-                                    .and_then(Value::as_str)
-                                    .unwrap_or("")
-                                    .to_string(),
-                                model: inp
-                                    .get("model")
-                                    .and_then(Value::as_str)
-                                    .unwrap_or("")
-                                    .to_string(),
+                                description: arg("description"),
+                                subagent_type: arg("subagent_type"),
+                                model: arg("model"),
                                 ts: ts.to_string(),
                             },
                         ));
                     }
                 }
                 if ctx {
-                    self.ctx.chars.tool_input +=
-                        content_chars(block.get("input")) + name.len() as u64;
+                    self.ctx.chars.tool_input += block.input.content_chars() + name.len() as u64;
                 }
-                let input = block.get("input").cloned().unwrap_or(Value::Null);
-                let block_id = block.get("id").and_then(Value::as_str);
+                let block_id = block.id.get();
                 if let Some(id) = block_id
                     && let Some(key) = &turn_key
                 {
                     self.tool_turn.insert(id.to_string(), key.clone());
                 }
-                self.record_tool(name, &input, ts, file, is_main, block_id);
+                self.record_tool(name, &block.input.value(), ts, file, is_main, block_id);
             }
         }
 
-        let Some(usage) = message.get("usage") else {
+        let Some(usage) = message.usage.get() else {
             return;
         };
-        let u = |k: &str| usage.get(k).and_then(Value::as_u64).unwrap_or(0);
-        let input = u("input_tokens");
-        let cache_read = u("cache_read_input_tokens");
-        let output = u("output_tokens");
-        let total_cw = u("cache_creation_input_tokens");
-        let creation = usage.get("cache_creation");
-        let cw5m_raw = creation
-            .and_then(|c| c.get("ephemeral_5m_input_tokens"))
-            .and_then(Value::as_u64)
-            .unwrap_or(0);
-        let cw1h = creation
-            .and_then(|c| c.get("ephemeral_1h_input_tokens"))
-            .and_then(Value::as_u64)
-            .unwrap_or(0);
+        let u = |n: &Lenient<u64>| n.value().unwrap_or(0);
+        let input = u(&usage.input_tokens);
+        let cache_read = u(&usage.cache_read_input_tokens);
+        let output = u(&usage.output_tokens);
+        let total_cw = u(&usage.cache_creation_input_tokens);
+        let creation = usage.cache_creation.get();
+        let cw5m_raw = creation.map_or(0, |c| u(&c.ephemeral_5m_input_tokens));
+        let cw1h = creation.map_or(0, |c| u(&c.ephemeral_1h_input_tokens));
         // Older transcripts report only the aggregate; attribute the remainder
         // to the 5m tier, which is the default TTL.
         //
@@ -1109,7 +1072,7 @@ impl Extractor {
             return;
         }
 
-        let model = message.get("model").and_then(Value::as_str).unwrap_or("");
+        let model = message.model.or_empty();
         if model.is_empty() || model == "<synthetic>" {
             self.error = Some(format!(
                 "Encountered billable Claude usage with unknown model in {}",
@@ -1151,25 +1114,24 @@ impl Extractor {
     }
 
     /// Count a subagent's reply and keep what it last said.
-    fn note_sub_reply(&mut self, message: &Value, file: &Path, ts: &str, key: Option<&str>) {
+    fn note_sub_reply(&mut self, message: &Message, file: &Path, ts: &str, key: Option<&str>) {
         let Some(stats) = self.sub_stats.get_mut(file) else {
             return;
         };
-        let blocks = message
-            .get("content")
-            .and_then(Value::as_array)
-            .map(Vec::as_slice)
-            .unwrap_or_default();
-        let kind = |b: &Value| b.get("type").and_then(Value::as_str).map(str::to_string);
-        let text: Vec<&str> = blocks
-            .iter()
-            .filter(|b| kind(b).as_deref() == Some("text"))
-            .filter_map(|b| b.get("text").and_then(Value::as_str))
+        let blocks = || {
+            message
+                .content
+                .list()
+                .unwrap_or_default()
+                .iter()
+                .filter_map(Shape::object)
+        };
+        let text: Vec<&str> = blocks()
+            .filter(|b| b.kind.is("text"))
+            .filter_map(|b| b.text.get())
             .filter(|t| !t.trim().is_empty())
             .collect();
-        let calls = blocks
-            .iter()
-            .any(|b| kind(b).as_deref() == Some("tool_use"));
+        let calls = blocks().any(|b| b.kind.is("tool_use"));
         if text.is_empty() && !calls {
             return;
         }
@@ -1193,14 +1155,14 @@ impl Extractor {
 
     fn visit(
         &mut self,
-        item: &Value,
+        item: &Line,
         file: &Path,
         is_main: bool,
         last_by_key: &mut HashMap<String, Snapshot>,
     ) {
         // Any timestamped entry counts as subagent activity.
         if !is_main
-            && let Some(ts) = item.get("timestamp").and_then(Value::as_str)
+            && let Some(ts) = item.timestamp.get()
             && let Some(stats) = self.sub_stats.get_mut(file)
         {
             if stats.first_ts.as_deref().is_none_or(|f| ts_before(ts, f)) {
@@ -1214,16 +1176,15 @@ impl Extractor {
         // Newer transcripts flag the summary entry itself; older ones wrote a
         // `compact_boundary` system entry instead. Both mean the same thing.
         if in_context(item, is_main)
-            && (item.get("isCompactSummary").and_then(Value::as_bool) == Some(true)
-                || item.get("subtype").and_then(Value::as_str) == Some("compact_boundary"))
+            && (item.compact_summary() || item.subtype.is("compact_boundary"))
         {
             self.note_compaction();
         }
 
-        match item.get("type").and_then(Value::as_str) {
+        match item.kind.get() {
             Some("system") => {
-                if item.get("subtype").and_then(Value::as_str) == Some("turn_duration")
-                    && let Some(ms) = item.get("durationMs").and_then(Value::as_u64)
+                if item.subtype.is("turn_duration")
+                    && let Some(ms) = item.duration_ms.value()
                 {
                     self.metrics.api_duration_ms += ms;
                 }
@@ -1232,39 +1193,46 @@ impl Extractor {
             // skill listing: content the harness splices into the next user
             // message, recorded as its own entry rather than inside one.
             Some("attachment") if in_context(item, is_main) => {
-                let attachment = item.get("attachment");
-                let queued = attachment
-                    .filter(|a| a.get("type").and_then(Value::as_str) == Some("queued_command"));
+                let attachment = item.attachment();
+                let queued = attachment.as_ref().filter(|a| a.kind.is("queued_command"));
                 if let Some(q) = queued {
                     // A message that arrived mid-turn. Only its `prompt` reaches
                     // the model: `origin.body` repeats a peer's report for the
                     // harness's own use, so sizing the whole object counted
                     // every report twice, and filed it as an attachment
                     // whoever wrote it.
-                    let text = crate::chat::prompt_text(q.get("prompt"));
-                    let mode = q.get("commandMode").and_then(Value::as_str);
-                    let by = crate::chat::speaker(q.get("origin"), mode, &text);
+                    let text = crate::chat::prompt_text(&q.prompt);
+                    let by = crate::chat::speaker(q.origin.get(), q.command_mode.get(), &text);
                     self.ctx.chars.add_said(by, text.len() as u64);
                 } else {
                     // Some kinds carry no `content` and are the payload
                     // themselves, such as the file reference a compaction
                     // leaves behind.
-                    self.ctx.chars.attachments += match attachment.and_then(|a| a.get("content")) {
-                        Some(content) => content_chars(Some(content)),
-                        None => content_chars(attachment),
+                    self.ctx.chars.attachments += match attachment.as_ref().map(|a| a.content) {
+                        Some(content @ Raw(Some(_))) => content.content_chars(),
+                        _ => item.attachment.content_chars(),
                     };
                 }
-                if let Some(a) = attachment {
-                    self.loadout.note(a);
+                // Built whole only for the kinds the loadout reads, which are
+                // listings: a file the person @-mentioned is an attachment
+                // too, and can be most of a line.
+                if let Some(a) = &attachment
+                    && a.kind
+                        .get()
+                        .is_some_and(|k| super::Loadout::NOTED.contains(&k))
+                    && let Some(raw) = item.attachment.0
+                    && let Ok(value) = serde_json::from_str::<Value>(raw.get())
+                {
+                    self.loadout.note(&value);
                 }
             }
             Some("custom-title") if is_main => {
-                if let Some(t) = item.get("customTitle").and_then(Value::as_str) {
+                if let Some(t) = item.custom_title.get() {
                     self.custom_title = Some(t.to_string());
                 }
             }
             Some("ai-title") if is_main => {
-                if let Some(t) = item.get("aiTitle").and_then(Value::as_str) {
+                if let Some(t) = item.ai_title.get() {
                     self.ai_title = Some(t.to_string());
                 }
             }
@@ -1289,7 +1257,7 @@ pub fn extract(transcript: &Path) -> SessionData {
     for (idx, file) in files.iter().enumerate() {
         let is_main = idx == 0;
         let mut last_by_key: HashMap<String, Snapshot> = HashMap::new();
-        if let Err(err) = for_each_jsonl(file, |item| {
+        if let Err(err) = claude_line::for_each(file, |item| {
             ext.visit(item, file, is_main, &mut last_by_key);
         }) {
             // Never fall through to a fabricated $0: the cache only refuses to
@@ -1826,7 +1794,7 @@ pub fn extract_context(session: &Session) -> Option<ContextUsage> {
             if line.is_empty() {
                 continue;
             }
-            let Ok(item) = serde_json::from_str::<Value>(line) else {
+            let Some(item) = Line::parse(line.as_bytes()) else {
                 continue;
             };
             // Both spellings of a compaction, matching what the full extractor
@@ -1834,21 +1802,18 @@ pub fn extract_context(session: &Session) -> Option<ContextUsage> {
             // ones wrote a `compact_boundary`. Reading only one of them here
             // would let the column and the context panel disagree about whether
             // the same transcript has been compacted.
-            if item.get("isCompactSummary").and_then(Value::as_bool) == Some(true)
-                || (item.get("type").and_then(Value::as_str) == Some("system")
-                    && item.get("subtype").and_then(Value::as_str) == Some("compact_boundary"))
+            if item.compact_summary()
+                || (item.kind.is("system") && item.subtype.is("compact_boundary"))
             {
                 compacted = true;
             }
-            if item.get("type").and_then(Value::as_str) != Some("assistant") {
+            if !item.kind.is("assistant") {
                 continue;
             }
-            let Some(u) = item.get("message").and_then(|m| m.get("usage")) else {
+            let Some(u) = item.message.get().and_then(|m| m.usage.get()) else {
                 continue;
             };
-            let g = |k: &str| u.get(k).and_then(Value::as_u64).unwrap_or(0);
-            let used =
-                g("input_tokens") + g("cache_creation_input_tokens") + g("cache_read_input_tokens");
+            let used = u.window();
             if used == 0 {
                 continue;
             }
@@ -1887,22 +1852,18 @@ pub fn extract_last_tool(session: &Session) -> String {
         return String::new();
     };
     for line in text.lines().rev() {
-        let Ok(item) = serde_json::from_str::<Value>(line.trim()) else {
+        let Some(item) = Line::parse(line.trim().as_bytes()) else {
             continue;
         };
-        if item.get("type").and_then(Value::as_str) != Some("assistant") {
+        if !item.kind.is("assistant") {
             continue;
         }
-        let Some(blocks) = item
-            .get("message")
-            .and_then(|m| m.get("content"))
-            .and_then(Value::as_array)
-        else {
+        let Some(blocks) = item.content().list() else {
             continue;
         };
-        for block in blocks.iter().rev() {
-            if block.get("type").and_then(Value::as_str) == Some("tool_use")
-                && let Some(name) = block.get("name").and_then(Value::as_str)
+        for block in blocks.iter().rev().filter_map(Shape::object) {
+            if block.kind.is("tool_use")
+                && let Some(name) = block.name.get()
             {
                 return name.to_string();
             }
@@ -1966,6 +1927,31 @@ mod tests {
     /// beside a journal that is the run's log rather than anyone's transcript.
     /// Each agent is counted and listed under the name its sidecar gives it;
     /// the journal is neither.
+    /// A transcript from a Claude Code that has added fields, changed the type
+    /// of some and dropped others: each line is read for the fields that are
+    /// right, and none is lost for the ones that are not.
+    #[test]
+    fn a_changed_schema_loses_fields_not_lines() {
+        let lines = [
+            // `requestId` became a number, so the message id keys the request;
+            // `isSidechain` became a string, which is not `true`.
+            r#"{"type":"assistant","timestamp":"2026-08-05T10:00:00.000Z","requestId":7,"isSidechain":"yes","newField":{"a":[1]},"message":{"id":"m1","model":"claude-opus-5","content":[{"type":"tool_use","id":"toolu_1","name":"Read","input":{"file_path":"/a"}},{"type":"brand_new_block","x":1},"stray"],"usage":{"input_tokens":100,"output_tokens":"5","cache_creation":[1]}}}"#.to_string(),
+            // A result whose flags changed type, and a `toolUseResult` that is
+            // only an error string.
+            r#"{"type":"user","timestamp":"2026-08-05T10:00:01.000Z","toolUseResult":"Error: gone","isMeta":"no","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_1","is_error":"true","content":[{"type":"text","text":"ok"}]}]}}"#.to_string(),
+            // A message of the wrong type, and none at all.
+            r#"{"type":"assistant","timestamp":"2026-08-05T10:00:02.000Z","message":42}"#.to_string(),
+            r#"{"type":"assistant"}"#.to_string(),
+        ];
+        let data = extract_lines("schema", &lines);
+        assert_eq!(data.error, None);
+        assert_eq!(data.last_model, "claude-opus-5");
+        assert_eq!(data.tokens.input, 100);
+        assert_eq!(data.tokens.output, 0);
+        assert_eq!(data.metrics.tool_count, 1);
+        assert_eq!(data.metrics.tool_errors, 0);
+    }
+
     #[test]
     fn a_workflows_agents_are_counted_and_its_journal_is_not() {
         let main = temp_path("workflow").with_extension("jsonl");
