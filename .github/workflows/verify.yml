@@ -212,6 +212,10 @@ jobs:
         working-directory: web
       - run: npm run lint
         working-directory: web
+      # The escape-sequence cases the TUI's tests read too
+      # (crates/ui/src/ansi_cases.json), so the two parsers cannot drift apart.
+      - run: npm test
+        working-directory: web
       - run: npm run build
         working-directory: web
       - name: The committed build matches web/

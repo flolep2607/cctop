@@ -210,6 +210,7 @@ cd web && npm ci          # Node from web/.nvmrc
 npm run dev               # hot reload, proxied to `cctop serve --no-token --port 7778`
 npm run build             # writes crates/serve/src/assets/app/index.html — commit it
 npm run lint
+npm test                  # node --test; the ANSI cases shared with crates/ui
 ```
 
 How it ships, and why:

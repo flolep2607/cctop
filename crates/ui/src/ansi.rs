@@ -113,7 +113,10 @@ fn lines_with(text: &str, base: Style, adapt: impl Fn(Color) -> Color) -> Vec<Li
             // The eight-bit CSI, which a few programs still write.
             '\u{9b}' => csi(&mut chars, &mut style, base, &adapt),
             '\n' => out.push(finish(&mut line)),
-            '\r' if chars.peek() == Some(&'\n') => {}
+            // A return with nothing drawn after it leaves the line as it was,
+            // as a terminal would: that is CRLF, and also a last frame that
+            // ended on its `\r`. Only text after the return replaces the line.
+            '\r' if matches!(chars.peek(), None | Some('\n' | '\r')) => {}
             '\r' => line.clear(),
             '\t' => {
                 let to = (line.len() / 8 + 1) * 8;
@@ -426,6 +429,80 @@ mod tests {
         let out = lines_with("a\x1b]8;;http://cut\nnext\x1b[3", Style::default(), keep);
         let texts: Vec<String> = out.iter().map(plain).collect();
         assert_eq!(texts, ["a", "next"]);
+    }
+
+    /// The cases the web page's parser (`web/src/lib/ansi.ts`) is held to as
+    /// well, so a result reads the same in the dashboard and in the browser.
+    #[test]
+    fn the_shared_cases_read_as_the_web_reads_them() {
+        let cases: serde_json::Value =
+            serde_json::from_str(include_str!("ansi_cases.json")).expect("ansi_cases.json");
+        for case in cases["cases"].as_array().expect("cases") {
+            let input = case["input"].as_str().expect("input");
+            let got: Vec<serde_json::Value> = lines_with(input, Style::default(), keep)
+                .iter()
+                .map(|line| serde_json::Value::Array(normalized(line)))
+                .collect();
+            assert_eq!(
+                serde_json::Value::Array(got),
+                case["lines"],
+                "{}: {input:?}",
+                case["name"]
+            );
+        }
+    }
+
+    /// A line as the fixtures spell it. Spans are merged by how they look
+    /// rather than by `Style` equality, since a ratatui `Style` records a
+    /// removed modifier, and an un-bolded span is not `==` a plain one.
+    fn normalized(line: &Line) -> Vec<serde_json::Value> {
+        let mut out: Vec<serde_json::Map<String, serde_json::Value>> = Vec::new();
+        for span in &line.spans {
+            let s = span.style;
+            let mut style = serde_json::Map::new();
+            for (key, color) in [("fg", s.fg), ("bg", s.bg)] {
+                if let Some(c) = color {
+                    style.insert(key.into(), colour(c).into());
+                }
+            }
+            for (key, m) in [
+                ("bold", Modifier::BOLD),
+                ("dim", Modifier::DIM),
+                ("italic", Modifier::ITALIC),
+                ("underline", Modifier::UNDERLINED),
+                ("inverse", Modifier::REVERSED),
+                ("strike", Modifier::CROSSED_OUT),
+            ] {
+                if s.add_modifier.contains(m) {
+                    style.insert(key.into(), true.into());
+                }
+            }
+            if let Some(last) = out.last_mut() {
+                let mut looks = last.clone();
+                looks.remove("text");
+                if looks == style {
+                    let joined = format!("{}{}", last["text"].as_str().unwrap_or(""), span.content);
+                    last.insert("text".into(), joined.into());
+                    continue;
+                }
+            }
+            style.insert("text".into(), span.content.to_string().into());
+            out.push(style);
+        }
+        out.into_iter().map(serde_json::Value::Object).collect()
+    }
+
+    fn colour(c: Color) -> String {
+        match c {
+            Color::Indexed(n) => format!("i{n}"),
+            Color::Rgb(r, g, b) => format!("#{r:02x}{g:02x}{b:02x}"),
+            sixteen => {
+                let n = (0..16)
+                    .find(|&n| named(n) == sixteen)
+                    .expect("one of the sixteen");
+                format!("n{n}")
+            }
+        }
     }
 
     /// The one-line form has no escape left in it at all.
