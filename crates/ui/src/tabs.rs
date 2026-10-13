@@ -37,6 +37,115 @@ const QUIET_IS_IDLE: Duration = Duration::from_secs(2);
 /// all while unanswered, which in practice is the first moment of a pane's life.
 const FIND_AGENT_EVERY: Duration = Duration::from_millis(500);
 
+/// How young a pane's agent can be when it exits and still have the exit read
+/// as a failure to start, whatever its code.
+///
+/// An agent that cannot start — no such binary, a profile whose PATH does not
+/// reach it, a missing login, a flag it does not know — says so within a
+/// second or two, and one loading its MCP servers first can take several. Ten
+/// seconds covers that with room, and is shorter than anyone opens a tab
+/// meaning to close it again: a deliberate `/exit` that lands inside it costs
+/// one key to dismiss, where a failure that closed silently cost the whole
+/// reason it failed.
+pub const QUICK_EXIT: Duration = Duration::from_secs(10);
+
+/// How long a finished pane waits before its last screen is taken as final.
+///
+/// The exit is seen by waiting on the process, and the output it wrote on the
+/// way out travels separately — pty, shim, socket, parser — so the error a
+/// failing agent prints last is also the thing most likely to still be in
+/// flight at the moment it is seen to have gone.
+const DRAIN: Duration = Duration::from_millis(250);
+
+/// How a pane's agent ended, for a pane kept on screen to say so.
+///
+/// A pane is kept when its agent exited with a failure or at once — see
+/// [`Death::keeps`] — so that a tab whose agent could not start no longer
+/// vanishes before anyone can read why.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Death {
+    /// The exit status, when the agent exited rather than being killed.
+    pub code: Option<i32>,
+    /// The signal that killed it, when one did.
+    pub signal: Option<i32>,
+    /// How long it ran, when this pane is what started it. A pane opened onto
+    /// an agent already running knows only when it started watching, which is
+    /// not how long the agent lived.
+    pub lived: Option<Duration>,
+    /// The last line with anything on it of what it left on screen: usually
+    /// the error, and the part worth carrying to a tab you are not looking at.
+    pub last_line: Option<String>,
+}
+
+impl Death {
+    /// Whether a pane whose agent ended like this stays on screen.
+    ///
+    /// A failure stays however long it ran, since a crash after an hour is
+    /// still a crash; a clean exit stays only inside [`QUICK_EXIT`], since a
+    /// clean exit is what `/exit` and a shell's `exit` are and those should
+    /// close the tab as they always did.
+    pub fn keeps(&self) -> bool {
+        self.failed() || self.lived.is_some_and(|lived| lived < QUICK_EXIT)
+    }
+
+    fn failed(&self) -> bool {
+        self.signal.is_some() || self.code != Some(0)
+    }
+
+    /// "exited with code 1", or as much of it as is known.
+    fn ended(&self) -> String {
+        match (self.signal, self.code) {
+            (Some(signal), _) => format!("was killed by signal {signal}"),
+            (None, Some(code)) => format!("exited with code {code}"),
+            (None, None) => "exited".to_string(),
+        }
+    }
+
+    /// "exited with code 1 after 0.4s", or as much of it as is known.
+    pub fn how(&self) -> String {
+        let ended = self.ended();
+        match self.lived {
+            Some(lived) => format!("{ended} after {}", lifetime(lived)),
+            None => ended,
+        }
+    }
+
+    /// What the pane's own border says while it is kept.
+    pub fn banner(&self, label: &str) -> String {
+        format!("{label} {} — any key closes", self.how())
+    }
+
+    /// What the status line says, which reaches you on whichever tab you are
+    /// on: how it ended, and what it said last. Without the lifetime, which
+    /// the pane's own banner carries: a toast has two lines, and the error is
+    /// the part that must fit in them.
+    pub fn note(&self, label: &str) -> String {
+        match &self.last_line {
+            Some(line) => format!("{label} {}: {line}", self.ended()),
+            None => format!("{label} {}", self.ended()),
+        }
+    }
+}
+
+/// A lifetime as a person reads it: tenths of a second while that is what
+/// tells a failure apart, whole seconds and minutes after.
+///
+/// A lifetime in whole seconds is one measured by rmux's clock, which keeps
+/// no finer time than that, and is not dressed up in a decimal it never had.
+fn lifetime(lived: Duration) -> String {
+    let secs = lived.as_secs();
+    let exact = lived.subsec_nanos() != 0;
+    match secs {
+        // A tenth of a second would round an exec failure to "0.0s".
+        0 if exact && lived.subsec_millis() < 100 => format!("{}ms", lived.subsec_millis()),
+        0..10 if exact => format!("{:.1}s", lived.as_secs_f64()),
+        0 => "less than a second".to_string(),
+        1..120 => format!("{secs}s"),
+        120..7200 => format!("{}m", secs / 60),
+        _ => format!("{}h", secs / 3600),
+    }
+}
+
 /// Why a tab is asking to be looked at.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Attention {
@@ -120,6 +229,15 @@ pub struct Pane {
     read: Option<(ScreenPlace, ScreenReading)>,
     /// Whether this pane's rmux client holds the window; see [`Fit`].
     pub fit: Fit,
+    /// When this pane started its agent. `None` for a pane opened onto an
+    /// agent that was already running, whose age it cannot know.
+    started: Option<Instant>,
+    /// When the process behind this pane was first seen to have exited, while
+    /// its last output is given [`DRAIN`] to arrive.
+    exited: Option<Instant>,
+    /// How the agent ended, while the pane is kept on screen to say so. Any
+    /// key closes it; see [`Death`].
+    pub dead: Option<Death>,
 }
 
 /// How long after a pane's last keystroke the next one counts as coming back
@@ -210,6 +328,9 @@ impl Pane {
             drew_at: Instant::now(),
             read: None,
             fit: Fit::default(),
+            started: None,
+            exited: None,
+            dead: None,
         }
     }
 
@@ -305,7 +426,8 @@ impl Pane {
     /// Still, and not merely unmatched: see [`cctop_core::screen::FOOTERS`] for the frame mid-turn
     /// that has neither.
     pub fn read_screen(&mut self) -> Option<cctop_core::peek::Screened> {
-        if !cctop_core::screen::screenable(self.harness()) {
+        // A dead agent's last frame is not a turn it is in.
+        if self.dead.is_some() || !cctop_core::screen::screenable(self.harness()) {
             return None;
         }
         // Only a screen that has changed since the last reading can have a
@@ -538,6 +660,15 @@ impl Pane {
             Own::Mux(name) | Own::MuxExisting(name) => Some(name.clone()),
             Own::Cctop => None,
         };
+        // Whether this launch is what starts the agent, which is what makes its
+        // age knowable: reattaching to a session is watching an agent of
+        // unknown age, and one that exits cleanly a moment later is not one
+        // that failed to start.
+        let fresh = match &own {
+            Own::Mux(name) => !cctop_core::rmux::exists(name),
+            Own::MuxExisting(_) => false,
+            Own::Cctop => true,
+        };
         let spawn = match &own {
             Own::Mux(name) => {
                 // Before the client, so the daemon is this cctop's child rather
@@ -549,6 +680,7 @@ impl Pane {
             Own::Cctop => argv.to_vec(),
         };
         let hosted = cctop_core::shim::host(&spawn, cwd, super::render::pane_size())?;
+        let started = fresh.then(Instant::now);
         // The shim binds and serves the socket before returning, so there is
         // something to connect to even though the agent has drawn nothing yet.
         let mut view = cctop_core::attach::attach(hosted.pid).ok_or_else(|| {
@@ -581,6 +713,9 @@ impl Pane {
             drew_at: Instant::now(),
             read: None,
             fit: Fit::default(),
+            started,
+            exited: None,
+            dead: None,
         })
     }
 
@@ -606,6 +741,9 @@ impl Pane {
             drew_at: Instant::now(),
             read: None,
             fit: Fit::default(),
+            started: None,
+            exited: None,
+            dead: None,
         })
     }
 
@@ -621,14 +759,61 @@ impl Pane {
         }
     }
 
-    /// Whether the agent behind this pane has gone.
-    fn finished(&mut self) -> bool {
+    /// How the process behind this pane ended, once it has: `Some(None)` when
+    /// it has gone but nothing here can say how.
+    ///
+    /// For a rmux-backed pane the process is the client, so this is the
+    /// client's status. An agent that *failed* in rmux keeps its session (see
+    /// [`mux::REMAIN_ON_EXIT`](cctop_core::mux::REMAIN_ON_EXIT)) and with it the
+    /// client, and is told to the pane by the sweep instead — see
+    /// [`Pane::died`]. What reaches here is a session that closed, which is an
+    /// agent that exited cleanly or one ended from elsewhere.
+    fn exit(&mut self) -> Option<Option<std::process::ExitStatus>> {
         match self.hosted.as_mut() {
-            Some(hosted) => hosted.finished().is_some(),
+            Some(hosted) => hosted.exit_status().map(Some),
             // Nothing here owns the process, so the connection is the only
             // evidence there is: a shim that exited closes it.
-            None => self.view.closed(),
+            None => self.view.closed().then_some(None),
         }
+    }
+
+    /// Keep this pane on screen, frozen, because its agent ended as `death`
+    /// says. Returns what to tell the person, or `None` if it was already dead.
+    ///
+    /// The last line is this pane's own screen's where it has one — it is what
+    /// was drawn here — and `death`'s otherwise: a client that attached as the
+    /// agent was dying can be left holding a blank screen, and then what rmux
+    /// read off the session is what there is to say.
+    pub fn died(&mut self, mut death: Death) -> Option<String> {
+        if self.dead.is_some() {
+            return None;
+        }
+        // Whatever is still in flight, so the line read is the last one sent.
+        self.view.pump();
+        death.last_line =
+            cctop_core::rmux::last_words(self.view.parser.screen()).or(death.last_line);
+        cctop_core::elog::event(
+            "pane",
+            "died",
+            serde_json::json!({
+                "label": self.label,
+                "session": self.rmux,
+                "code": death.code,
+                "signal": death.signal,
+                "lived_ms": death.lived.map(|d| d.as_millis() as u64),
+                "last_line": death.last_line,
+            }),
+        );
+        let note = death.note(&self.label);
+        // Off the bottom of history, so the screen shown is the one it died on.
+        self.view.parser.screen_mut().set_scrollback(0);
+        self.dead = Some(death);
+        Some(note)
+    }
+
+    /// How long this pane's agent has run, when this pane started it.
+    pub fn lived(&self) -> Option<Duration> {
+        self.started.map(|at| at.elapsed())
     }
 }
 
@@ -935,6 +1120,11 @@ impl Tab {
         if self.panes.iter().any(|pane| pane.rmux.is_none()) {
             return false;
         }
+        // A kept dead pane is on screen to be read; giving up its client would
+        // put it back as a session the sweep retires before you return.
+        if self.panes.iter().any(|pane| pane.dead.is_some()) {
+            return false;
+        }
         let panes = std::mem::take(&mut self.panes);
         let mut shared = Vec::with_capacity(panes.len());
         for pane in &panes {
@@ -1173,6 +1363,9 @@ impl Tab {
             .iter()
             .enumerate()
             .filter(|(i, _)| !(focused && *i == self.focus))
+            // Its screen has stopped for good, which the idle fallback would
+            // read as a turn finished and waiting on you.
+            .filter(|(_, pane)| pane.dead.is_none())
             .filter_map(|(_, pane)| match known(pane.agent()) {
                 // A bell over a turn the agent has already reported as finished
                 // is the nudge, not a question: Claude Code rings its
@@ -1258,9 +1451,39 @@ impl Tab {
     /// here, and where the file went is added to `saved` for the caller to say:
     /// the agent exiting is the commonest way a recording ends, and the one
     /// nobody pressed a key for.
-    pub fn reap(&mut self, saved: &mut Vec<(std::path::PathBuf, std::io::Result<()>)>) -> bool {
+    ///
+    /// Not every pane whose process ended goes: one that failed, or ended
+    /// within [`QUICK_EXIT`] of starting, is kept frozen with a [`Death`] on it
+    /// — that is the agent that could not start, and the tab vanishing was the
+    /// only thing anyone saw of it. What it says is added to `died` for the
+    /// caller to put on the status line.
+    pub fn reap(
+        &mut self,
+        saved: &mut Vec<(std::path::PathBuf, std::io::Result<()>)>,
+        died: &mut Vec<String>,
+    ) -> bool {
+        let now = Instant::now();
         self.panes.retain_mut(|pane| {
-            if !pane.finished() {
+            if pane.dead.is_some() {
+                return true;
+            }
+            let Some(status) = pane.exit() else {
+                return true;
+            };
+            let at = *pane.exited.get_or_insert(now);
+            if now.duration_since(at) < DRAIN && !pane.view.closed() {
+                return true;
+            }
+            let death = Death {
+                code: status.and_then(|s| s.code()),
+                signal: status.and_then(|s| std::os::unix::process::ExitStatusExt::signal(&s)),
+                lived: pane.started.map(|started| at.duration_since(started)),
+                last_line: None,
+            };
+            // Nothing known about how it ended is nothing to keep it for: a
+            // window onto someone else's agent closes as it always did.
+            if status.is_some() && death.keeps() {
+                died.extend(pane.died(death));
                 return true;
             }
             saved.extend(pane.view.stop_recording());
@@ -1873,6 +2096,9 @@ Enter to select · ↑/↓ to navigate · Esc to cancel";
             drew_at: Instant::now() - Duration::from_secs(ago),
             read: None,
             fit: Fit::default(),
+            started: None,
+            exited: None,
+            dead: None,
         }
     }
 
@@ -2175,12 +2401,12 @@ Enter to select · ↑/↓ to navigate · Esc to cancel";
     fn a_detached_tab_is_not_reaped() {
         let mut tab = Tab::for_agent(&session("cctop-claude-a", None, 0));
         assert!(
-            !tab.reap(&mut Vec::new()),
+            !tab.reap(&mut Vec::new(), &mut Vec::new()),
             "a shared tab was reaped for having no pane"
         );
         // Once it stands for nothing, it is nothing.
         tab.shared = None;
-        assert!(tab.reap(&mut Vec::new()));
+        assert!(tab.reap(&mut Vec::new(), &mut Vec::new()));
     }
 
     /// A still-running agent in the launcher, as rmux would have described it.
@@ -2545,5 +2771,109 @@ Enter to select · ↑/↓ to navigate · Esc to cancel";
         let shell = pane("zsh", false, 0);
         let sent = shell.translate_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
         assert_eq!(sent.modifiers, KeyModifiers::NONE);
+    }
+
+    /// Reap `tab` until `done` says the pane has settled one way or the other,
+    /// pumping its output as the run loop would. What the reap said is
+    /// returned with it.
+    fn reap_until(tab: &mut Tab, done: impl Fn(&Tab) -> bool) -> Vec<String> {
+        let mut died = Vec::new();
+        cctop_core::test_wait::eventually_true("the pane to settle", || {
+            tab.pump();
+            tab.reap(&mut Vec::new(), &mut died);
+            done(tab)
+        });
+        died
+    }
+
+    fn sh(script: &str) -> Vec<String> {
+        ["sh", "-c", script].map(String::from).to_vec()
+    }
+
+    /// The bug this exists for: an agent that could not start took its tab
+    /// with it, before anyone could read why. A fast failure stays, frozen,
+    /// carrying its exit code and the last thing it said.
+    #[test]
+    fn a_pane_whose_agent_fails_at_once_stays_and_says_why() {
+        let argv = sh("echo starting; echo 'error: not logged in' >&2; exit 3");
+        let mut tab = Tab::new(Pane::launch(&argv, None, Own::Cctop).expect("launch"));
+
+        let died = reap_until(&mut tab, |tab| {
+            tab.panes.first().is_some_and(|p| p.dead.is_some())
+        });
+
+        assert_eq!(tab.panes.len(), 1, "the failed pane was dropped");
+        let death = tab.panes[0].dead.clone().expect("dead");
+        assert_eq!(death.code, Some(3));
+        assert_eq!(death.signal, None);
+        assert!(death.lived.is_some_and(|l| l < QUICK_EXIT), "{death:?}");
+        assert_eq!(death.last_line.as_deref(), Some("error: not logged in"));
+        let [note] = died.as_slice() else {
+            panic!("expected one note, got {died:?}");
+        };
+        assert!(note.contains("exited with code 3"), "{note}");
+        assert!(note.ends_with(": error: not logged in"), "{note}");
+        let banner = death.banner("sh");
+        assert!(banner.ends_with("— any key closes"), "{banner}");
+
+        // And it stays: a kept pane is not reaped on a later tick.
+        assert!(!tab.reap(&mut Vec::new(), &mut Vec::new()));
+        assert_eq!(tab.panes.len(), 1);
+    }
+
+    /// `/exit` after an afternoon's work is the ordinary way out, and closes
+    /// the tab as it always did — no banner, nothing on the status line.
+    #[test]
+    fn a_long_lived_agent_that_exits_cleanly_goes_silently() {
+        let argv = sh("exit 0");
+        let mut pane = Pane::launch(&argv, None, Own::Cctop).expect("launch");
+        // Born an hour ago, as far as the reap can tell.
+        pane.started = Instant::now().checked_sub(Duration::from_secs(3600));
+        let mut tab = Tab::new(pane);
+
+        let died = reap_until(&mut tab, |tab| tab.panes.is_empty());
+
+        assert!(died.is_empty(), "a clean exit was announced: {died:?}");
+    }
+
+    /// A clean exit at once is still a tab that vanished before it could be
+    /// read — a harness that prints its error and exits 0 is out there — so it
+    /// is kept too; and a crash is kept however long it ran.
+    #[test]
+    fn what_keeps_a_pane_is_a_failure_or_an_early_exit() {
+        let death = |code, signal, lived| Death {
+            code,
+            signal,
+            lived: Some(Duration::from_secs(lived)),
+            last_line: None,
+        };
+        assert!(death(Some(0), None, 1).keeps(), "an instant clean exit");
+        assert!(!death(Some(0), None, 600).keeps(), "a clean /exit");
+        assert!(death(Some(1), None, 3600).keeps(), "a crash after an hour");
+        assert!(death(None, Some(9), 3600).keeps(), "a kill");
+        // A pane onto an agent it did not start has no age to judge by.
+        let unknown = Death {
+            lived: None,
+            ..death(Some(0), None, 0)
+        };
+        assert!(!unknown.keeps());
+        assert_eq!(
+            death(None, Some(9), 3).how(),
+            "was killed by signal 9 after 3s"
+        );
+        let quick = Death {
+            lived: Some(Duration::from_millis(400)),
+            ..death(Some(1), None, 0)
+        };
+        assert_eq!(quick.how(), "exited with code 1 after 0.4s");
+        // rmux's clock is in seconds, and under one is all it can say.
+        assert_eq!(
+            death(Some(1), None, 0).how(),
+            "exited with code 1 after less than a second"
+        );
+        assert_eq!(
+            death(Some(2), None, 300).how(),
+            "exited with code 2 after 5m"
+        );
     }
 }
