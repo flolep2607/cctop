@@ -26,6 +26,7 @@ anyhow.workspace = true
 chrono.workspace = true
 dirs.workspace = true
 flate2.workspace = true
+httparse.workspace = true
 libc.workspace = true
 rusqlite.workspace = true
 serde.workspace = true

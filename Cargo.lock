@@ -692,6 +692,7 @@ dependencies = [
  "chrono",
  "dirs",
  "flate2",
+ "httparse",
  "libc",
  "rusqlite",
  "serde",

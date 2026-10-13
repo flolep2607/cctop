@@ -162,20 +162,78 @@ impl Request {
         // allowance covers a body as well, so the header half is bounded by
         // counting bytes as they are read rather than by the reader itself.
         let mut reader = BufReader::new(stream.take((MAX_HEADER_BYTES + MAX_IMAGE_BYTES) as u64));
-        let mut line = String::new();
-        if reader.read_line(&mut line).is_err() || line.is_empty() {
+
+        // The head is gathered here a line at a time — the bounds are ours —
+        // and its grammar is `httparse`'s. Hand-splitting on whitespace and
+        // `:` accepted what no client sends and a smuggler does: a header
+        // name with a space in it, a line continued onto the next by leading
+        // whitespace (obs-fold, which RFC 9112 says a server must refuse), a
+        // line with no colon at all, silently skipped.
+        let mut head = Vec::with_capacity(1024);
+        if !matches!(reader.read_until(b'\n', &mut head), Ok(n) if n > 0) {
             return Err((400, "malformed request line"));
         }
-
-        let mut parts = line.split_whitespace();
-        let method = parts.next().unwrap_or_default().to_string();
-        let target = parts.next().unwrap_or_default();
+        if head.len() > MAX_HEADER_BYTES {
+            return Err((431, "request headers too large"));
+        }
+        // The request line on its own first, so a method this server does
+        // not answer is refused before its headers are read. With no header
+        // slots and nothing after the line, a valid line parses as partial.
+        let method = {
+            let mut none = [];
+            let mut line = httparse::Request::new(&mut none);
+            match (line.parse(&head), line.method) {
+                (Ok(_), Some(method)) => method.to_string(),
+                _ => return Err((400, "malformed request line")),
+            }
+        };
         if method != "GET" && method != "HEAD" && method != "POST" {
             return Err((405, "this server answers GET, HEAD and POST"));
         }
-        if target.is_empty() {
-            return Err((400, "malformed request line"));
+
+        // Headers are read to the blank line. They all have to leave the
+        // socket, or a client that pipelines sees its next request answered
+        // with the tail of this one's headers.
+        let mut lines = 0;
+        loop {
+            let start = head.len();
+            match reader.read_until(b'\n', &mut head) {
+                // A client that closed without the blank line has still sent
+                // all it is going to, and always has been answered: end the
+                // head for it rather than calling it malformed.
+                Ok(0) => {
+                    if !head.ends_with(b"\n") {
+                        head.extend_from_slice(b"\r\n");
+                    }
+                    head.extend_from_slice(b"\r\n");
+                    break;
+                }
+                Ok(_) if head[start..].trim_ascii().is_empty() => break,
+                Ok(_) => {
+                    if head.len() > MAX_HEADER_BYTES {
+                        return Err((431, "request headers too large"));
+                    }
+                    lines += 1;
+                }
+                // Hitting the `take` limit surfaces here: `431` rather than
+                // `400`, since it is the size of the field, not the shape of
+                // it, that we objected to.
+                Err(_) => return Err((431, "request headers too large")),
+            }
         }
+
+        // Exactly as many slots as lines, so the count is bounded by the
+        // bytes above rather than by a second, arbitrary limit.
+        let mut slots = vec![httparse::EMPTY_HEADER; lines];
+        let mut parsed = httparse::Request::new(&mut slots);
+        match parsed.parse(&head) {
+            Ok(httparse::Status::Complete(_)) => {}
+            Err(httparse::Error::HeaderName | httparse::Error::HeaderValue) => {
+                return Err((400, "malformed header"));
+            }
+            _ => return Err((400, "malformed request")),
+        }
+        let target = parsed.path.unwrap_or_default();
 
         let (raw_path, raw_query) = match target.split_once('?') {
             Some((p, q)) => (p, q),
@@ -199,14 +257,10 @@ impl Request {
             })
             .collect();
 
-        // Headers are read to the blank line and mostly discarded: the token is
-        // a query parameter precisely so that a link is the whole credential.
-        // Two of them are kept, because a body cannot be read without knowing
-        // how long it is and must not be trusted without knowing what it claims
-        // to be. They all have to leave the socket either way, or a client that
-        // pipelines sees its next request answered with the tail of this one's
-        // headers.
-        let mut header_bytes = line.len();
+        // Most headers are discarded: the token is a query parameter precisely
+        // so that a link is the whole credential. A few are kept, because a
+        // body cannot be read without knowing how long it is and must not be
+        // trusted without knowing what it claims to be.
         let mut length: Option<usize> = None;
         let mut json_content_type = false;
         let mut cookie_header = String::new();
@@ -214,75 +268,63 @@ impl Request {
         let mut accepts_gzip = false;
         let mut accepts_br = false;
         let mut if_none_match = String::new();
-        let mut headers: Vec<(String, String)> = Vec::new();
-        loop {
-            let mut header = String::new();
-            match reader.read_line(&mut header) {
-                Ok(0) => break,
-                Ok(_) if header.trim().is_empty() => break,
-                Ok(n) => {
-                    header_bytes += n;
-                    if header_bytes > MAX_HEADER_BYTES {
-                        return Err((431, "request headers too large"));
-                    }
-                    let Some((name, value)) = header.split_once(':') else {
-                        continue;
-                    };
-                    headers.push((name.trim().to_string(), value.trim().to_string()));
-                    let value = value.trim();
-                    if name.eq_ignore_ascii_case("content-length") {
-                        // A length that is not a number is not a length. Left
-                        // as `None` so the body reads as absent rather than as
-                        // whatever the digits before the junk happened to say.
-                        length = value.parse::<usize>().ok();
-                    } else if name.eq_ignore_ascii_case("content-type") {
-                        // `application/json; charset=utf-8` is the same claim as
-                        // `application/json`, and a browser sends either.
-                        json_content_type = value
-                            .split(';')
-                            .next()
-                            .unwrap_or_default()
-                            .trim()
-                            .eq_ignore_ascii_case("application/json");
-                    } else if name.eq_ignore_ascii_case("cookie") {
-                        // A second credential channel: `?t=` opens the door
-                        // once and the page hands the cookie back, so a reload
-                        // — which has no query to present — still gets in.
-                        cookie_header = value.to_string();
-                    } else if name.eq_ignore_ascii_case("accept-encoding") {
-                        let offers = |wanted: &str| {
-                            value.split(',').any(|coding| {
-                                let mut parts = coding.split(';');
-                                let name = parts.next().unwrap_or_default().trim();
-                                // `gzip;q=0` is a refusal, not an offer.
-                                let refused = parts.any(|p| {
-                                    let q = p.trim().replace(' ', "");
-                                    q.strip_prefix("q=")
-                                        .and_then(|q| q.parse::<f32>().ok())
-                                        .is_some_and(|q| q <= 0.0)
-                                });
-                                name.eq_ignore_ascii_case(wanted) && !refused
-                            })
-                        };
-                        accepts_gzip = offers("gzip");
-                        accepts_br = offers("br");
-                    } else if name.eq_ignore_ascii_case("if-none-match") {
-                        if_none_match = value.to_string();
-                    } else if name.eq_ignore_ascii_case("authorization") {
-                        // Safe to honour on an action as well as a read: a page
-                        // on another origin can only send this header after a
-                        // CORS preflight, and an `OPTIONS` is answered 405.
-                        if let Some((scheme, token)) = value.split_once(' ')
-                            && scheme.eq_ignore_ascii_case("bearer")
-                        {
-                            bearer = token.trim().to_string();
-                        }
-                    }
+        let mut headers: Vec<(String, String)> = Vec::with_capacity(parsed.headers.len());
+        for header in parsed.headers.iter() {
+            // httparse lets a value carry any byte but control characters;
+            // every header read here is ASCII, and one that is not UTF-8
+            // is nothing a browser sends.
+            let Ok(value) = std::str::from_utf8(header.value) else {
+                return Err((400, "malformed header"));
+            };
+            let (name, value) = (header.name, value.trim());
+            headers.push((name.to_string(), value.to_string()));
+            if name.eq_ignore_ascii_case("content-length") {
+                // A length that is not a number is not a length. Left
+                // as `None` so the body reads as absent rather than as
+                // whatever the digits before the junk happened to say.
+                length = value.parse::<usize>().ok();
+            } else if name.eq_ignore_ascii_case("content-type") {
+                // `application/json; charset=utf-8` is the same claim as
+                // `application/json`, and a browser sends either.
+                json_content_type = value
+                    .split(';')
+                    .next()
+                    .unwrap_or_default()
+                    .trim()
+                    .eq_ignore_ascii_case("application/json");
+            } else if name.eq_ignore_ascii_case("cookie") {
+                // A second credential channel: `?t=` opens the door
+                // once and the page hands the cookie back, so a reload
+                // — which has no query to present — still gets in.
+                cookie_header = value.to_string();
+            } else if name.eq_ignore_ascii_case("accept-encoding") {
+                let offers = |wanted: &str| {
+                    value.split(',').any(|coding| {
+                        let mut parts = coding.split(';');
+                        let name = parts.next().unwrap_or_default().trim();
+                        // `gzip;q=0` is a refusal, not an offer.
+                        let refused = parts.any(|p| {
+                            let q = p.trim().replace(' ', "");
+                            q.strip_prefix("q=")
+                                .and_then(|q| q.parse::<f32>().ok())
+                                .is_some_and(|q| q <= 0.0)
+                        });
+                        name.eq_ignore_ascii_case(wanted) && !refused
+                    })
+                };
+                accepts_gzip = offers("gzip");
+                accepts_br = offers("br");
+            } else if name.eq_ignore_ascii_case("if-none-match") {
+                if_none_match = value.to_string();
+            } else if name.eq_ignore_ascii_case("authorization") {
+                // Safe to honour on an action as well as a read: a page
+                // on another origin can only send this header after a
+                // CORS preflight, and an `OPTIONS` is answered 405.
+                if let Some((scheme, token)) = value.split_once(' ')
+                    && scheme.eq_ignore_ascii_case("bearer")
+                {
+                    bearer = token.trim().to_string();
                 }
-                // Hitting the `take` limit surfaces here, as does a header that
-                // is not UTF-8. Both are `431` rather than `400`: it is the
-                // size of the field, not the shape of it, that we objected to.
-                Err(_) => return Err((431, "request headers too large")),
             }
         }
 
@@ -1172,6 +1214,83 @@ mod tests {
         // no other directive.
         assert!(headers.contains("img-src 'self'"));
         assert!(headers.contains("manifest-src 'self'"));
+    }
+
+    /// `Request::parse` over these bytes, sent by a client that then closes.
+    fn parse_raw(raw: &[u8]) -> Result<Request, (u16, &'static str)> {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (server, _) = listener.accept().unwrap();
+        client.write_all(raw).unwrap();
+        client.shutdown(std::net::Shutdown::Write).unwrap();
+        Request::parse(&server)
+    }
+
+    /// A header name is a token: one with a space in it, or no colon at all, is
+    /// refused rather than split wherever a colon happens to fall — the shape
+    /// two hops disagree about is the shape request smuggling is made of.
+    #[test]
+    fn a_malformed_header_name_is_refused() {
+        for raw in [
+            &b"GET / HTTP/1.1\r\nBad Header: x\r\n\r\n"[..],
+            b"GET / HTTP/1.1\r\nHost : x\r\n\r\n",
+            b"GET / HTTP/1.1\r\nno colon here\r\n\r\n",
+            b"GET / HTTP/1.1\r\n(paren): x\r\n\r\n",
+        ] {
+            let err = parse_raw(raw).err().map(|(status, _)| status);
+            assert_eq!(err, Some(400), "{}", String::from_utf8_lossy(raw));
+        }
+        // And the well-formed neighbour is still read.
+        let ok = parse_raw(b"GET / HTTP/1.1\r\nX-Fine-Header: x\r\n\r\n").unwrap();
+        assert_eq!(ok.headers, [("X-Fine-Header".to_string(), "x".to_string())]);
+    }
+
+    /// RFC 9112 §5.2: a server must refuse a header continued onto the next
+    /// line by leading whitespace, or quietly undo it. Refused, since a proxy
+    /// in front that undid it differently would see another header than this.
+    #[test]
+    fn an_obs_fold_is_refused() {
+        let raw = b"POST /api/act/x HTTP/1.1\r\n\
+                    Content-Type: text/plain\r\n \
+                    application/json\r\n\
+                    Content-Length: 2\r\n\r\n{}";
+        assert_eq!(parse_raw(raw).err().map(|(s, _)| s), Some(400));
+        let tab = b"GET / HTTP/1.1\r\nX-A: one\r\n\ttwo\r\n\r\n";
+        assert_eq!(parse_raw(tab).err().map(|(s, _)| s), Some(400));
+    }
+
+    /// The bounds the parser had before it was httparse's: a method it does
+    /// not answer is refused before its headers are read, the head is capped,
+    /// a POST needs a length, and a client that closes without the blank line
+    /// is still answered.
+    #[test]
+    fn the_head_keeps_its_bounds() {
+        assert_eq!(
+            parse_raw(b"DELETE / HTTP/1.1\r\n\r\n").err().map(|(s, _)| s),
+            Some(405)
+        );
+        assert_eq!(parse_raw(b"nonsense\r\n\r\n").err().map(|(s, _)| s), Some(400));
+        assert_eq!(parse_raw(b"").err().map(|(s, _)| s), Some(400));
+        let mut huge = b"GET / HTTP/1.1\r\n".to_vec();
+        for i in 0..MAX_HEADER_BYTES / 16 {
+            huge.extend_from_slice(format!("X-Pad-{i:05}: aaaa\r\n").as_bytes());
+        }
+        huge.extend_from_slice(b"\r\n");
+        assert_eq!(parse_raw(&huge).err().map(|(s, _)| s), Some(431));
+        assert_eq!(
+            parse_raw(b"POST /api/act/x HTTP/1.1\r\n\r\n").err().map(|(s, _)| s),
+            Some(411)
+        );
+        let open = parse_raw(b"GET /x?a=1 HTTP/1.1\r\nCookie: k=v").unwrap();
+        assert_eq!((open.path.as_str(), open.cookie("k")), ("/x", Some("v")));
+
+        let post = parse_raw(
+            b"POST /api/act/x HTTP/1.1\r\nContent-Type: application/json\r\n\
+              Content-Length: 2\r\n\r\n{}",
+        )
+        .unwrap();
+        assert!(post.wants_json());
+        assert_eq!(post.body, b"{}");
     }
 
     /// The access cookie is one `name=value` among several — the lookup must
