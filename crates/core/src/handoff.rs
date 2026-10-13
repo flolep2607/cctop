@@ -1212,6 +1212,7 @@ mod tests {
             tools: Vec::new(),
             from: None,
             agent: None,
+            html: None,
         }
     }
 

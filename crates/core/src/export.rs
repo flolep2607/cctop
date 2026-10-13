@@ -428,6 +428,7 @@ mod tests {
             tools,
             from: None,
             agent: None,
+            html: None,
         }
     }
 

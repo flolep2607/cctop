@@ -151,6 +151,7 @@ const OWNER: &str = "yolo.owner";
 
 /// One prompt cctop allowed, for the page to list.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(rename = "YoloAllowed"))]
 pub struct Allowed {
     /// RFC 3339, like every other time a row carries.
     pub at: String,
@@ -168,6 +169,7 @@ pub struct Allowed {
 /// never share it, and the runtime directory the file lives in does not
 /// outlive the boot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(rename = "YoloAgent"))]
 pub struct Agent {
     pub pid: u32,
     pub start: u64,
@@ -207,6 +209,7 @@ fn start_time(pid: u32) -> Option<u64> {
 
 /// One session with YOLO on.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(rename = "YoloEntry"))]
 pub struct Entry {
     /// When it was switched on, RFC 3339.
     pub since: String,

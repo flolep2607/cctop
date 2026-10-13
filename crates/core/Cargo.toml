@@ -28,6 +28,10 @@ debug = []
 # above turn this on from their dev-dependencies — which a release build never
 # reads. See `under_test` in src/lib.rs for the binary a `cargo test` builds.
 test-support = []
+# Derives the TypeScript declarations of the types the web API answers with.
+# Turned on only by cctop-serve's dev-dependencies, whose `ts_types` test
+# writes and checks `web/src/lib/gen/`.
+ts = ["dep:ts-rs"]
 
 [dependencies]
 cctop-tunnel.workspace = true
@@ -59,6 +63,7 @@ tar.workspace = true
 tempfile.workspace = true
 tokenizers.workspace = true
 tokio.workspace = true
+ts-rs = { workspace = true, optional = true }
 toml_edit.workspace = true
 ureq.workspace = true
 vt100.workspace = true

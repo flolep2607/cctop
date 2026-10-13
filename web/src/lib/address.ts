@@ -1,21 +1,14 @@
 import { useEffect, useState } from "react";
 import { getJson } from "@/lib/api";
 import { CAN_ACT } from "@/lib/config";
+import type { Address } from "./types";
 
 /**
  * An address on the connected Cloudflare account's domain, as `/api/address`
- * reports it: the dashboard's, or the one `W` shares an agent on.
+ * reports it: the dashboard's, or the one `W` shares an agent on. Generated
+ * from `Address` and `Done` in crates/serve/src/address.rs.
  */
-export type Address = {
-  host: string | null;
-  zone: string | null;
-  /** For an agent: where an empty name sends it back to. */
-  default: string | null;
-  renamable: boolean;
-  why: string | null;
-};
-
-export type Done = { host: string | null; origin: string | null; old: string | null; changed: boolean; note: string | null };
+export type { Address, AddressDone as Done } from "./types";
 
 export const addressPath = (session?: string) => "/api/address" + (session ? "/" + encodeURIComponent(session) : "");
 

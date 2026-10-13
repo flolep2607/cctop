@@ -92,6 +92,7 @@ const MAX_DIFF_FILES: usize = 40;
 const MAX_HUNKS_PER_FILE: usize = 300;
 
 #[derive(Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct Report {
     pub session_id: String,
     pub provider: &'static str,
@@ -138,6 +139,7 @@ pub struct Report {
 /// patch each edit applied, so the report can show the change rather than
 /// describe it.
 #[derive(Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct ReportFileDiff {
     pub file: String,
     pub added: u32,
@@ -154,6 +156,7 @@ pub struct ReportFileDiff {
 }
 
 #[derive(Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct ReportCost {
     /// `false` where the transcript records no billable usage, which is not the
     /// same as a session that cost nothing.
@@ -170,6 +173,7 @@ pub struct ReportCost {
 }
 
 #[derive(Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct ReportModelCost {
     pub model: String,
     pub total: f64,
@@ -177,6 +181,7 @@ pub struct ReportModelCost {
 }
 
 #[derive(Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct ReportContext {
     pub used: u64,
     pub max: u64,
@@ -190,6 +195,7 @@ pub struct ReportContext {
 }
 
 #[derive(Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct ReportBreakdown {
     pub total: u64,
     pub startup: u64,
@@ -206,6 +212,7 @@ pub struct ReportBreakdown {
 }
 
 #[derive(Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct ReportActivity {
     pub tool_count: u64,
     /// Absent, rather than zero, for a harness that records no per-call
@@ -235,6 +242,7 @@ pub struct ReportActivity {
 }
 
 #[derive(Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct ReportTool {
     pub name: String,
     pub calls: u64,
@@ -243,6 +251,7 @@ pub struct ReportTool {
 
 /// Failed calls that were the *same* call, counted.
 #[derive(Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct ReportFailure {
     pub tool: String,
     /// The argument the calls shared, which is what makes them one finding.
@@ -252,6 +261,7 @@ pub struct ReportFailure {
 }
 
 #[derive(Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct ReportCall {
     pub tool: String,
     pub detail: String,

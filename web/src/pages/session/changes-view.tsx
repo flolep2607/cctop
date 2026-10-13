@@ -32,7 +32,7 @@ function FileRow({ f }: { f: FileDiff }) {
 const WRITES = /(^|[\s;&|(])(sed\s+-i|perl\s+-p?i|tee\s|cp\s|mv\s|rm\s|mkdir\s|touch\s|truncate\s|patch\s|python3?\s+-\s*<<|python3?\s+-c|node\s+-e|npx\s+\S*(prettier|shadcn|create)|git\s+(rm|mv|apply|checkout|restore|reset|stash|commit|merge|rebase|cherry-pick|am)\b|cargo\s+(fmt|add|update)|npm\s+(install|i|uninstall|update|create))|(?<![0-9&])>>?\s*(?!\/dev\/|&)[^\s&|>]/;
 
 function shellWrites(r: Report): { detail: string; ts?: string }[] {
-  return (r.activity?.calls ?? [])
+  return (r.activity.calls ?? [])
     .filter((c: { tool: string; detail?: string }) => /^(Bash|bash|shell|exec_command|run_shell_command)$/.test(c.tool) && WRITES.test(c.detail ?? ""))
     .map((c: { detail: string; ts?: string }) => ({ detail: c.detail, ts: c.ts }));
 }
@@ -40,7 +40,7 @@ function shellWrites(r: Report): { detail: string; ts?: string }[] {
 export function ChangesView({ r }: { r: Report }) {
   const files = diffFiles(r);
   const shell = shellWrites(r);
-  const shellCount = (r.activity?.tools ?? [])
+  const shellCount = (r.activity.tools ?? [])
     .filter((t: { name: string }) => /^(Bash|bash|shell|exec_command|run_shell_command)$/.test(t.name))
     .reduce((a: number, t: { calls: number }) => a + t.calls, 0);
   const stats = new Map(files.map((d) => [d.file, d]));
@@ -66,7 +66,7 @@ export function ChangesView({ r }: { r: Report }) {
       {shell.length > 0 && (
         <Section
           title="Shell commands that may have changed files"
-          note={`${shell.length} of the ${shellCount} shell commands look like they write — an in-place edit, a redirect, a script, a move or a git command. The transcript keeps the command, not its effect on the disk, so these are listed rather than diffed. Newest first${(r.activity?.calls?.length ?? 0) < (r.activity?.tool_count ?? 0) ? ", from the calls the transcript still keeps" : ""}.`}
+          note={`${shell.length} of the ${shellCount} shell commands look like they write — an in-place edit, a redirect, a script, a move or a git command. The transcript keeps the command, not its effect on the disk, so these are listed rather than diffed. Newest first${(r.activity.calls.length) < (r.activity.tool_count) ? ", from the calls the transcript still keeps" : ""}.`}
         >
           <Panel pad={false} className="max-h-[50vh] overflow-y-auto">
             {shell.map((c, i) => (
@@ -78,11 +78,11 @@ export function ChangesView({ r }: { r: Report }) {
           </Panel>
         </Section>
       )}
-      {r.files?.length > 0 && (
+      {r.files.length > 0 && (
         <Section title="Files it wrote" note="Most recent first. Line counts where the transcript kept the edits.">
           <Panel>
             <div className="columns-1 gap-6 font-mono text-xs md:columns-2">
-              {r.files.map((f: string) => {
+              {r.files.map((f) => {
                 const d = stats.get(f);
                 return (
                   <div key={f} className="text-muted-foreground break-inside-avoid py-0.5 break-all">

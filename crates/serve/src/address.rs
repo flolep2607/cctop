@@ -70,7 +70,8 @@ impl Addresses for Connected {
 
 /// What the page is told about an address.
 #[derive(serde::Serialize, Debug, PartialEq, Eq)]
-struct Address {
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub(crate) struct Address {
     /// The hostname now, when there is one to show.
     host: Option<String>,
     /// The domain a typed label goes under.
@@ -85,7 +86,8 @@ struct Address {
 
 /// What a rename did, for the page.
 #[derive(serde::Serialize)]
-struct Done {
+#[cfg_attr(test, derive(ts_rs::TS), ts(rename = "AddressDone"))]
+pub(crate) struct Done {
     host: Option<String>,
     /// The page's new origin, after a dashboard rename.
     origin: Option<String>,

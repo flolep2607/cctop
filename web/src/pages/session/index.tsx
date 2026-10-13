@@ -1,25 +1,20 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useParams } from "wouter";
-import { Check, ChevronDown, Copy, Download, ExternalLink, FileText, Forward, LayoutGrid, MessagesSquare, MoreHorizontal, Play, SquareTerminal, Wrench, X } from "lucide-react";
+import { ExternalLink, SquareTerminal, X } from "lucide-react";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
-import { act, getJson } from "@/lib/api";
-import { CAN_ACT, withToken } from "@/lib/config";
+import { act } from "@/lib/api";
+import { CAN_ACT } from "@/lib/config";
 import { ago, clock, copyText, shortModel, shortPath } from "@/lib/format";
-import { copyMarkdown, downloadMarkdown } from "@/lib/export";
 import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import {
-  DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { AppShell } from "@/components/app-shell";
 import { StateBadge, StateDot } from "@/components/status";
 import { dotOf } from "@/lib/status";
 import { TerminalFrame } from "@/components/terminal";
 import { popOut, type Terminal } from "@/lib/terminal";
 import { POLL_EVERY, useSessions, useTick } from "@/hooks/use-live";
+import { usePoll } from "@/hooks/use-poll";
 import { YoloLog, YoloSwitch } from "@/components/yolo";
 import { AgentAddress } from "@/components/address";
 import type { Report } from "@/lib/types";
@@ -27,11 +22,9 @@ import { AccessView } from "./access-view";
 import { ChangesView } from "./changes-view";
 import { diffFiles } from "./diff-files";
 import { Conversation } from "./conversation";
+import { ChatSignal } from "./chat-signal";
 import { ReportView } from "./report-view";
-import { reportMarkdown } from "./report-markdown";
-
-/** Where a session can be handed: an agent, under one of its accounts. */
-type HandoffTarget = { agent: string; account?: string | null; label: string };
+import { Actions } from "./actions";
 
 const VIEWS = ["chat", "changes", "access", "report"] as const;
 type View = (typeof VIEWS)[number];
@@ -46,43 +39,25 @@ const typing = (t: EventTarget | null) =>
 export function SessionPage() {
   const { id: rawId = "" } = useParams<{ id: string }>();
   const urlId = decodeURIComponent(rawId);
-  const [r, setR] = useState<Report | null>(null);
-  const [error, setError] = useState("");
   const [view, setView] = useState<View>(viewFromHash);
   // Views are drawn on first sight and kept: each is another read, and
   // switching back must not repeat it.
   const [seen, setSeen] = useState<Set<View>>(() => new Set([viewFromHash()]));
   const [term, setTerm] = useState<Terminal | "opening" | null>(null);
-  useTick();
+  const now = useTick();
 
-  // The page's one blocking read, retried on its own: a connection that drops
-  // during it leaves nothing on screen to recover from.
+  // The page's one blocking read, retried on its own until it lands: a
+  // connection that drops during it leaves nothing on screen to recover from.
+  // Read whether or not the tab is shown, so a session opened in a background
+  // tab is ready when it is looked at.
+  const { data: r, error } = usePoll<Report>("/api/report/" + encodeURIComponent(urlId), 5000, { once: true, visibleOnly: false });
   useEffect(() => {
-    let live = true;
-    let timer: ReturnType<typeof setTimeout>;
-    const load = () =>
-      getJson<Report>("/api/report/" + encodeURIComponent(urlId)).then(
-        (rep) => {
-          if (!live) return;
-          setR(rep);
-          setError("");
-          document.title = "cctop — " + (rep.title || rep.project || rep.session_id);
-        },
-        (e) => {
-          if (!live) return;
-          setError(String(e.message || e));
-          timer = setTimeout(load, 5000);
-        },
-      );
-    load();
-    return () => {
-      live = false;
-      clearTimeout(timer);
-    };
-  }, [urlId]);
+    if (r) document.title = "cctop — " + (r.title || r.project || r.session_id);
+  }, [r]);
 
   const id = r?.session_id ?? urlId;
-  const { sessions, feed } = useSessions(urlId);
+  const { sessions, feed, chat } = useSessions(urlId);
+  const chatSignal = useMemo(() => ({ mark: chat, live: feed === "live" }), [chat, feed]);
   // The URL may carry any unambiguous prefix of the id.
   const live = useMemo(
     () => sessions?.find((s) => s.session_id === id) ?? sessions?.find((s) => s.session_id.startsWith(urlId)) ?? null,
@@ -134,7 +109,7 @@ export function SessionPage() {
   }
 
   const spans = new Date(r.started_at).toDateString() !== new Date(r.last_active).toDateString();
-  const when = [clock(r.started_at, spans), r.duration, running ? "still going" : ago(live?.last_active ?? r.last_active)].filter(Boolean).join(" · ");
+  const when = [clock(r.started_at, spans), r.duration, running ? "still going" : ago(live?.last_active ?? r.last_active, now)].filter(Boolean).join(" · ");
   const changes = diffFiles(r).length;
 
   return (
@@ -208,7 +183,11 @@ export function SessionPage() {
           {/* Conversation stays mounted while hidden: it holds a poll, a
               scroll position and whatever is half typed in the composer. */}
           <div className={cn("min-h-0 flex-1 flex-col", view === "chat" ? "flex" : "hidden")}>
-            {seen.has("chat") && <Conversation id={id} live={live} active={view === "chat"} />}
+            {seen.has("chat") && (
+              <ChatSignal.Provider value={chatSignal}>
+                <Conversation id={id} live={live} active={view === "chat"} />
+              </ChatSignal.Provider>
+            )}
           </div>
           {(["changes", "access", "report"] as const).map((v) => (
             <div key={v} className={cn("min-h-0 flex-1 overflow-y-auto px-4 pb-4", view === v ? "block" : "hidden")}>
@@ -273,135 +252,5 @@ export function SessionPage() {
         )}
       </div>
     </AppShell>
-  );
-}
-
-// The buttons that are not a prompt: the terminal, put the session back, give
-// its work to another agent. Absent entirely when this run serves no actions.
-function Actions({
-  r, id, running, term, onTerminal,
-}: {
-  r: Report; id: string; running: boolean; term: unknown; onTerminal: () => void;
-}) {
-  // Every (agent, account) this session can go to — the server leaves out the
-  // pair it is already on, so the menu never offers a session back to itself.
-  const [targets, setTargets] = useState<HandoffTarget[]>([]);
-  const [busy, setBusy] = useState(false);
-  useEffect(() => {
-    if (!CAN_ACT) return;
-    getJson<{ targets?: HandoffTarget[] }>("/api/handoff/" + encodeURIComponent(id)).then(
-      (b) => setTargets(b.targets ?? []),
-      () => {},
-    );
-  }, [id]);
-  const run = async (verb: string, body: object, label: string) => {
-    setBusy(true);
-    try {
-      const done = await act(verb, id, body);
-      toast.success(done.message || label + " done");
-    } catch (e) {
-      toast.error(String((e as Error).message || e));
-    } finally {
-      setBusy(false);
-    }
-  };
-  const copyMd = () =>
-    copyText(reportMarkdown(r))
-      .then(() => toast.success("Copied this report as markdown"))
-      .catch((e) => toast.error("Copy failed: " + String(e?.message || e)));
-  return (
-    <div className="flex flex-wrap items-center gap-1.5">
-      {CAN_ACT && (
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <span>
-              <Button variant={term ? "secondary" : "outline"} size="sm" disabled={!r.terminal} onClick={onTerminal} aria-pressed={!!term}>
-                <SquareTerminal />
-                Terminal
-              </Button>
-            </span>
-          </TooltipTrigger>
-          <TooltipContent>
-            {r.terminal ? "This agent's own terminal, beside the conversation" : "Not running in a multiplexer cctop can reach"}
-          </TooltipContent>
-        </Tooltip>
-      )}
-      {CAN_ACT && (
-        <Button variant="outline" size="sm" disabled={busy} onClick={() => run("resume", {}, "Resume")} title="Start this session's harness back up on this transcript">
-          <Play />
-          {running ? "Reattach" : "Resume"}
-        </Button>
-      )}
-      {CAN_ACT && targets.length > 0 && (
-        <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <Button variant="outline" size="sm" disabled={busy}>
-              <Forward />
-              Hand off
-              <ChevronDown />
-            </Button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="end" className="min-w-60">
-            <DropdownMenuLabel className="text-muted-foreground text-xs font-normal">Hand this session to another agent or account</DropdownMenuLabel>
-            {targets.map((t) => (
-              <DropdownMenuItem
-                key={t.label}
-                onSelect={() => run("handoff", { agent: t.agent, account: t.account ?? "" }, "Handoff")}
-              >
-                <span>{t.agent}</span>
-                {/* Named whenever there is one, as the terminal's picker does: it is
-                    the half of the pair that says whose subscription is spent. */}
-                {t.account && (
-                  <span className="text-muted-foreground ml-auto pl-4 text-xs whitespace-nowrap">as {t.account}</span>
-                )}
-              </DropdownMenuItem>
-            ))}
-          </DropdownMenuContent>
-        </DropdownMenu>
-      )}
-      <DropdownMenu>
-        <DropdownMenuTrigger asChild>
-          <Button variant="ghost" size="icon-sm" aria-label="More">
-            <MoreHorizontal />
-          </Button>
-        </DropdownMenuTrigger>
-        <DropdownMenuContent align="end" className="min-w-64">
-          <DropdownMenuItem onSelect={copyMd}>
-            <Copy /> Copy report as markdown
-          </DropdownMenuItem>
-          <DropdownMenuSeparator />
-          {/* The conversation itself, for pasting into another agent or an
-              issue. Flat rather than a submenu: a submenu is a hover target,
-              and this menu is opened on phones too. */}
-          <DropdownMenuItem onSelect={() => copyMarkdown(r.session_id, "conversation")}>
-            <MessagesSquare /> Copy conversation as markdown
-          </DropdownMenuItem>
-          <DropdownMenuItem onSelect={() => copyMarkdown(r.session_id, "tools")}>
-            <Wrench /> Copy with tool output
-          </DropdownMenuItem>
-          <DropdownMenuItem onSelect={() => copyMarkdown(r.session_id, "brief")}>
-            <FileText /> Copy handoff brief
-          </DropdownMenuItem>
-          <DropdownMenuItem onSelect={() => downloadMarkdown(r.session_id, "tools")}>
-            <Download /> Download .md with tool output
-          </DropdownMenuItem>
-          <DropdownMenuSeparator />
-          <DropdownMenuItem onSelect={() => copyText(r.session_id).then(() => toast.success("Copied the session id"))}>
-            <Check /> Copy session id
-          </DropdownMenuItem>
-          <DropdownMenuSeparator />
-          <DropdownMenuItem asChild>
-            <a href={withToken("/workspace")}>
-              <LayoutGrid /> Open the workspace
-            </a>
-          </DropdownMenuItem>
-        </DropdownMenuContent>
-      </DropdownMenu>
-      {r.cost && (
-        <Badge variant="outline" className="font-mono font-normal">
-          {r.cost.included ? "incl" : r.cost.available ? "$" + Number(r.cost.total).toFixed(2) : "—"}
-        </Badge>
-      )}
-    </div>
   );
 }

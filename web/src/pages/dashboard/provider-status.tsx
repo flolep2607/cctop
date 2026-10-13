@@ -1,42 +1,21 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { ExternalLink, TriangleAlert } from "lucide-react";
-import { getJson } from "@/lib/api";
+import { since } from "@/lib/format";
+import { usePoll } from "@/hooks/use-poll";
+import { useTick } from "@/hooks/use-live";
 import { cn } from "@/lib/utils";
+import type { PageDocument as PageDoc, ProviderStatus } from "@/lib/types";
+import type { Incident } from "@/lib/gen/Incident";
+import type { StatusLevel } from "@/lib/gen/StatusLevel";
+import type { StatusTone } from "@/lib/gen/StatusTone";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 
 // `/api/provider-status`, as `cctop_core::provider_status::document` writes it.
 // The wording — the line and the "is it me?" sentence — arrives finished, so
 // this page and the TUI's footer cannot say two different things.
-type Level = "operational" | "maintenance" | "minor" | "major" | "critical";
-type Tone = "outage" | "warning" | "quiet";
-// "live" counts towards the line; "stale" has sat in monitoring too long to
-// explain anything; "other" is on something agents never touch (the Console,
-// billing, images). Core decides, so both screens file them alike.
-type Standing = "live" | "stale" | "other";
-type Incident = {
-  name: string;
-  stage: string;
-  level: Level;
-  started_at: number | null;
-  update: string | null;
-  components: string[];
-  standing: Standing;
-  note?: string;
-};
-type Component = { name: string; level: Level; standing: Standing };
-type PageDoc = {
-  page: string;
-  label: string;
-  site: string;
-  erroring: number;
-  state: "pending" | "ok" | "unavailable";
-  reason?: string;
-  level?: Level;
-  description?: string;
-  incidents?: Incident[];
-  degraded?: Component[];
-};
-type Doc = { pages: PageDoc[]; line: { text: string; tone: Tone } | null; verdict: { text: string; detail: string | null; tone: Tone } };
+type Doc = ProviderStatus;
+type Level = StatusLevel;
+type Tone = StatusTone;
 
 // The server answers from memory and polls the vendor on the TUI's two-minute
 // schedule whatever this does, so re-reading more often than that buys nothing
@@ -57,39 +36,17 @@ const LEVEL: Record<Level, string> = {
   critical: "text-destructive",
 };
 
-// `cctop_core::util::compact_duration`, which the TUI's panel uses.
-function compact(secs: number): string {
-  const s = Math.round(secs);
-  if (s <= 0) return "—";
-  if (s < 60) return s + "s";
-  const two = (n: number) => String(n).padStart(2, "0");
-  if (s < 3600) return Math.floor(s / 60) + "m" + two(s % 60) + "s";
-  return Math.floor(s / 3600) + "h" + two(Math.floor((s % 3600) / 60)) + "m";
-}
-
-// "since 13:55 (1h20m)", in the browser's local time.
-function since(startedAt: number): string {
-  const at = new Date(startedAt * 1000);
-  const hm = isNaN(at.getTime()) ? "?" : String(at.getHours()).padStart(2, "0") + ":" + String(at.getMinutes()).padStart(2, "0");
-  const elapsed = Date.now() / 1000 - startedAt;
-  return elapsed > 0 ? `since ${hm} (${compact(elapsed)})` : `since ${hm}`;
-}
-
 // The TUI's outage footer, above the table: one line when a vendor's page
 // explains — or pointedly fails to explain — the sessions failing here, and
 // nothing otherwise, offline included. Clicking it opens the `!` panel.
 export function ProviderStatus() {
-  const [doc, setDoc] = useState<Doc | null>(null);
+  const read = usePoll<Doc>("/api/provider-status", REREAD_MS);
   const [open, setOpen] = useState(false);
-  useEffect(() => {
-    // A failed read clears the line rather than keeping one that can no longer
-    // be vouched for; it is not worth a console message, since the table's own
-    // connection state already says the server went away.
-    const read = () => getJson<Doc>("/api/provider-status").then((d) => setDoc(d && Array.isArray(d.pages) ? d : null), () => setDoc(null));
-    read();
-    const t = setInterval(read, REREAD_MS);
-    return () => clearInterval(t);
-  }, []);
+  const now = useTick();
+  // A failed read clears the line rather than keeping one that can no longer
+  // be vouched for; it is not worth a console message, since the table's own
+  // connection state already says the server went away.
+  const doc = !read.error && read.data && Array.isArray(read.data.pages) ? read.data : null;
   if (!doc?.line) return null;
   const { line } = doc;
   return (
@@ -118,7 +75,7 @@ export function ProviderStatus() {
           </DialogHeader>
           <div className="-mx-1 min-h-0 flex-1 space-y-4 overflow-y-auto px-1 text-sm">
             {doc.pages.map((p) => (
-              <PageSection key={p.page} page={p} />
+              <PageSection key={p.page} page={p} now={now} />
             ))}
           </div>
         </DialogContent>
@@ -127,15 +84,15 @@ export function ProviderStatus() {
   );
 }
 
-function PageSection({ page: p }: { page: PageDoc }) {
+function PageSection({ page: p, now }: { page: PageDoc; now: number }) {
   const summary =
     p.state === "pending" ? "checking…"
     // Kept apart from an outage: cctop not reaching the page says nothing
     // about the provider.
     : p.state === "unavailable" ? `status page unreachable (${p.reason ?? "no answer"})`
-    : p.description || "";
-  const incidents = p.incidents ?? [];
-  const degraded = p.degraded ?? [];
+    : p.description;
+  const incidents = p.state === "ok" ? p.incidents : [];
+  const degraded = p.state === "ok" ? p.degraded : [];
   const counted = incidents.filter((i) => i.standing !== "other");
   const other = incidents.filter((i) => i.standing === "other");
   const affected = degraded.filter((c) => c.standing !== "other");
@@ -144,14 +101,14 @@ function PageSection({ page: p }: { page: PageDoc }) {
     <section className="space-y-2 border-t pt-3 first:border-t-0 first:pt-0">
       <div className="flex flex-wrap items-baseline gap-x-2">
         <h3 className="font-semibold">{p.label}</h3>
-        <span className={p.state === "ok" && p.level ? LEVEL[p.level] : "text-muted-foreground"}>{summary}</span>
+        <span className={p.state === "ok" ? LEVEL[p.level] : "text-muted-foreground"}>{summary}</span>
         {p.erroring > 0 && <span className="text-muted-foreground text-xs">({p.erroring} of yours failing)</span>}
         <a href={p.site} target="_blank" rel="noreferrer noopener" className="text-muted-foreground hover:text-foreground ml-auto inline-flex items-center gap-1 text-xs underline-offset-2 hover:underline">
           {p.site.replace(/^https?:\/\//, "")} <ExternalLink className="size-3" aria-hidden />
         </a>
       </div>
       {counted.map((i, n) => (
-        <IncidentBlock key={n} incident={i} />
+        <IncidentBlock key={n} incident={i} now={now} />
       ))}
       {affected.length > 0 && (
         <p className="text-xs">
@@ -163,7 +120,7 @@ function PageSection({ page: p }: { page: PageDoc }) {
         <div className="space-y-2">
           <h4 className="text-muted-foreground text-xs font-medium">other, not affecting agents</h4>
           {other.map((i, n) => (
-            <IncidentBlock key={n} incident={i} />
+            <IncidentBlock key={n} incident={i} now={now} />
           ))}
           {otherComponents.length > 0 && (
             <p className="text-muted-foreground text-xs">affected {otherComponents.map((c) => c.name).join(", ")}</p>
@@ -178,9 +135,9 @@ function PageSection({ page: p }: { page: PageDoc }) {
 // Live incidents at full strength; stale and unrelated ones dimmed, since they
 // are there to be recognised and dismissed. A stale one is told by its age —
 // "since 21:44" on a two-day-old incident would read as this evening.
-function IncidentBlock({ incident: i }: { incident: Incident }) {
+function IncidentBlock({ incident: i, now }: { incident: Incident; now: number }) {
   const live = i.standing === "live";
-  const meta = i.note ?? [i.stage, i.started_at ? since(i.started_at) : ""].filter(Boolean).join(" · ");
+  const meta = i.note ?? [i.stage, i.started_at ? since(i.started_at, now) : ""].filter(Boolean).join(" · ");
   return (
     <div
       className={cn(

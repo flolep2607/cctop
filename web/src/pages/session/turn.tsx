@@ -1,7 +1,7 @@
 import { memo, useState, type ReactNode } from "react";
 import { ArrowUpRight, Bot, ChevronRight, Hash, Loader2 } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { clock, money, secs, tokens } from "@/lib/format";
+import { clock, costLabel, secs, tokens } from "@/lib/format";
 import { Badge } from "@/components/ui/badge";
 import { Markdown } from "@/components/markdown";
 import { Patch } from "@/components/patch";
@@ -132,7 +132,7 @@ export const TurnView = memo(function TurnView({
       </div>
       {turn.text && (
         <div className={cn(quiet && "text-muted-foreground [&_.md]:text-[13px]")}>
-          <Markdown text={turn.text} />
+          <Markdown html={turn.html} text={turn.text} />
         </div>
       )}
       {turn.clipped && <div className="text-muted-foreground mt-1 text-[11px]">… cut for length; the whole of it is in the transcript</div>}
@@ -190,7 +190,7 @@ function HandBack({ turn, marks, isNew }: { turn: Turn; marks: string; isNew: bo
       </div>
       {open && turn.text && (
         <div className="text-muted-foreground mt-2 pl-5 [&_.md]:text-[13px]">
-          <Markdown text={turn.text} />
+          <Markdown html={turn.html} text={turn.text} />
         </div>
       )}
     </div>
@@ -220,11 +220,11 @@ function AgentBlock({ tool, agent }: { tool: Tool; agent: AgentCall }) {
     agent.duration_ms ? secs(agent.duration_ms) : "",
     // As the report tab's subagent table reads it: a bundled plan's agent is
     // "incl", and an unpriced one says nothing rather than "$0".
-    agent.cost ? (included ? "incl" : money(agent.cost)) : "",
+    agent.cost ? costLabel({ total: agent.cost, included }) : "",
     agent.started_at ? "started " + clock(agent.started_at) : "",
   ].filter(Boolean);
   const spent = agent.tokens ? `${tokens(agent.tokens)} tokens` : undefined;
-  const reportedAt = agent.handback !== undefined ? reported.get(agent.handback) : undefined;
+  const reportedAt = agent.handback != null ? reported.get(agent.handback) : undefined;
   return (
     <div className={cn("bg-muted/40 mt-2 overflow-hidden rounded-md border", agent.status === "failed" && "border-destructive/50")}>
       <button type="button" onClick={() => setOpen(!open)} className="hover:bg-muted/70 flex w-full min-w-0 items-start gap-2 px-2.5 py-2 text-left" aria-expanded={open}>
@@ -290,7 +290,7 @@ function AgentBody({ tool, agent }: { tool: Tool; agent: AgentCall }) {
         <div className="border-t px-3 py-2">
           <div className="text-muted-foreground mb-1 text-[11px] tracking-wider uppercase">{agent.last_message ? LAST_MESSAGE : "Report"}</div>
           <div className={cn("[&_.md]:text-[13px]", agent.last_message && "border-muted-foreground/40 text-muted-foreground border-l-2 border-dashed pl-2")}>
-            <Markdown text={agent.report} />
+            <Markdown html={agent.report_html} text={agent.report} />
           </div>
         </div>
       )}
