@@ -98,6 +98,29 @@ fn project_root(chats_dir: &Path) -> String {
         .unwrap_or_default()
 }
 
+/// The newest message's time in a chat file, in Unix milliseconds.
+///
+/// Only the JSONL shape answers: its messages are lines, and the newest is
+/// near the end, beside the `$set` patches that revise the header and are not
+/// a message. ponytail: the older single-object shape would have to be
+/// deserialised whole to reach its last message — the cost
+/// [`started_from_stem`] exists to avoid — so it keeps its mtime. Nothing
+/// writes that shape any more, so the file is not touched after the fact.
+fn last_turn_ms(path: &Path) -> Option<i64> {
+    if path.extension().is_none_or(|ext| ext != "jsonl") {
+        return None;
+    }
+    extract::last_entry_ms(path, |bytes| {
+        let item: Value = serde_json::from_slice(bytes).ok()?;
+        let kind = item.get("type").and_then(Value::as_str)?;
+        if kind != "user" && kind != "gemini" {
+            return None;
+        }
+        let ts = item.get("timestamp").and_then(Value::as_str)?;
+        util::parse_ts(ts).map(|d| d.timestamp_millis())
+    })
+}
+
 fn summarize(path: PathBuf) -> Option<Session> {
     let stem = path.file_stem()?.to_string_lossy().into_owned();
     let started = started_from_stem(&stem)?;
@@ -110,7 +133,9 @@ fn summarize(path: PathBuf) -> Option<Session> {
     let mut session = Session::new(Provider::Gemini, stem);
     session.surface = Surface::Cli;
     session.started_at = started;
-    session.last_active = util::ms_to_rfc3339(config::file_mtime_ms(&path) as i64);
+    let touched = config::file_mtime_ms(&path) as i64;
+    session.touched_at = util::ms_to_rfc3339(touched);
+    session.last_active = util::ms_to_rfc3339(last_turn_ms(&path).unwrap_or(touched));
     session.label_source = project_root(path.parent()?);
     session.data_file = Some(path);
     Some(session)
@@ -320,6 +345,24 @@ mod tests {
         let path = std::env::temp_dir().join(format!("cctop-gemini-{}-{name}", std::process::id()));
         std::fs::write(&path, body).expect("write fixture");
         path
+    }
+
+    /// A JSONL chat is dated by its newest message, not by the header patch
+    /// written after it.
+    #[test]
+    fn a_jsonl_chat_is_dated_by_its_last_message() {
+        let path = fixture(
+            "last.jsonl",
+            concat!(
+                "{\"sessionId\":\"s\",\"startTime\":\"2026-05-14T17:34:00.000Z\"}\n",
+                "{\"type\":\"user\",\"timestamp\":\"2026-05-14T17:34:06.028Z\",\"content\":[]}\n",
+                "{\"type\":\"gemini\",\"timestamp\":\"2026-05-14T17:34:13.475Z\",\"content\":\"hi\"}\n",
+                "{\"$set\":{\"lastUpdated\":\"2026-05-15T09:00:00.000Z\"}}\n",
+            ),
+        );
+        let expected = util::parse_ts("2026-05-14T17:34:13.475Z").map(|d| d.timestamp_millis());
+        assert_eq!(last_turn_ms(&path), expected);
+        let _ = std::fs::remove_file(&path);
     }
 
     /// The recorded counts are the only usage evidence Gemini leaves, so the

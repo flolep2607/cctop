@@ -327,7 +327,7 @@ impl Loader {
                 // Cursor has a shared editor process rather than one process
                 // per native-agent transcript. A freshly growing transcript is
                 // the only trustworthy per-session liveness signal available.
-                s.inferred_running = util::parse_ts(&s.last_active)
+                s.inferred_running = util::parse_ts(s.touched())
                     .map(|d| util::now_ms() - d.timestamp_millis() < 90_000)
                     .unwrap_or(false);
             }
