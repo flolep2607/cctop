@@ -105,6 +105,7 @@ pub const HISTORY_LINES: &str = "50000";
 ///   otherwise, and cctop listens for it in the pane's parser.
 /// - `set-clipboard on`: at `external`, clipboard writes from inside a pane are
 ///   dropped, so a copy in Claude Code went nowhere.
+/// - `remain-on-exit failed`: see [`REMAIN_ON_EXIT`].
 fn defaults() -> String {
     format!(
         "\
@@ -114,9 +115,27 @@ set-option -g status off
 set-option -g window-size latest
 set-option -g allow-passthrough on
 set-option -s set-clipboard on
+set-option -wg remain-on-exit {REMAIN_ON_EXIT}
 "
     )
 }
+
+/// What a session's pane does when its agent exits: stay, frozen, when the
+/// exit was a failure, and go as before when it was not.
+///
+/// Without it an agent that died at once took its session with it, and with
+/// the session went everything it printed — the client attached to it saw the
+/// session end and exited, and the pane in cctop vanished before anyone could
+/// read why. Kept, the dead pane still shows the agent's last screen and rmux
+/// can say how it ended (`#{pane_dead_status}`), which is what
+/// [`rmux::ended`](crate::rmux::ended) reads.
+///
+/// `failed` rather than `on`, so an agent that was asked to exit and did — a
+/// `/exit`, a shell's `exit` — closes its session as it always did, with no
+/// cctop needing to be there to clean it up. A kept session is ended by the
+/// cctop showing it, once dismissed, or swept by any cctop once nobody is; see
+/// `ui::panes::App::sync_shared_tabs`.
+pub const REMAIN_ON_EXIT: &str = "failed";
 
 /// How long cctop waits for its daemon to come up, or to answer.
 const DEADLINE: Duration = Duration::from_secs(30);
@@ -297,6 +316,21 @@ pub fn new_session(
     argv: &[String],
 ) -> Result<(), String> {
     start()?;
+    // Also set here, and not only in [`defaults`], because a daemon started by
+    // an older cctop read a config without it and runs until its last session
+    // ends. Before the session is made: an agent that fails does so at once,
+    // and an option set after it would be set on a pane that had already gone.
+    let _ = ask(Request::SetOptionByName(Box::new(SetOptionByNameRequest {
+        scope: OptionScopeSelector::WindowGlobal,
+        name: "remain-on-exit".to_string(),
+        value: Some(REMAIN_ON_EXIT.to_string()),
+        mode: SetOptionMode::Replace,
+        only_if_unset: false,
+        unset: false,
+        unset_pane_overrides: false,
+        format: false,
+        format_target: None,
+    })));
     let request = NewSessionExtRequest {
         session_name: Some(session(name)?),
         working_directory: cwd
@@ -517,9 +551,20 @@ pub fn send_keys(pane: &PaneTarget, key: &str, literal: bool) -> Result<(), Stri
 /// `capture-pane -p`: the visible screen of a pane, `-e` when `escapes` (the
 /// colours kept) and `-J` when `join` (wrapped lines kept whole).
 pub fn capture(pane: &PaneTarget, escapes: bool, join: bool) -> Option<Vec<u8>> {
+    capture_from(pane, None, escapes, join)
+}
+
+/// [`capture`] from line `start` — negative reaches back into the history —
+/// to the bottom of the screen: `capture-pane -p -S start`.
+pub fn capture_from(
+    pane: &PaneTarget,
+    start: Option<i64>,
+    escapes: bool,
+    join: bool,
+) -> Option<Vec<u8>> {
     let response = ask(Request::CapturePane(Box::new(CapturePaneRequest {
         target: pane.clone(),
-        start: None,
+        start,
         end: None,
         print: true,
         buffer_name: None,

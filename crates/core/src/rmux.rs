@@ -108,7 +108,15 @@ pub fn start_detached(argv: &[String], name: &str, cwd: Option<&Path>) -> Result
         serde_json::json!({ "session": name, "cmd": argv.join(" ") }),
     );
     if exists(name) {
-        return Ok(());
+        // A session whose agent died and was kept to say so (see
+        // [`mux::REMAIN_ON_EXIT`](crate::mux::REMAIN_ON_EXIT)) is not someone's
+        // running agent. Resuming the same conversation reuses its name, and
+        // attaching to the corpse would show the old failure instead of
+        // starting anything.
+        if !ended_one(name) {
+            return Ok(());
+        }
+        let _ = kill(name);
     }
     crate::mux::new_session(name, cwd, launch_env(argv), argv)
 }
@@ -1223,12 +1231,13 @@ pub fn running() -> Vec<Running> {
     // One call for all of it. Every field below resolves in a pane's context —
     // rmux looks up the session a pane belongs to — so asking per session would
     // be a request each for the same answer.
-    const FORMAT: &str = "#{session_name}\t#{pane_pid}\t#{pane_current_path}\t#{session_attached}\t#{session_created}\t#{window_activity}\t#{@cctop_label}\t#{@cctop_profile}\t#{@cctop_order}\t#{@cctop_state}\t#{@cctop_color}\t#{@cctop_tab}\t#{@cctop_pane}\t#{@cctop_axis}\t#{window_width}\t#{window_height}";
+    const FORMAT: &str = "#{session_name}\t#{pane_pid}\t#{pane_current_path}\t#{session_attached}\t#{session_created}\t#{window_activity}\t#{@cctop_label}\t#{@cctop_profile}\t#{@cctop_order}\t#{@cctop_state}\t#{@cctop_color}\t#{@cctop_tab}\t#{@cctop_pane}\t#{@cctop_axis}\t#{window_width}\t#{window_height}\t#{pane_dead}";
     // No daemon running: no sessions, not an error.
     let listing = crate::mux::list_all_panes(FORMAT).unwrap_or_default();
 
     let prefix = format!("{PREFIX}-");
     let mut found: Vec<(u64, Running)> = Vec::new();
+    let mut seen: Vec<&str> = Vec::new();
     for line in listing.lines() {
         let mut parts = line.split('\t');
         let Some(name) = parts
@@ -1241,9 +1250,10 @@ pub fn running() -> Vec<Running> {
         // A session with splits or extra windows lists several panes. The agent
         // is the one cctop started, which is the first — later panes are the
         // user's own, opened inside the session after the fact.
-        if found.iter().any(|(_, s)| s.name == name) {
+        if seen.contains(&name) {
             continue;
         }
+        seen.push(name);
         let pid = parts.next().and_then(|p| p.trim().parse::<u32>().ok());
         let cwd = parts
             .next()
@@ -1280,6 +1290,12 @@ pub fn running() -> Vec<Running> {
         let width = option().and_then(|v| v.parse::<u16>().ok());
         let height = option().and_then(|v| v.parse::<u16>().ok());
         let window = width.zip(height);
+        // A session kept only to show how its agent died is not a running
+        // agent: offered back, shared as a tab or waited on, it would be one
+        // nobody could do anything with. See [`ended`].
+        if option().as_deref() == Some("1") {
+            continue;
+        }
         found.push((
             created,
             Running {
@@ -1303,6 +1319,133 @@ pub fn running() -> Vec<Running> {
     // Descending, so the agent left most recently is the one offered first.
     found.sort_by_key(|(created, _)| std::cmp::Reverse(*created));
     found.into_iter().map(|(_, s)| s).collect()
+}
+
+/// A cctop session whose agent has exited and whose pane rmux kept, frozen on
+/// its last screen, because the exit was a failure. See
+/// [`mux::REMAIN_ON_EXIT`](crate::mux::REMAIN_ON_EXIT).
+///
+/// Never among [`running`]: there is no agent in it to offer back, share as a
+/// tab, or wait on. What it is for is the message — the cctop with a pane on it
+/// says how the agent ended — and then for being ended itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Ended {
+    /// The rmux session name.
+    pub name: String,
+    /// The agent's exit status, when it exited rather than being killed.
+    pub status: Option<i32>,
+    /// The signal that killed it, when one did.
+    pub signal: Option<i32>,
+    /// When it died, in unix seconds.
+    pub at: Option<u64>,
+    /// Whether any client is still on the session — someone is reading it.
+    pub attached: bool,
+}
+
+/// Format fields [`running`] and [`ended`] both read, so they can tell a live
+/// session from a dead one in the same terms.
+const DEAD_FIELDS: &str =
+    "#{pane_dead}\t#{pane_dead_status}\t#{pane_dead_signal}\t#{pane_dead_time}";
+
+/// The cctop sessions whose agent has exited, kept by rmux for being a failure.
+///
+/// The first pane decides, as in [`running`]: it is the agent cctop started.
+pub fn ended() -> Vec<Ended> {
+    let format = format!("#{{session_name}}\t#{{session_attached}}\t{DEAD_FIELDS}");
+    let listing = crate::mux::list_all_panes(&format).unwrap_or_default();
+    let prefix = format!("{PREFIX}-");
+    let mut seen: Vec<&str> = Vec::new();
+    let mut out = Vec::new();
+    for line in listing.lines() {
+        let mut parts = line.split('\t').map(str::trim);
+        let Some(name) = parts.next().filter(|n| n.starts_with(&prefix)) else {
+            continue;
+        };
+        if seen.contains(&name) {
+            continue;
+        }
+        seen.push(name);
+        let attached = parts.next().is_some_and(|a| !a.is_empty() && a != "0");
+        if parts.next() != Some("1") {
+            continue;
+        }
+        let mut number = || parts.next().and_then(|v| v.parse::<i64>().ok());
+        let status = number().and_then(|v| i32::try_from(v).ok());
+        let signal = number().and_then(|v| i32::try_from(v).ok());
+        let at = number().and_then(|v| u64::try_from(v).ok());
+        out.push(Ended {
+            name: name.to_string(),
+            status,
+            signal,
+            at,
+            attached,
+        });
+    }
+    out
+}
+
+/// Whether the session called `name` is one whose agent has exited.
+fn ended_one(name: &str) -> bool {
+    let listing = crate::mux::list_panes(name, "#{session_name}\t#{pane_dead}");
+    listing
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| line.split_once('\t'))
+        .find(|(session, _)| *session == name)
+        .is_some_and(|(_, dead)| dead.trim() == "1")
+}
+
+/// How far back through history the last thing an agent said is looked for.
+///
+/// rmux marks a kept pane by writing "Pane is dead" at the bottom of its
+/// screen with a line feed, which scrolls everything up a line — so an agent
+/// that printed one line of error and died has it above the screen rather than
+/// on it. This is far enough back for that under any screen of blank rows,
+/// and no further than a status line needs.
+const LAST_WORDS_BACK: usize = 200;
+
+/// The last line with anything on it, skipping rmux's own epitaph: that is the
+/// exit status, which every caller already has, and not anything the agent said.
+fn last_line<'a>(lines: impl Iterator<Item = &'a str>) -> Option<String> {
+    lines
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with("Pane is dead"))
+        .last()
+        .map(str::to_string)
+}
+
+/// The last thing said on `screen` — its last line with anything on it, from
+/// the screen or the history just above it. See [`LAST_WORDS_BACK`].
+pub fn last_words(screen: &vt100::Screen) -> Option<String> {
+    let mut screen = screen.clone();
+    let rows = usize::from(screen.size().0.max(1));
+    let mut back = 0;
+    loop {
+        screen.set_scrollback(back);
+        if let Some(line) = last_line(screen.contents().lines()) {
+            return Some(line);
+        }
+        // Scrolled as far as the history goes, or as far as is worth it.
+        if screen.scrollback() < back || back >= LAST_WORDS_BACK {
+            return None;
+        }
+        back += rows;
+    }
+}
+
+/// [`last_words`] for the session called `name`, asked of rmux — for a dead
+/// session no pane here is showing.
+pub fn last_said(name: &str) -> Option<String> {
+    const FORMAT: &str = "#{session_name}\t#{session_name}:#{window_index}.#{pane_index}";
+    let listing = crate::mux::list_panes(name, FORMAT)?;
+    let target = listing
+        .lines()
+        .filter_map(|line| line.split_once('\t'))
+        .find(|(session, _)| *session == name)
+        .and_then(|(_, target)| crate::mux::pane_target(target))?;
+    let back = -(LAST_WORDS_BACK as i64);
+    let text = crate::mux::capture_from(&target, Some(back), false, true)?;
+    last_line(String::from_utf8_lossy(&text).lines())
 }
 
 /// The size rmux has fitted `name`'s window to, columns by rows.
@@ -2116,6 +2259,77 @@ mod tests {
         // One window, holding the agent: every lookup here assumes the one pane.
         assert_eq!(windows.as_deref(), Some("1"), "a second window appeared");
         assert!(agent.is_some_and(|p| p > 0), "no agent in the session");
+    }
+
+    /// An agent that fails keeps its session, so what it printed and how it
+    /// ended can still be read; it is never offered as a running agent; and an
+    /// agent that exits cleanly closes its session as it always did.
+    #[test]
+    fn a_failed_agent_keeps_its_session_and_a_clean_one_does_not() {
+        let _daemon = crate::mux::TestDaemon::new(
+            "a_failed_agent_keeps_its_session_and_a_clean_one_does_not",
+        );
+        let pid = std::process::id();
+        let failed = format!("cctop-failed-{pid}");
+        let clean = format!("cctop-clean-{pid}");
+        // A sleeper keeps the daemon up between the two, which would otherwise
+        // exit with its last session.
+        let keeper = format!("cctop-keeper-{pid}");
+        start_session(&keeper, None, &["sh", "-c", "sleep 30"]);
+        start_session(&clean, None, &["sh", "-c", "echo bye; exit 0"]);
+        start_session(
+            &failed,
+            None,
+            &["sh", "-c", "echo 'error: no such model'; exit 3"],
+        );
+
+        let gone = wait_asking(|| ended().into_iter().find(|e| e.name == failed))
+            .expect("the failed agent's session was not kept");
+        assert_eq!(gone.status, Some(3));
+        assert_eq!(gone.signal, None);
+        assert!(gone.at.is_some(), "no time of death");
+        assert!(
+            !running().iter().any(|r| r.name == failed),
+            "a dead session was offered as a running agent"
+        );
+        // One line of output, which rmux's own line scrolls off the screen.
+        assert_eq!(last_said(&failed).as_deref(), Some("error: no such model"));
+        wait_asking(|| (!exists(&clean)).then_some(())).expect("a clean exit kept its session");
+
+        // Starting under a dead session's name replaces it rather than
+        // attaching to the corpse.
+        let argv = vec!["sh".to_string(), "-c".to_string(), "sleep 30".to_string()];
+        start_detached(&argv, &failed, None).expect("start over the dead session");
+        assert!(
+            wait_asking(|| running().iter().any(|r| r.name == failed).then_some(())).is_some(),
+            "the replacement is not running"
+        );
+        end_session(&failed);
+        end_session(&keeper);
+    }
+
+    /// The line rmux writes under a kept pane is its own, not the agent's, and
+    /// the agent's last words are the line above it.
+    #[test]
+    fn the_last_words_skip_the_line_rmux_writes_under_a_dead_pane() {
+        let mut parser = vt100::Parser::new(6, 60, 0);
+        parser.process(b"claude: command not found\r\n\r\nPane is dead (status 127, 10:00)\r\n");
+        assert_eq!(
+            last_words(parser.screen()).as_deref(),
+            Some("claude: command not found")
+        );
+        // And scrolled off the top by the line feed rmux writes it with, the
+        // words are found in the history above.
+        let mut parser = vt100::Parser::new(4, 60, 100);
+        parser.process(b"error: no such model\r\n\x1b[4;1H\nPane is dead (status 3)");
+        assert!(
+            !parser.screen().contents().contains("model"),
+            "not scrolled"
+        );
+        assert_eq!(
+            last_words(parser.screen()).as_deref(),
+            Some("error: no such model")
+        );
     }
 
     /// The flag is the pane program's own answer, so it can only be checked

@@ -744,7 +744,7 @@ pub struct App {
     /// The listing is a subprocess and this runs on the thread that draws, so it
     /// is asked on a thread of its own and folded in here when it lands — the
     /// shape [`preview::Capture`] uses for its own capture.
-    shared_listing: Option<std::sync::mpsc::Receiver<Vec<cctop_core::rmux::Running>>>,
+    shared_listing: Option<std::sync::mpsc::Receiver<panes::Sweep>>,
     /// The tab being dragged along the bar, indexed as the bar is: `1..=len`,
     /// and never `0` because the dashboard does not move.
     ///
