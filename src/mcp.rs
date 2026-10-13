@@ -32,11 +32,19 @@
 use cctop_core::loader::Loader;
 use cctop_core::pricing::Plan;
 use cctop_core::session::Session;
+use cctop_core::session::lookup::{Lookup, lookup};
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Deserializer};
 use serde_json::{Value, json};
 use std::io::{BufRead, Write};
 
-/// The MCP revision this speaks.
-const PROTOCOL_VERSION: &str = "2024-11-05";
+/// The MCP revisions this speaks, newest first.
+///
+/// What changed between them is all on the client's side of a tools-only
+/// server or optional for this one — output schemas, structured content,
+/// elicitation — except batches, which 2025-03-26 asks a server to accept and
+/// [`answer_line`] does.
+const PROTOCOL_VERSIONS: [&str; 3] = ["2025-06-18", "2025-03-26", "2024-11-05"];
 
 /// How many sessions a listing returns before it truncates.
 ///
@@ -60,10 +68,10 @@ const MAX_LIMIT: u64 = 200;
 /// Both ends matter, and the floor is the one `recall` already uses: a zero
 /// would answer with nothing at all, which reads to an agent as "no sessions
 /// exist here" rather than "you asked for none". Anything no listing could
-/// honour — a float, a negative, a string — is not a limit at all, and falls
-/// back to the default.
-fn limit_of(args: &Value) -> usize {
-    match args.get("limit").and_then(Value::as_u64) {
+/// honour — a float, a negative, a string — is not a limit at all
+/// ([`lenient_u64`] reads it as `None`), and falls back to the default.
+fn limit_of(limit: Option<u64>) -> usize {
+    match limit {
         Some(n) => n.clamp(1, MAX_LIMIT) as usize,
         None => DEFAULT_LIMIT,
     }
@@ -89,23 +97,80 @@ pub fn serve() -> anyhow::Result<()> {
     let mut stdout = std::io::stdout();
 
     for line in stdin.lock().lines() {
-        let line = line?;
-        if line.trim().is_empty() {
-            continue;
-        }
-        let request: Value = match serde_json::from_str(&line) {
-            Ok(v) => v,
-            // A malformed line has no id to answer against, so there is nothing
-            // to reply to. Dropping it keeps the stream in sync.
-            Err(_) => continue,
-        };
-        let Some(response) = handle(&request) else {
+        let Some(response) = answer_line(&line?) else {
             continue;
         };
         writeln!(stdout, "{response}")?;
         stdout.flush()?;
     }
     Ok(())
+}
+
+/// The reply to one line of input, or `None` when it takes none.
+///
+/// A line that is not JSON is answered with a parse error and a null id, as
+/// JSON-RPC asks: its id cannot be read, but the client may be blocked on it,
+/// and an error it can log beats a silence it can only time out on. One line
+/// is one message, so the stream stays in sync either way.
+///
+/// A JSON array is a batch, which the 2025-03-26 revision asks a server to
+/// accept: each member is answered and the answers go back as one array, or
+/// nothing at all if every member was a notification.
+fn answer_line(line: &str) -> Option<Value> {
+    if line.trim().is_empty() {
+        return None;
+    }
+    let request: Value = match serde_json::from_str(line) {
+        Ok(v) => v,
+        Err(e) => {
+            return Some(error_reply(
+                Value::Null,
+                RpcError::new(PARSE_ERROR, format!("parse error: {e}")),
+            ));
+        }
+    };
+    match request {
+        Value::Array(batch) if batch.is_empty() => Some(error_reply(
+            Value::Null,
+            RpcError::new(INVALID_REQUEST, "an empty batch"),
+        )),
+        Value::Array(batch) => {
+            let replies: Vec<Value> = batch.iter().filter_map(handle).collect();
+            (!replies.is_empty()).then_some(Value::Array(replies))
+        }
+        request => handle(&request),
+    }
+}
+
+/// The JSON-RPC error codes this server answers with.
+const PARSE_ERROR: i64 = -32700;
+const INVALID_REQUEST: i64 = -32600;
+const METHOD_NOT_FOUND: i64 = -32601;
+const INVALID_PARAMS: i64 = -32602;
+
+/// A JSON-RPC error: the request itself was wrong, as opposed to a tool that
+/// ran and failed, which is a result (see [`call_tool`]).
+#[derive(Debug)]
+struct RpcError {
+    code: i64,
+    message: String,
+}
+
+impl RpcError {
+    fn new(code: i64, message: impl Into<String>) -> RpcError {
+        RpcError {
+            code,
+            message: message.into(),
+        }
+    }
+}
+
+fn error_reply(id: Value, error: RpcError) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "error": {"code": error.code, "message": error.message},
+    })
 }
 
 /// Register this binary as an MCP server with every agent CLI that can take
@@ -184,35 +249,55 @@ pub fn install(scope: &str) -> Vec<String> {
 
 /// Answer one request, or `None` for a notification, which takes no reply.
 fn handle(request: &Value) -> Option<Value> {
-    let method = request.get("method").and_then(Value::as_str)?;
-    let id = request.get("id").cloned();
     // A notification is exactly a request with no id, and replying to one is a
     // protocol error rather than a harmless extra message.
-    id.as_ref()?;
-    let id = id.unwrap_or(Value::Null);
+    let id = request.get("id")?.clone();
+    let Some(method) = request.get("method").and_then(Value::as_str) else {
+        return Some(error_reply(
+            id,
+            RpcError::new(INVALID_REQUEST, "a request needs a method"),
+        ));
+    };
+    let params = request.get("params");
 
     let result = match method {
         "initialize" => Ok(json!({
-            "protocolVersion": PROTOCOL_VERSION,
+            "protocolVersion": negotiate(params),
             "capabilities": {"tools": {}},
             "serverInfo": {"name": "cctop", "version": env!("CARGO_PKG_VERSION")},
             "instructions": INSTRUCTIONS,
         })),
         "tools/list" => Ok(json!({"tools": tool_schemas()})),
-        "tools/call" => call_tool(request.get("params")),
+        "tools/call" => call_tool(params),
         // `ping` is the one method a client may send that means nothing.
         "ping" => Ok(json!({})),
-        other => Err(format!("unknown method '{other}'")),
+        other => Err(RpcError::new(
+            METHOD_NOT_FOUND,
+            format!("unknown method '{other}'"),
+        )),
     };
 
     Some(match result {
         Ok(result) => json!({"jsonrpc": "2.0", "id": id, "result": result}),
-        Err(message) => json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "error": {"code": -32603, "message": message},
-        }),
+        Err(error) => error_reply(id, error),
     })
+}
+
+/// The protocol version to answer `initialize` with.
+///
+/// The client's own when this server speaks it, which is what the spec asks
+/// for; otherwise the newest one here, and the client decides whether it can
+/// live with that. Answering every client with one fixed revision is how a
+/// newer client that would have spoken the older one is told nothing it can
+/// agree to.
+fn negotiate(params: Option<&Value>) -> &'static str {
+    let asked = params
+        .and_then(|p| p.get("protocolVersion"))
+        .and_then(Value::as_str);
+    PROTOCOL_VERSIONS
+        .iter()
+        .find(|v| Some(**v) == asked)
+        .unwrap_or(&PROTOCOL_VERSIONS[0])
 }
 
 /// What the client is told the server is for, once, at `initialize`.
@@ -412,57 +497,153 @@ fn tool_schemas() -> Vec<Value> {
     ]
 }
 
-/// Run one tool and wrap its output the way MCP expects.
-fn call_tool(params: Option<&Value>) -> Result<Value, String> {
-    let params = params.ok_or("tools/call needs params")?;
-    let name = params
-        .get("name")
-        .and_then(Value::as_str)
-        .ok_or("tools/call needs a tool name")?;
-    let args = params.get("arguments").cloned().unwrap_or(json!({}));
+/// The tools [`call_tool`] answers to, which [`tool_schemas`] must list.
+const TOOLS: [&str; 7] = [
+    "list_sessions",
+    "get_session_context",
+    "check_conflicts",
+    "wait_for_session",
+    "recall",
+    "read_passage",
+    "search_sessions",
+];
 
+/// Run one tool and wrap its output the way MCP expects.
+///
+/// Two kinds of failure, kept apart as the spec keeps them. A call that names
+/// no tool, or one that does not exist, is the client's mistake and a JSON-RPC
+/// error. A tool that ran and could not answer — no such session, an ambiguous
+/// prefix, an argument it cannot use — is a *result* with `isError`: that is
+/// the form the client hands to the model, which can read "matches 3 sessions"
+/// and call again with more of the id. As a JSON-RPC error the same sentence
+/// tends to reach only a log. Bad arguments are on the result side for the
+/// same reason, as the 2025-11-25 revision moved them.
+fn call_tool(params: Option<&Value>) -> Result<Value, RpcError> {
+    let name = params
+        .and_then(|p| p.get("name"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| RpcError::new(INVALID_PARAMS, "tools/call needs a tool name"))?;
+    if !TOOLS.contains(&name) {
+        return Err(RpcError::new(
+            INVALID_PARAMS,
+            format!("unknown tool '{name}'"),
+        ));
+    }
+    let args = params
+        .and_then(|p| p.get("arguments"))
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    let (text, is_error) = match run_tool(name, args) {
+        Ok(text) => (text, false),
+        Err(text) => (text, true),
+    };
+    Ok(json!({"content": [{"type": "text", "text": text}], "isError": is_error}))
+}
+
+fn run_tool(name: &str, args: Value) -> Result<String, String> {
     // Before the load below: the wait does its own, and then keeps refreshing
     // it for as long as it blocks.
     if name == "wait_for_session" {
-        let text = wait_for_session(&args)?;
-        return Ok(json!({"content": [{"type": "text", "text": text}]}));
+        return wait_for_session(parse(name, args)?);
     }
 
     let mut loader = Loader::new();
     let sessions = loader.load(Plan::Retail);
 
     let text = match name {
-        "list_sessions" => list_sessions(&sessions, &args)?,
-        "get_session_context" => get_session_context(&sessions, &loader, &args)?,
-        "check_conflicts" => check_conflicts(&sessions, &args)?,
-        "search_sessions" => search_sessions(&sessions, &args)?,
-        "recall" => recall(&sessions, &args)?,
-        "read_passage" => read_passage(&sessions, &args)?,
-        other => return Err(format!("unknown tool '{other}'")),
+        "list_sessions" => list_sessions(&sessions, parse(name, args)?),
+        "get_session_context" => get_session_context(&sessions, &loader, parse(name, args)?)?,
+        "check_conflicts" => check_conflicts(&sessions, parse(name, args)?),
+        "search_sessions" => search_sessions(&sessions, parse(name, args)?)?,
+        "recall" => recall(&sessions, parse(name, args)?)?,
+        "read_passage" => read_passage(&sessions, parse(name, args)?)?,
+        other => unreachable!("{other} is not in TOOLS"),
     };
     // Persisting is worth the write even on a read-only call: an MCP server is
     // spawned per agent, and each one that reparsed every transcript from cold
     // would undo the cache the dashboard depends on.
     loader.store().save();
+    Ok(text)
+}
 
-    Ok(json!({"content": [{"type": "text", "text": text}]}))
+/// A tool's arguments as its own struct, or the sentence saying which one is
+/// missing or the wrong type, for the model to correct.
+fn parse<T: DeserializeOwned>(tool: &str, args: Value) -> Result<T, String> {
+    serde_json::from_value(args).map_err(|e| format!("{tool}: {e}"))
+}
+
+/// A number a model wrote, or `None` for anything that is not a whole
+/// non-negative one — a float, a negative, a string.
+///
+/// Lenient rather than refused because every number here has a default, and
+/// falling back to it answers the question that was asked; refusing would
+/// spend a turn on a field the caller could have left out.
+fn lenient_u64<'de, D: Deserializer<'de>>(d: D) -> Result<Option<u64>, D::Error> {
+    Ok(Value::deserialize(d)?.as_u64())
+}
+
+#[derive(Deserialize)]
+struct ListArgs {
+    #[serde(default)]
+    running_only: bool,
+    directory: Option<String>,
+    #[serde(default, deserialize_with = "lenient_u64")]
+    limit: Option<u64>,
+}
+
+#[derive(Deserialize)]
+struct ContextArgs {
+    session_id: String,
+}
+
+#[derive(Deserialize)]
+struct ConflictArgs {
+    directory: String,
+    #[serde(default)]
+    files: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct WaitArgs {
+    session: String,
+    until: Option<String>,
+    #[serde(default, deserialize_with = "lenient_u64")]
+    timeout_secs: Option<u64>,
+}
+
+#[derive(Deserialize)]
+struct RecallArgs {
+    query: String,
+    #[serde(default, deserialize_with = "lenient_u64")]
+    limit: Option<u64>,
+}
+
+#[derive(Deserialize)]
+struct PassageArgs {
+    session: String,
+    passage: u64,
+    #[serde(default, deserialize_with = "lenient_u64")]
+    around: Option<u64>,
+}
+
+#[derive(Deserialize)]
+struct SearchArgs {
+    query: String,
+    #[serde(default, deserialize_with = "lenient_u64")]
+    limit: Option<u64>,
 }
 
 /// `cctop wait`, bounded by [`MAX_WAIT`], answering in the CLI's `-j` shape.
-fn wait_for_session(args: &Value) -> Result<String, String> {
-    let target = args
-        .get("session")
-        .and_then(Value::as_str)
-        .ok_or("wait_for_session needs a session")?;
-    let until = match args.get("until").and_then(Value::as_str) {
+fn wait_for_session(args: WaitArgs) -> Result<String, String> {
+    let target = args.session.as_str();
+    let until = match args.until.as_deref() {
         None => crate::wait::Until::AnyStop,
         Some(word) => crate::wait::Until::parse(word).ok_or_else(|| {
             format!("until must be idle, waiting, done or any-stop, not '{word}'")
         })?,
     };
     let timeout = args
-        .get("timeout_secs")
-        .and_then(Value::as_u64)
+        .timeout_secs
         .map_or(DEFAULT_WAIT, std::time::Duration::from_secs)
         .min(MAX_WAIT);
     match crate::wait::wait(target, until, Some(timeout), false) {
@@ -478,13 +659,10 @@ fn wait_for_session(args: &Value) -> Result<String, String> {
     }
 }
 
-fn list_sessions(sessions: &[Session], args: &Value) -> Result<String, String> {
-    let running_only = args
-        .get("running_only")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    let directory = args.get("directory").and_then(Value::as_str);
-    let limit = limit_of(args);
+fn list_sessions(sessions: &[Session], args: ListArgs) -> String {
+    let running_only = args.running_only;
+    let directory = args.directory.as_deref();
+    let limit = limit_of(args.limit);
 
     let mut matched: Vec<&Session> = sessions
         .iter()
@@ -537,7 +715,7 @@ fn list_sessions(sessions: &[Session], args: &Value) -> Result<String, String> {
         "cost_note": "Costs are estimates from published per-token rates. Flat-rate plans \
                       bill differently.",
     });
-    Ok(serde_json::to_string_pretty(&payload).unwrap_or_default())
+    serde_json::to_string_pretty(&payload).unwrap_or_default()
 }
 
 /// Who else is running in this repository, and which of the caller's files they
@@ -548,23 +726,9 @@ fn list_sessions(sessions: &[Session], args: &Value) -> Result<String, String> {
 /// than guessed out: cctop cannot tell which row is the caller (an MCP server
 /// is a child process, not a session), and a wrong guess would drop the one
 /// peer that mattered. `own_row_note` says so instead.
-fn check_conflicts(sessions: &[Session], args: &Value) -> Result<String, String> {
-    let directory = args
-        .get("directory")
-        .and_then(Value::as_str)
-        .ok_or("check_conflicts needs a directory")?;
-    let files: Vec<String> = args
-        .get("files")
-        .and_then(Value::as_array)
-        .map(|list| {
-            list.iter()
-                .filter_map(Value::as_str)
-                .map(str::to_string)
-                .collect()
-        })
-        .unwrap_or_default();
-
-    let peers = cctop_core::collide::peers_of(sessions, directory, &files);
+fn check_conflicts(sessions: &[Session], args: ConflictArgs) -> String {
+    let directory = args.directory.as_str();
+    let peers = cctop_core::collide::peers_of(sessions, directory, &args.files);
     let contested: Vec<&str> = peers
         .iter()
         .filter(|(_, shared)| !shared.is_empty())
@@ -607,28 +771,19 @@ fn check_conflicts(sessions: &[Session], args: &Value) -> Result<String, String>
                    of one. A file is stronger evidence than a shared repository, though: a peer \
                    that already holds one of your files is reported wherever it was launched.",
     });
-    Ok(serde_json::to_string_pretty(&payload).unwrap_or_default())
+    serde_json::to_string_pretty(&payload).unwrap_or_default()
 }
 
 fn get_session_context(
     sessions: &[Session],
     loader: &Loader,
-    args: &Value,
+    args: ContextArgs,
 ) -> Result<String, String> {
-    let wanted = args
-        .get("session_id")
-        .and_then(Value::as_str)
-        .ok_or("get_session_context needs a session_id")?;
-
-    let matched: Vec<&Session> = sessions
-        .iter()
-        .filter(|s| s.session_id.starts_with(wanted))
-        .collect();
-
-    let session = match matched.as_slice() {
-        [only] => *only,
-        [] => return Err(format!("no session id starts with '{wanted}'")),
-        many => {
+    let wanted = args.session_id.as_str();
+    let session = match lookup(sessions, wanted) {
+        Lookup::Found(only) => only,
+        Lookup::None => return Err(format!("no session id starts with '{wanted}'")),
+        Lookup::Ambiguous(many) => {
             return Err(format!(
                 "'{wanted}' matches {} sessions: {}",
                 many.len(),
@@ -651,47 +806,30 @@ fn get_session_context(
 ///
 /// The text form rather than JSON: the reader is a model, which reads prose
 /// at a fraction of the tokens the same answer costs as quoted, escaped JSON.
-fn recall(sessions: &[Session], args: &Value) -> Result<String, String> {
-    let query = args
-        .get("query")
-        .and_then(Value::as_str)
-        .filter(|q| !q.trim().is_empty())
-        .ok_or("recall needs a query")?;
+fn recall(sessions: &[Session], args: RecallArgs) -> Result<String, String> {
+    let query = args.query.as_str();
+    if query.trim().is_empty() {
+        return Err("recall needs a query".into());
+    }
     let limit = args
-        .get("limit")
-        .and_then(Value::as_u64)
+        .limit
         .map_or(crate::recall::DEFAULT_LIMIT, |n| n.clamp(1, 50) as usize);
     let me = crate::recall::caller(sessions);
     let answer = crate::recall::recall(sessions, query, limit, me.as_deref());
     Ok(crate::recall::render(&answer))
 }
 
-fn read_passage(sessions: &[Session], args: &Value) -> Result<String, String> {
-    let session = args
-        .get("session")
-        .and_then(Value::as_str)
-        .ok_or("read_passage needs a session")?;
-    let passage = args
-        .get("passage")
-        .and_then(Value::as_u64)
-        .ok_or("read_passage needs a passage number")? as usize;
-    let around = args
-        .get("around")
-        .and_then(Value::as_u64)
-        .unwrap_or(1)
-        .min(5) as usize;
-    crate::recall::read(sessions, session, passage, around)
+fn read_passage(sessions: &[Session], args: PassageArgs) -> Result<String, String> {
+    let around = args.around.unwrap_or(1).min(5) as usize;
+    crate::recall::read(sessions, &args.session, args.passage as usize, around)
 }
 
-fn search_sessions(sessions: &[Session], args: &Value) -> Result<String, String> {
-    let query = args
-        .get("query")
-        .and_then(Value::as_str)
-        .ok_or("search_sessions needs a query")?;
+fn search_sessions(sessions: &[Session], args: SearchArgs) -> Result<String, String> {
+    let query = args.query.as_str();
     if query.trim().is_empty() {
         return Err("search_sessions needs a non-empty query".into());
     }
-    let limit = limit_of(args);
+    let limit = limit_of(args.limit);
 
     let needle = query.to_lowercase();
     let mut ordered: Vec<&Session> = sessions.iter().collect();
@@ -748,7 +886,7 @@ mod tests {
     fn initialize_answers_with_the_protocol_version() {
         let request = json!({"jsonrpc": "2.0", "id": 1, "method": "initialize"});
         let response = handle(&request).expect("a reply");
-        assert_eq!(response["result"]["protocolVersion"], PROTOCOL_VERSION);
+        assert_eq!(response["result"]["protocolVersion"], PROTOCOL_VERSIONS[0]);
         assert_eq!(response["id"], 1);
     }
 
@@ -794,7 +932,99 @@ mod tests {
         let request = json!({"jsonrpc": "2.0", "id": 7, "method": "resources/list"});
         let response = handle(&request).expect("a reply");
         assert_eq!(response["id"], 7);
+        assert_eq!(response["error"]["code"], METHOD_NOT_FOUND);
         assert!(response["error"]["message"].as_str().is_some());
+    }
+
+    /// A line that is not JSON has no readable id, so it is answered against a
+    /// null one — the client sees the error instead of waiting out a timeout.
+    #[test]
+    fn a_malformed_line_gets_a_parse_error_with_a_null_id() {
+        let reply = answer_line("{\"jsonrpc\": \"2.0\", \"id\": 3,").expect("a reply");
+        assert_eq!(reply["error"]["code"], PARSE_ERROR);
+        assert_eq!(reply["id"], Value::Null);
+        assert!(
+            answer_line("   ").is_none(),
+            "a blank line is not a message"
+        );
+    }
+
+    /// A batch is answered member by member, in one array, leaving out the
+    /// notifications; a batch of nothing but notifications gets no reply.
+    #[test]
+    fn a_batch_is_answered_as_one_array() {
+        let line = json!([
+            {"jsonrpc": "2.0", "id": 1, "method": "ping"},
+            {"jsonrpc": "2.0", "method": "notifications/initialized"},
+            {"jsonrpc": "2.0", "id": 2, "method": "nope"},
+        ])
+        .to_string();
+        let reply = answer_line(&line).expect("a reply");
+        let replies = reply.as_array().expect("an array");
+        assert_eq!(replies.len(), 2);
+        assert_eq!(replies[0]["id"], 1);
+        assert_eq!(replies[1]["error"]["code"], METHOD_NOT_FOUND);
+        let quiet = json!([{"jsonrpc": "2.0", "method": "notifications/initialized"}]);
+        assert!(answer_line(&quiet.to_string()).is_none());
+    }
+
+    /// The client's version is echoed when this server speaks it, and the
+    /// newest one here is offered when it does not.
+    #[test]
+    fn initialize_negotiates_the_protocol_version() {
+        let init = |version: &str| {
+            let request = json!({
+                "jsonrpc": "2.0", "id": 1, "method": "initialize",
+                "params": {"protocolVersion": version, "capabilities": {}},
+            });
+            handle(&request).expect("a reply")["result"]["protocolVersion"].clone()
+        };
+        for version in PROTOCOL_VERSIONS {
+            assert_eq!(init(version), version);
+        }
+        assert_eq!(init("1999-01-01"), PROTOCOL_VERSIONS[0]);
+    }
+
+    /// A tool that runs and cannot answer says so as a result the model reads,
+    /// with `isError`; a tool that does not exist is the client's mistake and a
+    /// JSON-RPC error.
+    #[test]
+    fn a_tool_failure_is_a_result_and_an_unknown_tool_an_error() {
+        let call = |params: Value| {
+            let request =
+                json!({"jsonrpc": "2.0", "id": 9, "method": "tools/call", "params": params});
+            handle(&request).expect("a reply")
+        };
+        // Missing its required argument: refused before any session is read.
+        let failed = call(json!({"name": "get_session_context", "arguments": {}}));
+        assert!(failed.get("error").is_none(), "{failed}");
+        assert_eq!(failed["result"]["isError"], true);
+        let text = failed["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("session_id"), "{text}");
+
+        let unknown = call(json!({"name": "drop_tables"}));
+        assert_eq!(unknown["error"]["code"], INVALID_PARAMS);
+        let nameless = call(json!({}));
+        assert_eq!(nameless["error"]["code"], INVALID_PARAMS);
+    }
+
+    /// Every name the dispatcher accepts is a tool the schema lists, and the
+    /// other way round, so neither can be added without the other.
+    #[test]
+    fn the_dispatched_tools_are_the_listed_ones() {
+        let listed: Vec<String> = tool_schemas()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(listed, TOOLS);
+    }
+
+    fn args<T: DeserializeOwned>(value: Value) -> T {
+        parse("test", value).expect("arguments that parse")
+    }
+
+    fn limit_of_json(value: Value) -> usize {
+        limit_of(args::<ListArgs>(value).limit)
     }
 
     /// The tool's `until` enum is exactly the words the wait understands, so
@@ -815,9 +1045,12 @@ mod tests {
         }
         assert_eq!(words.len(), 4);
         // Refused before anything is read, rather than after a walk.
-        let bad = wait_for_session(&json!({"session": "x", "until": "never"}));
+        let bad = run_tool(
+            "wait_for_session",
+            json!({"session": "x", "until": "never"}),
+        );
         assert!(bad.unwrap_err().contains("until must be"));
-        assert!(wait_for_session(&json!({})).is_err());
+        assert!(run_tool("wait_for_session", json!({})).is_err());
     }
 
     /// A `limit` is a model's number, and the biggest one it can write is not a
@@ -827,25 +1060,31 @@ mod tests {
     /// nothing.
     #[test]
     fn a_limit_from_the_model_is_clamped_rather_than_obeyed() {
-        assert_eq!(limit_of(&json!({"limit": u64::MAX})), MAX_LIMIT as usize);
         assert_eq!(
-            limit_of(&json!({"limit": MAX_LIMIT * 1_000})),
+            limit_of_json(json!({"limit": u64::MAX})),
             MAX_LIMIT as usize
         );
-        assert_eq!(limit_of(&json!({"limit": 0})), 1);
-        // `as_u64` refuses a negative outright, so the default is what is left.
-        assert_eq!(limit_of(&json!({"limit": -1})), DEFAULT_LIMIT);
-        assert_eq!(limit_of(&json!({"limit": i64::MIN})), DEFAULT_LIMIT);
-        // Nor a float or a string, which no listing would honour either.
-        assert_eq!(limit_of(&json!({"limit": 1e30})), DEFAULT_LIMIT);
         assert_eq!(
-            limit_of(&json!({"limit": "18446744073709551615"})),
+            limit_of_json(json!({"limit": MAX_LIMIT * 1_000})),
+            MAX_LIMIT as usize
+        );
+        assert_eq!(limit_of_json(json!({"limit": 0})), 1);
+        // `as_u64` refuses a negative outright, so the default is what is left.
+        assert_eq!(limit_of_json(json!({"limit": -1})), DEFAULT_LIMIT);
+        assert_eq!(limit_of_json(json!({"limit": i64::MIN})), DEFAULT_LIMIT);
+        // Nor a float or a string, which no listing would honour either.
+        assert_eq!(limit_of_json(json!({"limit": 1e30})), DEFAULT_LIMIT);
+        assert_eq!(
+            limit_of_json(json!({"limit": "18446744073709551615"})),
             DEFAULT_LIMIT
         );
-        assert_eq!(limit_of(&json!({})), DEFAULT_LIMIT);
+        assert_eq!(limit_of_json(json!({})), DEFAULT_LIMIT);
         // A number inside the range is still the caller's.
-        assert_eq!(limit_of(&json!({"limit": 3})), 3);
-        assert_eq!(limit_of(&json!({"limit": MAX_LIMIT})), MAX_LIMIT as usize);
+        assert_eq!(limit_of_json(json!({"limit": 3})), 3);
+        assert_eq!(
+            limit_of_json(json!({"limit": MAX_LIMIT})),
+            MAX_LIMIT as usize
+        );
     }
 
     /// The cap has to be in the schema, not only in the handler: the schema is
@@ -886,7 +1125,7 @@ mod tests {
     #[test]
     fn a_listing_stops_at_the_cap_however_large_a_limit_is() {
         let sessions = many_sessions(MAX_LIMIT as usize + 10);
-        let text = list_sessions(&sessions, &json!({"limit": u64::MAX})).expect("an answer");
+        let text = list_sessions(&sessions, args(json!({"limit": u64::MAX})));
         let out: Value = serde_json::from_str(&text).unwrap();
         assert_eq!(out["returned"], MAX_LIMIT);
         // Said out loud, because an agent handed a truncated list otherwise
@@ -896,7 +1135,7 @@ mod tests {
 
         // The other end: a zero limit still answers with a row, rather than with
         // nothing, which would read as "this machine has no sessions".
-        let text = list_sessions(&sessions, &json!({"limit": 0})).expect("an answer");
+        let text = list_sessions(&sessions, args(json!({"limit": 0})));
         let out: Value = serde_json::from_str(&text).unwrap();
         assert_eq!(out["returned"], 1);
     }
@@ -920,8 +1159,11 @@ mod tests {
             })
             .collect();
 
-        let text = search_sessions(&sessions, &json!({"query": "needle", "limit": u64::MAX}))
-            .expect("an answer");
+        let text = search_sessions(
+            &sessions,
+            args(json!({"query": "needle", "limit": u64::MAX})),
+        )
+        .expect("an answer");
         let out: Value = serde_json::from_str(&text).unwrap();
         assert_eq!(out["matches"].as_array().unwrap().len(), MAX_LIMIT as usize);
         // The note names the limit the scan actually stopped at, which is the
@@ -935,8 +1177,8 @@ mod tests {
             out["note"]
         );
 
-        let text =
-            search_sessions(&sessions, &json!({"query": "needle", "limit": 0})).expect("an answer");
+        let text = search_sessions(&sessions, args(json!({"query": "needle", "limit": 0})))
+            .expect("an answer");
         let out: Value = serde_json::from_str(&text).unwrap();
         assert_eq!(out["matches"].as_array().unwrap().len(), 1);
     }

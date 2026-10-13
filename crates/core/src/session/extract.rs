@@ -735,14 +735,7 @@ mod tests {
     }
 
     fn temp_path(tag: &str) -> std::path::PathBuf {
-        std::env::temp_dir().join(format!(
-            "cctop-extract-{tag}-{}-{}.jsonl",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("clock after epoch")
-                .as_nanos()
-        ))
+        crate::session::temp_path(&format!("extract-{tag}")).with_extension("jsonl")
     }
 
     /// Regression: an oversized assistant entry (a big `Write`, a large

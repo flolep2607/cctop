@@ -125,6 +125,10 @@ clap = { version = "4.6.5", features = ["derive"] }
 crossterm = "0.29.0"
 dirs = "6.0.0"
 flate2 = "1.1.9"
+# The serve's request line and headers. Already in the tree under the tunnel
+# crate and rmux-server, so this adds no dependency — and it is the parser
+# hyper uses, fuzzed for exactly the inputs a socket a stranger can reach gets.
+httparse = "1.10.1"
 # The web UI's fixed bodies are sent brotli to a browser that takes it: the app
 # page, rmux's terminal bundle and its WebAssembly come out 7-20% smaller than
 # gzip. They are compressed when cctop is built (`crates/serve/build.rs`), so

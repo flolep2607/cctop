@@ -309,12 +309,8 @@ pub fn extract(path: &Path) -> SessionData {
     data
 }
 
-pub fn delete(session: &Session) -> std::io::Result<()> {
-    let Some(path) = &session.data_file else {
-        return Ok(());
-    };
-    std::fs::remove_file(path)
-}
+/// A Gemini session is its one JSONL file.
+pub use super::delete_transcript as delete;
 
 #[cfg(test)]
 mod tests {

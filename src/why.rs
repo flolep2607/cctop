@@ -20,6 +20,7 @@
 use cctop_core::loader::Loader;
 use cctop_core::pricing::Plan;
 use cctop_core::session::Session;
+use cctop_core::session::lookup::{Lookup, candidate_lines, lookup};
 
 pub const HELP: &str = "\
 cctop why — why cctop thinks a session is running, or is not
@@ -43,23 +44,16 @@ A session id may be shortened, as long as it is unambiguous.
 /// refusal actionable — the same bargain [`crate::cli`] makes, since a prefix is
 /// ambiguous only relative to sessions the user cannot see from here.
 fn resolve<'a>(sessions: &'a [Session], id: &str) -> Result<Vec<&'a Session>, String> {
-    let matched: Vec<_> = sessions
-        .iter()
-        .filter(|s| s.session_id.starts_with(id))
-        .collect();
-    match matched.as_slice() {
-        [] => Err(format!(
+    match lookup(sessions, id) {
+        Lookup::None => Err(format!(
             "No session here starts with {id}.\n`cctop -l` lists them; `cctop doctor` \
              says where they are read from."
         )),
-        [only] => Ok(vec![*only]),
-        many => Err(format!(
+        Lookup::Found(only) => Ok(vec![only]),
+        Lookup::Ambiguous(many) => Err(format!(
             "`{id}` matches {} sessions:\n{}",
             many.len(),
-            many.iter()
-                .map(|s| format!("  {} ({})", s.session_id, s.provider.as_str()))
-                .collect::<Vec<_>>()
-                .join("\n")
+            candidate_lines(&many)
         )),
     }
 }

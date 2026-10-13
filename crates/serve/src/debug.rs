@@ -36,7 +36,7 @@
 
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
-use super::http::{self, Request};
+use super::http::{self, Request, json};
 use super::{Shared, current};
 use std::net::TcpStream;
 
@@ -122,13 +122,7 @@ pub fn intercept(stream: &mut TcpStream, request: &Request) -> bool {
             true
         }
         EMPTY => {
-            http::respond(
-                stream,
-                Some(request),
-                200,
-                "application/json; charset=utf-8",
-                b"",
-            );
+            http::respond_json(stream, request, "");
             true
         }
         _ => false,
@@ -306,14 +300,4 @@ fn fault_name(mode: u8) -> &'static str {
         STALL => "stall",
         _ => "off",
     }
-}
-
-fn json(stream: &mut TcpStream, request: &Request, body: &serde_json::Value) {
-    http::respond(
-        stream,
-        Some(request),
-        200,
-        "application/json; charset=utf-8",
-        body.to_string().as_bytes(),
-    );
 }

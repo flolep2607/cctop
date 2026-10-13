@@ -118,7 +118,7 @@ use cctop_core::session::Session;
 use cctop_core::tunnel;
 use cctop_core::watch::Watch;
 use cctop_core::{actions, chat, export, report};
-use http::{EventStream, Request};
+use http::{EventStream, Request, json};
 use std::collections::HashMap;
 use std::io::Write;
 use std::net::{TcpListener, TcpStream, ToSocketAddrs};
@@ -616,9 +616,9 @@ pub fn start(options: Options) -> anyhow::Result<Serving> {
         (false, _) => None,
     };
 
-    // The origin a notification's link is built on: the tunnel's when there is
-    // one, since a webhook that names loopback is a link that works only on the
-    // machine that sent it.
+    // The origin a link to hand out is built on: the tunnel's when there is
+    // one, since a link that names loopback works only on the machine that
+    // made it — which is also why a notification's link is built on it.
     //
     // Behind Access, a token link goes on the token hostname — the
     // dashboard's own asks for a login first — and with public links off
@@ -634,6 +634,18 @@ pub fn start(options: Options) -> anyhow::Result<Serving> {
         .clone()
         .or_else(|| tunnel.as_ref().map(|t| t.url.clone()))
         .unwrap_or_else(|| format!("http://127.0.0.1:{}", addr.port()));
+    let query = match token.is_empty() {
+        true => String::new(),
+        false => format!("?t={token}"),
+    };
+    let local = format!("http://127.0.0.1:{}/{query}", addr.port());
+    let public = tunnel.as_ref().map(|t| match &token_origin {
+        Some(origin) => format!("{origin}/{query}"),
+        None => format!("{}/", t.url),
+    });
+    // The webhook links what `Serving::best` hands out, for the reason
+    // `cctop_core::notify::session_link` gives.
+    let link_base = public.clone().unwrap_or_else(|| local.clone());
 
     let shared = Arc::new(Shared {
         token: token.clone(),
@@ -663,7 +675,7 @@ pub fn start(options: Options) -> anyhow::Result<Serving> {
                     .ok()
                     .filter(|url| !url.is_empty())
             })
-            .map(|target| notify::Webhook::new(target, origin.clone(), token.clone())),
+            .map(|target| notify::Webhook::new(target, link_base)),
         hosts: options
             .hosts
             .iter()
@@ -717,10 +729,6 @@ pub fn start(options: Options) -> anyhow::Result<Serving> {
         spawn_provider_status_poller(Arc::clone(&shared));
     }
 
-    let query = match token.is_empty() {
-        true => String::new(),
-        false => format!("?t={token}"),
-    };
     cctop_core::elog::event(
         "serve",
         "listen",
@@ -752,13 +760,8 @@ pub fn start(options: Options) -> anyhow::Result<Serving> {
             true => String::new(),
             false => format!("{origin}/?t={}", shared.readonly),
         };
-    let public = tunnel.as_ref().map(|t| match &token_origin {
-        Some(origin) => format!("{origin}/{query}"),
-        None => format!("{}/", t.url),
-    });
-
     Ok(Serving {
-        local: format!("http://127.0.0.1:{}/{query}", addr.port()),
+        local,
         public,
         tunnel_fallback: tunnel.as_ref().and_then(|t| t.fallback.clone()),
         readonly: readonly_link,
@@ -1281,18 +1284,8 @@ fn lock_provider_status(
 fn provider_status_route(shared: &Shared, stream: &mut TcpStream, request: &Request) {
     let status = lock_provider_status(shared).clone();
     let snapshot = current(shared);
-    let body = serde_json::to_string(&cctop_core::provider_status::document(
-        &status,
-        &snapshot.sessions,
-    ))
-    .unwrap_or_default();
-    http::respond(
-        stream,
-        Some(request),
-        200,
-        "application/json; charset=utf-8",
-        body.as_bytes(),
-    );
+    let document = cctop_core::provider_status::document(&status, &snapshot.sessions);
+    json(stream, request, &document);
 }
 
 /// Walk, refresh, and publish, forever.
@@ -1876,12 +1869,7 @@ fn serve_connection(shared: &Shared, stream: &mut TcpStream) {
                 }
                 false => snapshot.json.as_str(),
             };
-            http::respond_tagged_unkept(
-                stream,
-                &request,
-                "application/json; charset=utf-8",
-                body.as_bytes(),
-            );
+            http::respond_tagged_unkept(stream, &request, http::JSON, body.as_bytes());
         }
         "/api/hosts" => {
             let snapshot = current(shared);
@@ -1894,14 +1882,7 @@ fn serve_connection(shared: &Shared, stream: &mut TcpStream) {
                     failed.push((machine, why));
                 }
             }
-            let body = serde_json::to_string(&failed).unwrap_or_default();
-            http::respond(
-                stream,
-                Some(&request),
-                200,
-                "application/json; charset=utf-8",
-                body.as_bytes(),
-            );
+            json(stream, &request, &failed);
         }
         "/api/quota" => {
             // Served from memory: the document is rendered by whoever polled
@@ -1911,13 +1892,7 @@ fn serve_connection(shared: &Shared, stream: &mut TcpStream) {
                 .lock()
                 .map(|q| q.clone())
                 .unwrap_or_else(|_| quota::EMPTY.to_string());
-            http::respond(
-                stream,
-                Some(&request),
-                200,
-                "application/json; charset=utf-8",
-                body.as_bytes(),
-            );
+            http::respond_json(stream, &request, &body);
         }
         "/api/provider-status" => provider_status_route(shared, stream, &request),
         "/api/search" => api_search(shared, stream, &request),
@@ -1958,13 +1933,7 @@ fn serve_connection(shared: &Shared, stream: &mut TcpStream) {
                 "agents": agents,
                 "local_only": local_only,
             });
-            http::respond(
-                stream,
-                Some(&request),
-                200,
-                "application/json; charset=utf-8",
-                body.to_string().as_bytes(),
-            );
+            json(stream, &request, &body);
         }
         // Not under /api/act/<id>/ — a launch names no session because there is
         // none yet. The guards are the shared ones: same link, same flag, same
@@ -2099,12 +2068,7 @@ fn serve_connection(shared: &Shared, stream: &mut TcpStream) {
             // Tab names, titles and states — what the page shows in its bar,
             // nothing from a transcript — so it may sit in the browser cache.
             let body = serde_json::json!({ "tabs": list }).to_string();
-            http::respond_revalidated(
-                stream,
-                &request,
-                "application/json; charset=utf-8",
-                body.as_bytes(),
-            );
+            http::respond_revalidated(stream, &request, http::JSON, body.as_bytes());
         }
         _ if path.starts_with("/api/tab/") => {
             api_tab(shared, stream, &request, &path["/api/tab/".len()..], access);
@@ -2457,13 +2421,7 @@ fn remote_chat(
         Err(_) => return remote_json(shared, stream, request, session, args),
     };
     let Ok(mut conversation) = serde_json::from_str::<chat::Conversation>(&body) else {
-        return http::respond(
-            stream,
-            Some(request),
-            200,
-            "application/json; charset=utf-8",
-            body.as_bytes(),
-        );
+        return http::respond_json(stream, request, &body);
     };
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -2548,13 +2506,16 @@ fn remote_text(shared: &Shared, session: &Session, args: &[&str]) -> Result<Stri
     let remote = session
         .remote
         .as_ref()
-        .expect("only a remote row reaches remote_text");
+        .expect("only a remote row reaches remote_text or remote_json");
     let Some(host) = shared.hosts.get(&remote.host) else {
         return Err(format!(
             "this session is on {}, which this run is not connected to",
             remote.host
         ));
     };
+    // The far side's own words are usually the answer: "command not found",
+    // "no session id starts with …", or — for a cctop older than these flags —
+    // clap's "unexpected argument".
     host.run(args)
         .map_err(|why| format!("{} could not answer: {why}", remote.host))
 }
@@ -2723,25 +2684,6 @@ fn api_act(shared: &Shared, stream: &mut TcpStream, request: &Request, rest: &st
     match outcome {
         Ok(done) => json(stream, request, &done),
         Err((status, why)) => http::respond_error(stream, Some(request), status, &why),
-    }
-}
-
-/// Send a value as JSON, or say why it could not be rendered.
-fn json<T: serde::Serialize>(stream: &mut TcpStream, request: &Request, value: &T) {
-    match serde_json::to_string(value) {
-        Ok(body) => http::respond(
-            stream,
-            Some(request),
-            200,
-            "application/json; charset=utf-8",
-            body.as_bytes(),
-        ),
-        Err(e) => http::respond_error(
-            stream,
-            Some(request),
-            503,
-            &format!("could not render that: {e}"),
-        ),
     }
 }
 
@@ -2955,13 +2897,7 @@ fn config_route(
         None => "",
     };
     let actions = access == Access::Full && shared.actions;
-    http::respond(
-        stream,
-        Some(request),
-        200,
-        "application/json; charset=utf-8",
-        app_config(credential, actions).as_bytes(),
-    );
+    http::respond_json(stream, request, &app_config(credential, actions));
 }
 
 /// The config [`config_route`] answers with, as JSON.
@@ -3372,13 +3308,7 @@ fn api_report(shared: &Shared, stream: &mut TcpStream, request: &Request, id: &s
     let data = shared.store.session_data_fresh(session);
     let built = report::build(session, &data, shared.plan);
     match serde_json::to_string(&built) {
-        Ok(body) => http::respond(
-            stream,
-            Some(request),
-            200,
-            "application/json; charset=utf-8",
-            body.as_bytes(),
-        ),
+        Ok(body) => http::respond_json(stream, request, &body),
         Err(e) => http::respond_error(
             stream,
             Some(request),
@@ -3403,42 +3333,14 @@ fn remote_json(
     session: &Session,
     args: &[String],
 ) {
-    let remote = session
-        .remote
-        .as_ref()
-        .expect("only a remote row reaches remote_json");
-    let Some(host) = shared.hosts.get(&remote.host) else {
-        // The row is real — it arrived over ssh — so a host this map does not
-        // know is a spec that was dropped between polls, not a session that
-        // does not exist. 502 rather than 404 says which of those it is.
-        return http::respond_error(
-            stream,
-            Some(request),
-            502,
-            &format!(
-                "this session is on {}, which this run is not connected to",
-                remote.host
-            ),
-        );
-    };
     let argv: Vec<&str> = args.iter().map(String::as_str).collect();
-    match host.run(&argv) {
-        Ok(body) => http::respond(
-            stream,
-            Some(request),
-            200,
-            "application/json; charset=utf-8",
-            body.as_bytes(),
-        ),
-        // The far side's own words are usually the answer: "command not
-        // found", "no session id starts with …", or — for a cctop older than
-        // these flags — clap's "unexpected argument".
-        Err(why) => http::respond_error(
-            stream,
-            Some(request),
-            502,
-            &format!("{} could not answer: {why}", remote.host),
-        ),
+    match remote_text(shared, session, &argv) {
+        Ok(body) => http::respond_json(stream, request, &body),
+        // 502 for both of `remote_text`'s failures. The row is real — it
+        // arrived over ssh — so a host this run does not know is a spec that
+        // was dropped between polls, not a session that does not exist, and
+        // a 404 would say the wrong one of those.
+        Err(why) => http::respond_error(stream, Some(request), 502, &why),
     }
 }
 
@@ -3446,17 +3348,10 @@ fn remote_json(
 ///
 /// Prefixes because session ids are uuids and the report link is a thing people
 /// paste into chat. An ambiguous prefix resolves to nothing rather than to the
-/// first match — the wrong session's costs is a worse answer than none.
+/// first match — the wrong session's costs is a worse answer than none. The
+/// rules are core's, shared with every other face that takes an id.
 fn find<'a>(sessions: &'a [Session], id: &str) -> Option<&'a Session> {
-    if id.is_empty() {
-        return None;
-    }
-    if let Some(exact) = sessions.iter().find(|s| s.session_id == id) {
-        return Some(exact);
-    }
-    let mut matches = sessions.iter().filter(|s| s.session_id.starts_with(id));
-    let first = matches.next()?;
-    matches.next().is_none().then_some(first)
+    cctop_core::session::lookup::lookup(sessions, id).found()
 }
 
 #[cfg(test)]
