@@ -35,7 +35,7 @@
 //! # The one answer that is not silence
 //!
 //! Two events answer on stdout at all. `Stop` and `SubagentStop` get the
-//! documented no-op `{"continue": true}` (see [`answer`]). And, only with
+//! documented no-op `{"continue": true}` (see [`answer`](client::answer)). And, only with
 //! `[settings] warn_agents = true`, a file write another live session has
 //! recently made to the same file gets the harness's *context* channel —
 //! `hookSpecificOutput.additionalContext`, and nothing beside it. That is the
