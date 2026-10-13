@@ -660,6 +660,7 @@ dependencies = [
  "chrono",
  "dirs",
  "flate2",
+ "httparse",
  "libc",
  "percent-encoding",
  "pulldown-cmark",

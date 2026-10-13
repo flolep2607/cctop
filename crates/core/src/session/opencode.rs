@@ -1,6 +1,7 @@
 //! OpenCode session discovery and extraction from its current SQLite store.
 
 use super::extract;
+use super::readonly;
 use super::{
     ActivityState, ContextUsage, Costs, FallbackRates, ModelBreakdown, Session, SessionData,
     Subagent, SubagentStatus, Tokens,
@@ -8,7 +9,7 @@ use super::{
 use crate::config;
 use crate::pricing::Provider;
 use crate::util;
-use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::Value;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -44,13 +45,6 @@ fn tool_duration_ms(state: &Value) -> Option<i64> {
     let start = time.get("start")?.as_i64()?;
     let end = time.get("end")?.as_i64()?;
     Some((end - start).max(0))
-}
-
-fn readonly(path: &Path) -> rusqlite::Result<Connection> {
-    Connection::open_with_flags(
-        path,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
 }
 
 thread_local! {

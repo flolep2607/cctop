@@ -891,13 +891,8 @@ pub fn extract_last_tool(session: &Session) -> String {
     String::new()
 }
 
-/// Remove a Codex rollout file.
-pub fn delete(session: &Session) -> std::io::Result<()> {
-    if let Some(file) = session.data_file.as_ref() {
-        std::fs::remove_file(file)?;
-    }
-    Ok(())
-}
+/// A Codex session is its one rollout file.
+pub use super::delete_transcript as delete;
 
 #[cfg(test)]
 mod tests {

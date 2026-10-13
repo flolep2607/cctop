@@ -3,6 +3,7 @@
 use cctop_core::loader::Loader;
 use cctop_core::pricing::{Plan, Provider};
 use cctop_core::session::Session;
+use cctop_core::session::lookup::{Lookup, candidate_lines, lookup};
 use cctop_core::util;
 use clap::Parser;
 
@@ -541,36 +542,22 @@ pub fn run_list(sessions: &[Session], plan: Plan) {
 /// `--report`, `--chat`, `--export`, `--access`), so they all answer an ambiguous prefix
 /// the same way and all agree on what no argument means.
 fn find_session<'a>(sessions: &'a [Session], which: &str) -> anyhow::Result<&'a Session> {
-    let matched: Vec<&Session> = match which.is_empty() {
-        true => {
-            // `max_by_key` on the timestamps rather than on load order: the
-            // loader groups by provider, so "last in the list" is whichever
-            // provider sorted last, not whichever session ran last.
-            sessions
-                .iter()
-                .max_by_key(|s| s.last_active.clone())
-                .into_iter()
-                .collect()
-        }
-        false => sessions
+    if which.is_empty() {
+        // `max_by_key` on the timestamps rather than on load order: the
+        // loader groups by provider, so "last in the list" is whichever
+        // provider sorted last, not whichever session ran last.
+        return sessions
             .iter()
-            .filter(|s| s.session_id.starts_with(which))
-            .collect(),
-    };
-
-    match matched.as_slice() {
-        [only] => Ok(*only),
-        [] if which.is_empty() => anyhow::bail!("no sessions found"),
-        [] => anyhow::bail!("no session id starts with '{which}'"),
-        // Listing them is what makes the error actionable — a prefix is only
-        // ambiguous relative to sessions the user cannot see from here.
-        many => anyhow::bail!(
+            .max_by_key(|s| s.last_active.clone())
+            .ok_or_else(|| anyhow::anyhow!("no sessions found"));
+    }
+    match lookup(sessions, which) {
+        Lookup::Found(only) => Ok(only),
+        Lookup::None => anyhow::bail!("no session id starts with '{which}'"),
+        Lookup::Ambiguous(many) => anyhow::bail!(
             "'{which}' matches {} sessions:\n{}",
             many.len(),
-            many.iter()
-                .map(|s| format!("  {} ({})", s.session_id, s.provider.as_str()))
-                .collect::<Vec<_>>()
-                .join("\n")
+            candidate_lines(&many)
         ),
     }
 }
@@ -776,23 +763,16 @@ fn find_original<'a>(sessions: &'a [Session], which: &str) -> anyhow::Result<&'a
             .max_by_key(|s| s.last_active.clone())
             .ok_or_else(|| no_original(sessions, which));
     }
-    let matched: Vec<&Session> = sessions
-        .iter()
-        .filter(|s| s.converted_from.is_none() && s.session_id.starts_with(which))
-        .collect();
-    let found = match matched.as_slice() {
-        [only] => *only,
-        [] => return Err(no_original(sessions, which)),
-        many => anyhow::bail!(
+    let originals = sessions.iter().filter(|s| s.converted_from.is_none());
+    match lookup(originals, which) {
+        Lookup::Found(only) => Ok(only),
+        Lookup::None => Err(no_original(sessions, which)),
+        Lookup::Ambiguous(many) => anyhow::bail!(
             "'{which}' matches {} sessions:\n{}",
             many.len(),
-            many.iter()
-                .map(|s| format!("  {} ({})", s.session_id, s.provider.as_str()))
-                .collect::<Vec<_>>()
-                .join("\n")
+            candidate_lines(&many)
         ),
-    };
-    Ok(found)
+    }
 }
 
 /// Why no original session matched, said in terms of the copy that did.

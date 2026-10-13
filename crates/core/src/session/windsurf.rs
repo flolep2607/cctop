@@ -18,12 +18,13 @@
 //! guess costs visibility, never a wrong number. Add the real key to
 //! `CHAT_DATA_KEYS` once someone can read it off a live install.
 
+use super::readonly;
 use super::{Session, SessionData, Surface};
 use crate::config;
 use crate::pricing::Provider;
 use crate::util;
+use rusqlite::Connection;
 use rusqlite::types::ValueRef;
-use rusqlite::{Connection, OpenFlags};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 
@@ -35,13 +36,6 @@ const CHAT_DATA_KEYS: [&str; 4] = [
     "aiChat.chatdata",
     "chat.data",
 ];
-
-fn readonly(path: &Path) -> rusqlite::Result<Connection> {
-    Connection::open_with_flags(
-        path,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-}
 
 /// The Cascade blob from one workspace database, already parsed.
 ///
