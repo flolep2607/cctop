@@ -15,6 +15,7 @@
 mod address;
 mod ansi;
 mod batch;
+mod codes;
 pub mod columns;
 mod connect;
 mod dirs;
@@ -1146,8 +1147,8 @@ impl App {
             started_at: chrono::Utc::now().to_rfc3339(),
             started: Instant::now(),
             rave: rave::Rave::default(),
-            drunk: drunk::Drunk::default(),
-            high: high::High::default(),
+            drunk: drunk::Drunk::new(drunk::CODE),
+            high: high::High::new(high::CODE),
             prefs,
             tx,
             tabs: Vec::new(),
