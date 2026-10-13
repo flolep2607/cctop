@@ -18,6 +18,7 @@
 //! No flashing, and nothing faster than a hiccup: the sway takes seconds to
 //! swing, which keeps it on the right side of motion that makes people ill.
 
+use super::codes::{self, Code, Says};
 use super::rave::{hsv, snap};
 use super::*;
 use crossterm::event::KeyCode;
@@ -48,72 +49,25 @@ const HICCUP: f32 = 6.5;
 const JOLT: f32 = 0.18;
 
 /// How far along the code the keyboard is, and when the drinking started.
-#[derive(Debug, Default)]
-pub struct Drunk {
-    heard: usize,
-    since: Option<Instant>,
-}
+pub type Drunk = Code<10>;
 
-impl Drunk {
-    /// Take one key, returning what it is to the code — the same contract as
-    /// [`super::rave::Rave::hear`]: the arrows pass, `a` is kept (it would
-    /// attach), and `b` completes it.
-    pub fn hear(&mut self, code: KeyCode) -> rave::Heard {
-        if code != CODE[self.heard] {
-            // As with the rave, the only overlap is the opening run: a third ↓
-            // after two is still two downs in.
-            self.heard = match code {
-                KeyCode::Down if self.heard == 2 => 2,
-                KeyCode::Down => 1,
-                _ => 0,
-            };
-            return rave::Heard::Pass;
-        }
-        self.heard += 1;
-        match self.heard {
-            n if n == CODE.len() => {
-                self.heard = 0;
-                self.since = match self.since {
-                    Some(_) => None,
-                    None => Some(Instant::now()),
-                };
-                rave::Heard::Toggle
-            }
-            n if n > 8 => rave::Heard::Swallow,
-            _ => rave::Heard::Pass,
-        }
-    }
-
-    /// How long the night has been going, while it is.
-    pub fn elapsed(&self) -> Option<Duration> {
-        self.since.map(|since| since.elapsed())
-    }
-}
+/// What the status line says as the night starts and ends.
+const SAYS: Says = Says {
+    on: "🍺 Drunk mode. The same code again to sober up",
+    off: "Water, and bed. Back to work",
+    colourless: None,
+};
 
 impl App {
     /// Feed a key to the code, `true` when it was the code's to keep.
     pub(super) fn hear_drunk(&mut self, key: crossterm::event::KeyEvent) -> bool {
-        let code = match key.modifiers.is_empty() {
-            true => key.code,
-            false => KeyCode::Null,
-        };
-        match self.drunk.hear(code) {
-            rave::Heard::Pass => false,
-            rave::Heard::Swallow => true,
-            rave::Heard::Toggle => {
-                match self.drunk.since {
-                    Some(_) => self.set_status("🍺 Drunk mode. The same code again to sober up"),
-                    None => self.set_status("Water, and bed. Back to work"),
-                }
-                true
-            }
-        }
+        self.hear_code(key, |app| &mut app.drunk, &SAYS)
     }
 
     /// Whether the screen is swaying, and wants a frame every
     /// [`effects::FRAME`] to do it.
     pub fn reeling(&self) -> bool {
-        self.drunk.since.is_some()
+        self.drunk.is_on()
     }
 }
 
@@ -258,25 +212,21 @@ fn sign(buf: &mut Buffer, footer: Rect, hiccup: bool, colour: Option<bool>) {
         true => " ~  *hic*  ~ ",
         false => " ~  ↓↓↑↑→←→←ab to sober up  ~ ",
     };
-    let width = label.width() as u16;
-    if footer.height == 0 || footer.width <= width {
-        return;
-    }
     let style = match colour {
         Some(truecolor) => Style::default()
             .fg(Color::Indexed(16))
             .bg(snap((230, 170, 60), truecolor)),
         None => Style::default().add_modifier(Modifier::REVERSED),
     };
-    let x = footer.x + (footer.width - width) / 2;
-    buf.set_string(x, footer.y, label, style.add_modifier(Modifier::BOLD));
+    codes::sign(buf, footer, label, style.add_modifier(Modifier::BOLD));
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::codes::Heard;
 
-    fn type_code(drunk: &mut Drunk) -> Vec<rave::Heard> {
+    fn type_code(drunk: &mut Drunk) -> Vec<Heard> {
         CODE.iter().map(|&key| drunk.hear(key)).collect()
     }
 
@@ -289,14 +239,11 @@ mod tests {
     /// The code toggles the night both ways, and keeps only its letters.
     #[test]
     fn the_code_starts_the_night_and_ends_it() {
-        let mut drunk = Drunk::default();
+        let mut drunk = Drunk::new(CODE);
         let heard = type_code(&mut drunk);
-        assert!(
-            heard[..8].iter().all(|h| *h == rave::Heard::Pass),
-            "{heard:?}"
-        );
-        assert_eq!(heard[8], rave::Heard::Swallow);
-        assert_eq!(heard[9], rave::Heard::Toggle);
+        assert!(heard[..8].iter().all(|h| *h == Heard::Pass), "{heard:?}");
+        assert_eq!(heard[8], Heard::Swallow);
+        assert_eq!(heard[9], Heard::Toggle);
         assert!(drunk.elapsed().is_some());
         type_code(&mut drunk);
         assert!(drunk.elapsed().is_none());
@@ -305,13 +252,13 @@ mod tests {
     /// Extra downs at the start are forgiven, and a slip starts over.
     #[test]
     fn a_third_down_is_forgiven_and_a_slip_is_not() {
-        let mut drunk = Drunk::default();
+        let mut drunk = Drunk::new(CODE);
         for _ in 0..4 {
             drunk.hear(KeyCode::Down);
         }
-        assert_eq!(drunk.heard, 2);
+        assert_eq!(drunk.heard(), 2);
         drunk.hear(KeyCode::Char('x'));
-        assert_eq!(drunk.heard, 0);
+        assert_eq!(drunk.heard(), 0);
     }
 
     /// The Konami code and this one are both heard from the same keyboard

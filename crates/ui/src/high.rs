@@ -15,6 +15,7 @@
 //! Nothing here is fast. The quickest thing on screen takes several seconds to
 //! change, with no flashes and no beat. It is meant to be stared at.
 
+use super::codes::{self, Code, Says};
 use super::effects::nearest_indexed;
 use super::rave::hsv;
 use super::*;
@@ -23,10 +24,9 @@ use ratatui::buffer::{Buffer, CellDiffOption};
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use std::f32::consts::TAU;
-use unicode_width::UnicodeWidthStr;
 
 /// The code. Its last two keys spell what it is.
-const CODE: [KeyCode; 10] = [
+pub(super) const CODE: [KeyCode; 10] = [
     KeyCode::Right,
     KeyCode::Right,
     KeyCode::Left,
@@ -49,78 +49,26 @@ const FLOATERS: u32 = 24;
 const SHAPES: [&str; 8] = ["✿", "❀", "◌", "∞", "☮", "✺", "◯", "☁"];
 
 /// How far along the code the keyboard is, and when the trip started.
-#[derive(Debug, Default)]
-pub struct High {
-    heard: usize,
-    since: Option<Instant>,
-}
+pub type High = Code<10>;
 
-impl High {
-    /// Take one key, returning what it is to the code, on the same contract
-    /// as [`super::rave::Rave::hear`]. The arrows pass. `h` is kept, since it
-    /// would open the hooks, and `i` completes the code.
-    pub fn hear(&mut self, code: KeyCode) -> rave::Heard {
-        if code != CODE[self.heard] {
-            // The only overlap is the opening run: a third → after two is
-            // still two rights in.
-            self.heard = match code {
-                KeyCode::Right if self.heard == 2 => 2,
-                KeyCode::Right => 1,
-                _ => 0,
-            };
-            return rave::Heard::Pass;
-        }
-        self.heard += 1;
-        match self.heard {
-            n if n == CODE.len() => {
-                self.heard = 0;
-                self.since = match self.since {
-                    Some(_) => None,
-                    None => Some(Instant::now()),
-                };
-                rave::Heard::Toggle
-            }
-            n if n > 8 => rave::Heard::Swallow,
-            _ => rave::Heard::Pass,
-        }
-    }
-
-    /// How long the trip has been going, while it is.
-    pub fn elapsed(&self) -> Option<Duration> {
-        self.since.map(|since| since.elapsed())
-    }
-}
+/// What the status line says as the trip starts and ends. The whole trip is
+/// colour, so without it there is none.
+const SAYS: Says = Says {
+    on: "☮ High mode. Stare at it. The same code again to come down",
+    off: "Back down. Drink some water",
+    colourless: Some("No colour, no trip"),
+};
 
 impl App {
     /// Feed a key to the code, `true` when it was the code's to keep.
     pub(super) fn hear_high(&mut self, key: crossterm::event::KeyEvent) -> bool {
-        let code = match key.modifiers.is_empty() {
-            true => key.code,
-            false => KeyCode::Null,
-        };
-        match self.high.hear(code) {
-            rave::Heard::Pass => false,
-            rave::Heard::Swallow => true,
-            rave::Heard::Toggle => {
-                match (self.high.since, theme::no_color()) {
-                    // The whole trip is colour, so without it there is none.
-                    (Some(_), true) => {
-                        self.high = High::default();
-                        self.set_status("No colour, no trip");
-                    }
-                    (Some(_), false) => self
-                        .set_status("☮ High mode. Stare at it. The same code again to come down"),
-                    (None, _) => self.set_status("Back down. Drink some water"),
-                }
-                true
-            }
-        }
+        self.hear_code(key, |app| &mut app.high, &SAYS)
     }
 
     /// Whether the ground is melting, and wants a frame every
     /// [`effects::FRAME`] to do it.
     pub fn tripping(&self) -> bool {
-        self.high.since.is_some()
+        self.high.is_on()
     }
 }
 
@@ -279,10 +227,6 @@ fn scatter(k: u32) -> u32 {
 /// The way down, across the middle of the footer, its colour turning slowly.
 fn sign(buf: &mut Buffer, footer: Rect, secs: f32, truecolor: bool) {
     let label = " ☮  →→←←↑↓↑↓hi to come down  ☮ ";
-    let width = label.width() as u16;
-    if footer.height == 0 || footer.width <= width {
-        return;
-    }
     let rgb = hsv(secs * 12.0, 0.45, 0.95);
     let bg = match truecolor {
         true => Color::Rgb(rgb.0, rgb.1, rgb.2),
@@ -292,29 +236,26 @@ fn sign(buf: &mut Buffer, footer: Rect, secs: f32, truecolor: bool) {
         .fg(Color::Indexed(16))
         .bg(bg)
         .add_modifier(Modifier::BOLD);
-    let x = footer.x + (footer.width - width) / 2;
-    buf.set_string(x, footer.y, label, style);
+    codes::sign(buf, footer, label, style);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::codes::Heard;
 
-    fn type_code(high: &mut High) -> Vec<rave::Heard> {
+    fn type_code(high: &mut High) -> Vec<Heard> {
         CODE.iter().map(|&key| high.hear(key)).collect()
     }
 
     /// The code toggles the trip both ways and keeps only its letters.
     #[test]
     fn the_code_starts_the_trip_and_ends_it() {
-        let mut high = High::default();
+        let mut high = High::new(CODE);
         let heard = type_code(&mut high);
-        assert!(
-            heard[..8].iter().all(|h| *h == rave::Heard::Pass),
-            "{heard:?}"
-        );
-        assert_eq!(heard[8], rave::Heard::Swallow);
-        assert_eq!(heard[9], rave::Heard::Toggle);
+        assert!(heard[..8].iter().all(|h| *h == Heard::Pass), "{heard:?}");
+        assert_eq!(heard[8], Heard::Swallow);
+        assert_eq!(heard[9], Heard::Toggle);
         assert!(high.elapsed().is_some());
         type_code(&mut high);
         assert!(high.elapsed().is_none());
@@ -323,11 +264,11 @@ mod tests {
     /// Extra rights at the start are forgiven.
     #[test]
     fn a_third_right_is_forgiven() {
-        let mut high = High::default();
+        let mut high = High::new(CODE);
         for _ in 0..5 {
             high.hear(KeyCode::Right);
         }
-        assert_eq!(high.heard, 2);
+        assert_eq!(high.heard(), 2);
     }
 
     /// All three codes share one keyboard, and each is heard through the

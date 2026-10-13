@@ -31,12 +31,14 @@
 
 mod sound;
 
+use super::codes::{self, Code, Heard};
 use super::effects::nearest_indexed;
 use super::*;
 use crossterm::event::KeyCode;
 use ratatui::buffer::{Buffer, CellDiffOption};
 use ratatui::layout::Rect;
 use ratatui::style::Color;
+use unicode_width::UnicodeWidthStr;
 
 /// The code, as the keys it is typed with.
 pub(super) const CODE: [KeyCode; 10] = [
@@ -55,11 +57,10 @@ pub(super) const CODE: [KeyCode; 10] = [
 /// House tempo.
 const BPM: f32 = 128.0;
 
-/// How far along the code the keyboard is, and when the party started.
-#[derive(Debug, Default)]
+/// The code, and what a party has going while it is on.
+#[derive(Debug)]
 pub struct Rave {
-    heard: usize,
-    since: Option<Instant>,
+    code: Code<10>,
     /// The music, while there is a party and something to play it with.
     sound: Option<sound::Sound>,
     /// The newest `ultracode` prompt already answered, so one prompt starts
@@ -74,86 +75,51 @@ pub struct Rave {
     ultracode_pids: Vec<u32>,
 }
 
-/// What a key was to the code.
-#[derive(Debug, PartialEq, Eq)]
-pub enum Heard {
-    /// Nothing to do with it: the key does what it always does.
-    Pass,
-    /// Part of the code and not harmless alone — `b` jumps to a bell, and in a
-    /// pane both letters would be typed at the agent — so kept from whatever
-    /// else would have taken it. The arrows pass through: they only move.
-    Swallow,
-    /// The code is complete: the party starts, or ends.
-    Toggle,
+impl Default for Rave {
+    fn default() -> Self {
+        Rave {
+            code: Code::new(CODE),
+            sound: None,
+            ultracode_heard: None,
+            by_ultracode: false,
+            ultracode_pids: Vec::new(),
+        }
+    }
 }
 
 impl Rave {
-    /// Take one key, returning what it is to the code.
-    pub fn hear(&mut self, code: KeyCode) -> Heard {
-        if code != CODE[self.heard] {
-            // The only overlap the code has with itself is its opening run of
-            // ups: a third ↑ after two is still two ups in, not one.
-            self.heard = match code {
-                KeyCode::Up if self.heard == 2 => 2,
-                KeyCode::Up => 1,
-                _ => 0,
-            };
-            return Heard::Pass;
-        }
-        self.heard += 1;
-        match self.heard {
-            n if n == CODE.len() => {
-                self.heard = 0;
-                self.since = match self.since {
-                    Some(_) => None,
-                    None => Some(Instant::now()),
-                };
-                Heard::Toggle
-            }
-            n if n > 8 => Heard::Swallow,
-            _ => Heard::Pass,
-        }
-    }
-
     /// How long the party has been going, while it is.
     pub fn elapsed(&self) -> Option<Duration> {
-        self.since.map(|since| since.elapsed())
+        self.code.elapsed()
     }
 }
 
 impl App {
     /// Feed a key to the code, `true` when it was the code's to keep.
     pub(super) fn hear_rave(&mut self, key: crossterm::event::KeyEvent) -> bool {
-        let code = match key.modifiers.is_empty() {
-            true => key.code,
-            false => KeyCode::Null,
-        };
-        match self.rave.hear(code) {
-            Heard::Pass => false,
-            Heard::Swallow => true,
-            Heard::Toggle => {
-                self.rave.by_ultracode = false;
-                match self.rave.since {
-                    Some(_) => self.start_rave("↑↑↓↓←→←→ba"),
-                    None => {
-                        // Dropping it is what stops the player.
-                        self.rave.sound = None;
-                        self.set_status("Lights up. Back to work")
-                    }
+        let heard = self.rave.code.hear_key(key);
+        if heard == Heard::Toggle {
+            self.rave.by_ultracode = false;
+            match self.rave.code.is_on() {
+                true => self.start_rave("↑↑↓↓←→←→ba"),
+                false => {
+                    // Dropping it is what stops the player.
+                    self.rave.sound = None;
+                    self.set_status("Lights up. Back to work")
                 }
-                true
             }
         }
+        heard != Heard::Pass
     }
 
     /// Start the music and say so, the lights having just come on for `why`.
     fn start_rave(&mut self, why: &str) {
         if theme::no_color() {
-            self.rave.since = None;
+            self.rave.code.stop();
             self.set_status("No colour, no party");
             return;
         }
-        self.rave.since.get_or_insert_with(Instant::now);
+        self.rave.code.start();
         self.rave.sound = sound::Sound::start();
         self.set_status(format!(
             "♫ {why}: rave mode, with {} if you are online. ↑↑↓↓←→←→ba to go home",
@@ -188,14 +154,14 @@ impl App {
         match newest {
             Some(on) if self.rave.ultracode_heard.is_none_or(|heard| on > heard) => {
                 self.rave.ultracode_heard = Some(on);
-                if self.rave.since.is_none() {
+                if !self.rave.code.is_on() {
                     self.start_rave("ultracode");
-                    self.rave.by_ultracode = self.rave.since.is_some();
+                    self.rave.by_ultracode = self.rave.code.is_on();
                 }
             }
-            None if self.rave.by_ultracode && self.rave.since.is_some() => {
+            None if self.rave.by_ultracode && self.rave.code.is_on() => {
                 self.rave.by_ultracode = false;
-                self.rave.since = None;
+                self.rave.code.stop();
                 // Dropping it is what stops the player.
                 self.rave.sound = None;
                 self.set_status("Ultracode off. Lights up");
@@ -214,7 +180,7 @@ impl App {
     /// shown on, so its party is everywhere instead: otherwise the switch
     /// would do nothing at all that anyone could see.
     pub fn raving(&self) -> bool {
-        if self.rave.since.is_none() {
+        if !self.rave.code.is_on() {
             return false;
         }
         if !self.rave.by_ultracode {
@@ -466,11 +432,6 @@ fn equaliser(buf: &mut Buffer, footer: Rect, beats: f32, thump: f32, build: f32,
         (false, true) => " ♫  here it comes…  ♫ ",
         (false, false) => " ♫  ↑↑↓↓←→←→ba to go home  ♫ ",
     };
-    let width = label.chars().count() as u16;
-    if footer.width <= width {
-        return;
-    }
-    let x = footer.x + (footer.width - width) / 2;
     let style = ratatui::style::Style::default()
         .fg(Color::Indexed(16))
         .bg(snap(
@@ -478,7 +439,10 @@ fn equaliser(buf: &mut Buffer, footer: Rect, beats: f32, thump: f32, build: f32,
             truecolor,
         ))
         .add_modifier(ratatui::style::Modifier::BOLD);
-    buf.set_string(x, y, label, style);
+    let Some(x) = codes::sign(buf, footer, label, style) else {
+        return;
+    };
+    let width = label.width() as u16;
 
     // Two dancers a side, each a beat out of step with the next, where the
     // footer has room for them past the label.
@@ -529,7 +493,7 @@ mod tests {
     use super::*;
 
     fn type_code(rave: &mut Rave) -> Vec<Heard> {
-        CODE.iter().map(|&key| rave.hear(key)).collect()
+        CODE.iter().map(|&key| rave.code.hear(key)).collect()
     }
 
     /// The code toggles the party both ways, and only its `b` and `a` are kept
@@ -550,18 +514,18 @@ mod tests {
     #[test]
     fn a_wrong_key_starts_over_but_a_third_up_does_not() {
         let mut rave = Rave::default();
-        rave.hear(KeyCode::Up);
-        rave.hear(KeyCode::Up);
-        rave.hear(KeyCode::Down);
-        assert_eq!(rave.hear(KeyCode::Char('x')), Heard::Pass);
-        assert_eq!(rave.heard, 0);
+        rave.code.hear(KeyCode::Up);
+        rave.code.hear(KeyCode::Up);
+        rave.code.hear(KeyCode::Down);
+        assert_eq!(rave.code.hear(KeyCode::Char('x')), Heard::Pass);
+        assert_eq!(rave.code.heard(), 0);
         // A plain `b` or `a` outside the code is the table's.
-        assert_eq!(rave.hear(KeyCode::Char('b')), Heard::Pass);
+        assert_eq!(rave.code.hear(KeyCode::Char('b')), Heard::Pass);
         for _ in 0..5 {
-            rave.hear(KeyCode::Up);
+            rave.code.hear(KeyCode::Up);
         }
-        assert_eq!(rave.heard, 2);
-        let rest: Vec<_> = CODE[2..].iter().map(|&key| rave.hear(key)).collect();
+        assert_eq!(rave.code.heard(), 2);
+        let rest: Vec<_> = CODE[2..].iter().map(|&key| rave.code.hear(key)).collect();
         assert_eq!(rest.last(), Some(&Heard::Toggle));
     }
 
