@@ -1295,21 +1295,17 @@ pub(super) fn draw_resume_confirm(frame: &mut Frame, area: Rect, app: &App, layo
             theme::value(),
         )),
         Line::default(),
+    ];
+    Confirm {
+        title: "Resume a running session?",
+        width: 62,
         // The same two chips its siblings use, rather than the sentence this
         // line used to be: they are what a pointer can be aimed at, and one
         // dialog in the family phrasing it differently taught nobody anything.
-        Line::from(Span::styled(RESUME_KEYS, theme::dim())),
-    ];
-    let last = lines.len() as u16 - 1;
-    let (outer, inner) = modal(frame, area, "Resume a running session?", lines, 62);
-    confirm_chips(
-        layout,
-        outer,
-        inner,
-        last,
-        RESUME_KEYS,
-        &[("[y]", ch('y')), ("[n / Esc]", dismiss())],
-    );
+        hint: RESUME_KEYS,
+        keys: &yes_no(),
+    }
+    .draw(frame, area, layout, lines);
 }
 
 const RESUME_KEYS: &str = " [y] resume anyway    [n / Esc] cancel";
@@ -1620,14 +1616,7 @@ pub(super) fn draw_share_qr(frame: &mut Frame, area: Rect, app: &App, layout: &m
     if let (Some(qr), Some(row)) = (&code, room) {
         draw_qr(frame, inner, row, qr);
     }
-    confirm_chips(
-        layout,
-        outer,
-        inner,
-        last,
-        DISMISS_KEYS,
-        &[("[any key]", dismiss())],
-    );
+    confirm_chips(layout, outer, inner, last, DISMISS_KEYS, &any_key());
 }
 
 /// `http://127.0.0.1:7778/?t=abc` → `http://127.0.0.1:7778`.
@@ -2385,34 +2374,92 @@ fn confirm_chips(
     }
 }
 
+/// `[y]` and `[n / Esc]`: the two chips of a question that can be refused.
+fn yes_no() -> [(&'static str, KeyEvent); 2] {
+    [("[y]", ch('y')), ("[n / Esc]", dismiss())]
+}
+
+/// `[any key]`: the one chip of a dialog that only has something to say.
+fn any_key() -> [(&'static str, KeyEvent); 1] {
+    [("[any key]", dismiss())]
+}
+
+/// A dialog that ends in a row of chips: the box, its width, the chip line and
+/// what each chip presses.
+///
+/// Every confirmation is the same four steps — append the chip line, find the
+/// row it landed on, draw the box, hand the chips to [`confirm_chips`] — and
+/// they were written out a dozen times, each one a chance to put the chips a
+/// row away from where they are drawn. [`Confirm::draw`] is those steps once.
+struct Confirm<'a> {
+    title: &'a str,
+    width: u16,
+    /// The last line, as drawn: the chips are found in it by their text.
+    hint: &'a str,
+    keys: &'a [(&'a str, KeyEvent)],
+}
+
+impl Confirm<'_> {
+    /// Draw `lines` with the hint below them, claim the box and make its chips
+    /// clickable.
+    ///
+    /// The chip row is counted in wrapped rows, as [`modal`] sizes the box, and
+    /// not in lines: a session label long enough to wrap above it would
+    /// otherwise leave every chip a row above the text it stands for.
+    fn draw(
+        self,
+        frame: &mut Frame,
+        area: Rect,
+        layout: &mut Layout,
+        mut lines: Vec<Line<'static>>,
+    ) {
+        let row = wrapped_rows(&lines, self.width.saturating_sub(2));
+        lines.push(Line::from(Span::styled(
+            self.hint.to_string(),
+            theme::dim(),
+        )));
+        let (outer, inner) = modal(frame, area, self.title, lines, self.width);
+        confirm_chips(layout, outer, inner, row, self.hint, self.keys);
+    }
+}
+
+/// The session a single-session dialog is about: its label, and its id when
+/// the dialog is about to act on it, so the one being deleted or stopped can
+/// be told from another with the same name.
+fn session_header(s: &cctop_core::session::Session, with_id: bool) -> Vec<Line<'static>> {
+    let mut lines = vec![Line::from(Span::styled(
+        format!("  {}", s.display_label()),
+        theme::value(),
+    ))];
+    if with_id {
+        lines.push(Line::from(Span::styled(
+            format!("  {}", s.session_id),
+            theme::dim(),
+        )));
+    }
+    lines
+}
+
 pub(super) fn draw_delete_confirm(frame: &mut Frame, area: Rect, app: &App, layout: &mut Layout) {
     let Some(s) = app.selected_session() else {
         return;
     };
-    let lines = vec![
-        Line::from(Span::styled(
-            format!("  {}", s.display_label()),
-            theme::value(),
-        )),
-        Line::from(Span::styled(format!("  {}", s.session_id), theme::dim())),
+    let mut lines = session_header(s, true);
+    lines.extend([
         Line::default(),
         Line::from(Span::styled(
             "  This permanently removes the transcript from disk.",
             Style::default().fg(theme::colors().cost_mid),
         )),
         Line::default(),
-        Line::from(Span::styled(DELETE_KEYS, theme::dim())),
-    ];
-    let last = lines.len() as u16 - 1;
-    let (outer, inner) = modal(frame, area, "Delete session?", lines, 62);
-    confirm_chips(
-        layout,
-        outer,
-        inner,
-        last,
-        DELETE_KEYS,
-        &[("[y]", ch('y')), ("[n / Esc]", dismiss())],
-    );
+    ]);
+    Confirm {
+        title: "Delete session?",
+        width: 62,
+        hint: DELETE_KEYS,
+        keys: &yes_no(),
+    }
+    .draw(frame, area, layout, lines);
 }
 
 const DELETE_KEYS: &str = "  [y] delete    [n / Esc] cancel";
@@ -2421,27 +2468,20 @@ pub(super) fn draw_delete_blocked(frame: &mut Frame, area: Rect, app: &App, layo
     let Some(s) = app.selected_session() else {
         return;
     };
-    let lines = vec![
-        Line::from(Span::styled(
-            format!("  {}", s.display_label()),
-            theme::value(),
-        )),
+    let mut lines = session_header(s, false);
+    lines.extend([
         Line::default(),
         Line::from(Span::raw("  This session is still running.")),
         Line::from(Span::raw("  Stop the agent first, then delete it.")),
         Line::default(),
-        Line::from(Span::styled(DISMISS_KEYS, theme::dim())),
-    ];
-    let last = lines.len() as u16 - 1;
-    let (outer, inner) = modal(frame, area, "Cannot delete", lines, 62);
-    confirm_chips(
-        layout,
-        outer,
-        inner,
-        last,
-        DISMISS_KEYS,
-        &[("[any key]", dismiss())],
-    );
+    ]);
+    Confirm {
+        title: "Cannot delete",
+        width: 62,
+        hint: DISMISS_KEYS,
+        keys: &any_key(),
+    }
+    .draw(frame, area, layout, lines);
 }
 
 /// The one chip on a dialog that has nothing to decide, only something to say.
@@ -2451,12 +2491,8 @@ pub(super) fn draw_kill_confirm(frame: &mut Frame, area: Rect, app: &App, layout
     let Some(s) = app.selected_session() else {
         return;
     };
-    let lines = vec![
-        Line::from(Span::styled(
-            format!("  {}", s.display_label()),
-            theme::value(),
-        )),
-        Line::from(Span::styled(format!("  {}", s.session_id), theme::dim())),
+    let mut lines = session_header(s, true);
+    lines.extend([
         Line::default(),
         Line::from(Span::styled(
             "  Send a termination signal to this agent process?",
@@ -2464,18 +2500,14 @@ pub(super) fn draw_kill_confirm(frame: &mut Frame, area: Rect, app: &App, layout
         )),
         Line::from(Span::raw("  Unsaved work in the agent may be interrupted.")),
         Line::default(),
-        Line::from(Span::styled(KILL_KEYS, theme::dim())),
-    ];
-    let last = lines.len() as u16 - 1;
-    let (outer, inner) = modal(frame, area, "Terminate session?", lines, 62);
-    confirm_chips(
-        layout,
-        outer,
-        inner,
-        last,
-        KILL_KEYS,
-        &[("[y]", ch('y')), ("[n / Esc]", dismiss())],
-    );
+    ]);
+    Confirm {
+        title: "Terminate session?",
+        width: 62,
+        hint: KILL_KEYS,
+        keys: &yes_no(),
+    }
+    .draw(frame, area, layout, lines);
 }
 
 const KILL_KEYS: &str = "  [y] terminate    [n / Esc] cancel";
@@ -2498,18 +2530,14 @@ pub(super) fn draw_quit_confirm(frame: &mut Frame, area: Rect, app: &App, layout
         )),
         Line::from(Span::raw("  Exit the agent itself to leave it cleanly.")),
         Line::default(),
-        Line::from(Span::styled(QUIT_KEYS, theme::dim())),
     ];
-    let last = lines.len() as u16 - 1;
-    let (outer, inner) = modal(frame, area, "Quit and stop the agent?", lines, 62);
-    confirm_chips(
-        layout,
-        outer,
-        inner,
-        last,
-        QUIT_KEYS,
-        &[("[y]", ch('y')), ("[n / Esc]", dismiss()), ("[A]", ch('A'))],
-    );
+    Confirm {
+        title: "Quit and stop the agent?",
+        width: 62,
+        hint: QUIT_KEYS,
+        keys: &[("[y]", ch('y')), ("[n / Esc]", dismiss()), ("[A]", ch('A'))],
+    }
+    .draw(frame, area, layout, lines);
 }
 
 const QUIT_KEYS: &str = "  [y] quit anyway    [n / Esc] stay    [A] back to the agent";
@@ -2559,18 +2587,14 @@ pub(super) fn draw_remote_update_confirm(
             "  needs root, cctop says so and shows the sudo command to run yourself.",
         )),
         Line::default(),
-        Line::from(Span::styled(REMOTE_UPDATE_KEYS, theme::dim())),
     ];
-    let last = lines.len() as u16 - 1;
-    let (outer, inner) = modal(frame, area, "Update cctop over there?", lines, 78);
-    confirm_chips(
-        layout,
-        outer,
-        inner,
-        last,
-        REMOTE_UPDATE_KEYS,
-        &[("[y]", ch('y')), ("[n / Esc]", dismiss())],
-    );
+    Confirm {
+        title: "Update cctop over there?",
+        width: 78,
+        hint: REMOTE_UPDATE_KEYS,
+        keys: &yes_no(),
+    }
+    .draw(frame, area, layout, lines);
 }
 
 const REMOTE_UPDATE_KEYS: &str = "  [y] update    [n / Esc] cancel";
@@ -2579,29 +2603,22 @@ pub(super) fn draw_kill_blocked(frame: &mut Frame, area: Rect, app: &App, layout
     let Some(s) = app.selected_session() else {
         return;
     };
-    let lines = vec![
-        Line::from(Span::styled(
-            format!("  {}", s.display_label()),
-            theme::value(),
-        )),
+    let mut lines = session_header(s, false);
+    lines.extend([
         Line::default(),
         Line::from(Span::raw(
             "  This session has no locally controllable process.",
         )),
         Line::from(Span::raw("  It may be running in a remote or shared host.")),
         Line::default(),
-        Line::from(Span::styled(DISMISS_KEYS, theme::dim())),
-    ];
-    let last = lines.len() as u16 - 1;
-    let (outer, inner) = modal(frame, area, "Cannot terminate", lines, 62);
-    confirm_chips(
-        layout,
-        outer,
-        inner,
-        last,
-        DISMISS_KEYS,
-        &[("[any key]", dismiss())],
-    );
+    ]);
+    Confirm {
+        title: "Cannot terminate",
+        width: 62,
+        hint: DISMISS_KEYS,
+        keys: &any_key(),
+    }
+    .draw(frame, area, layout, lines);
 }
 
 pub(super) fn draw_batch_confirm(frame: &mut Frame, area: Rect, app: &App, layout: &mut Layout) {
@@ -2642,17 +2659,13 @@ pub(super) fn draw_batch_confirm(frame: &mut Frame, area: Rect, app: &App, layou
     )));
     lines.push(Line::default());
     let hint = format!("  [y] {verb} all    [n / Esc] cancel");
-    lines.push(Line::from(Span::styled(hint.clone(), theme::dim())));
-    let last = lines.len() as u16 - 1;
-    let (outer, inner) = modal(frame, area, &format!("{verb} all?"), lines, 62);
-    confirm_chips(
-        layout,
-        outer,
-        inner,
-        last,
-        &hint,
-        &[("[y]", ch('y')), ("[n / Esc]", dismiss())],
-    );
+    Confirm {
+        title: &format!("{verb} all?"),
+        width: 62,
+        hint: &hint,
+        keys: &yes_no(),
+    }
+    .draw(frame, area, layout, lines);
 }
 
 /// The idle view's `K`: what will be stopped, how much memory that gives
@@ -2747,17 +2760,13 @@ fn draw_reclaim_confirm(frame: &mut Frame, area: Rect, app: &App, layout: &mut L
     )));
     lines.push(Line::default());
     let hint = format!("  [y] stop {n}    [n / Esc] cancel");
-    lines.push(Line::from(Span::styled(hint.clone(), theme::dim())));
-    let last = lines.len() as u16 - 1;
-    let (outer, inner) = modal(frame, area, "Stop idle sessions?", lines, 62);
-    confirm_chips(
-        layout,
-        outer,
-        inner,
-        last,
-        &hint,
-        &[("[y]", ch('y')), ("[n / Esc]", dismiss())],
-    );
+    Confirm {
+        title: "Stop idle sessions?",
+        width: 62,
+        hint: &hint,
+        keys: &yes_no(),
+    }
+    .draw(frame, area, layout, lines);
 }
 
 pub(super) fn draw_batch_blocked(
@@ -2802,23 +2811,18 @@ pub(super) fn draw_batch_blocked(
             theme::dim(),
         )),
         Line::default(),
-        Line::from(Span::styled(DISMISS_KEYS, theme::dim())),
     ];
-    let last = lines.len() as u16 - 1;
-    let title = if deleting {
-        "Cannot delete all"
-    } else {
-        "Cannot terminate all"
-    };
-    let (outer, inner) = modal(frame, area, title, lines, 62);
-    confirm_chips(
-        layout,
-        outer,
-        inner,
-        last,
-        DISMISS_KEYS,
-        &[("[any key]", dismiss())],
-    );
+    Confirm {
+        title: if deleting {
+            "Cannot delete all"
+        } else {
+            "Cannot terminate all"
+        },
+        width: 62,
+        hint: DISMISS_KEYS,
+        keys: &any_key(),
+    }
+    .draw(frame, area, layout, lines);
 }
 
 pub(super) fn draw_cost_filter(frame: &mut Frame, area: Rect, app: &App) {
@@ -3735,26 +3739,18 @@ pub(super) fn draw_add_account(frame: &mut Frame, area: Rect, app: &mut App, lay
                 Style::default().fg(theme::colors().cost_mid),
             ))],
         };
-        let hint = " [Enter] done";
-        lines.extend([
-            Line::default(),
-            Line::from(Span::styled(hint, theme::dim())),
-        ]);
-        let row = lines.len() as u16 - 1;
-        let (outer, inner) = modal(frame, area, "Add a Claude account", lines, 72);
-        confirm_chips(
-            layout,
-            outer,
-            inner,
-            row,
-            hint,
-            &[("[Enter]", KeyEvent::from(KeyCode::Enter))],
-        );
+        lines.push(Line::default());
+        Confirm {
+            title: "Add a Claude account",
+            width: 72,
+            hint: " [Enter] done",
+            keys: &[("[Enter]", KeyEvent::from(KeyCode::Enter))],
+        }
+        .draw(frame, area, layout, lines);
         return;
     }
 
     if flow.named && flow.pane.is_none() {
-        let hint = " [f] full login   [t] token   [Esc] cancel";
         let key = |label: &'static str| Span::styled(label, theme::value());
         let lines = vec![
             Line::from(vec![
@@ -3773,49 +3769,34 @@ pub(super) fn draw_add_account(frame: &mut Frame, area: Rect, app: &mut App, lay
                 theme::dim(),
             )),
             Line::default(),
-            Line::from(Span::styled(hint, theme::dim())),
         ];
-        let row = lines.len() as u16 - 1;
-        let (outer, inner) = modal(
-            frame,
-            area,
-            &format!("Add Claude account {}", flow.name),
-            lines,
-            64,
-        );
-        confirm_chips(
-            layout,
-            outer,
-            inner,
-            row,
-            hint,
-            &[
+        Confirm {
+            title: &format!("Add Claude account {}", flow.name),
+            width: 64,
+            hint: " [f] full login   [t] token   [Esc] cancel",
+            keys: &[
                 ("[f]", KeyEvent::from(KeyCode::Char('f'))),
                 ("[t]", KeyEvent::from(KeyCode::Char('t'))),
                 ("[Esc]", esc),
             ],
-        );
+        }
+        .draw(frame, area, layout, lines);
         return;
     }
 
     let Some(pane) = flow.pane.as_mut() else {
-        let hint = " [Enter] next   [Esc] cancel";
         let lines = vec![
             Line::from(Span::styled(" What is it called?", theme::dim())),
             input_line(&flow.name),
             Line::default(),
-            Line::from(Span::styled(hint, theme::dim())),
         ];
-        let row = lines.len() as u16 - 1;
-        let (outer, inner) = modal(frame, area, "Add a Claude account", lines, 52);
-        confirm_chips(
-            layout,
-            outer,
-            inner,
-            row,
-            hint,
-            &[("[Enter]", KeyEvent::from(KeyCode::Enter)), ("[Esc]", esc)],
-        );
+        Confirm {
+            title: "Add a Claude account",
+            width: 52,
+            hint: " [Enter] next   [Esc] cancel",
+            keys: &[("[Enter]", KeyEvent::from(KeyCode::Enter)), ("[Esc]", esc)],
+        }
+        .draw(frame, area, layout, lines);
         return;
     };
 
