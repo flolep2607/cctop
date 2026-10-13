@@ -82,15 +82,87 @@ impl App {
     /// Whether an action that reaches into this machine can apply to a row.
     ///
     /// Returns the refusal to show, or `None` when the row is local. Every
-    /// caller is a path that signals a process, deletes a file, or opens a pty,
+    /// caller is a path that signals a process, deletes a file, or edits one,
     /// and each would otherwise do it to whatever sits at the same path here.
+    /// Opening the row is the exception, and goes to its machine instead —
+    /// see [`open_remote_selected`](Self::open_remote_selected) — so the
+    /// refusal points there.
     pub fn remote_refusal(session: &Session) -> Option<String> {
         let r = session.remote.as_ref()?;
         Some(format!(
-            "{} is on {} — cctop reads other machines but only acts on this one",
+            "{} is on {} — R opens it there in a tab; nothing else acts on another machine",
             session.display_label(),
             r.host
         ))
+    }
+
+    /// Open the selected remote row in a tab here, working on its machine.
+    ///
+    /// The tab runs a transport to that machine — a sibling's terminal socket,
+    /// or ssh — and the cctop there attaches to the session, resumes it, or
+    /// says why not and is a shell in its project: see
+    /// [`cctop_core::remote_open`]. Inside this machine's rmux like every other
+    /// tab, so the tab outlives a restart of this cctop just as theirs do; the
+    /// session itself is in the far machine's rmux and outlives the tab.
+    pub(super) fn open_remote_selected(&mut self) {
+        use cctop_core::remote_open;
+        if self.on_subagent() {
+            self.set_status("Open the session, not one of its subagents");
+            return;
+        }
+        let Some(session) = self.selected_session() else {
+            return;
+        };
+        let Some(remote) = session.remote.as_ref() else {
+            return;
+        };
+        let host = remote.host.clone();
+        let reach = match self.reach_of(&host) {
+            Ok(reach) => reach,
+            Err(why) => {
+                self.set_status(format!("Cannot open it there: {why}"));
+                return;
+            }
+        };
+        let provider = session.provider.as_str();
+        let exe = std::env::current_exe().unwrap_or_else(|_| "cctop".into());
+        let argv = match remote_open::argv(
+            &reach,
+            &exe,
+            provider,
+            &session.session_id,
+            &session.label_source,
+        ) {
+            Ok(argv) => argv,
+            Err(why) => {
+                self.set_status(format!("Not opening it: {why}"));
+                return;
+            }
+        };
+        let shown = session.display_label().to_string();
+        let name = remote_open::tab_name(&host, provider, &session.session_id);
+        // Already open: switch to it, as a resume does — asked of the panes'
+        // own record too, for a tab whose rmux name this cctop has no client
+        // on yet.
+        if let Some(at) = self.tabs.iter().position(|tab| {
+            tab.sessions().any(|open| open == name)
+                || tab
+                    .panes
+                    .iter()
+                    .any(|p| p.resumed.as_deref() == Some(&name))
+        }) {
+            self.go_to_tab(at + 1);
+            self.set_status(format!("Already open: {shown} on {host}"));
+            return;
+        }
+        // The machine first: the tab bar is where a tab on another machine
+        // has to look like one, before anything is typed into it.
+        let label = format!(
+            "{host} · {}",
+            cctop_core::util::truncate(&shown, launch::TAB_LABEL_CHARS)
+        );
+        let what = format!("{shown} on {host}");
+        self.open_remote_tab(&argv, &what, name, label);
     }
 
     /// The footer's note that machines are answering — the down-note's other
@@ -580,7 +652,12 @@ mod tests {
             match item.action {
                 // Read joins Expand and Mark on a remote row: it reads over the
                 // same ssh channel the row arrived by, never the local path.
-                menu::Action::Read | menu::Action::Expand | menu::Action::Mark => {
+                // Resume and Attach open it on its own machine.
+                menu::Action::Read
+                | menu::Action::Expand
+                | menu::Action::Mark
+                | menu::Action::Resume
+                | menu::Action::Attach => {
                     assert!(item.enabled(), "{} works on a remote row", item.label);
                 }
                 _ => {
@@ -595,6 +672,82 @@ mod tests {
         }
         // And the cursor never rests on one of the refusals.
         assert!(items[menu::first_enabled(&items)].enabled());
+    }
+
+    /// `R` on a remote row opens it on its machine when this cctop can reach
+    /// that machine, says so plainly when it cannot, refuses an id that did
+    /// not come from a harness, and goes to the tab already open on it.
+    #[test]
+    fn a_remote_row_opens_on_its_machine_or_says_why_not() {
+        let mut app = test_app();
+        let mut s = session("away", false, "/srv/work");
+        s.remote = Some(cctop_core::session::Remote {
+            host: "box".into(),
+            ..Default::default()
+        });
+        app.sessions = vec![s];
+        app.refilter();
+        app.selected = 0;
+
+        // Not a sibling and not a --host: nothing to reach it by.
+        app.resume_selected();
+        let said = app.status().expect("a reason").to_owned();
+        assert!(said.contains("box is neither a --host"), "{said}");
+
+        // A --host, but an id that is not one: refused before ssh is built.
+        app.remote_hosts = vec![cctop_core::fleet::Host::parse("box").expect("host")];
+        app.sessions[0].session_id = "-oProxyCommand=x".into();
+        app.attach_selected();
+        let said = app.status().expect("a reason").to_owned();
+        assert!(said.contains("Not opening it"), "{said}");
+
+        // Already open: switched to, not opened twice.
+        app.sessions[0].session_id = "abc".into();
+        let (mut child, pid) = cctop_core::shim::test_session(&["sh", "-c", "sleep 30"], (80, 24));
+        let mut pane = tabs::Pane::view_of(pid, "ssh".into()).expect("attach");
+        pane.resumed = Some(cctop_core::remote_open::tab_name("box", "claude", "abc"));
+        app.tabs.push(tabs::Tab::new(pane));
+        app.tab = 0;
+        app.resume_selected();
+        assert_eq!(app.tabs.len(), 1);
+        assert_eq!(app.tab, 1);
+        let said = app.status().expect("said").to_owned();
+        assert!(
+            said.contains("Already open") && said.contains("box"),
+            "{said}"
+        );
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = cctop_core::shim::socket_path(pid).map(std::fs::remove_file);
+    }
+
+    /// The launcher opened on a remote row from an ssh host offers that row's
+    /// project there; on a local row it stays where cctop was started.
+    #[test]
+    fn the_launcher_on_a_remote_row_starts_in_its_project_there() {
+        let mut app = test_app();
+        app.remote_hosts = vec![cctop_core::fleet::Host::parse("box").expect("host")];
+        let mut s = session("away", false, "/srv/work");
+        s.remote = Some(cctop_core::session::Remote {
+            host: "box".into(),
+            ..Default::default()
+        });
+        app.sessions = vec![s, session("here", false, "/tmp")];
+        app.refilter();
+        let remote_at = app
+            .visible
+            .iter()
+            .position(|r| matches!(r, Row::Session(0)))
+            .expect("the remote row");
+        app.selected = remote_at;
+        app.launch_prompt(LaunchInto::Tab);
+        let target = app.launch_remote.clone().expect("prefilled");
+        assert_eq!(target.spelled(), "box:/srv/work");
+
+        app.mode = Mode::List;
+        app.selected = 1 - remote_at;
+        app.launch_prompt(LaunchInto::Tab);
+        assert!(app.launch_remote.is_none());
     }
 
     /// A row from a sibling on the Cloudflare account — no `--host` anywhere —

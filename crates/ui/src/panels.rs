@@ -322,7 +322,7 @@ pub fn info(
                     .add_modifier(Modifier::BOLD),
             ),
             Span::raw("  "),
-            dim(format!("read {via}; cctop acts only on this machine")),
+            dim(format!("read {via}; R opens it there in a tab")),
         ]));
         // Only when the two differ: a matching version is the expected state
         // and a line saying so on every remote row would be read past, which

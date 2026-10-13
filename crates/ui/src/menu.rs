@@ -85,11 +85,20 @@ pub fn items(app: &App) -> Vec<Item> {
     let far = |also: Option<String>| remote.clone().or(also);
 
     let mut items = vec![
+        // On a remote row these two open it on its own machine, which
+        // attaches or resumes there as it can — so they are not refused, and
+        // the far side says what it could do.
         Item {
             action: Action::Resume,
-            label: "Resume in a tab",
+            label: match session.remote.is_some() {
+                true => "Open it on its machine, in a tab",
+                false => "Resume in a tab",
+            },
             key: "R",
-            blocked: far(pid_only.then(|| "no transcript claims this process".to_string())),
+            blocked: match session.remote.is_some() {
+                true => None,
+                false => pid_only.then(|| "no transcript claims this process".to_string()),
+            },
             rule: false,
         },
         Item {
@@ -118,7 +127,10 @@ pub fn items(app: &App) -> Vec<Item> {
             action: Action::Attach,
             label: "Attach to it",
             key: "a",
-            blocked: far(subagent.then(|| "a subagent has no terminal of its own".to_string())),
+            blocked: match subagent {
+                true => Some("a subagent has no terminal of its own".to_string()),
+                false => None,
+            },
             rule: false,
         },
         Item {

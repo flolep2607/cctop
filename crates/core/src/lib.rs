@@ -59,6 +59,7 @@ pub mod quota;
 pub mod reach;
 pub mod remote_fs;
 pub mod remote_launch;
+pub mod remote_open;
 /// The per-session postmortem: `--report`, and `/api/report`.
 pub mod report;
 pub mod rmux;
@@ -79,6 +80,7 @@ pub mod tunnel;
 pub mod update;
 pub mod util;
 pub mod watch;
+pub mod ws;
 pub mod yolo;
 pub mod yolo_log;
 

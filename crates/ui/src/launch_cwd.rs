@@ -181,7 +181,9 @@ impl App {
         // listed, is a share that offers nothing.
         let sessions: Vec<std::path::PathBuf> = recent
             .iter()
-            .filter(|s| !s.label_source.is_empty())
+            // A remote row's project is a path on its machine, and the same
+            // path here — if there is one — is some other directory.
+            .filter(|s| !s.label_source.is_empty() && s.remote.is_none())
             // `locate` answers (common git dir, checkout root); the root is
             // the directory, and `None` — a relative path, or a directory in no
             // repository — leaves it as it was.

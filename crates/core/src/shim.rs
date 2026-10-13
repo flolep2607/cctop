@@ -599,6 +599,24 @@ fn spawn_on_pty_at(
     spawn_on_pty_at_env(argv, cwd, size, &[])
 }
 
+/// Spawn `argv` on a fresh pty of `size`, with `env` added, and hand back the
+/// child and the master — for a caller that pumps the bytes itself: the
+/// terminal a sibling opens over [`crate::remote_open`]'s socket.
+pub fn spawn_pty(
+    argv: &[String],
+    size: (u16, u16),
+    env: &[(String, String)],
+) -> anyhow::Result<(std::process::Child, File)> {
+    spawn_on_pty_at_env(argv, None, size, env)
+}
+
+/// Set a pty's size, which the program on it gets as a SIGWINCH.
+pub fn set_pty_size(master: &File, cols: u16, rows: u16) {
+    let ws = winsize(cols, rows);
+    // SAFETY: `master` is a live pty master and `ws` outlives the call.
+    unsafe { libc::ioctl(master.as_raw_fd(), libc::TIOCSWINSZ as _, &ws) };
+}
+
 /// [`spawn_on_pty_at`] with `inherited` applied to the child as though this
 /// process's environment had it, and then scrubbed like everything else.
 ///

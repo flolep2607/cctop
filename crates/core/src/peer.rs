@@ -449,7 +449,8 @@ impl Upstream {
         Ok(Upstream::Tls(Box::new(conn), stream))
     }
 
-    fn socket(&self) -> &TcpStream {
+    /// The socket underneath, for a caller that polls it alongside its own.
+    pub fn socket(&self) -> &TcpStream {
         match self {
             Upstream::Plain(s) | Upstream::Tls(_, s) => s,
         }
@@ -458,7 +459,7 @@ impl Upstream {
     /// Write `data`, and for TLS whatever records are owed — the handshake's
     /// first flight included, since rustls holds plaintext written before the
     /// handshake until it is done.
-    fn write_all(&mut self, data: &[u8]) -> std::io::Result<()> {
+    pub fn write_all(&mut self, data: &[u8]) -> std::io::Result<()> {
         match self {
             Upstream::Plain(s) => s.write_all(data),
             Upstream::Tls(conn, s) => {
@@ -471,7 +472,7 @@ impl Upstream {
     /// After the socket polled readable: append what it carried to `out`, and
     /// say whether the far side is still open. One read of the socket, so it
     /// never blocks past what `poll` promised.
-    fn read_ready(&mut self, out: &mut Vec<u8>) -> std::io::Result<bool> {
+    pub fn read_ready(&mut self, out: &mut Vec<u8>) -> std::io::Result<bool> {
         let mut buf = [0u8; 16 * 1024];
         match self {
             Upstream::Plain(s) => {
@@ -730,6 +731,47 @@ fn discover(
     Ok(found)
 }
 
+/// What it takes to list the account's tunnels: the API, the account, and
+/// this machine's own tunnel to leave out. `None` with no account, with one
+/// connected by tunnel token alone (no API token to list with), and in a test,
+/// which must never reach a real account.
+fn account_api() -> Option<(Arc<Api>, String, Option<String>)> {
+    if crate::under_test() {
+        return None;
+    }
+    let account = crate::tunnel::account()?;
+    let (Some(api_token), Some(account_id)) = (account.api_token.clone(), account.account_id)
+    else {
+        return None;
+    };
+    let own = cctop_tunnel::cloudflare::Credentials::from_token(&account.token)
+        .ok()
+        .map(|c| c.tunnel_id.to_string());
+    let auth = match account.login {
+        true => Auth::Login(api_token),
+        false => Auth::Pasted(api_token),
+    };
+    Some((Arc::new(Api::with(&auth)), account_id, own))
+}
+
+/// The sibling called `machine`, listing the account to find it when this
+/// process has not — which is the case for anything but a dashboard or a
+/// server: the bridge a remote tab runs ([`crate::remote_open`]) is a process
+/// of its own, started long after the listing that showed the row.
+pub fn lookup(machine: &str) -> Result<Arc<Peer>, String> {
+    if let Some(peer) = find(machine) {
+        return Ok(peer);
+    }
+    let (api, account_id, own) = account_api().ok_or(
+        "this machine has no Cloudflare account to find its siblings with — `cctop tunnel setup`",
+    )?;
+    discover(&api, &account_id, own.as_deref(), &[])
+        .map_err(|e| format!("could not list the account's machines: {e}"))?
+        .into_iter()
+        .find(|p| p.machine == machine)
+        .ok_or_else(|| format!("no machine called {machine} on this Cloudflare account"))
+}
+
 /// Find and poll this account's other cctops on a thread of their own, for as
 /// long as `report` keeps returning `true`, handing it each sibling's
 /// snapshot as it lands. A sibling that leaves the account is reported once
@@ -741,27 +783,12 @@ fn discover(
 /// process: the dashboard and a server inside it share one poller.
 pub fn spawn(mut report: impl FnMut(&str, Snapshot) -> bool + Send + 'static) -> bool {
     static STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-    if crate::under_test() {
-        return false;
-    }
-    let Some(account) = crate::tunnel::account() else {
-        return false;
-    };
-    let (Some(api_token), Some(account_id)) = (account.api_token.clone(), account.account_id)
-    else {
+    let Some((api, account_id, own)) = account_api() else {
         return false;
     };
     if STARTED.swap(true, std::sync::atomic::Ordering::SeqCst) {
         return false;
     }
-    let own = cctop_tunnel::cloudflare::Credentials::from_token(&account.token)
-        .ok()
-        .map(|c| c.tunnel_id.to_string());
-    let auth = match account.login {
-        true => Auth::Login(api_token),
-        false => Auth::Pasted(api_token),
-    };
-    let api = Arc::new(Api::with(&auth));
     std::thread::Builder::new()
         .name("cctop-peers".into())
         .spawn(move || {
