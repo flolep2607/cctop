@@ -1,0 +1,81 @@
+name: Release PR
+
+# Keeps one standing pull request that would release what main holds now: every
+# crate that changed since crates.io's copy bumped, by a patch or — when
+# cargo-semver-checks says its public API broke — by a 0.x minor with its
+# requirement moved, and the root `cctop` with them. release-plz.toml says how,
+# and why each setting is what it is.
+#
+# This only prepares the release. Merging the pull request changes the version
+# in Cargo.toml on main, and that is what release.yml has always released on:
+# it tags, builds the archives, writes the GitHub release and publishes the
+# crates. release-plz is never asked to do any of those, so there is one thing
+# tagging and one thing publishing.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  # Pinned like everything else that decides a release. One that
+  # taiki-e/install-action has a prebuilt binary for, so installing it takes
+  # seconds; moving it is a pull request that changes this line.
+  RELEASE_PLZ_VERSION: 0.3.171
+
+permissions:
+  contents: read
+
+# One run at a time, and a newer push makes the older run pointless: the pull
+# request is rebuilt from scratch on every run anyway.
+concurrency:
+  group: release-plz
+  cancel-in-progress: true
+
+jobs:
+  release-pr:
+    # A fork has neither the token nor anything to release.
+    if: github.repository == 'flolep2607/cctop'
+    runs-on: ubuntu-24.04
+    steps:
+      # A pull request opened with the workflow's own GITHUB_TOKEN starts no
+      # workflow — GitHub's rule against runs triggering runs — so CI would
+      # never run on the release PR, and the release would be looked over and
+      # merged without a check on it (release.yml would still run verify before
+      # tagging, but only after the merge). So the pull request is opened with
+      # a token of a real account, a fine-grained PAT or a GitHub App's.
+      - name: Require the release token
+        env:
+          RELEASE_PLZ_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
+        run: |
+          if [ -z "$RELEASE_PLZ_TOKEN" ]; then
+            echo "::error::RELEASE_PLZ_TOKEN is not configured; see CONTRIBUTING.md, \"Releasing\""
+            exit 1
+          fi
+      - uses: actions/checkout@v6
+        with:
+          # release-plz reads the history to find the commits behind each
+          # change, and pushes through the API rather than with git.
+          fetch-depth: 0
+          persist-credentials: false
+      - run: rustup toolchain install
+      # The cargo-semver-checks rust-toolchain.toml pins, beside the toolchain
+      # whose rustdoc JSON it has to read. release-plz runs whichever one is on
+      # PATH.
+      - id: semver-checks
+        run: echo "version=$(sed -n 's/^# cargo-semver-checks //p' rust-toolchain.toml)" >>"$GITHUB_OUTPUT"
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: release-plz@${{ env.RELEASE_PLZ_VERSION }},cargo-semver-checks@${{ steps.semver-checks.outputs.version }}
+      # cargo-semver-checks builds each changed library's rustdoc twice, the
+      # published copy's and main's, so without a cache every dependency
+      # compiles twice per crate on every push. kache restores by content hash.
+      - uses: kunobi-ninja/kache-action@v1
+        with:
+          cache-key-prefix: kache-release-plz
+          pr-comment: false
+          runtime-dir: ${{ runner.temp }}/kache
+      - name: Open or update the release pull request
+        env:
+          GIT_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
+        run: release-plz release-pr

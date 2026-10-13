@@ -110,13 +110,14 @@ not the server and not the parsers.
 - Each crate has its own version. The root `cctop`'s is the release version
   (`[workspace.package]` in the root `Cargo.toml`); cctop-tunnel, -core, -serve
   and -ui carry theirs in `crates/*/Cargo.toml`, required by caret ("0.28") in
-  the root's `[workspace.dependencies]`. A release bumps the root, and an
-  internal crate only if it changed since the last tag — its files, its
-  packaged manifest, or a breaking bump of an internal crate it depends on (so
-  a core fix bumps core and the root, and nothing else). A crate whose public
-  API broke, by `cargo-semver-checks`, takes the next 0.x minor and its
-  requirement moves with it. `tools/bump.sh` does it, and `verify /
-  release-plan` fails a release that got it wrong. The cargo-semver-checks
+  the root's `[workspace.dependencies]`. Nobody bumps them by hand:
+  release-plz keeps a release pull request open on main that bumps the root,
+  and an internal crate only if it differs from its copy on crates.io — its
+  files, its packaged manifest, or a breaking bump of an internal crate it
+  depends on (so a core fix bumps core and the root, and nothing else). A
+  crate whose public API broke, by `cargo-semver-checks`, takes the next 0.x
+  minor and its requirement moves with it. `release-plz.toml` has the rules
+  and CONTRIBUTING.md's "Releasing" the procedure. The cargo-semver-checks
   version is pinned at the end of `rust-toolchain.toml`: moving the toolchain
   may mean moving it too.
 
@@ -180,8 +181,11 @@ These do not:
 
 - **`chore: release 0.7.4`.** This is what 0.7.4 actually shipped as its only
   release note, on the release that introduced the feature that prints them.
-  A release PR's title has to name what the release *contains* — its theme, in
-  the user's terms — because the bump is the least interesting thing about it.
+  The release PR is release-plz's now, still titled `chore: release`, and kept
+  out of the notes by its `release` label (`.github/release.yml`). What the
+  release is *for* — its theme, in the user's terms — is a paragraph written at
+  the top of that PR's description before merging: `release.yml` puts it above
+  the list, and an updater reads it first.
 - **A type prefix.** `fix:` and `feat:` belong on commits, where the audience is
   someone reading `git log`. On an updater's screen they spend width telling a
   user what a maintainer would have wanted to know.

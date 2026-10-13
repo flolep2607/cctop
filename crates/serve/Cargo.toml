@@ -1,7 +1,7 @@
 [package]
 name = "cctop-serve"
 # Its own version, not the release's: bumped only in a release that changes
-# this crate. The rules are in tools/release-plan.sh, which CI enforces.
+# this crate. release-plz bumps it; the rules are in release-plz.toml.
 version = "0.32.4"
 edition.workspace = true
 rust-version.workspace = true

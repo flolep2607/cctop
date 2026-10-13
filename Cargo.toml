@@ -2,8 +2,8 @@
 # in the file, because the release workflow reads the first `version` line of
 # this file as the version to tag. Only the root `cctop` package inherits it:
 # cctop-core, cctop-serve and cctop-ui each carry their own in crates/*/, and a
-# release bumps one of those only when that crate changed since the last tag
-# (see "Every crate is published" below, and tools/release-plan.sh).
+# release bumps one of those only when that crate changed since its last
+# release (see "Every crate is published" below, and release-plz.toml).
 #
 # 0.23.0 is cut from the commit that touches this file: the first attempt failed verify, so nothing was tagged.
 #
@@ -14,10 +14,10 @@
 # `verify / package` runs `cargo publish --dry-run`, which refuses a dirty tree,
 # and cargo rewrites the lock the moment it reads a version that disagrees with
 # it — so a bump on its own leaves one file changed and fails the release before
-# anything is tagged. 0.26.2 shipped that way once. `tools/bump.sh` makes all of
-# these edits, but it is a convenience: by hand it is one `version` line per
-# bumped crate, its requirement if the bump is breaking, the root version and
-# the lock.
+# anything is tagged. 0.26.2 shipped that way once. The release pull request
+# release-plz keeps open makes all of these edits; by hand it is one `version`
+# line per bumped crate, its requirement if the bump is breaking, the root
+# version and the lock.
 [workspace.package]
 version = "0.36.0"
 edition = "2024"
@@ -73,8 +73,8 @@ homepage = "https://github.com/flolep2607/cctop"
 # released alone.
 #
 # What makes that a promise rather than a hope is `cargo-semver-checks`, which
-# `verify / release-plan` runs on every release commit against the last tag:
-# a crate whose public API broke must take a breaking bump (0.28.x -> 0.29.0),
+# release-plz runs on every crate that changed against its copy on crates.io:
+# a crate whose public API broke takes a breaking bump (0.28.x -> 0.29.0),
 # and that moves its requirement here, which in turn bumps every crate that
 # names it. Every requirement stays one caret within the dependency's current
 # minor, so the workspace never resolves two cores. `pub` here exists for use
@@ -90,7 +90,7 @@ homepage = "https://github.com/flolep2607/cctop"
 # API.
 #
 # Each has its own version, and a release bumps (and publishes) only the ones
-# that changed since the last tag, plus the root every time. Changed means:
+# that changed since their last release, plus the root every time. Changed means:
 #
 #   1. a file under its directory changed;
 #   2. its packaged manifest changed without one — a `[workspace.dependencies]`
@@ -100,8 +100,8 @@ homepage = "https://github.com/flolep2607/cctop"
 #      seen from before the bump: the requirement has to move. A non-breaking
 #      bump moves nothing, so a core fix publishes core and the root alone.
 #
-# `verify` enforces this on a release commit (tools/release-plan.sh check), and
-# `publish-crate` skips whatever crates.io already has.
+# release-plz applies it (release-plz.toml), and `publish-crate` skips whatever
+# crates.io already has.
 [workspace]
 members = ["crates/core", "crates/serve", "crates/tunnel", "crates/ui"]
 # Everything, so that a bare `cargo test` or `cargo clippy` at the root checks
