@@ -658,7 +658,7 @@ impl App {
     /// ended after [`ORPHAN_AFTER_SECS`], so a kept session never outlives
     /// every cctop's interest in it.
     fn settle_ended(&mut self, ended: &[(cctop_core::rmux::Ended, Option<String>)]) {
-        let now = cctop_core::rmux::now_secs();
+        let now = cctop_core::util::now_secs();
         let mut notes = Vec::new();
         for (gone, line) in ended {
             // Seconds since it died: rmux's clock, not this pane's, says when.
