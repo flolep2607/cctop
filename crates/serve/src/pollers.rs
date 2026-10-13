@@ -6,6 +6,8 @@
 //! `lib.rs` so the router reads as a router.
 
 use crate::{FULL_WALK, QUOTA_INTERVAL_SECS, QUOTA_TICK, Remotes, Shared, Snapshot, quota};
+#[cfg(feature = "debug")]
+use crate::debug;
 use cctop_core::fleet;
 use cctop_core::loader::Loader;
 use cctop_core::pricing::Plan;
