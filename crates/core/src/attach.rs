@@ -375,16 +375,26 @@ impl Attach {
 
     /// Send keys in their extended form without waiting to be asked.
     ///
-    /// For a pane with rmux between cctop and the agent, where the request never
-    /// arrives: rmux answers the agent's keyboard-protocol calls itself and says
-    /// nothing about them to its own client. Sending anyway is safe in exactly
-    /// that case, and only there — rmux forwards an extended key to a pane whose
-    /// program asked for one, and rewrites it to the plain key for a program
-    /// that did not. Measured against rmux 0.10 with `cat -v` in the pane: a
-    /// `CSI 13 ; 2 u` written into the client arrives as a newline, not as the
-    /// eight characters of the sequence. So a shell in a tab is never handed
-    /// something it would print as text, which is the whole risk of sending a
-    /// key nobody asked for.
+    /// For a pane with rmux between cctop and the agent, where the agent's own
+    /// request never arrives: rmux answers the agent's keyboard-protocol calls
+    /// itself. What reaches this end instead is rmux's request on behalf of all
+    /// its panes, and only sometimes — with `extended-keys on`
+    /// ([`mux::EXTENDED_KEYS`](crate::mux::EXTENDED_KEYS)), and only to a
+    /// client whose `TERM` rmux believes can do it. The client in a pane
+    /// inherits the `TERM` cctop was started under, and rmux asks only the
+    /// families it knows (xterm, tmux, kitty, foot and a few more — not
+    /// `screen`, `alacritty` or `linux`); and a daemon left by an older cctop
+    /// asks nothing until a newer one starts a session in it. Hence sending
+    /// without being asked.
+    ///
+    /// Safe in exactly this case, and only here — rmux forwards an extended
+    /// key to a pane whose program asked for one, and rewrites it to the plain
+    /// key for a program that did not. Measured against rmux 0.10 with a
+    /// program in the pane logging what it read: a `CSI 13 ; 2 u` written into
+    /// the client arrives as a newline, not as the eight characters of the
+    /// sequence, whether `extended-keys` is on or off. So a shell in a tab is
+    /// never handed something it would print as text, which is the whole risk
+    /// of sending a key nobody asked for.
     pub fn assume_extended_keys(&mut self) {
         self.assume_extended = true;
     }
