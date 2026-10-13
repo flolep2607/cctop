@@ -4,7 +4,7 @@
 //! silence matters most: for every session but the one YOLO was switched on
 //! for, in the process it was switched on in, it must print nothing and exit
 //! 0, whatever is on its stdin and whatever state the switch's file is in.
-//! The unit tests in `crates/core/src/hook.rs` and `crates/core/src/yolo.rs`
+//! The unit tests in `crates/core/src/hook/client.rs` and `crates/core/src/yolo.rs`
 //! cover the decision; these cover the process — the exit status, the bytes
 //! on stdout, the deadline, and the ancestry the match is made against, which
 //! only a real child of a real parent has.

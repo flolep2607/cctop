@@ -139,7 +139,7 @@ feeds stderr back to the model. So it exits 0 always, writes nothing to stdout
 that could read as a decision, and returns inside a deadline — by construction,
 not by care. The one thing it may print is the opt-in `warn_agents` context,
 which carries no decision; see "The one answer that is not silence" in the
-module docs of `crates/core/src/hook.rs`.
+module docs of `crates/core/src/hook/mod.rs`.
 
 A hook that fell through to clap would exit non-zero on every fire, so the
 `hook` dispatch in `main.rs` is never gated behind anything.
