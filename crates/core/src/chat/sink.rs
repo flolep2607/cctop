@@ -168,14 +168,14 @@ impl Sink {
 
     // --- Claude Code ---
 
-    pub(super) fn claude(&mut self, item: &Value) {
+    pub(super) fn claude(&mut self, item: &Line) {
         // A subagent's turns are a different conversation that happens to share
         // a file. See the module docs.
-        if !self.sidechains && item.get("isSidechain").and_then(Value::as_bool) == Some(true) {
+        if !self.sidechains && item.sidechain() {
             return;
         }
-        let ts = item.get("timestamp").and_then(Value::as_str).unwrap_or("");
-        match item.get("type").and_then(Value::as_str) {
+        let ts = item.timestamp.or_empty();
+        match item.kind.get() {
             Some("user") => self.claude_user(item, ts),
             Some("assistant") => self.claude_assistant(item, ts),
             Some("attachment") => self.claude_queued(item, ts),
@@ -191,24 +191,19 @@ impl Sink {
     /// attachments lost every word said mid-turn; and a subagent's report or
     /// a task notification arrives the same way, so the record says nothing
     /// about who spoke until its `origin` is read.
-    fn claude_queued(&mut self, item: &Value, ts: &str) {
-        let Some(queued) = item
-            .get("attachment")
-            .filter(|a| a.get("type").and_then(Value::as_str) == Some("queued_command"))
-        else {
+    fn claude_queued(&mut self, item: &Line, ts: &str) {
+        let Some(queued) = item.attachment().filter(|a| a.kind.is("queued_command")) else {
             return;
         };
-        let text = prompt_text(queued.get("prompt"));
+        let text = prompt_text(&queued.prompt);
         if text.trim().is_empty() {
             return;
         }
-        let mode = queued.get("commandMode").and_then(Value::as_str);
-        let by = author(queued.get("origin"), mode, &text);
+        let by = author(queued.origin.get(), queued.command_mode.get(), &text);
         self.claude_said(by, false, &text, ts);
     }
 
-    fn claude_user(&mut self, item: &Value, ts: &str) {
-        let content = item.get("message").and_then(|m| m.get("content"));
+    fn claude_user(&mut self, item: &Line, ts: &str) {
         // The patch an edit applied is recorded on the entry carrying its
         // result, not on the call, so it is read once here and handed to
         // whichever `tool_result` block claims it.
@@ -216,27 +211,30 @@ impl Sink {
         let mut text = String::new();
         let mut had_result = false;
 
-        match content {
-            Some(Value::String(s)) => text.push_str(s),
-            Some(Value::Array(blocks)) => {
+        match item.content() {
+            Shape::Text(s) => text.push_str(s),
+            Shape::List(blocks) => {
                 for block in blocks {
-                    if let Value::String(s) = block {
-                        push_text(&mut text, s);
-                        continue;
-                    }
-                    match block.get("type").and_then(Value::as_str) {
+                    let block = match block {
+                        Shape::Text(s) => {
+                            push_text(&mut text, s);
+                            continue;
+                        }
+                        Shape::Object(block) => block,
+                        _ => continue,
+                    };
+                    match block.kind.get() {
                         Some("tool_result") => {
                             had_result = true;
-                            let Some(id) = block.get("tool_use_id").and_then(Value::as_str) else {
+                            let Some(id) = block.tool_use_id.get() else {
                                 continue;
                             };
-                            let failed =
-                                block.get("is_error").and_then(Value::as_bool) == Some(true);
-                            let body = flatten_content(block.get("content"));
+                            let failed = block.is_error.value() == Some(true);
+                            let body = flatten_raw(block.content);
                             self.resolve(id, Some(body), failed, delta.take());
                         }
                         _ => {
-                            if let Some(t) = block.get("text").and_then(Value::as_str) {
+                            if let Some(t) = block.text.get() {
                                 push_text(&mut text, t);
                             }
                         }
@@ -253,10 +251,10 @@ impl Sink {
         // types while a tool is running. The result has already been attached;
         // what is left is a person talking — unless the entry is the harness's
         // own (`isMeta`), as a hook's output is.
-        let compaction = item.get("isCompactSummary").and_then(Value::as_bool) == Some(true);
-        let by = match had_result && item_is_meta(item) {
+        let compaction = item.compact_summary();
+        let by = match had_result && item.meta() {
             true => Author::Harness,
-            false => author(item.get("origin"), None, &text),
+            false => author(item.origin.get(), None, &text),
         };
         self.claude_said(by, compaction, &text, ts);
     }
@@ -292,46 +290,37 @@ impl Sink {
         self.push(turn);
     }
 
-    fn claude_assistant(&mut self, item: &Value, ts: &str) {
-        let request = item.get("requestId").and_then(Value::as_str);
-        let Some(blocks) = item
-            .get("message")
-            .and_then(|m| m.get("content"))
-            .and_then(Value::as_array)
-        else {
+    fn claude_assistant(&mut self, item: &Line, ts: &str) {
+        let request = item.request_id.get();
+        let Some(blocks) = item.content().list() else {
             return;
         };
 
         let mut text = String::new();
         let mut thinking = String::new();
         let mut calls: Vec<(Option<String>, ToolUse)> = Vec::new();
-        for block in blocks {
-            match block.get("type").and_then(Value::as_str) {
+        for block in blocks.iter().filter_map(Shape::object) {
+            match block.kind.get() {
                 Some("text") => {
-                    if let Some(t) = block.get("text").and_then(Value::as_str) {
+                    if let Some(t) = block.text.get() {
                         push_text(&mut text, t);
                     }
                 }
                 Some("thinking") => {
-                    if let Some(t) = block.get("thinking").and_then(Value::as_str) {
+                    if let Some(t) = block.thinking.get() {
                         push_text(&mut thinking, t);
                     }
                 }
                 Some("tool_use") => {
-                    let name = block.get("name").and_then(Value::as_str).unwrap_or("tool");
-                    let input = block.get("input").cloned().unwrap_or(Value::Null);
-                    let (short, full) = extract::tool_detail(name, &input);
+                    let name = block.name.get().unwrap_or("tool");
+                    let (short, full) = extract::tool_detail(name, &block.input.value());
                     calls.push((
-                        block.get("id").and_then(Value::as_str).map(str::to_string),
+                        block.id.get().map(str::to_string),
                         ToolUse {
                             name: util::pretty_mcp_name(name),
                             detail: short,
                             full,
-                            id: block
-                                .get("id")
-                                .and_then(Value::as_str)
-                                .unwrap_or_default()
-                                .to_string(),
+                            id: block.id.or_empty().to_string(),
                             ..ToolUse::default()
                         },
                     ));
@@ -374,23 +363,14 @@ impl Sink {
 
     // --- Codex ---
 
-    pub(super) fn codex(&mut self, item: &Value) {
-        let ts = item.get("timestamp").and_then(Value::as_str).unwrap_or("");
-        let kind = item.get("type").and_then(Value::as_str).unwrap_or("");
-        let Some(payload) = item.get("payload") else {
+    pub(super) fn codex(&mut self, item: &codex_line::Line) {
+        let ts = item.timestamp.or_empty();
+        let Some(payload) = item.payload.get() else {
             return;
         };
         // A rollout writes the same shapes either at the top level or wrapped
         // in a `response_item`, exactly as the extraction path finds them.
-        let effective = match kind {
-            "response_item" => payload
-                .get("type")
-                .and_then(Value::as_str)
-                .unwrap_or_default(),
-            other => other,
-        };
-
-        match effective {
+        match item.effective_kind() {
             "message" => self.codex_message(payload, ts),
             "reasoning" => {
                 let text = codex_summary(payload);
@@ -402,19 +382,19 @@ impl Sink {
             }
             "function_call" | "custom_tool_call" => self.codex_call(payload, ts),
             "function_call_output" | "custom_tool_call_output" => {
-                let Some(id) = payload.get("call_id").and_then(Value::as_str) else {
+                let Some(id) = payload.call_id.get() else {
                     return;
                 };
-                let output = payload.get("output");
-                let failed = codex_output_failed(output);
-                self.resolve(id, Some(flatten_content(output)), failed, None);
+                let output = payload.output.to_value();
+                let failed = codex_output_failed(output.as_ref());
+                self.resolve(id, Some(flatten_content(output.as_ref())), failed, None);
             }
             _ => {}
         }
     }
 
-    fn codex_message(&mut self, payload: &Value, ts: &str) {
-        let role = match payload.get("role").and_then(Value::as_str) {
+    fn codex_message(&mut self, payload: &codex_line::Payload, ts: &str) {
+        let role = match payload.role.get() {
             Some("user") => "user",
             Some("assistant") => "assistant",
             // `system` and `developer` are both the harness talking: the
@@ -436,28 +416,20 @@ impl Sink {
         }
     }
 
-    fn codex_call(&mut self, payload: &Value, ts: &str) {
-        if let Some(id) = payload.get("call_id").and_then(Value::as_str)
+    fn codex_call(&mut self, payload: &codex_line::Payload, ts: &str) {
+        if let Some(id) = payload.call_id.get()
             && !self.seen_calls.insert(id.to_string())
         {
             return;
         }
-        let name = payload
-            .get("name")
-            .and_then(Value::as_str)
-            .unwrap_or("tool");
+        let name = payload.name.get().unwrap_or("tool");
         // `arguments` is a JSON-encoded string on a `function_call` and `input`
         // on a `custom_tool_call`, and `apply_patch` sends a raw patch through
         // either — so the argument is parsed if it parses and shown verbatim if
         // it does not, which is what the extraction path does with the same
         // entries.
-        let raw_field = payload.get("arguments").or_else(|| payload.get("input"));
-        let raw = raw_field.and_then(Value::as_str);
-        let args: Value = match raw_field {
-            Some(Value::String(s)) => serde_json::from_str(s).unwrap_or(Value::Null),
-            Some(other) => other.clone(),
-            None => Value::Null,
-        };
+        let (raw, args) = payload.call_args();
+        let raw = raw.as_ref().and_then(Str::get);
 
         let mut tool = ToolUse {
             name: util::pretty_mcp_name(name),
@@ -485,8 +457,7 @@ impl Sink {
         }
 
         let seq = self.open_assistant(ts, None);
-        let id = payload.get("call_id").and_then(Value::as_str);
-        self.add_tool(seq, id, tool);
+        self.add_tool(seq, payload.call_id.get(), tool);
     }
 
     // --- OpenCode ---
@@ -1049,44 +1020,81 @@ fn opencode_call(part: &Value) -> ToolUse {
 }
 
 /// The diff a Claude edit reported, from the entry carrying its result.
-fn claude_delta(item: &Value) -> Option<Delta> {
-    let hunks = item
-        .get("toolUseResult")
-        .and_then(|r| r.get("structuredPatch"))
-        .and_then(Value::as_array)?;
+fn claude_delta(item: &Line) -> Option<Delta> {
+    let lines = item.tool_use_result.get()?.patch_lines()?;
     let mut delta = Delta::default();
-    for hunk in hunks {
-        let Some(lines) = hunk.get("lines").and_then(Value::as_array) else {
-            continue;
-        };
-        for line in lines.iter().filter_map(Value::as_str) {
-            if line.starts_with('+') {
-                delta.added += 1;
-            } else if line.starts_with('-') {
-                delta.removed += 1;
-            }
-            if delta.hunks.len() < MAX_DIFF_LINES {
-                delta.hunks.push(line.to_string());
-            }
+    for line in lines {
+        if line.starts_with('+') {
+            delta.added += 1;
+        } else if line.starts_with('-') {
+            delta.removed += 1;
+        }
+        if delta.hunks.len() < MAX_DIFF_LINES {
+            delta.hunks.push(line.to_string());
         }
     }
     (delta.added > 0 || delta.removed > 0).then_some(delta)
 }
 
-/// Text out of a Codex message payload's content blocks.
-fn codex_text(payload: &Value) -> String {
+/// A Claude tool result's content, as [`flatten_content`] reads it, without
+/// building the base64 of an image result to throw it away.
+///
+/// A list — text blocks, image blocks — is the case worth reading typed; a
+/// string or anything else is built and handed over whole, since it is all
+/// kept anyway.
+fn flatten_raw(content: Raw) -> String {
+    #[derive(Default, serde::Deserialize)]
+    #[serde(default)]
+    struct Part<'a> {
+        #[serde(rename = "type", borrow)]
+        kind: Str<'a>,
+        #[serde(borrow)]
+        text: Str<'a>,
+    }
+    let Some(raw) = content.0 else {
+        return flatten_content(None);
+    };
+    let Some(parts) = raw
+        .get()
+        .starts_with('[')
+        .then(|| serde_json::from_str::<Shape<Part>>(raw.get()).ok())
+        .flatten()
+    else {
+        return flatten_content(Some(&content.value()));
+    };
     let mut out = String::new();
-    match payload.get("content") {
-        Some(Value::String(s)) => out.push_str(s),
-        Some(Value::Array(blocks)) => {
+    for part in parts.list().unwrap_or_default() {
+        match part {
+            Shape::Text(s) => push_text(&mut out, s),
+            Shape::Object(part) => {
+                if let Some(t) = part.text.get() {
+                    push_text(&mut out, t);
+                } else if part.kind.is("image") {
+                    // See `flatten_content`.
+                    push_text(&mut out, "[image]");
+                }
+            }
+            _ => {}
+        }
+    }
+    crate::util::clip(out.trim(), MAX_RESULT_CHARS)
+}
+
+/// Text out of a Codex message payload's content blocks.
+fn codex_text(payload: &codex_line::Payload) -> String {
+    let mut out = String::new();
+    match &payload.content {
+        Shape::Text(s) => out.push_str(s),
+        Shape::List(blocks) => {
             for block in blocks {
                 match block {
-                    Value::String(s) => push_text(&mut out, s),
-                    _ => {
-                        if let Some(t) = block.get("text").and_then(Value::as_str) {
+                    Shape::Text(s) => push_text(&mut out, s),
+                    Shape::Object(block) => {
+                        if let Some(t) = block.text.get() {
                             push_text(&mut out, t);
                         }
                     }
+                    _ => {}
                 }
             }
         }
@@ -1096,15 +1104,16 @@ fn codex_text(payload: &Value) -> String {
 }
 
 /// The reasoning summary Codex records, which is a list of its own blocks.
-fn codex_summary(payload: &Value) -> String {
+fn codex_summary(payload: &codex_line::Payload) -> String {
     let mut out = String::new();
     for block in payload
-        .get("summary")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
+        .summary
+        .list()
+        .unwrap_or_default()
+        .iter()
+        .filter_map(Shape::object)
     {
-        if let Some(t) = block.get("text").and_then(Value::as_str) {
+        if let Some(t) = block.text.get() {
             push_text(&mut out, t);
         }
     }
@@ -1242,7 +1251,7 @@ mod tests {
     fn sink_codex(lines: &[&str]) -> Conversation {
         let mut sink = Sink::default();
         for line in lines {
-            sink.codex(&serde_json::from_str(line).unwrap());
+            sink.codex(&codex_line::Line::parse(line.as_bytes()).unwrap());
         }
         sink.finish()
     }
@@ -1831,6 +1840,44 @@ mod tests {
         assert_eq!(chat.turns.len(), 2);
         assert_eq!(chat.turns[0].kind, "reasoning");
         assert_eq!(chat.turns[1].text, "here goes");
+    }
+
+    /// Fields added, fields of the wrong type, fields gone: the conversation
+    /// keeps every turn the right fields still describe.
+    #[test]
+    fn a_changed_claude_schema_loses_fields_not_turns() {
+        let chat = sink_claude(&[
+            r#"{"type":"user","timestamp":"t1","isSidechain":"yes","origin":7,"brandNew":[1],"message":{"content":"look at this"}}"#,
+            r#"{"type":"assistant","timestamp":"t2","requestId":{"x":1},"message":{"content":[{"type":"text","text":"looking","extra":true},{"type":"tool_use","id":"toolu_1","name":3,"input":"not an object"},7]}}"#,
+            r#"{"type":"user","timestamp":"t3","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_1","is_error":"yes","content":[{"type":"image","source":{"data":"AAAA"}},{"text":"done"}]}]}}"#,
+            r#"{"type":"assistant","timestamp":"t4","message":"gone"}"#,
+            r#"{"type":"assistant"}"#,
+        ]);
+        assert_eq!(chat.turns.len(), 2);
+        assert_eq!(chat.turns[0].text, "look at this");
+        assert_eq!(chat.turns[1].text, "looking");
+        let tool = &chat.turns[1].tools[0];
+        // A name that is not a string is the placeholder a missing one gets.
+        assert_eq!(tool.name, "tool");
+        assert_eq!(tool.result.as_deref(), Some("[image]\n\ndone"));
+        assert!(!tool.failed);
+    }
+
+    #[test]
+    fn a_changed_codex_schema_loses_fields_not_turns() {
+        let chat = sink_codex(&[
+            r#"{"type":"response_item","timestamp":"t1","new":{},"payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"ship it","annotations":[]},5]}}"#,
+            r#"{"type":"response_item","timestamp":"t2","payload":{"type":"message","role":7,"content":[{"text":"system words"}]}}"#,
+            r#"{"type":"response_item","timestamp":"t3","payload":{"type":"function_call","name":"shell","call_id":"c1","arguments":{"command":["ls"]}}}"#,
+            r#"{"type":"response_item","timestamp":"t4","payload":{"type":"function_call_output","call_id":"c1","output":{"output":"a\nb","metadata":{"exit_code":0}}}}"#,
+            r#"{"type":"response_item","timestamp":"t5","payload":"gone"}"#,
+            r#"{"type":"event_msg"}"#,
+        ]);
+        let roles: Vec<&str> = chat.turns.iter().map(|t| t.role.as_ref()).collect();
+        assert_eq!(roles, ["user", "system", "assistant"]);
+        assert_eq!(chat.turns[0].text, "ship it");
+        let tool = &chat.turns[2].tools[0];
+        assert_eq!(tool.result.as_deref(), Some("a\nb"));
     }
 
     #[test]

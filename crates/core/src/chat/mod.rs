@@ -72,6 +72,9 @@
 //! the whole cost of opening the page.
 
 use crate::pricing::Provider;
+use crate::session::claude_line::{self, Block, Line, Origin};
+use crate::session::codex_line;
+use crate::session::lenient::{Raw, Shape, Str};
 use crate::session::{Delta, Session, devin, extract, gemini, opencode, pi};
 use crate::util;
 use serde::{Deserialize, Serialize};
@@ -532,8 +535,8 @@ fn read_main(session: &Session, before: Option<usize>, limits: Limits) -> Conver
         ..Sink::default()
     };
     let read = match session.provider {
-        Provider::Claude => extract::for_each_jsonl(path, |item| sink.claude(item)),
-        Provider::Codex => extract::for_each_jsonl(path, |item| sink.codex(item)),
+        Provider::Claude => claude_line::for_each(path, |item| sink.claude(item)),
+        Provider::Codex => codex_line::for_each(path, |item| sink.codex(item)),
         Provider::Devin => read_devin(path, &mut sink),
         Provider::OpenCode => read_opencode(path, &session.session_id, &mut sink),
         Provider::Cursor => extract::for_each_jsonl(path, |item| sink.cursor(item)),
@@ -593,7 +596,7 @@ pub fn build_agent(session: &Session, agent: &str, before: Option<usize>) -> Opt
         sidechains: true,
         ..Sink::default()
     };
-    if let Err(e) = extract::for_each_jsonl(&path, |item| sink.claude(item)) {
+    if let Err(e) = claude_line::for_each(&path, |item| sink.claude(item)) {
         return Some(unsupported(&format!("could not read the transcript: {e}")));
     }
     Some(Conversation {
@@ -730,7 +733,7 @@ fn unsupported(why: &str) -> Conversation {
 fn sink_claude(lines: &[&str]) -> Conversation {
     let mut sink = Sink::default();
     for line in lines {
-        sink.claude(&serde_json::from_str(line).unwrap());
+        sink.claude(&Line::parse(line.as_bytes()).unwrap());
     }
     sink.finish()
 }

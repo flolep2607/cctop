@@ -224,19 +224,17 @@ pub(super) enum Author {
 /// the person's is the mistake this exists to stop, and the opposite one only
 /// dims a line. Transcripts older than `origin` fall back to the shape of the
 /// text.
-pub(super) fn author(origin: Option<&Value>, command_mode: Option<&str>, text: &str) -> Author {
-    let kind = origin.and_then(|o| o.get("kind")).and_then(Value::as_str);
-    let field = |key: &str| {
-        origin
-            .and_then(|o| o.get(key))
-            .and_then(Value::as_str)
+pub(super) fn author(origin: Option<&Origin>, command_mode: Option<&str>, text: &str) -> Author {
+    let kind = origin.and_then(|o| o.kind.get());
+    let field = |value: Option<&str>| {
+        value
             .map(str::trim)
             .filter(|n| !n.is_empty())
             .map(str::to_string)
     };
     let agent = || Author::Agent {
-        name: field("name"),
-        id: field("from"),
+        name: field(origin.and_then(|o| o.name.get())),
+        id: field(origin.and_then(|o| o.from.get())),
     };
     match kind {
         // A slash command the person typed is still recorded as the harness's
@@ -268,7 +266,7 @@ pub(crate) enum Speaker {
 /// [`author`], for the parser: the same decision the conversation view makes,
 /// so the context meter can never file a message under someone the reader
 /// does not show as its writer.
-pub(crate) fn speaker(origin: Option<&Value>, command_mode: Option<&str>, text: &str) -> Speaker {
+pub(crate) fn speaker(origin: Option<&Origin>, command_mode: Option<&str>, text: &str) -> Speaker {
     match author(origin, command_mode, text) {
         Author::Person => Speaker::Person,
         Author::Agent { .. } => Speaker::Agent,
@@ -281,10 +279,9 @@ pub(crate) fn speaker(origin: Option<&Value>, command_mode: Option<&str>, text: 
 /// For the readers that only need to know whether to trust a record as typed —
 /// the effort switch — rather than how to show it. A record with no `origin`
 /// is not ruled out here; it predates the field.
-pub(crate) fn from_someone_else(item: &Value) -> bool {
-    item.get("origin")
-        .and_then(|o| o.get("kind"))
-        .and_then(Value::as_str)
+pub(crate) fn from_someone_else(origin: Option<&Origin>) -> bool {
+    origin
+        .and_then(|o| o.kind.get())
         .is_some_and(|kind| kind != "human")
 }
 
@@ -360,29 +357,26 @@ fn dedent(text: &str) -> String {
 
 /// A queued message's `prompt`: a string ordinarily, a list of blocks when an
 /// image came with it. Only the words are kept, as for a `user` entry.
-pub(crate) fn prompt_text(prompt: Option<&Value>) -> String {
+pub(crate) fn prompt_text(prompt: &Shape<Block>) -> String {
     let mut text = String::new();
     match prompt {
-        Some(Value::String(s)) => text.push_str(s),
-        Some(Value::Array(blocks)) => {
+        Shape::Text(s) => text.push_str(s),
+        Shape::List(blocks) => {
             for block in blocks {
                 match block {
-                    Value::String(s) => push_text(&mut text, s),
-                    _ => {
-                        if let Some(t) = block.get("text").and_then(Value::as_str) {
+                    Shape::Text(s) => push_text(&mut text, s),
+                    Shape::Object(block) => {
+                        if let Some(t) = block.text.get() {
                             push_text(&mut text, t);
                         }
                     }
+                    _ => {}
                 }
             }
         }
         _ => {}
     }
     text
-}
-
-pub(super) fn item_is_meta(item: &Value) -> bool {
-    item.get("isMeta").and_then(Value::as_bool) == Some(true)
 }
 
 #[cfg(test)]
