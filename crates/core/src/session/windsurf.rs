@@ -97,34 +97,12 @@ fn workspace_dir(storage_dir: &Path) -> String {
         .unwrap_or_default()
 }
 
-/// Undo the URI escaping VS Code applies to workspace paths.
-///
-/// Only `%XX` needs undoing and only a handful of bytes are ever escaped, so a
-/// scan is the whole job — a URI crate would be a dependency for six lines.
+/// Undo the URI escaping VS Code applies to workspace paths. A `%` that
+/// starts no escape stays as it is, and `+` is a plus: this is a path.
 fn percent_decode(s: &str) -> String {
-    let bytes = s.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        let decoded = (bytes[i] == b'%' && i + 2 < bytes.len())
-            // `get`: the two bytes after a `%` need not end on a character.
-            .then(|| {
-                s.get(i + 1..i + 3)
-                    .and_then(|h| u8::from_str_radix(h, 16).ok())
-            })
-            .flatten();
-        match decoded {
-            Some(byte) => {
-                out.push(byte);
-                i += 3;
-            }
-            None => {
-                out.push(bytes[i]);
-                i += 1;
-            }
-        }
-    }
-    String::from_utf8_lossy(&out).into_owned()
+    percent_encoding::percent_decode_str(s)
+        .decode_utf8_lossy()
+        .into_owned()
 }
 
 fn databases() -> Vec<PathBuf> {

@@ -113,8 +113,8 @@ pub(crate) fn build_endpoint(edge: &EdgeSource) -> Result<Endpoint, Error> {
 }
 
 /// Install rustls's ring-backed crypto provider exactly once
-/// per-process. Other consumers in the same binary (reqwest,
-/// hickory DoT) share it.
+/// per-process. Other rustls users in the same binary (hickory's DoT)
+/// share it.
 fn install_crypto_provider() {
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {

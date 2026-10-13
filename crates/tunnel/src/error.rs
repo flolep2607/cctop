@@ -18,7 +18,7 @@ pub struct QuickTunnelApiError {
 #[derive(ThisError, Debug)]
 pub enum Error {
     #[error("quick-tunnel API request failed: {0}")]
-    Api(#[from] reqwest::Error),
+    Api(#[from] ureq::Error),
 
     #[error("quick-tunnel API returned business errors: {0:?}")]
     ApiBusiness(Vec<QuickTunnelApiError>),

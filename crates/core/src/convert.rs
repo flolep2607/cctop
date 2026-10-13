@@ -968,18 +968,7 @@ fn walk(dir: &Path, depth: usize, each: &mut impl FnMut(&Path) -> bool) -> bool 
 /// A fresh session id of the shape every harness here writes: sixteen random
 /// bytes as a version-4 UUID.
 fn new_uuid() -> String {
-    let mut bytes = crate::util::random_bytes(16);
-    bytes[6] = (bytes[6] & 0x0f) | 0x40;
-    bytes[8] = (bytes[8] & 0x3f) | 0x80;
-    let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
-    format!(
-        "{}-{}-{}-{}-{}",
-        &hex[0..8],
-        &hex[8..12],
-        &hex[12..16],
-        &hex[16..20],
-        &hex[20..32]
-    )
+    crate::util::new_uuid()
 }
 
 // ---------------------------------------------------------------------------
