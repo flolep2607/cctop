@@ -4,7 +4,7 @@ use crate::config;
 use crate::util;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::Duration;
 
 const HTTP_TIMEOUT: Duration = Duration::from_secs(5);
@@ -689,15 +689,10 @@ pub fn save_token(profile: &str, token: &str) -> anyhow::Result<()> {
         .ok_or_else(|| anyhow::anyhow!("account '{profile}' in {} is not a table", path.display()))?
         .insert("token", toml_edit::value(token));
 
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
     // Written through a temporary file so an interrupted write cannot truncate
     // the config, and created unreadable to anyone else from the start:
     // widening a file that already holds a secret is a window, however short.
-    let tmp = temp_beside(path, "toml");
-    write_secret(&tmp, &doc.to_string())?;
-    std::fs::rename(&tmp, path)?;
+    crate::util::write_atomic(path, doc.to_string().as_bytes(), true)?;
     // Launchable at once, and polled at once, rather than after a restart and
     // after the next interval: the account was added to be used.
     config::refresh_launchable();
@@ -853,26 +848,6 @@ fn token_account_in(environ: &[u8], config_text: &str) -> Option<String> {
     config::account_names_in(config_text)
         .into_iter()
         .find(|name| pick_token(config_text, name).as_deref() == Some(token))
-}
-
-/// Write `contents` to `path`, owner-only from the moment it exists.
-///
-/// A secret that arrives as `fs::write` followed by a `chmod` is
-/// readable by everyone for as long as the file exists — a window of
-/// microseconds that widens to whatever a slow filesystem makes of it, and
-/// the reason the comments above these writers say "owner-only from the
-/// start". `create` rather than `create_new`: [`temp_beside`] already
-/// makes the name unique, and a reused pid must not fail to save a config
-/// because a crashed run left its file behind.
-pub(crate) fn write_secret(path: &Path, contents: &str) -> std::io::Result<()> {
-    use std::os::unix::fs::OpenOptionsExt;
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(path)?;
-    std::io::Write::write_all(&mut file, contents.as_bytes())
 }
 
 /// Parse `text` as the TOML of `path`, or say where it broke.
@@ -1163,8 +1138,7 @@ fn cached_in(
     );
     // Best effort: a cache that cannot be written costs a request, not an answer.
     if let Ok(json) = serde_json::to_vec(&all) {
-        let tmp = temp_beside(path, "json");
-        let _ = std::fs::write(&tmp, json).and_then(|()| std::fs::rename(&tmp, path));
+        let _ = crate::util::write_atomic(path, &json, false);
     }
     status
 }
@@ -1202,40 +1176,11 @@ impl Writer {
     /// `patience`. Never blocks on it: the holder may be a cctop that is itself
     /// wedged, and a quota figure is not worth waiting for anything for.
     fn take(path: &Path, patience: Duration) -> Option<Writer> {
-        use std::os::fd::AsRawFd;
         let lock = path.with_extension("json.lock");
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .open(&lock)
-            .ok()?;
-        let started = std::time::Instant::now();
-        loop {
-            // SAFETY: flock on a descriptor this function owns for the call.
-            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
-                return Some(Writer { _held: file });
-            }
-            if started.elapsed() >= patience {
-                return None;
-            }
-            std::thread::sleep(Duration::from_millis(1));
-        }
+        crate::util::lock_within(&lock, patience)
+            .ok()
+            .map(|file| Writer { _held: file })
     }
-}
-
-/// A temporary name beside `path` that no other writer can already be holding.
-///
-/// A fixed one is a race between processes, not between threads: two cctops
-/// `File::create` the same inode, and whichever renames first publishes a file
-/// the other is still writing into. The pid separates processes — one usage
-/// cache is shared by every cctop on the machine — and the counter separates
-/// threads inside one.
-pub(crate) fn temp_beside(path: &Path, extension: &str) -> PathBuf {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static WRITES: AtomicU64 = AtomicU64::new(0);
-    let seq = WRITES.fetch_add(1, Ordering::Relaxed);
-    path.with_extension(format!("{extension}.{}.{seq}", std::process::id()))
 }
 
 pub fn fetch_claude(profile: &config::Profile) -> ProviderStatus {
@@ -1413,25 +1358,6 @@ mod tests {
         // A clean file parses, and the message still says what went wrong.
         let ok = "[accounts]\n[accounts.work]\ntoken = \"x\"\n";
         assert!(parse_toml(path, ok).is_ok());
-    }
-
-    /// A temp file holding a config or a token is owner-only from the moment
-    /// it exists — not created wide and then narrowed.
-    #[test]
-    fn a_written_secret_is_owner_only_before_a_byte_of_it_lands() {
-        use super::write_secret;
-        use std::os::unix::fs::PermissionsExt;
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.toml.toml");
-        write_secret(&path, "token = \"sk-ant-oat01-x\"\n").unwrap();
-        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
-        assert_eq!(mode & 0o777, 0o600, "mode was {mode:o}");
-        // And the contents are what was asked for.
-        assert!(std::fs::read_to_string(&path).unwrap().contains("sk-ant"));
-        // A second write to the same name still lands: `create` is not
-        // `create_new`, so a reused pid cannot fail to save its config.
-        write_secret(&path, "token = \"y\"\n").unwrap();
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "token = \"y\"\n");
     }
 
     /// A token account's sessions live in the default directory, so only the

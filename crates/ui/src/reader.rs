@@ -614,7 +614,7 @@ fn lay_out(view: &mut ChatView, width: usize) {
 }
 
 fn note_block(note: &str, width: usize) -> Block {
-    let mut lines: Vec<Line<'static>> = super::panels::wrap(note, width)
+    let mut lines: Vec<Line<'static>> = cctop_core::util::wrap(note, width)
         .into_iter()
         .map(|l| Line::styled(l, theme::dim()))
         .collect();
@@ -735,7 +735,7 @@ fn turn_block(
     match turn.role.as_ref() {
         "user" => {
             let bar = Span::styled("▎ ", Style::default().fg(theme::colors().accent));
-            for line in super::panels::wrap(&turn.text, body) {
+            for line in cctop_core::util::wrap(&turn.text, body) {
                 out.push(Line::from(vec![
                     bar.clone(),
                     Span::styled(line, text_style),
@@ -760,7 +760,7 @@ fn turn_block(
             }));
         }
         _ => {
-            for line in super::panels::wrap(&turn.text, body) {
+            for line in cctop_core::util::wrap(&turn.text, body) {
                 out.push(Line::styled(format!("  {line}"), text_style));
             }
         }

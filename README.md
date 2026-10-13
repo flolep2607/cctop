@@ -65,7 +65,7 @@ sudo install -m755 "$d/cctop" /usr/local/bin/cctop && rm -rf "$d"
 ```bash
 cargo binstall cctop           # fetches the release binary
 cargo install cctop --locked   # or compiles it, with the dependencies it was
-                               # released with; needs Rust 1.88 or newer
+                               # released with; needs Rust 1.89 or newer
 ```
 
 From source: `git clone`, `cd cctop`, `cargo build --release`. The binary lands

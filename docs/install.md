@@ -214,4 +214,4 @@ cargo build --release
 The binary lands at `target/release/cctop`. It links no system libraries and
 needs no runtime — a single file you can copy anywhere.
 
-Building requires Rust 1.88 or newer (the code uses let-chains).
+Building requires Rust 1.89 or newer (the code uses let-chains and std's file locks).

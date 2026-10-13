@@ -598,9 +598,9 @@ fn parse_args(argv: &[String]) -> Result<Filter, String> {
             "--session" => filter.session = Some(value()?),
             "--since" => {
                 let v = value()?;
-                filter.since = Some(since(&v, chrono::Utc::now()).ok_or_else(|| {
-                    format!("--since {v:?}: not a duration (30m, 2h, 7d) or a date")
-                })?);
+                filter.since = Some(crate::util::parse_since(&v, chrono::Utc::now()).ok_or_else(
+                    || format!("--since {v:?}: not a duration (30m, 2h, 7d) or a date"),
+                )?);
             }
             "-n" => {
                 let v = value()?;
@@ -612,33 +612,6 @@ fn parse_args(argv: &[String]) -> Result<Filter, String> {
         }
     }
     Ok(filter)
-}
-
-/// A `--since`: a duration back from `now`, or a date or time.
-fn since(word: &str, now: chrono::DateTime<chrono::Utc>) -> Option<chrono::DateTime<chrono::Utc>> {
-    let split = word
-        .find(|c: char| !c.is_ascii_digit())
-        .unwrap_or(word.len());
-    let (count, unit) = word.split_at(split);
-    if let Ok(count) = count.parse::<i64>() {
-        let secs = match unit {
-            "s" => Some(1),
-            "m" => Some(60),
-            "h" => Some(3600),
-            "d" => Some(86_400),
-            "w" => Some(7 * 86_400),
-            _ => None,
-        };
-        if let Some(secs) = secs {
-            return now.checked_sub_signed(chrono::Duration::seconds(count.checked_mul(secs)?));
-        }
-    }
-    if let Ok(at) = chrono::DateTime::parse_from_rfc3339(word) {
-        return Some(at.with_timezone(&chrono::Utc));
-    }
-    let day = chrono::NaiveDate::parse_from_str(word, "%Y-%m-%d").ok()?;
-    let local = day.and_hms_opt(0, 0, 0)?.and_local_timezone(chrono::Local);
-    Some(local.earliest()?.with_timezone(&chrono::Utc))
 }
 
 /// One entry for a person: local time, the session's first eight characters,
@@ -1019,26 +992,6 @@ mod tests {
         let log = Log::default();
         assert!(!log.path().starts_with(&real), "{}", log.path().display());
         assert!(log.path().starts_with(std::env::temp_dir()));
-    }
-
-    #[test]
-    fn since_reads_durations_and_dates() {
-        let now = chrono::DateTime::parse_from_rfc3339("2026-10-08T12:00:00Z")
-            .unwrap()
-            .with_timezone(&chrono::Utc);
-        let ago = |w| (now - since(w, now).unwrap()).num_seconds();
-        assert_eq!(ago("90s"), 90);
-        assert_eq!(ago("30m"), 1800);
-        assert_eq!(ago("2h"), 7200);
-        assert_eq!(ago("7d"), 7 * 86_400);
-        assert_eq!(ago("1w"), 7 * 86_400);
-        assert_eq!(
-            since("2026-10-01T00:00:00Z", now).unwrap().to_rfc3339(),
-            "2026-10-01T00:00:00+00:00"
-        );
-        assert!(since("2026-10-01", now).is_some());
-        assert!(since("soon", now).is_none());
-        assert!(since("5y", now).is_none());
     }
 
     /// `--json --session` over both files, the rotated one included.

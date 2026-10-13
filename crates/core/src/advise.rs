@@ -48,7 +48,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 /// How long a write counts as "recently".
 ///
@@ -422,11 +422,7 @@ impl Ledger {
         let Ok(json) = serde_json::to_vec(&entries) else {
             return;
         };
-        // One temporary name is enough: only the lock holder writes it.
-        let tmp = self.dir.join("writes.json.tmp");
-        if std::fs::write(&tmp, &json).is_ok() {
-            let _ = std::fs::rename(&tmp, self.file());
-        }
+        let _ = crate::util::write_atomic(&self.file(), &json, false);
     }
 }
 
@@ -440,24 +436,9 @@ struct Lock {
 impl Lock {
     /// Try for the lock until `patience` runs out, never blocking on it.
     fn take(path: &Path, patience: Duration) -> Option<Lock> {
-        use std::os::fd::AsRawFd;
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .open(path)
-            .ok()?;
-        let started = Instant::now();
-        loop {
-            // SAFETY: flock on a descriptor this function owns for the call.
-            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
-                return Some(Lock { _held: file });
-            }
-            if started.elapsed() >= patience {
-                return None;
-            }
-            std::thread::sleep(Duration::from_millis(1));
-        }
+        crate::util::lock_within(path, patience)
+            .ok()
+            .map(|file| Lock { _held: file })
     }
 }
 
@@ -509,6 +490,7 @@ fn parse_stat(text: &str) -> Option<(String, u64)> {
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::time::Instant;
 
     const NOW: i64 = 1_800_000_000_000;
 

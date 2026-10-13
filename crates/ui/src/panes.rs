@@ -1733,7 +1733,7 @@ mod tests {
                 order: None,
                 state: signal.map(|signal| cctop_core::rmux::State {
                     signal,
-                    at: cctop_core::rmux::now_secs(),
+                    at: cctop_core::util::now_secs(),
                 }),
                 color: None,
                 tab: None,
@@ -1799,7 +1799,7 @@ mod tests {
             order: None,
             state: signal.map(|signal| cctop_core::rmux::State {
                 signal,
-                at: cctop_core::rmux::now_secs(),
+                at: cctop_core::util::now_secs(),
             }),
             color: None,
             tab: None,
@@ -2012,7 +2012,7 @@ mod tests {
                 order: None,
                 state: Some(cctop_core::rmux::State {
                     signal,
-                    at: cctop_core::rmux::now_secs(),
+                    at: cctop_core::util::now_secs(),
                 }),
                 color: None,
                 tab: None,

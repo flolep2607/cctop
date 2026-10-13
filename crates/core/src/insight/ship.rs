@@ -21,7 +21,8 @@
 //! repository git cannot read is reported as unreadable rather than guessed
 //! at.
 
-use super::{Analysis, plural};
+use super::Analysis;
+use crate::util::plural;
 use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -915,13 +916,7 @@ fn sorted(rows: HashMap<String, Tally>) -> Vec<(String, Tally)> {
 /// A path with the home directory as `~`, because every repository on the
 /// machine shares that prefix and it is the least informative part.
 fn tilde(path: &Path) -> String {
-    let shown = path.to_string_lossy().into_owned();
-    match std::env::var("HOME") {
-        Ok(home) if !home.is_empty() && shown.starts_with(&home) => {
-            format!("~{}", &shown[home.len()..])
-        }
-        _ => shown,
-    }
+    crate::util::tildify(&path.to_string_lossy())
 }
 
 fn money(v: f64, unpriced: bool) -> String {
