@@ -87,15 +87,16 @@ pub fn token_link() -> String {
 /// Where a domain is added to Cloudflare.
 pub const ADD_SITE_LINK: &str = "https://dash.cloudflare.com/?to=/:account/add-site";
 
+/// Everything but RFC 3986's unreserved characters escaped, so the result is
+/// safe as any one component of a URL.
 pub(crate) fn percent_encode(text: &str) -> String {
-    text.bytes()
-        .map(|b| match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                (b as char).to_string()
-            }
-            _ => format!("%{b:02X}"),
-        })
-        .collect()
+    use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
+    const COMPONENT: &AsciiSet = &NON_ALPHANUMERIC
+        .remove(b'-')
+        .remove(b'_')
+        .remove(b'.')
+        .remove(b'~');
+    utf8_percent_encode(text, COMPONENT).to_string()
 }
 
 /// What was pasted.

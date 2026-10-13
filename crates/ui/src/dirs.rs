@@ -131,22 +131,7 @@ pub(super) fn complete(typed: &str, hits: &[PathBuf]) -> Option<String> {
 /// The longest string every path starts with, cut to a whole character.
 fn shared_prefix(paths: &[PathBuf]) -> String {
     let spellings: Vec<String> = paths.iter().map(|p| p.to_string_lossy().into()).collect();
-    let mut prefix = String::new();
-    let Some(first) = spellings.first() else {
-        return prefix;
-    };
-    for (i, c) in first.char_indices() {
-        let upto = i + c.len_utf8();
-        if spellings
-            .iter()
-            .all(|s| s.len() >= upto && s[..upto] == first[..upto])
-        {
-            prefix.push(c);
-        } else {
-            break;
-        }
-    }
-    prefix
+    super::location::shared_prefix(&spellings)
 }
 
 /// Whether `path` is a directory once a symlink is resolved.

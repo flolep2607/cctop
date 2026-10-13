@@ -549,7 +549,7 @@ impl App {
     /// expired one reads as saying nothing, so a working claim this cctop still
     /// believes is rewritten rather than allowed to lapse.
     pub(super) fn publish_states(&self, running: &[cctop_core::rmux::Running]) {
-        for (name, signal) in self.states_to_publish(running, cctop_core::rmux::now_secs()) {
+        for (name, signal) in self.states_to_publish(running, cctop_core::util::now_secs()) {
             cctop_core::rmux::set_state(&name, signal);
         }
     }

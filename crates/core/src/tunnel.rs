@@ -235,23 +235,11 @@ fn claim(credentials: &Credentials) -> Option<File> {
 }
 
 fn claim_in(dir: &Path, tunnel_id: &str) -> Option<File> {
-    use std::os::fd::AsRawFd;
-    use std::os::unix::fs::OpenOptionsExt;
     let _ = std::fs::create_dir_all(dir);
-    let file = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .mode(0o600)
-        .open(dir.join(format!("tunnel-{tunnel_id}.lock")))
-        // A lock that cannot be taken at all is not a reason to refuse the
-        // tunnel; it is a reason to say nothing and go without the guard.
-        .ok()?;
-    // SAFETY: flock on a descriptor this function owns for the call.
-    match unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } {
-        0 => Some(file),
-        _ => None,
-    }
+    // One try: a connector already running is the answer, not something to
+    // wait out.
+    let path = dir.join(format!("tunnel-{tunnel_id}.lock"));
+    crate::util::lock_within(&path, std::time::Duration::ZERO).ok()
 }
 
 // ---------------------------------------------------------------------------
@@ -980,12 +968,7 @@ fn edit_config(path: &Path, edit: impl FnOnce(&mut toml_edit::DocumentMut)) -> a
     };
     let mut doc = crate::quota::parse_toml(path, &text)?;
     edit(&mut doc);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let tmp = crate::quota::temp_beside(path, "toml");
-    crate::quota::write_secret(&tmp, &doc.to_string())?;
-    std::fs::rename(&tmp, path)?;
+    crate::util::write_atomic(path, doc.to_string().as_bytes(), true)?;
     Ok(())
 }
 

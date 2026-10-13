@@ -16,12 +16,14 @@ use qrcode::{EcLevel, QrCode};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
-use ratatui::widgets::Widget;
-use tui_qrcode::{Colors, QrCodeWidget, QuietZone};
+
+/// The light margin round a code, in modules, on every side: the four the
+/// standard asks for.
+const QUIET: usize = 4;
 
 /// A link encoded and ready to draw, with the cells it will take.
 pub(super) struct Qr {
-    widget: QrCodeWidget,
+    code: QrCode,
     pub width: u16,
     pub height: u16,
 }
@@ -35,8 +37,8 @@ pub(super) struct Qr {
 /// `M`, four rows of difference.
 ///
 /// Half-blocks, one module wide and two tall per cell, because that is the
-/// densest rendering the widget has and the squarest: a terminal cell is about
-/// twice as tall as it is wide. And the full four-module quiet zone the
+/// densest rendering a cell grid allows and the squarest: a terminal cell is
+/// about twice as tall as it is wide. And the full four-module quiet zone the
 /// standard asks for — on a dark theme the modal behind the code is dark, and a
 /// code with no light margin of its own runs its finder patterns into the
 /// border, which is the failure scanners are worst at.
@@ -46,15 +48,12 @@ pub(super) struct Qr {
 /// is one more copy of a credential to remember to drop.
 pub(super) fn encode(url: &str) -> Option<Qr> {
     let code = QrCode::with_error_correction_level(url.as_bytes(), EcLevel::L).ok()?;
-    let widget = QrCodeWidget::new(code)
-        .quiet_zone(QuietZone::Enabled)
-        .colors(colors())
-        .style(style());
-    let size = widget.size(Rect::default());
+    // Version 40 is 177 modules, so neither side comes near a u16's limit.
+    let side = (code.width() + 2 * QUIET) as u16;
     Some(Qr {
-        widget,
-        width: size.width,
-        height: size.height,
+        code,
+        width: side,
+        height: side.div_ceil(2),
     })
 }
 
@@ -83,7 +82,39 @@ impl Qr {
             width: self.width,
             height: self.height,
         };
-        (&self.widget).render(at, buf);
+        buf.set_style(at, style());
+        let inverted = inverted();
+        for row in 0..self.height {
+            for col in 0..self.width {
+                let top = self.ink(col.into(), usize::from(row) * 2, inverted);
+                let bottom = self.ink(col.into(), usize::from(row) * 2 + 1, inverted);
+                let glyph = match (top, bottom) {
+                    (true, true) => "█",
+                    (true, false) => "▀",
+                    (false, true) => "▄",
+                    (false, false) => " ",
+                };
+                buf[(at.x + col, at.y + row)].set_symbol(glyph);
+            }
+        }
+    }
+
+    /// Whether the half-cell for module (`x`, `y`) — counted from the outer
+    /// edge of the quiet zone — is drawn as glyph rather than as blank.
+    ///
+    /// The glyph is the foreground, so it is the dark modules, or the light
+    /// ones when [`inverted`]. The half-row below the last, which an odd side
+    /// leaves at the bottom of the final cell row, is no module at all and
+    /// always blank, in either polarity.
+    fn ink(&self, x: usize, y: usize, inverted: bool) -> bool {
+        let side = self.code.width() + 2 * QUIET;
+        if y >= side {
+            return false;
+        }
+        let in_code = |v: usize| (QUIET..QUIET + self.code.width()).contains(&v);
+        let dark =
+            in_code(x) && in_code(y) && self.code[(x - QUIET, y - QUIET)] == qrcode::Color::Dark;
+        dark != inverted
     }
 }
 
@@ -94,11 +125,11 @@ impl Qr {
 /// is to be read by somebody else's camera — so the dark theme does not get a
 /// light-on-dark code just because that is what the rest of its screen is.
 ///
-/// The widget's `Normal` draws a dark module as a glyph in the foreground
-/// colour and a light one as a blank on the background, so the foreground is
-/// the black. 256-colour indices 16 and 231 rather than the ANSI black and
-/// white, which themes remap freely — Solarized's "white" is a grey, and a
-/// grey quiet zone is contrast given away.
+/// A dark module is drawn as a glyph in the foreground colour and a light one
+/// as a blank on the background, so the foreground is the black. 256-colour
+/// indices 16 and 231 rather than the ANSI black and white, which themes remap
+/// freely — Solarized's "white" is a grey, and a grey quiet zone is contrast
+/// given away.
 fn style() -> Style {
     match super::theme::no_color() {
         // No colour means none of ours: the terminal's own pair, see below.
@@ -109,7 +140,7 @@ fn style() -> Style {
     }
 }
 
-/// Which of the widget's two polarities to draw in.
+/// Whether the glyphs are the light modules rather than the dark ones.
 ///
 /// Under `NO_COLOR` there is no black to ask for, only the terminal's
 /// foreground and background, and the code is drawn with the light modules in
@@ -119,11 +150,8 @@ fn style() -> Style {
 /// ponytail: under `NO_COLOR` on a dark-text-on-light terminal that comes out
 /// inverted. Phone cameras read it anyway; a scanner that insists on polarity
 /// will not, and the fix is the colour `NO_COLOR` asked cctop not to use.
-fn colors() -> Colors {
-    match super::theme::no_color() {
-        true => Colors::Inverted,
-        false => Colors::Normal,
-    }
+fn inverted() -> bool {
+    super::theme::no_color()
 }
 
 #[cfg(test)]

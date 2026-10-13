@@ -832,14 +832,6 @@ impl State {
     }
 }
 
-/// Wall-clock seconds, which is the only clock two cctops share.
-pub fn now_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-}
-
 /// Record on the session what its agent last reported about itself.
 ///
 /// The fourth thing written onto the session rather than kept in this process,
@@ -858,7 +850,11 @@ pub fn now_secs() -> u64 {
 /// Best effort, like its neighbours: a state that failed to save is a tab that
 /// falls back to guessing at its screen, which is where it was before.
 pub fn set_state(name: &str, signal: crate::hook::Signal) {
-    record(name, "@cctop_state", &State::encode(signal, now_secs()));
+    record(
+        name,
+        "@cctop_state",
+        &State::encode(signal, crate::util::now_secs()),
+    );
 }
 
 /// Record where this session's tab sits in the bar.
@@ -2160,12 +2156,7 @@ mod tests {
             &["sh", "-c", "while true; do date; sleep 0.2; done"],
         );
 
-        let now = || {
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0)
-        };
+        let now = crate::util::now_secs;
         let reading = || {
             running()
                 .into_iter()

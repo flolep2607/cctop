@@ -1891,11 +1891,7 @@ fn flatten_content(content: Option<&Value>) -> String {
         Some(other) => out = other.to_string(),
         None => {}
     }
-    let trimmed = out.trim();
-    match trimmed.chars().count() > MAX_RESULT_CHARS {
-        true => trimmed.chars().take(MAX_RESULT_CHARS).collect::<String>() + "…",
-        false => trimmed.to_string(),
-    }
+    crate::util::clip(out.trim(), MAX_RESULT_CHARS)
 }
 
 /// Append with a blank line between blocks, so two text blocks do not run into

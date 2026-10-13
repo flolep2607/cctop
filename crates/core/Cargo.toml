@@ -43,6 +43,7 @@ dirs.workspace = true
 flate2.workspace = true
 libc.workspace = true
 notify.workspace = true
+percent-encoding.workspace = true
 ratatui.workspace = true
 rayon.workspace = true
 regex.workspace = true
@@ -65,7 +66,9 @@ tokenizers.workspace = true
 tokio.workspace = true
 ts-rs = { workspace = true, optional = true }
 toml_edit.workspace = true
+tracing.workspace = true
 ureq.workspace = true
+uuid.workspace = true
 vt100.workspace = true
 webpki-roots.workspace = true
 

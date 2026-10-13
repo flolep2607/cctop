@@ -328,7 +328,7 @@ fn tool_output(out: &mut String, tool: &ToolUse) {
 
 /// Quote `text` line by line, blank lines included, so the quote is one block
 /// and nothing in it can be read as the document's own structure.
-fn quote(text: &str) -> String {
+pub(crate) fn quote(text: &str) -> String {
     text.trim()
         .lines()
         .map(|line| match line.trim().is_empty() {

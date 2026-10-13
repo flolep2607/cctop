@@ -109,14 +109,10 @@ impl Login {
 
     /// Against another authorize page and store: the [`fake`] in tests.
     pub(crate) fn at(login: &str, store: &str) -> Login {
-        let key: String = crate::util::b64_encode(&crate::util::random_bytes(32))
-            .chars()
-            .map(|c| match c {
-                '+' => '-',
-                '/' => '_',
-                c => c,
-            })
-            .collect();
+        let key = {
+            use base64::Engine;
+            base64::engine::general_purpose::URL_SAFE.encode(crate::util::random_bytes(32))
+        };
         let store = format!("{store}{key}");
         // cloudflared's query, in the order Go's `url.Values.Encode` sorts it.
         let url = format!("{login}?aud=&callback={}", percent_encode(&store));
@@ -381,23 +377,9 @@ pub mod fake {
     }
 
     fn percent_decode(text: &str) -> String {
-        let bytes = text.as_bytes();
-        let mut out = Vec::with_capacity(bytes.len());
-        let mut i = 0;
-        while i < bytes.len() {
-            match bytes[i] {
-                b'%' if i + 2 < bytes.len() => {
-                    let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or("");
-                    out.push(u8::from_str_radix(hex, 16).unwrap_or(b'?'));
-                    i += 3;
-                }
-                b => {
-                    out.push(b);
-                    i += 1;
-                }
-            }
-        }
-        String::from_utf8_lossy(&out).into_owned()
+        percent_encoding::percent_decode_str(text)
+            .decode_utf8_lossy()
+            .into_owned()
     }
 
     /// "The user logged in": what a browser opening `url` would do.

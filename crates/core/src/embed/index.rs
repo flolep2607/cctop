@@ -29,7 +29,7 @@ use super::{Model, cosine};
 use crate::session::search::Target;
 use anyhow::{Context, Result};
 use std::collections::HashMap;
-use std::io::{Read, Write};
+use std::io::Read;
 use std::path::Path;
 
 /// How much prose goes into one chunk.
@@ -286,9 +286,6 @@ impl Index {
     /// encoding of them is both larger than the vectors and lossy about their
     /// last digit.
     pub fn save(&self, path: &Path) -> Result<()> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).ok();
-        }
         let mut out: Vec<u8> = Vec::new();
         out.extend_from_slice(MAGIC);
         out.extend_from_slice(&VERSION.to_le_bytes());
@@ -310,11 +307,8 @@ impl Index {
 
         // Written beside and renamed, so an interrupted save leaves the old
         // index rather than half of a new one.
-        let tmp = path.with_extension("tmp");
-        std::fs::File::create(&tmp)
-            .and_then(|mut f| f.write_all(&out))
-            .with_context(|| format!("writing {}", tmp.display()))?;
-        std::fs::rename(&tmp, path).with_context(|| format!("renaming onto {}", path.display()))?;
+        crate::util::write_atomic(path, &out, false)
+            .with_context(|| format!("writing {}", path.display()))?;
         Ok(())
     }
 
@@ -406,6 +400,7 @@ mod tests {
     use crate::embed::tests::tiny;
     use crate::pricing::Provider;
     use crate::session::Session;
+    use std::io::Write;
     use std::path::PathBuf;
 
     fn temp(name: &str, body: &str) -> PathBuf {

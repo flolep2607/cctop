@@ -181,7 +181,7 @@ impl Request {
             Some((p, q)) => (p, q),
             None => (target, ""),
         };
-        let path = percent_decode(raw_path);
+        let path = decode_path(raw_path);
         // Refused rather than normalised. Nothing here serves a file off disk,
         // so a `..` in a path is not a traversal — but it is also not a route
         // that exists, and a request shaped like an attack should be answered
@@ -420,41 +420,23 @@ impl Request {
     }
 }
 
-/// Decode `%XX` escapes and `+`, leaving anything malformed as written.
+/// Decode a path's `%XX` escapes, leaving anything malformed as written.
 ///
 /// A stray `%` in a path is far likelier to be a literal than a truncated
 /// escape, and turning it into a replacement character would make the path fail
-/// to match a route for a reason nobody could see.
+/// to match a route for a reason nobody could see. `+` is a plus here: only a
+/// query string spells a space that way.
+fn decode_path(s: &str) -> String {
+    percent_encoding::percent_decode_str(s)
+        .decode_utf8_lossy()
+        .into_owned()
+}
+
+/// Decode a query string's key or value: `+` is a space, as a form encodes
+/// one, and the rest is [`decode_path`]. The `+`s go first, so a `%2B` is still
+/// the plus it escaped.
 fn percent_decode(s: &str) -> String {
-    let bytes = s.as_bytes();
-    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'%' if i + 2 < bytes.len() => {
-                let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).ok();
-                match hex.and_then(|h| u8::from_str_radix(h, 16).ok()) {
-                    Some(byte) => {
-                        out.push(byte);
-                        i += 3;
-                    }
-                    None => {
-                        out.push(b'%');
-                        i += 1;
-                    }
-                }
-            }
-            b'+' => {
-                out.push(b' ');
-                i += 1;
-            }
-            byte => {
-                out.push(byte);
-                i += 1;
-            }
-        }
-    }
-    String::from_utf8_lossy(&out).into_owned()
+    decode_path(&s.replace('+', " "))
 }
 
 /// The reason phrase for the statuses this server actually sends.
@@ -1125,6 +1107,34 @@ mod tests {
         // The trailing `%2` cannot be an escape, and turning it into one would
         // silently change the path being asked for.
         assert_eq!(percent_decode("/x%2"), "/x%2");
+        assert_eq!(decode_path("/x%2"), "/x%2");
+    }
+
+    /// `u8::from_str_radix` takes a leading sign, so a decoder built on it read
+    /// `%+A` as the byte 0x0A. It is not an escape.
+    #[test]
+    fn a_signed_escape_is_not_an_escape() {
+        assert_eq!(percent_decode("%+A"), "% A");
+        assert_eq!(decode_path("/x%+A"), "/x%+A");
+        assert_eq!(decode_path("/x%-1"), "/x%-1");
+    }
+
+    /// A path's `+` is a plus; only a query's is a space.
+    #[test]
+    fn plus_is_a_space_only_in_the_query() {
+        assert_eq!(decode_path("/c++/a+b"), "/c++/a+b");
+        assert_eq!(percent_decode("a+b"), "a b");
+        assert_eq!(percent_decode("a%2Bb"), "a+b");
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (server, _) = listener.accept().unwrap();
+        use std::io::Write;
+        client
+            .write_all(b"GET /c++?q=a+b%2B HTTP/1.1\r\n\r\n")
+            .unwrap();
+        let req = Request::parse(&server).unwrap();
+        assert_eq!(req.path, "/c++");
+        assert_eq!(req.query.get("q").map(String::as_str), Some("a b+"));
     }
 
     #[test]

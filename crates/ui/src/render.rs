@@ -640,7 +640,7 @@ fn draw_workspace_bar(frame: &mut Frame, area: Rect, app: &App, layout: &mut Lay
             ));
             pos += 1;
         }
-        let text = format!(" {} ", elide(title, cap));
+        let text = format!(" {} ", util::truncate(title, cap));
         let mut width = text.chars().count() as u16;
         let style = tab_style(app, i, hues[i]);
         spans.push(Span::styled(text, style));
@@ -852,14 +852,6 @@ pub(super) fn bar_styles(app: &App) -> Vec<Style> {
     (0..=app.settings_tab())
         .map(|i| tab_style(app, i, tab_hue(app, i)))
         .collect()
-}
-
-/// `text`, clipped to `max` columns with an ellipsis when it does not fit.
-pub(super) fn elide(text: &str, max: usize) -> String {
-    if text.chars().count() <= max {
-        return text.to_string();
-    }
-    text.chars().take(max.saturating_sub(1)).collect::<String>() + "…"
 }
 
 /// How much of the quota fits. Rather than truncate mid-number, the pane border
@@ -1642,10 +1634,9 @@ fn draw_bottom(frame: &mut Frame, area: Rect, app: &mut App, layout: &mut Layout
         // rather than implying the cursor is on nothing.
         let said = match app.selected_group() {
             Some(g) => format!(
-                "{} — {} session{}. Enter folds or unfolds it.",
+                "{} — {}. Enter folds or unfolds it.",
                 g.label,
-                g.sessions,
-                if g.sessions == 1 { "" } else { "s" }
+                util::plural(g.sessions, "session")
             ),
             None => "No session selected".to_string(),
         };
@@ -3065,7 +3056,7 @@ mod tests {
                 order: None,
                 state: Some(cctop_core::rmux::State {
                     signal: cctop_core::hook::Signal::NeedsInput,
-                    at: cctop_core::rmux::now_secs(),
+                    at: cctop_core::util::now_secs(),
                 }),
                 color: color.map(str::to_string),
                 tab: None,
@@ -3612,13 +3603,13 @@ mod tests {
             .max(3);
         let drawn: usize = titles
             .iter()
-            .map(|t| elide(t, cap).chars().count() + 2)
+            .map(|t| util::cells(&util::truncate(t, cap)) + 2)
             .sum::<usize>()
             + separators;
 
         assert!(drawn <= label_room, "{drawn} columns in {label_room}");
-        assert_eq!(elide("1:claude-1", cap), "1:…");
-        assert_eq!(elide("1:cc", cap), "1:…");
+        assert_eq!(util::truncate("1:claude-1", cap), "1:…");
+        assert_eq!(util::truncate("1:cc", cap), "1:…");
     }
 
     #[test]

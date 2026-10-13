@@ -14,7 +14,6 @@
 //! for it.
 
 use std::io::{Read, Write};
-use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -418,11 +417,8 @@ fn a_held_lock_does_not_hold_the_agent_up() {
         .write(true)
         .open(dir.join("run").join("cctop").join("yolo.lock"))
         .unwrap();
-    // SAFETY: flock on a descriptor this test owns until the end.
-    assert_eq!(
-        unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
-        0
-    );
+    lock.try_lock()
+        .expect("nobody else holds the switch's lock");
     let fired = fire(&dir, &request("on"));
     assert_eq!(fired.code, Some(0));
     assert_eq!(String::from_utf8_lossy(&fired.stdout), format!("{ALLOW}\n"));

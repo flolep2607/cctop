@@ -5,7 +5,7 @@ when behaviour changes.
 
 ## Development
 
-Build and run the test suite with Rust 1.88 or newer (the code uses let-chains):
+Build and run the test suite with Rust 1.89 or newer (the code uses let-chains and std's file locks):
 
 ```bash
 cargo test

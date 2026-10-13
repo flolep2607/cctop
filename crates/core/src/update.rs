@@ -124,13 +124,6 @@ struct CheckCache {
     latest: String,
 }
 
-fn unix_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-}
-
 pub(crate) fn agent() -> ureq::Agent {
     ureq::Agent::config_builder()
         .timeout_global(Some(std::time::Duration::from_secs(15)))
@@ -160,7 +153,12 @@ fn github_get(url: &str) -> Result<String> {
         };
         let remaining = header("x-ratelimit-remaining");
         let reset = header("x-ratelimit-reset").and_then(|r| r.parse().ok());
-        anyhow::bail!(refusal(status, remaining.as_deref(), reset, unix_secs()));
+        anyhow::bail!(refusal(
+            status,
+            remaining.as_deref(),
+            reset,
+            crate::util::now_secs()
+        ));
     }
     response
         .body_mut()
@@ -261,7 +259,7 @@ fn latest_checked(
 ) -> Option<String> {
     if let Ok(text) = std::fs::read_to_string(path)
         && let Ok(cache) = serde_json::from_str::<CheckCache>(&text)
-        && unix_secs().saturating_sub(cache.checked_at) < CHECK_MAX_AGE_SECS
+        && crate::util::now_secs().saturating_sub(cache.checked_at) < CHECK_MAX_AGE_SECS
     {
         return Some(cache.latest);
     }
@@ -277,7 +275,7 @@ fn latest_checked(
         let _ = std::fs::create_dir_all(dir);
     }
     if let Ok(text) = serde_json::to_string(&CheckCache {
-        checked_at: unix_secs(),
+        checked_at: crate::util::now_secs(),
         latest: latest.clone(),
     }) {
         let _ = std::fs::write(path, text);
@@ -1026,7 +1024,7 @@ fn note(line: &str) {
         let _ = writeln!(
             file,
             "{} {} (pid {}): {line}",
-            unix_secs(),
+            crate::util::now_secs(),
             current_version(),
             std::process::id()
         );

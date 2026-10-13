@@ -311,6 +311,424 @@ pub fn untildify(path: &str) -> String {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Shared helpers that used to be copied from module to module
+//
+// Each of these had grown a copy per caller, and the copies had drifted: some
+// wrote through a fixed temporary name, some counted chars where a terminal
+// counts cells, two `--since` parsers disagreed about what a bare date meant.
+// ---------------------------------------------------------------------------
+
+/// Replace `path` with `bytes`, so a reader sees the old file or the new one
+/// and never half of either.
+///
+/// Written to a temporary beside the target and renamed over it, which is
+/// atomic within one filesystem — hence beside, not in `/tmp`. The parent is
+/// created first, because every caller wanted that.
+///
+/// The temporary's name is unique to this write ([`temp_beside`]), never a
+/// fixed `.tmp`: several cctops share most of these files, and two writers on
+/// one fixed name `File::create` the same inode, so whichever renames first
+/// publishes a file the other is still writing into.
+///
+/// `private` makes the file owner-only from the moment it exists, rather than
+/// created wide and narrowed after: a config holding a token is readable by
+/// anyone for as long as that window lasts, however short. Without it the file
+/// gets the umask's mode, as `fs::write` would give it.
+///
+/// No fsync. None of the writers this replaced did one, and what they write is
+/// a cache, a state file or a config whose loss on power failure costs a
+/// re-read or a re-run, not work — while an fsync on every hook fire is a
+/// stall on a slow disk inside someone's coding session.
+///
+/// A failed write removes its temporary, so a full disk does not also fill up
+/// with half-written siblings.
+pub fn write_atomic(path: &Path, bytes: &[u8], private: bool) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
+        std::fs::create_dir_all(dir)?;
+    }
+    let tmp = temp_beside(path);
+    let written = (|| {
+        let mut options = std::fs::OpenOptions::new();
+        // `create` rather than `create_new`: the name is already unique to
+        // this process and write, and a reused pid must not fail to save
+        // because a crashed run left its temporary behind.
+        options.write(true).create(true).truncate(true);
+        if private {
+            options.mode(0o600);
+        }
+        options.open(&tmp)?.write_all(bytes)?;
+        std::fs::rename(&tmp, path)
+    })();
+    if written.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    written
+}
+
+/// A temporary name beside `path` that no other writer can already be holding.
+///
+/// The pid separates processes, which is the direction that matters since each
+/// cctop is its own writer; the counter separates threads inside one, which a
+/// pid alone would call the same writer.
+fn temp_beside(path: &Path) -> std::path::PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static WRITES: AtomicU64 = AtomicU64::new(0);
+    let seq = WRITES.fetch_add(1, Ordering::Relaxed);
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(format!(".{}.{seq}.tmp", std::process::id()));
+    path.with_file_name(name)
+}
+
+/// An exclusive lock on the file at `path`, created if it is not there, or
+/// `WouldBlock` once `patience` has gone by with someone else holding it.
+///
+/// Polled rather than blocked on: the holder may be a cctop that is itself
+/// wedged — stopped with ^Z mid-write, say — and every caller would rather go
+/// without than wait on that. A zero `patience` is one try. The lock goes with
+/// the returned file, or with the process, since the kernel releases it on the
+/// last close of the descriptor: which is what makes it safe in a hook that
+/// may be abandoned mid-write.
+///
+/// Owner-only, because the lock files live beside state that is.
+pub fn lock_within(path: &Path, patience: std::time::Duration) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .mode(0o600)
+        .open(path)?;
+    let started = std::time::Instant::now();
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(file),
+            Err(std::fs::TryLockError::Error(e)) => return Err(e),
+            Err(std::fs::TryLockError::WouldBlock) => {}
+        }
+        if started.elapsed() >= patience {
+            return Err(std::io::ErrorKind::WouldBlock.into());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+}
+
+/// Seconds since the Unix epoch; zero on a clock set before it.
+pub fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
+/// `1 session` / `2 sessions`, because a line that says "1 sessions" reads as
+/// one nobody proof-read.
+pub fn plural(n: usize, noun: &str) -> String {
+    match n {
+        1 => format!("1 {noun}"),
+        _ => format!("{n} {noun}s"),
+    }
+}
+
+/// Cells one character occupies, by the same measure as [`cells`].
+fn char_cells(c: char) -> usize {
+    cells(c.encode_utf8(&mut [0u8; 4]))
+}
+
+/// At most `max` cells of `text`, then `…` when something was cut.
+///
+/// The counterpart of [`truncate`], whose ellipsis fits *inside* the width:
+/// this one goes past it, for the places that cap how much is kept rather than
+/// how wide a column is — a tool's detail, a quoted prompt, a title. Cells
+/// rather than chars for the same reason as there, and a kept part that ends
+/// in a space has it trimmed, so the `…` reads as the end of the last word.
+///
+/// The ellipsis is load-bearing where an agent reads the text as fact: a
+/// half-quoted instruction that ends cleanly reads as the whole instruction.
+pub fn clip(text: &str, max: usize) -> String {
+    if cells(text) <= max {
+        return text.to_string();
+    }
+    let mut used = 0;
+    let end = text
+        .char_indices()
+        .find(|&(_, c)| {
+            used += char_cells(c);
+            used > max
+        })
+        .map_or(text.len(), |(i, _)| i);
+    format!("{}…", text[..end].trim_end())
+}
+
+/// `text` in rows of at most `width` cells, each line of it wrapped on its
+/// own, broken on the last space that fits — and inside a word only where it
+/// is wider than a whole row.
+///
+/// Cells, not chars: a CJK line counted in chars came out twice the width it
+/// was given and ran over whatever was beside it. Spaces inside a row are kept
+/// as typed, and the ones a break lands on are dropped; an empty line stays an
+/// empty row.
+pub fn wrap(text: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
+    let mut out = Vec::new();
+    for raw in text.lines() {
+        let mut line = raw;
+        while cells(line) > width {
+            // The byte where the row is full, and the last space at or before
+            // it — a space just past the edge is as good a break as one inside
+            // it, since the row is then exactly full.
+            let mut used = 0;
+            let mut full = line.len();
+            let mut space = None;
+            for (i, c) in line.char_indices() {
+                if c == ' ' {
+                    space = Some(i);
+                }
+                used += char_cells(c);
+                if used > width {
+                    full = i;
+                    break;
+                }
+            }
+            let cut = match space {
+                // Nothing to break on, or only a leading space, which would
+                // emit an empty row and never make progress: cut the word.
+                // A wide character alone on a row narrower than itself still
+                // has to go somewhere, or this would never end.
+                Some(0) | None => match full {
+                    0 => line.chars().next().map_or(line.len(), char::len_utf8),
+                    at => at,
+                },
+                Some(at) => at,
+            };
+            out.push(line[..cut].to_string());
+            line = line[cut..].trim_start();
+            if line.is_empty() {
+                // Cut exactly at the end, or only spaces were left: an empty
+                // row here would be one nobody wrote.
+                break;
+            }
+        }
+        if !line.is_empty() || raw.is_empty() {
+            out.push(line.to_string());
+        }
+    }
+    out
+}
+
+/// A span typed by a person, `90s`, `30m`, `2h`, `7d`, `2w` — or `1.5h`.
+///
+/// `None` for anything else, including a span too long to be a [`Duration`]:
+/// `99999999999999w` is a typo to refuse, not a reason to panic, which is what
+/// `chrono::Duration::weeks` did with it. A bare number is not a span here;
+/// what it would mean depends on the flag, so a caller that has a default unit
+/// adds it.
+///
+/// [`Duration`]: std::time::Duration
+pub fn parse_duration(text: &str) -> Option<std::time::Duration> {
+    let text = text.trim();
+    let split = text.find(|c: char| !c.is_ascii_digit() && c != '.')?;
+    let (number, unit) = text.split_at(split);
+    let scale = match unit {
+        "s" => 1.0,
+        "m" => 60.0,
+        "h" => 3_600.0,
+        "d" => 86_400.0,
+        "w" => 7.0 * 86_400.0,
+        _ => return None,
+    };
+    let value: f64 = number.parse().ok()?;
+    std::time::Duration::try_from_secs_f64(value * scale).ok()
+}
+
+/// `--since`, as every command that takes one reads it: a span back from
+/// `now` ([`parse_duration`]), an RFC 3339 instant, or a date.
+///
+/// A bare date is *local* midnight, because that is what a person typing
+/// `--since 2026-09-01` means: the start of their 1st of September, not
+/// whatever hour of it UTC's midnight falls on. It used to be UTC midnight in
+/// `optimize` and local midnight in `yolo log`, so the same flag picked a
+/// different set of sessions depending on the command it was given to.
+///
+/// A span of zero is refused: "since now" selects nothing, and is a slip.
+pub fn parse_since(text: &str, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
+    let text = text.trim();
+    if let Some(span) = parse_duration(text) {
+        if span.is_zero() {
+            return None;
+        }
+        return now.checked_sub_signed(chrono::TimeDelta::from_std(span).ok()?);
+    }
+    if let Ok(at) = DateTime::parse_from_rfc3339(text) {
+        return Some(at.with_timezone(&Utc));
+    }
+    let day = chrono::NaiveDate::parse_from_str(text, "%Y-%m-%d").ok()?;
+    // `earliest`: a midnight a DST change repeats happens twice, and the day
+    // starts at the first. One it skips does not happen at all, and the day
+    // starts at the hour the clocks jumped to.
+    let at = |hour| {
+        day.and_hms_opt(hour, 0, 0)?
+            .and_local_timezone(Local)
+            .earliest()
+    };
+    Some(at(0).or_else(|| at(1))?.with_timezone(&Utc))
+}
+
+#[cfg(test)]
+mod shared_tests {
+    use super::*;
+
+    /// A write lands whole, leaves no temporary behind, and a private one is
+    /// owner-only — checked on the file, since the mode is set at creation.
+    #[test]
+    fn an_atomic_write_lands_whole_and_private_when_asked() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("deeper/config.toml");
+        write_atomic(&path, b"token = \"x\"\n", true).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"token = \"x\"\n");
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "mode was {mode:o}");
+        // Replaced, not appended to.
+        write_atomic(&path, b"y", true).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"y");
+        let names: Vec<_> = std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names, ["config.toml"], "a temporary was left behind");
+    }
+
+    /// Two temporaries for one target never share a name, which is the whole
+    /// difference from the fixed `.tmp` the copies used to write through.
+    #[test]
+    fn temporaries_beside_one_target_are_all_different() {
+        let path = Path::new("/x/state.json");
+        let (a, b) = (temp_beside(path), temp_beside(path));
+        assert_ne!(a, b);
+        assert_eq!(a.parent(), path.parent());
+        assert!(a.to_string_lossy().starts_with("/x/state.json."));
+    }
+
+    /// A failed write says so and leaves nothing where it tried.
+    #[test]
+    fn a_failed_atomic_write_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let blocker = dir.path().join("file");
+        std::fs::write(&blocker, "").unwrap();
+        assert!(write_atomic(&blocker.join("x.json"), b"{}", false).is_err());
+    }
+
+    /// The lock keeps a second taker out until the first lets go.
+    #[test]
+    fn a_held_lock_turns_the_next_taker_away() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("x.lock");
+        let held = lock_within(&path, std::time::Duration::ZERO).unwrap();
+        let refused = lock_within(&path, std::time::Duration::from_millis(5)).unwrap_err();
+        assert_eq!(refused.kind(), std::io::ErrorKind::WouldBlock);
+        drop(held);
+        assert!(lock_within(&path, std::time::Duration::ZERO).is_ok());
+    }
+
+    #[test]
+    fn plural_counts_one_and_the_rest() {
+        assert_eq!(plural(1, "session"), "1 session");
+        assert_eq!(plural(0, "session"), "0 sessions");
+        assert_eq!(plural(2, "tab"), "2 tabs");
+    }
+
+    /// A CJK string is two cells a character: counted in chars it came out
+    /// twice as wide as the room it was given.
+    #[test]
+    fn clipping_and_wrapping_count_cells_not_chars() {
+        // Within the cap, untouched; past it, the ellipsis goes on top.
+        assert_eq!(clip("hello", 5), "hello");
+        assert_eq!(clip("hello world", 5), "hello…");
+        assert_eq!(clip("hello world", 6), "hello…", "the space is trimmed");
+        assert_eq!(clip("日本語のテキスト", 6), "日本語…");
+        assert_eq!(
+            cells(&clip("日本語のテキスト", 7)),
+            7,
+            "no half a character"
+        );
+
+        for row in wrap("日本語のテキストを折り返す", 6) {
+            assert!(cells(&row) <= 6, "{row:?} is {} cells", cells(&row));
+        }
+        assert_eq!(wrap("日本語 テキスト", 7), ["日本語", "テキス", "ト"]);
+        assert_eq!(wrap("the quick brown fox", 10), ["the quick", "brown fox"]);
+        // A word wider than the row is cut, an empty line stays a row, and a
+        // wide character in a one-cell row still makes progress.
+        assert_eq!(wrap("abcdefgh", 3), ["abc", "def", "gh"]);
+        assert_eq!(wrap("a\n\nb", 5), ["a", "", "b"]);
+        assert_eq!(wrap("日本", 1), ["日", "本"]);
+    }
+
+    #[test]
+    fn durations_read_every_unit_and_refuse_overflow() {
+        use std::time::Duration;
+        assert_eq!(parse_duration("90s"), Some(Duration::from_secs(90)));
+        assert_eq!(parse_duration("30m"), Some(Duration::from_secs(1_800)));
+        assert_eq!(parse_duration("2h"), Some(Duration::from_secs(7_200)));
+        assert_eq!(parse_duration("7d"), Some(Duration::from_secs(7 * 86_400)));
+        assert_eq!(parse_duration("2w"), Some(Duration::from_secs(14 * 86_400)));
+        assert_eq!(parse_duration("1.5m"), Some(Duration::from_secs(90)));
+        for bad in [
+            "",
+            "7",
+            "d",
+            "7y",
+            "-3d",
+            "soon",
+            "1e9s",
+            "99999999999999999999w",
+        ] {
+            assert_eq!(parse_duration(bad), None, "{bad}");
+        }
+    }
+
+    /// `--since 99999999999999w` panicked in chrono's `Duration::weeks`; it is
+    /// a span before the start of time, and refused like any other nonsense.
+    #[test]
+    fn since_takes_a_span_an_instant_or_a_local_date_and_never_panics() {
+        let now = DateTime::parse_from_rfc3339("2026-10-08T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let ago = |w| (now - parse_since(w, now).unwrap()).num_seconds();
+        assert_eq!(ago("90s"), 90);
+        assert_eq!(ago("7d"), 7 * 86_400);
+        assert_eq!(ago("1w"), 7 * 86_400);
+        assert_eq!(
+            parse_since("2026-10-01T00:00:00Z", now)
+                .unwrap()
+                .to_rfc3339(),
+            "2026-10-01T00:00:00+00:00"
+        );
+        let local = parse_since("2026-09-01", now)
+            .unwrap()
+            .with_timezone(&Local);
+        assert_eq!(
+            (local.date_naive().to_string(), local.hour(), local.minute()),
+            ("2026-09-01".to_string(), 0, 0),
+            "a date is the person's own midnight"
+        );
+        for bad in ["", "7", "0d", "-3d", "5y", "yesterday", "99999999999999w"] {
+            assert!(parse_since(bad, now).is_none(), "{bad}");
+        }
+    }
+
+    /// A home of `/home/flo` must not fold `/home/flo2` into `~2`: only a
+    /// whole leading component is the home directory.
+    #[test]
+    fn tildify_folds_only_the_whole_home_component() {
+        let home = crate::config::HOME.to_string_lossy().into_owned();
+        assert_eq!(tildify(&format!("{home}/x")), "~/x");
+        assert_eq!(tildify(&format!("{home}2/x")), format!("{home}2/x"));
+    }
+}
+
 /// Drop routing prefixes, version-date suffixes, and the `claude-` vendor prefix.
 ///
 /// Custom providers name models by the whole route they are reached through
@@ -473,59 +891,42 @@ pub fn pretty_mcp_name(name: &str) -> String {
 // Base64
 // ---------------------------------------------------------------------------
 
-const B64_ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
 /// Standard base64 with padding. Used for OSC 52 clipboard writes.
 pub fn b64_encode(data: &[u8]) -> String {
-    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
-    for chunk in data.chunks(3) {
-        let b = [
-            chunk[0],
-            *chunk.get(1).unwrap_or(&0),
-            *chunk.get(2).unwrap_or(&0),
-        ];
-        let n = u32::from_be_bytes([0, b[0], b[1], b[2]]);
-        let idx = [(n >> 18) & 63, (n >> 12) & 63, (n >> 6) & 63, n & 63];
-        out.push(B64_ALPHABET[idx[0] as usize] as char);
-        out.push(B64_ALPHABET[idx[1] as usize] as char);
-        out.push(if chunk.len() > 1 {
-            B64_ALPHABET[idx[2] as usize] as char
-        } else {
-            '='
-        });
-        out.push(if chunk.len() > 2 {
-            B64_ALPHABET[idx[3] as usize] as char
-        } else {
-            '='
-        });
-    }
-    out
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD.encode(data)
 }
 
-/// Decode base64, accepting both the standard and URL-safe alphabets and
-/// tolerating missing padding (JWT payloads omit it).
+/// Decode base64 the way it arrives pasted or copied rather than the way a
+/// spec writes it: either alphabet (even mixed — JWT payloads are URL-safe and
+/// a clipboard is usually standard), padding or none (JWTs omit it), and line
+/// breaks where `base64` wraps at 76 columns. Anything else — a space, a `?` —
+/// refuses the whole input, which is what makes it safe to sniff every paste
+/// for an image: prose does not decode into rubbish.
+///
+/// The crate's engines are each one alphabet, so the input is folded onto the
+/// standard one first rather than trying four engines in turn.
 pub fn b64_decode(input: &str) -> Option<Vec<u8>> {
-    let mut acc: u32 = 0;
-    let mut bits: u8 = 0;
-    let mut out = Vec::with_capacity(input.len() * 3 / 4);
-    for c in input.bytes() {
-        let v = match c {
-            b'A'..=b'Z' => c - b'A',
-            b'a'..=b'z' => c - b'a' + 26,
-            b'0'..=b'9' => c - b'0' + 52,
-            b'+' | b'-' => 62,
-            b'/' | b'_' => 63,
-            b'=' | b'\n' | b'\r' => continue,
-            _ => return None,
-        };
-        acc = (acc << 6) | v as u32;
-        bits += 6;
-        if bits >= 8 {
-            bits -= 8;
-            out.push((acc >> bits) as u8);
-        }
-    }
-    Some(out)
+    use base64::Engine;
+    use base64::engine::{DecodePaddingMode, GeneralPurpose, GeneralPurposeConfig};
+    const LENIENT: GeneralPurpose = GeneralPurpose::new(
+        &base64::alphabet::STANDARD,
+        GeneralPurposeConfig::new()
+            .with_decode_padding_mode(DecodePaddingMode::RequireNone)
+            // An encoder that leaves stray bits in the last character still
+            // meant the bytes before them.
+            .with_decode_allow_trailing_bits(true),
+    );
+    let folded: Vec<u8> = input
+        .bytes()
+        .filter_map(|c| match c {
+            b'\r' | b'\n' | b'=' => None,
+            b'-' => Some(b'+'),
+            b'_' => Some(b'/'),
+            c => Some(c),
+        })
+        .collect();
+    LENIENT.decode(folded).ok()
 }
 
 /// Read at most `max_bytes` from the start of a file.
@@ -580,19 +981,24 @@ pub fn scan_tail_escalating<T>(path: &Path, mut scan: impl FnMut(&str) -> Option
     None
 }
 
-/// `want` bytes of entropy, from the OS where it will give us any.
+/// `want` bytes from the operating system's random source.
 ///
-/// `/dev/urandom` is the real source and the fallback is not as good: hashing
-/// the clock and the pid under [`std::hash::RandomState`], whose keys the
-/// standard library seeds from the OS once per process. That is enough to stop
-/// a value being guessed from across a network and is not enough to stop a
-/// local process that already knows when cctop started.
+/// It panics rather than fall back, because what it makes is the `cctop serve`
+/// token and a login's key, and a fallback that hashed the clock and the pid
+/// (what this did once) is guessable by a local process that knows when cctop
+/// started. A token nobody can use is better than one somebody can guess, and on
+/// Linux `getrandom(2)` only fails on a kernel older than 3.17.
 ///
-/// A short read counts as a failure rather than as fewer bytes: half of
-/// something random is not half as good, and silently shortening it is the kind
-/// of weakening nobody would find later.
+/// `ring` rather than another crate because it is already here for Access's
+/// JWT signatures, and its `SystemRandom` is `getrandom(2)` with no
+/// `/dev/urandom` fallback (that feature is off in the workspace).
 pub fn random_bytes(want: usize) -> Vec<u8> {
-    read_random(want).unwrap_or_else(|| hashed_bytes(want))
+    use ring::rand::SecureRandom;
+    let mut buf = vec![0u8; want];
+    ring::rand::SystemRandom::new()
+        .fill(&mut buf)
+        .expect("the operating system gave no random bytes (getrandom failed)");
+    buf
 }
 
 /// `bytes` bytes of entropy as hex, which is twice as many characters.
@@ -603,34 +1009,10 @@ pub fn random_hex(bytes: usize) -> String {
         .collect()
 }
 
-/// The fallback for a machine whose `/dev/urandom` could not be read, split out
-/// so it can be tested without breaking the real source.
-fn hashed_bytes(want: usize) -> Vec<u8> {
-    use std::hash::{BuildHasher, Hasher, RandomState};
-
-    let mut out = Vec::with_capacity(want);
-    for salt in 0.. {
-        if out.len() >= want {
-            break;
-        }
-        let mut hasher = RandomState::new().build_hasher();
-        hasher.write_i64(now_ms());
-        hasher.write_u32(std::process::id());
-        hasher.write_u64(salt);
-        out.extend_from_slice(&hasher.finish().to_ne_bytes());
-    }
-    out.truncate(want);
-    out
-}
-
-/// Read `want` bytes from the system random device, if there is one.
-fn read_random(want: usize) -> Option<Vec<u8>> {
-    use std::io::Read;
-
-    let mut file = std::fs::File::open("/dev/urandom").ok()?;
-    let mut buf = vec![0u8; want];
-    file.read_exact(&mut buf).ok()?;
-    Some(buf)
+/// A fresh version-4 UUID, the shape of every session id a harness here
+/// writes.
+pub fn new_uuid() -> String {
+    uuid::Uuid::new_v4().to_string()
 }
 
 #[cfg(test)]
@@ -668,6 +1050,28 @@ mod tests {
         let wrapped = format!("{}\r\n{}", &text[..8], &text[8..]);
         assert_eq!(b64_decode(&wrapped).as_deref(), Some(&b"hello world!"[..]));
         assert_eq!(b64_decode("what is wrong with this?"), None);
+        assert_eq!(b64_decode("two words"), None);
+    }
+
+    /// Both alphabets, padded or not, decode to the same bytes.
+    #[test]
+    fn base64_takes_either_alphabet_and_any_padding() {
+        let bytes = b"\xfb\xff\xfe?";
+        for text in ["+//+Pw==", "+//+Pw", "-__-Pw==", "-__-Pw", "+_/-Pw="] {
+            assert_eq!(b64_decode(text).as_deref(), Some(&bytes[..]), "{text}");
+        }
+    }
+
+    #[test]
+    fn a_uuid_is_version_four() {
+        let id = new_uuid();
+        assert_eq!(id.len(), 36);
+        assert_eq!(id.as_bytes()[14], b'4');
+        assert!(
+            matches!(id.as_bytes()[19], b'8' | b'9' | b'a' | b'b'),
+            "{id}"
+        );
+        assert_ne!(new_uuid(), new_uuid());
     }
     use super::*;
 
@@ -788,12 +1192,13 @@ mod tests {
         assert_eq!(nice_max(230.0), 250.0);
     }
 
-    /// The fallback has to be the same shape as the source it stands in for.
+    /// As many bytes as asked for, and never the same twice.
     #[test]
-    fn the_hashed_fallback_is_the_same_shape_as_the_real_thing() {
-        assert_eq!(hashed_bytes(16).len(), 16);
-        assert_eq!(hashed_bytes(3).len(), 3);
-        assert_ne!(hashed_bytes(16), hashed_bytes(16));
+    fn random_bytes_are_the_length_asked_for_and_differ() {
+        assert_eq!(random_bytes(16).len(), 16);
+        assert_eq!(random_bytes(3).len(), 3);
+        assert_eq!(random_bytes(0).len(), 0);
+        assert_ne!(random_bytes(16), random_bytes(16));
         let hex = random_hex(16);
         assert_eq!(hex.len(), 32);
         assert!(hex.chars().all(|c| c.is_ascii_hexdigit()));

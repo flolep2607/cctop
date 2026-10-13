@@ -497,16 +497,7 @@ pub fn ensure_template(path: &Path) -> std::io::Result<()> {
 /// temporary file, so an interrupted write cannot truncate a file holding
 /// account tokens, and owner-only from the start, because it may hold them.
 fn save(path: &Path, text: &str) -> std::io::Result<()> {
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-    // A pid-and-sequence name rather than the one fixed `toml.cctop-tmp` this
-    // used: two cctops saving at once would otherwise write the same inode,
-    // and whichever renamed first would publish a file the other was still
-    // writing into.
-    let tmp = crate::quota::temp_beside(path, "toml");
-    crate::quota::write_secret(&tmp, text)?;
-    std::fs::rename(&tmp, path)
+    crate::util::write_atomic(path, text.as_bytes(), true)
 }
 
 /// Set `name` in `[table]` of the file at `path` to `value`, or take it out

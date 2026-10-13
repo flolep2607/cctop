@@ -1116,25 +1116,6 @@ pub fn since(
         .collect()
 }
 
-/// `--since`: a span back from now (`90m`, `24h`, `7d`, `2w`) or a date
-/// (`2026-09-01`, midnight UTC).
-fn parse_since(value: &str) -> Option<chrono::DateTime<chrono::Utc>> {
-    let now = chrono::Utc::now();
-    if let Ok(day) = chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d") {
-        return day.and_hms_opt(0, 0, 0).map(|t| t.and_utc());
-    }
-    let unit = value.chars().last()?;
-    let n: i64 = value[..value.len() - unit.len_utf8()].parse().ok()?;
-    let span = match unit {
-        'm' => chrono::Duration::minutes(n),
-        'h' => chrono::Duration::hours(n),
-        'd' => chrono::Duration::days(n),
-        'w' => chrono::Duration::weeks(n),
-        _ => return None,
-    };
-    (n > 0).then(|| now - span)
-}
-
 /// `--help` for `optimize` and `compare`; `yield` prints `ship`'s own.
 ///
 /// A template rather than a literal because the harness names come from
@@ -1154,7 +1135,7 @@ cached. Expect them to take a few seconds on a large machine.
 OPTIONS:
   --provider NAME  Only this harness: {PROVIDERS}
   --since SPAN     Only sessions active in the last SPAN — 24h, 7d, 2w — or
-                   since a date, 2026-09-01. Models change, and so does what
+                   since a date, 2026-09-01 (your midnight). Models change, and so does what
                    you give them; last month's sessions blur this week's.
   --rate USD       compare only: what an hour of agent time is worth to you.
                    Adds a column of dollars plus time per file, and ranks by
@@ -1229,7 +1210,10 @@ pub fn run(which: &str, argv: &[String]) -> i32 {
                     return 2;
                 }
             },
-            "--since" => match args.next().and_then(|v| parse_since(v)) {
+            "--since" => match args
+                .next()
+                .and_then(|v| crate::util::parse_since(v, chrono::Utc::now()))
+            {
                 Some(c) => cutoff = Some(c),
                 None => {
                     eprintln!(
@@ -1282,15 +1266,6 @@ pub fn run(which: &str, argv: &[String]) -> i32 {
         _ => unreachable!("only optimize, compare and yield reach here"),
     }
     0
-}
-
-/// `1 session` / `2 sessions`, because a report that says "1 sessions" reads as
-/// one nobody proof-read.
-pub fn plural(n: usize, noun: &str) -> String {
-    match n {
-        1 => format!("1 {noun}"),
-        _ => format!("{n} {noun}s"),
-    }
 }
 
 /// A harness name as somebody would type it at `--provider`.
@@ -1615,17 +1590,8 @@ mod tests {
     }
 
     #[test]
-    fn since_takes_a_span_or_a_date() {
-        let now = chrono::Utc::now();
-        let week = parse_since("7d").unwrap();
-        assert!((now - week - chrono::Duration::days(7)).num_seconds().abs() < 5);
-        assert_eq!(
-            parse_since("2026-09-01").unwrap().to_rfc3339(),
-            "2026-09-01T00:00:00+00:00"
-        );
-        for bad in ["", "d", "7", "7y", "-3d", "0d", "yesterday"] {
-            assert!(parse_since(bad).is_none(), "{bad}");
-        }
+    fn since_keeps_recent_and_undated_sessions() {
+        let week = chrono::Utc::now() - chrono::Duration::days(7);
 
         let mut old = analysed(Provider::Claude, &[]);
         old.last_active = "2020-01-01T00:00:00Z".into();

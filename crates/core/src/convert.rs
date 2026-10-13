@@ -532,7 +532,7 @@ pub fn write_claude(transcript: &Transcript, home: &Path) -> std::io::Result<Con
             line_of(json!({
                 "type": "last-prompt",
                 "leafUuid": leaf,
-                "lastPrompt": clip(&first_prompt, 200),
+                "lastPrompt": crate::util::clip(&first_prompt, 200),
                 "sessionId": id,
             }))
         )?;
@@ -541,7 +541,7 @@ pub fn write_claude(transcript: &Transcript, home: &Path) -> std::io::Result<Con
             "{}",
             line_of(json!({
                 "type": "ai-title",
-                "aiTitle": clip(&title_of(transcript, &first_prompt), 120),
+                "aiTitle": crate::util::clip(&title_of(transcript, &first_prompt), 120),
                 "sessionId": id,
             }))
         )?;
@@ -968,18 +968,7 @@ fn walk(dir: &Path, depth: usize, each: &mut impl FnMut(&Path) -> bool) -> bool 
 /// A fresh session id of the shape every harness here writes: sixteen random
 /// bytes as a version-4 UUID.
 fn new_uuid() -> String {
-    let mut bytes = crate::util::random_bytes(16);
-    bytes[6] = (bytes[6] & 0x0f) | 0x40;
-    bytes[8] = (bytes[8] & 0x3f) | 0x80;
-    let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
-    format!(
-        "{}-{}-{}-{}-{}",
-        &hex[0..8],
-        &hex[8..12],
-        &hex[12..16],
-        &hex[16..20],
-        &hex[20..32]
-    )
+    crate::util::new_uuid()
 }
 
 // ---------------------------------------------------------------------------
@@ -1208,15 +1197,7 @@ fn title_of(transcript: &Transcript, fallback: &str) -> String {
         true => fallback,
         false => transcript.title.as_str(),
     };
-    clip(title, 120)
-}
-
-/// Cut to `max` characters, marking that it was cut.
-fn clip(text: &str, max: usize) -> String {
-    match text.char_indices().nth(max) {
-        Some((at, _)) => format!("{}…", text[..at].trim_end()),
-        None => text.to_owned(),
-    }
+    crate::util::clip(title, 120)
 }
 
 /// A message id for an assistant record, distinct within the session.

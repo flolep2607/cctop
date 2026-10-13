@@ -214,13 +214,7 @@ fn flatten(s: &str, limit: usize) -> String {
         .filter(|l| !l.is_empty())
         .collect::<Vec<_>>()
         .join(" ↵ ");
-    if joined.chars().count() <= limit {
-        joined
-    } else {
-        let mut out: String = joined.chars().take(limit).collect();
-        out.push('…');
-        out
-    }
+    crate::util::clip(&joined, limit)
 }
 
 fn str_field<'a>(input: &'a Value, key: &str) -> &'a str {
@@ -367,7 +361,7 @@ pub fn tool_detail(name: &str, input: &Value) -> (String, Option<String>) {
                 "{}/{} → {}",
                 done,
                 steps.len(),
-                truncate_chars(current, 120)
+                crate::util::clip(current, 120)
             );
             return (short, (!full.is_empty()).then_some(full));
         }
@@ -403,19 +397,10 @@ fn web_run_detail(input: &Value) -> String {
             .take(4)
             .collect::<Vec<_>>();
         if !targets.is_empty() {
-            return format!("{label}: {}", truncate_chars(&targets.join(" · "), 120));
+            return format!("{label}: {}", crate::util::clip(&targets.join(" · "), 120));
         }
     }
     generic_detail(input)
-}
-
-fn truncate_chars(s: &str, limit: usize) -> String {
-    if s.chars().count() <= limit {
-        return s.to_string();
-    }
-    let mut out: String = s.chars().take(limit).collect();
-    out.push('…');
-    out
 }
 
 /// `flatten` for callers outside this module.
