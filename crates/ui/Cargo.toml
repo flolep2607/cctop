@@ -34,7 +34,6 @@ tachyonfx.workspace = true
 tempfile.workspace = true
 termprofile.workspace = true
 toml_edit.workspace = true
-tui-qrcode.workspace = true
 tui-term.workspace = true
 unicode-segmentation.workspace = true
 unicode-width.workspace = true

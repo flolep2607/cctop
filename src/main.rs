@@ -117,6 +117,12 @@ fn main() -> anyhow::Result<()> {
         }
     }
 
+    // The tunnel and rmux log through `tracing`; this hands what they say to
+    // `CCTOP_LOG` (and nowhere else, so never to the terminal). After the
+    // hooks, which must answer before anything is set up, and before `mux`,
+    // whose daemon is most of what logs.
+    cctop_core::elog::forward_tracing();
+
     // `cctop mux`: cctop's own rmux daemon (#197), and the client a tab's
     // pane runs to sit on one of its sessions. After `hook` and the sandbox
     // words, which must answer before anything else, and before clap and any

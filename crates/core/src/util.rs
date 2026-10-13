@@ -473,59 +473,42 @@ pub fn pretty_mcp_name(name: &str) -> String {
 // Base64
 // ---------------------------------------------------------------------------
 
-const B64_ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
 /// Standard base64 with padding. Used for OSC 52 clipboard writes.
 pub fn b64_encode(data: &[u8]) -> String {
-    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
-    for chunk in data.chunks(3) {
-        let b = [
-            chunk[0],
-            *chunk.get(1).unwrap_or(&0),
-            *chunk.get(2).unwrap_or(&0),
-        ];
-        let n = u32::from_be_bytes([0, b[0], b[1], b[2]]);
-        let idx = [(n >> 18) & 63, (n >> 12) & 63, (n >> 6) & 63, n & 63];
-        out.push(B64_ALPHABET[idx[0] as usize] as char);
-        out.push(B64_ALPHABET[idx[1] as usize] as char);
-        out.push(if chunk.len() > 1 {
-            B64_ALPHABET[idx[2] as usize] as char
-        } else {
-            '='
-        });
-        out.push(if chunk.len() > 2 {
-            B64_ALPHABET[idx[3] as usize] as char
-        } else {
-            '='
-        });
-    }
-    out
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD.encode(data)
 }
 
-/// Decode base64, accepting both the standard and URL-safe alphabets and
-/// tolerating missing padding (JWT payloads omit it).
+/// Decode base64 the way it arrives pasted or copied rather than the way a
+/// spec writes it: either alphabet (even mixed — JWT payloads are URL-safe and
+/// a clipboard is usually standard), padding or none (JWTs omit it), and line
+/// breaks where `base64` wraps at 76 columns. Anything else — a space, a `?` —
+/// refuses the whole input, which is what makes it safe to sniff every paste
+/// for an image: prose does not decode into rubbish.
+///
+/// The crate's engines are each one alphabet, so the input is folded onto the
+/// standard one first rather than trying four engines in turn.
 pub fn b64_decode(input: &str) -> Option<Vec<u8>> {
-    let mut acc: u32 = 0;
-    let mut bits: u8 = 0;
-    let mut out = Vec::with_capacity(input.len() * 3 / 4);
-    for c in input.bytes() {
-        let v = match c {
-            b'A'..=b'Z' => c - b'A',
-            b'a'..=b'z' => c - b'a' + 26,
-            b'0'..=b'9' => c - b'0' + 52,
-            b'+' | b'-' => 62,
-            b'/' | b'_' => 63,
-            b'=' | b'\n' | b'\r' => continue,
-            _ => return None,
-        };
-        acc = (acc << 6) | v as u32;
-        bits += 6;
-        if bits >= 8 {
-            bits -= 8;
-            out.push((acc >> bits) as u8);
-        }
-    }
-    Some(out)
+    use base64::Engine;
+    use base64::engine::{DecodePaddingMode, GeneralPurpose, GeneralPurposeConfig};
+    const LENIENT: GeneralPurpose = GeneralPurpose::new(
+        &base64::alphabet::STANDARD,
+        GeneralPurposeConfig::new()
+            .with_decode_padding_mode(DecodePaddingMode::RequireNone)
+            // An encoder that leaves stray bits in the last character still
+            // meant the bytes before them.
+            .with_decode_allow_trailing_bits(true),
+    );
+    let folded: Vec<u8> = input
+        .bytes()
+        .filter_map(|c| match c {
+            b'\r' | b'\n' | b'=' => None,
+            b'-' => Some(b'+'),
+            b'_' => Some(b'/'),
+            c => Some(c),
+        })
+        .collect();
+    LENIENT.decode(folded).ok()
 }
 
 /// Read at most `max_bytes` from the start of a file.
@@ -580,19 +563,24 @@ pub fn scan_tail_escalating<T>(path: &Path, mut scan: impl FnMut(&str) -> Option
     None
 }
 
-/// `want` bytes of entropy, from the OS where it will give us any.
+/// `want` bytes from the operating system's random source.
 ///
-/// `/dev/urandom` is the real source and the fallback is not as good: hashing
-/// the clock and the pid under [`std::hash::RandomState`], whose keys the
-/// standard library seeds from the OS once per process. That is enough to stop
-/// a value being guessed from across a network and is not enough to stop a
-/// local process that already knows when cctop started.
+/// It panics rather than fall back, because what it makes is the `cctop serve`
+/// token and a login's key, and a fallback that hashed the clock and the pid
+/// (what this did once) is guessable by a local process that knows when cctop
+/// started. A token nobody can use is better than one somebody can guess, and on
+/// Linux `getrandom(2)` only fails on a kernel older than 3.17.
 ///
-/// A short read counts as a failure rather than as fewer bytes: half of
-/// something random is not half as good, and silently shortening it is the kind
-/// of weakening nobody would find later.
+/// `ring` rather than another crate because it is already here for Access's
+/// JWT signatures, and its `SystemRandom` is `getrandom(2)` with no
+/// `/dev/urandom` fallback (that feature is off in the workspace).
 pub fn random_bytes(want: usize) -> Vec<u8> {
-    read_random(want).unwrap_or_else(|| hashed_bytes(want))
+    use ring::rand::SecureRandom;
+    let mut buf = vec![0u8; want];
+    ring::rand::SystemRandom::new()
+        .fill(&mut buf)
+        .expect("the operating system gave no random bytes (getrandom failed)");
+    buf
 }
 
 /// `bytes` bytes of entropy as hex, which is twice as many characters.
@@ -603,34 +591,10 @@ pub fn random_hex(bytes: usize) -> String {
         .collect()
 }
 
-/// The fallback for a machine whose `/dev/urandom` could not be read, split out
-/// so it can be tested without breaking the real source.
-fn hashed_bytes(want: usize) -> Vec<u8> {
-    use std::hash::{BuildHasher, Hasher, RandomState};
-
-    let mut out = Vec::with_capacity(want);
-    for salt in 0.. {
-        if out.len() >= want {
-            break;
-        }
-        let mut hasher = RandomState::new().build_hasher();
-        hasher.write_i64(now_ms());
-        hasher.write_u32(std::process::id());
-        hasher.write_u64(salt);
-        out.extend_from_slice(&hasher.finish().to_ne_bytes());
-    }
-    out.truncate(want);
-    out
-}
-
-/// Read `want` bytes from the system random device, if there is one.
-fn read_random(want: usize) -> Option<Vec<u8>> {
-    use std::io::Read;
-
-    let mut file = std::fs::File::open("/dev/urandom").ok()?;
-    let mut buf = vec![0u8; want];
-    file.read_exact(&mut buf).ok()?;
-    Some(buf)
+/// A fresh version-4 UUID, the shape of every session id a harness here
+/// writes.
+pub fn new_uuid() -> String {
+    uuid::Uuid::new_v4().to_string()
 }
 
 #[cfg(test)]
@@ -668,6 +632,28 @@ mod tests {
         let wrapped = format!("{}\r\n{}", &text[..8], &text[8..]);
         assert_eq!(b64_decode(&wrapped).as_deref(), Some(&b"hello world!"[..]));
         assert_eq!(b64_decode("what is wrong with this?"), None);
+        assert_eq!(b64_decode("two words"), None);
+    }
+
+    /// Both alphabets, padded or not, decode to the same bytes.
+    #[test]
+    fn base64_takes_either_alphabet_and_any_padding() {
+        let bytes = b"\xfb\xff\xfe?";
+        for text in ["+//+Pw==", "+//+Pw", "-__-Pw==", "-__-Pw", "+_/-Pw="] {
+            assert_eq!(b64_decode(text).as_deref(), Some(&bytes[..]), "{text}");
+        }
+    }
+
+    #[test]
+    fn a_uuid_is_version_four() {
+        let id = new_uuid();
+        assert_eq!(id.len(), 36);
+        assert_eq!(id.as_bytes()[14], b'4');
+        assert!(
+            matches!(id.as_bytes()[19], b'8' | b'9' | b'a' | b'b'),
+            "{id}"
+        );
+        assert_ne!(new_uuid(), new_uuid());
     }
     use super::*;
 
@@ -788,12 +774,13 @@ mod tests {
         assert_eq!(nice_max(230.0), 250.0);
     }
 
-    /// The fallback has to be the same shape as the source it stands in for.
+    /// As many bytes as asked for, and never the same twice.
     #[test]
-    fn the_hashed_fallback_is_the_same_shape_as_the_real_thing() {
-        assert_eq!(hashed_bytes(16).len(), 16);
-        assert_eq!(hashed_bytes(3).len(), 3);
-        assert_ne!(hashed_bytes(16), hashed_bytes(16));
+    fn random_bytes_are_the_length_asked_for_and_differ() {
+        assert_eq!(random_bytes(16).len(), 16);
+        assert_eq!(random_bytes(3).len(), 3);
+        assert_eq!(random_bytes(0).len(), 0);
+        assert_ne!(random_bytes(16), random_bytes(16));
         let hex = random_hex(16);
         assert_eq!(hex.len(), 32);
         assert!(hex.chars().all(|c| c.is_ascii_hexdigit()));
