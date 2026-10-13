@@ -746,6 +746,32 @@ pub fn respond(
     respond_extra(stream, request, status, content_type, body, "");
 }
 
+/// The type every JSON route answers with. The charset is said outright
+/// because the body is always UTF-8 and the request parser's own check reads
+/// the same parameter (see `Request::parse`).
+pub const JSON: &str = "application/json; charset=utf-8";
+
+/// A 200 with a JSON body that is already rendered — a snapshot's cached
+/// table, a remote cctop's answer, a value just turned to text.
+pub fn respond_json(stream: &mut TcpStream, request: &Request, body: &str) {
+    respond(stream, Some(request), 200, JSON, body.as_bytes());
+}
+
+/// Render `value` as JSON and send it, or a 503 saying why it could not be.
+///
+/// A 503 rather than an empty 200, which the page would read as an answer.
+pub fn json<T: serde::Serialize>(stream: &mut TcpStream, request: &Request, value: &T) {
+    match serde_json::to_string(value) {
+        Ok(body) => respond_json(stream, request, &body),
+        Err(e) => respond_error(
+            stream,
+            Some(request),
+            503,
+            &format!("could not render that: {e}"),
+        ),
+    }
+}
+
 /// `respond`, plus headers the one route that needs them asks for — the
 /// `Set-Cookie` a page sets on first open is the only one there is.
 ///

@@ -23,7 +23,7 @@
 //! The ssh and the connect are held as trait objects so the tests stand a
 //! local `sh` in for the host and never reach one.
 
-use crate::http::{self, Request};
+use crate::http::{self, Request, json};
 use cctop_core::remote_fs::{self, Listing};
 use cctop_core::remote_launch;
 use cctop_core::ssh_config;
@@ -210,17 +210,6 @@ fn target(body: &serde_json::Value) -> Result<(String, String), String> {
         return Err("that path is longer than any host allows".into());
     }
     Ok((host, path))
-}
-
-fn json<T: serde::Serialize>(stream: &mut TcpStream, request: &Request, value: &T) {
-    let body = serde_json::to_string(value).unwrap_or_default();
-    http::respond(
-        stream,
-        Some(request),
-        200,
-        "application/json; charset=utf-8",
-        body.as_bytes(),
-    );
 }
 
 /// `POST /api/ssh/<what>`, already past `may_act`.
