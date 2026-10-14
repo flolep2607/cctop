@@ -126,6 +126,40 @@ case $d in "~"|"") d=$HOME ;; "~/"*) d=$HOME/${d#"~/"} ;; esac
 cd -- "$d" 2>/dev/null || cd
 exec "${SHELL:-sh}" -l"#;
 
+/// How long a failed transport waits before saying why.
+///
+/// The tab's client attaches to the local rmux session a moment after the
+/// session's program starts, and what the program printed before that is not
+/// on the screen the client is handed. An ssh refused at once, or a sibling
+/// that cannot be found, fails inside that moment — and a tab that came up
+/// blank and then vanished is exactly what "the tab closes itself" was. Said
+/// after this, the reason lands on a screen someone is looking at.
+const SETTLE: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// What runs the ssh client in the tab: run it, and when it fails, wait out
+/// [`SETTLE`], say what ssh said and how it ended, and keep the tab until
+/// Enter. A clean exit — detaching from the far rmux — closes the tab at once.
+///
+/// ssh's own diagnostics ("Connection refused", a key it would not take) go to
+/// a file until then rather than the screen, for the reason [`SETTLE`] gives.
+/// Nothing interactive is lost by it: ssh asks for passwords and host keys on
+/// the terminal itself, and with `-t` the far side's output is all on stdout.
+///
+/// Read and dismissed, it exits 0: a failure would have rmux keep the pane
+/// frozen (`mux::REMAIN_ON_EXIT`) for a reason the person has just read and
+/// closed.
+const HOLD_SCRIPT: &str = r#"e=$(mktemp 2>/dev/null) || e=/dev/null
+"$@" 2>"$e"; s=$?
+if [ "$s" -ne 0 ]; then
+  sleep 1
+  cat "$e" >&2
+  printf '\r\n%s exited %s. Press Enter to close this tab.\r\n' "$1" "$s" >&2
+  read -r _
+  s=0
+fi
+[ "$e" = /dev/null ] || rm -f "$e"
+exit "$s""#;
+
 fn ssh_argv(host: &Host, provider: &str, id: &str, dir: &str) -> Result<Vec<String>, String> {
     if !host_ok(&host.target) {
         return Err(format!("{:?} is not an ssh host", host.target));
@@ -134,7 +168,20 @@ fn ssh_argv(host: &Host, provider: &str, id: &str, dir: &str) -> Result<Vec<Stri
         "" => "~",
         dir => dir,
     };
-    let mut argv = vec!["ssh".to_string(), "-t".to_string()];
+    let mut argv = vec![
+        "sh".to_string(),
+        "-c".to_string(),
+        HOLD_SCRIPT.to_string(),
+        "cctop-hold".to_string(),
+        "ssh".to_string(),
+        "-t".to_string(),
+        // A host that never answers — a dropped VPN, a firewall that eats the
+        // SYN — would otherwise leave the tab blank for as long as the kernel
+        // keeps trying, which is minutes. Long enough for a slow link, short
+        // enough that the reason arrives while someone is still looking.
+        "-o".to_string(),
+        "ConnectTimeout=20".to_string(),
+    ];
     // Over the launcher's master when it is up, so a host that asked for a
     // password once does not ask again; `auto` connects afresh otherwise, and
     // asks in the tab.
@@ -252,6 +299,29 @@ pub fn open_here(args: &[String]) -> Result<(), String> {
                 Err((_, why)) => shell_in(work_dir.as_deref(), &format!("Could not resume: {why}")),
             }
         }
+    }
+}
+
+/// Either end's result, with a failure held on screen until Enter when there
+/// is a terminal to hold it on — and then reported as done, since it has been
+/// said.
+///
+/// Both ends run as the only program of a tab, so a failure that ended them
+/// closed the tab as it was printed. Over a sibling's socket it was worse: an
+/// exit status does not cross it, the bridge saw the far pty close as it would
+/// after a detach, and exited 0. Held, the reason stays until it is read. Done
+/// rather than failed after the hold, so ssh and the bridge do not then hold
+/// the same failure a second time. See [`SETTLE`] for the wait.
+pub fn held(result: Result<(), String>) -> Result<(), String> {
+    use std::io::IsTerminal;
+    match result {
+        Err(why) if std::io::stdin().is_terminal() => {
+            std::thread::sleep(SETTLE);
+            eprint!("\r\n{why}\r\n\r\nPress Enter to close this tab.\r\n");
+            let _ = std::io::stdin().read_line(&mut String::new());
+            Ok(())
+        }
+        other => other,
     }
 }
 
@@ -601,7 +671,8 @@ mod tests {
             hostile,
         )
         .expect("argv");
-        assert_eq!(line[..2], ["ssh", "-t"]);
+        assert_eq!(line[..2], ["sh", "-c"]);
+        assert_eq!(line[4..6], ["ssh", "-t"]);
         let remote = line.last().expect("command");
         let out = std::process::Command::new("sh")
             .arg("-c")
@@ -682,5 +753,36 @@ mod tests {
             "404 Not Found: no such session on this machine\n",
         );
         assert!(gone.contains("no such session"), "{gone}");
+    }
+
+    /// An ssh that fails keeps the tab until Enter and says what ssh said and
+    /// how it ended, then closes the tab cleanly; one that ends cleanly closes the
+    /// tab at once and says nothing.
+    #[test]
+    fn a_failed_ssh_holds_the_tab_open_and_a_clean_one_does_not() {
+        use std::io::Write;
+        let run = |script: &str| {
+            let mut child = std::process::Command::new("sh")
+                .args(["-c", HOLD_SCRIPT, "cctop-hold", "sh", "-c", script])
+                .stdin(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .expect("sh");
+            child
+                .stdin
+                .take()
+                .expect("stdin")
+                .write_all(b"\n")
+                .expect("enter");
+            child.wait_with_output().expect("output")
+        };
+        let failed = run("echo 'Connection refused' >&2; exit 255");
+        assert!(failed.status.success(), "dismissed, it closes the tab");
+        let said = String::from_utf8_lossy(&failed.stderr);
+        assert!(said.contains("Connection refused"), "{said}");
+        assert!(said.contains("sh exited 255. Press Enter"), "{said}");
+        let clean = run("echo bye >&2; exit 0");
+        assert!(clean.status.success());
+        assert!(clean.stderr.is_empty(), "{:?}", clean.stderr);
     }
 }
