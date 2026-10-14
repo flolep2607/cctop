@@ -162,8 +162,16 @@ fn pump(stream: &mut TcpStream, master: std::fs::File) {
             }
             loop {
                 match decoder.frame() {
-                    Ok(Some((Op::Close, _))) | Err(_) => {
+                    Ok(Some((Op::Close, _))) => {
                         let _ = stream.write_all(&frame(Op::Close, b"", false));
+                        return;
+                    }
+                    // Said, with the protocol-error code, so the tab shows why
+                    // instead of closing as though the terminal had ended.
+                    Err(why) => {
+                        let mut payload = 1002u16.to_be_bytes().to_vec();
+                        payload.extend(why.bytes().take(120));
+                        let _ = stream.write_all(&frame(Op::Close, &payload, false));
                         return;
                     }
                     Ok(Some((Op::Ping, payload))) => {
