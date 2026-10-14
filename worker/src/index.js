@@ -7,6 +7,15 @@
 // from KV, behind Cloudflare's cache. The JSON is GitHub's own, so cctop parses
 // it with the same code either way: the latest release, to update by, and the
 // recent list cut to tag and notes, to show what changed in between.
+//
+// The release files themselves are kept too, in R2 under /assets/<tag>/<name>,
+// for when GitHub is down altogether rather than only rate-limiting. The
+// updater derives that URL from the tag and the asset's name, so the release
+// JSON above stays GitHub's own. Nothing served from here is trusted for
+// coming from here: every archive is signed in the release workflow with a key
+// this Worker never sees, and the updater installs a mirrored archive only
+// when that signature checks out (`fetch_archive` in crates/core/src/update.rs).
+// A leaked PUSH_TOKEN can make the mirror serve junk, not a binary anyone runs.
 
 async function authorised(request, token) {
   if (!token) return false;
@@ -102,11 +111,102 @@ async function telemetry(request, env) {
   return new Response(null, { status: 204 });
 }
 
+// A tag as the release workflow cuts them, and a release file's name: no
+// slashes and no dot-dot, so a key can never step outside its tag's folder.
+const TAG = /^v\d+\.\d+\.\d+[\w.+-]*$/;
+const NAME = /^[\w+-][\w.+-]*$/;
+// An archive is a few MB; this only stops a mistake from filling the bucket.
+const ASSET_MAX = 64 << 20;
+// How many releases' files are kept. The updater only ever fetches the
+// latest, so the rest are slack for an updater that read the release a moment
+// before the next one was pushed.
+const KEEP_RELEASES = 3;
+
+function contentType(name) {
+  if (name.endsWith(".tar.gz")) return "application/gzip";
+  if (name.endsWith(".sha256") || name.endsWith(".sig")) return "text/plain; charset=utf-8";
+  return "application/octet-stream";
+}
+
+// Dotted numbers, newest first; a suffix sorts as nothing, as in the updater.
+function byVersionDescending(a, b) {
+  const parts = (t) => t.replace(/^v/, "").split(/[-+]/)[0].split(".").map((p) => Number(p) || 0);
+  const [x, y] = [parts(a), parts(b)];
+  for (let i = 0; i < Math.max(x.length, y.length); i++) {
+    const d = (y[i] ?? 0) - (x[i] ?? 0);
+    if (d !== 0) return d;
+  }
+  return 0;
+}
+
+// Delete every release's files but the newest KEEP_RELEASES, so the bucket
+// stays a few tens of MB however many releases there have been.
+async function prune(bucket) {
+  const tags = [];
+  let cursor;
+  do {
+    const page = await bucket.list({ delimiter: "/", cursor });
+    tags.push(...page.delimitedPrefixes.map((p) => p.slice(0, -1)));
+    cursor = page.truncated ? page.cursor : undefined;
+  } while (cursor);
+  for (const tag of tags.sort(byVersionDescending).slice(KEEP_RELEASES)) {
+    let more;
+    do {
+      const page = await bucket.list({ prefix: `${tag}/` });
+      if (page.objects.length) await bucket.delete(page.objects.map((o) => o.key));
+      more = page.truncated;
+    } while (more);
+  }
+}
+
+async function asset(request, env, tag, name) {
+  const key = `${tag}/${name}`;
+  if (request.method === "PUT") {
+    if (!(await authorised(request, env.PUSH_TOKEN))) {
+      return new Response("unauthorised\n", { status: 401 });
+    }
+    // R2 takes a stream only when its length is known up front.
+    const length = Number(request.headers.get("content-length"));
+    if (!Number.isInteger(length) || length <= 0 || length > ASSET_MAX || !request.body) {
+      return new Response("expected a release file with its content-length\n", { status: 411 });
+    }
+    await env.RELEASE_FILES.put(key, request.body, {
+      httpMetadata: { contentType: contentType(name) },
+    });
+    await prune(env.RELEASE_FILES);
+    return new Response(`stored ${key}\n`);
+  }
+
+  if (request.method === "GET" || request.method === "HEAD") {
+    const object =
+      request.method === "GET" ? await env.RELEASE_FILES.get(key) : await env.RELEASE_FILES.head(key);
+    if (!object) {
+      return new Response("no such release file\n", { status: 404 });
+    }
+    const headers = new Headers();
+    object.writeHttpMetadata(headers);
+    headers.set("content-length", String(object.size));
+    headers.set("etag", object.httpEtag);
+    // A tag's files never change once pushed, so any cache may keep them.
+    headers.set("cache-control", "public, max-age=31536000, immutable");
+    return new Response(request.method === "GET" ? object.body : null, { headers });
+  }
+
+  return new Response("method not allowed\n", { status: 405 });
+}
+
 export default {
   async fetch(request, env) {
     const path = new URL(request.url).pathname;
     if (path === "/telemetry") {
       return telemetry(request, env);
+    }
+    const file = path.match(/^\/assets\/([^/]+)\/([^/]+)$/);
+    if (file) {
+      const [, tag, name] = file;
+      return TAG.test(tag) && NAME.test(name)
+        ? asset(request, env, tag, name)
+        : new Response("not found\n", { status: 404 });
     }
     const route = ROUTES[path];
     if (!route) {

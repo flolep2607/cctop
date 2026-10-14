@@ -352,6 +352,26 @@ Notes are fetched when someone updates rather than when the release is cut, so a
 note that landed badly is still worth fixing: edit the release body on GitHub and
 everyone who has not updated yet sees the better one.
 
+### The mirror and the signature
+
+`cctop --update` asks GitHub first and falls back on a Cloudflare Worker,
+`worker/`, for both the release JSON and the archives: GitHub rate-limits
+anonymous API calls and is sometimes simply down. The release workflow keeps
+the Worker in step (`tools/push-release-mirror.sh`), and a mirror failure
+never fails a release. The Worker is deployed by Cloudflare Workers Builds
+when a change to `worker/` reaches `main` — not by hand — so anything a new
+binding in `worker/wrangler.jsonc` names (a bucket, a namespace) has to exist
+in the Cloudflare account *before* that change merges.
+
+Each archive is signed with ed25519 before the release is made public
+(`tools/sign-release.sh`, with the `RELEASE_SIGNING_KEY` secret), and the
+updater checks it against `RELEASE_PUBLIC_KEY` in `crates/core/src/update.rs`
+for every download, GitHub's or the mirror's. That is what keeps the mirror's
+push token from being a way to ship a binary to everyone. `tools/release-key.sh`
+makes the pair once: it stores the private half in the secret without printing
+it and prints the public half to paste. Do not run it again for an existing
+key — a binary refuses releases signed by any key but the one it carries.
+
 ## Refreshing the screenshots
 
 `docs/assets/` holds real captures, not mock-ups. Regenerate them after any
