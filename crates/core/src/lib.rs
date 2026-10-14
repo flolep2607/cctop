@@ -43,6 +43,8 @@ pub mod hook;
 pub mod inject;
 pub mod insight;
 pub mod json;
+/// A new agent's model and permission settings, per harness.
+pub mod launch_opts;
 pub mod loader;
 pub mod mux;
 pub mod notify;

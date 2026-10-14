@@ -60,6 +60,49 @@ pub(crate) fn route(
     if !known {
         return http::respond_error(stream, Some(request), 404, NO_SESSION);
     }
+    terminal(stream, request, &open_argv(provider, id));
+}
+
+/// `/api/new-term/<agent>/<permissions>/<model>/<dir>`: a *new* agent on this
+/// machine, started in rmux and opened as a terminal from a tab on another —
+/// the launcher's `machine:path` for a sibling with no ssh route.
+///
+/// The same line as [`route`] for who may, since starting an agent is acting;
+/// every part of the request is checked by
+/// [`NewAgent::from_route`](cctop_core::remote_open::NewAgent::from_route),
+/// and what this machine cannot do — an agent not installed here, a directory
+/// that is not one — is refused before a terminal is opened, so the reason
+/// arrives as the tab's message rather than as a pty that ended.
+pub(crate) fn route_new(
+    shared: &Shared,
+    stream: &mut TcpStream,
+    request: &Request,
+    rest: &str,
+    access: Access,
+) {
+    if access != Access::Full || !shared.actions {
+        return http::respond_error(stream, Some(request), 403, "this link cannot start agents");
+    }
+    if !request.is_websocket() {
+        return http::respond_error(
+            stream,
+            Some(request),
+            400,
+            "a terminal socket is a WebSocket",
+        );
+    }
+    let spec = match cctop_core::remote_open::NewAgent::from_route(rest) {
+        Ok(spec) => spec,
+        Err(why) => return http::respond_error(stream, Some(request), 400, &why),
+    };
+    if let Some(why) = problem_here(&spec) {
+        return http::respond_error(stream, Some(request), 404, &why);
+    }
+    terminal(stream, request, &new_argv(&spec));
+}
+
+/// Upgrade to a WebSocket and pump a pty running `argv` through it.
+fn terminal(stream: &mut TcpStream, request: &Request, argv: &[String]) {
     let key = request.header("sec-websocket-key");
     if key.is_empty() {
         return http::respond_error(stream, Some(request), 400, "no Sec-WebSocket-Key");
@@ -73,14 +116,13 @@ pub(crate) fn route(
             .unwrap_or(default)
     };
     let size = (size("cols", 80), size("rows", 24));
-    let argv = open_argv(provider, id);
     // A server started by systemd has no TERM, and an attach with none draws
     // nothing a terminal can read.
     let env = match std::env::var_os("TERM") {
         Some(_) => Vec::new(),
         None => vec![("TERM".to_string(), "xterm-256color".to_string())],
     };
-    let (mut child, master) = match cctop_core::shim::spawn_pty(&argv, size, &env) {
+    let (mut child, master) = match cctop_core::shim::spawn_pty(argv, size, &env) {
         Ok(spawned) => spawned,
         Err(error) => {
             return http::respond_error(stream, Some(request), 500, &error.to_string());
@@ -109,6 +151,46 @@ fn open_argv(provider: &str, id: &str) -> Vec<String> {
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|_| "cctop".into());
     vec![exe, "mux".into(), "open".into(), provider.into(), id.into()]
+}
+
+/// What the pty runs for a new agent: this binary's `mux new`.
+#[cfg(not(test))]
+fn new_argv(spec: &cctop_core::remote_open::NewAgent) -> Vec<String> {
+    let exe = std::env::current_exe()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| "cctop".into());
+    let mut argv = vec![exe, "mux".into(), "new".into()];
+    argv.extend(spec.args());
+    argv
+}
+
+/// What this machine cannot start, asked of the machine itself.
+#[cfg(not(test))]
+fn problem_here(spec: &cctop_core::remote_open::NewAgent) -> Option<String> {
+    spec.problem_here()
+}
+
+/// Under test no agent need be installed, so only the directory is asked
+/// about — the half of the check that is about this machine's disk.
+#[cfg(test)]
+fn problem_here(spec: &cctop_core::remote_open::NewAgent) -> Option<String> {
+    let dir = cctop_core::util::untildify(&spec.dir);
+    (!spec.dir.is_empty() && !std::path::Path::new(&dir).is_dir())
+        .then(|| format!("{} is not a directory on this machine", spec.dir))
+}
+
+/// Under test a shell stands in for `mux new`, as for [`open_argv`]: it says
+/// what it was asked to start, and waits for a line.
+#[cfg(test)]
+fn new_argv(spec: &cctop_core::remote_open::NewAgent) -> Vec<String> {
+    let mut argv = vec![
+        "sh".into(),
+        "-c".into(),
+        r#"echo "new $*"; read line; echo "got $line""#.into(),
+        "sh".into(),
+    ];
+    argv.extend(spec.args());
+    argv
 }
 
 /// Under test this binary is the test harness, which would read `mux open`
@@ -242,6 +324,110 @@ mod tests {
         }
         s.actions = false;
         assert!(status(&s, "/api/term/claude/abc?t=full", ws).contains("403"));
+    }
+
+    /// A new agent is started only for a full link with actions on, as a
+    /// WebSocket, from a launch that reads back whole — and a directory this
+    /// machine does not have is refused with that reason before anything
+    /// is spawned.
+    #[test]
+    fn only_a_full_link_starts_an_agent_and_only_one_that_checks_out() {
+        let mut s = shared("full", "ro");
+        let ws = "Upgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: x\r\n";
+        let status =
+            |s: &crate::Shared, target: &str, headers: &str| status_of(s, "GET", target, headers);
+        assert!(status(&s, "/api/new-term/claude/ask/-/-?t=ro", ws).contains("403"));
+        assert!(status(&s, "/api/new-term/claude/ask/-/-?t=full", "").contains("400"));
+        for bad in [
+            "/api/new-term/sh/ask/-/-?t=full",
+            "/api/new-term/claude/root/-/-?t=full",
+            "/api/new-term/codex/plan/-/-?t=full",
+            "/api/new-term/claude/ask/-?t=full",
+            "/api/new-term/claude/ask/-/zz?t=full",
+        ] {
+            assert!(status(&s, bad, ws).contains("400"), "{bad}");
+        }
+        let nowhere = cctop_core::remote_open::NewAgent {
+            agent: "claude".into(),
+            dir: "/no/such/dir/here".into(),
+            options: Default::default(),
+        };
+        let said = status(&s, &format!("{}?t=full", nowhere.route()), ws);
+        assert!(said.contains("404"), "{said}");
+        s.actions = false;
+        assert!(status(&s, "/api/new-term/claude/ask/-/-?t=full", ws).contains("403"));
+    }
+
+    /// End to end, as a sibling's launcher reaches it: signed, upgraded, and
+    /// the far side handed the launch as words — agent, directory, settings.
+    #[test]
+    fn a_sibling_starts_a_new_agent_here_with_its_settings() {
+        use cctop_core::ws::{Decoder, Op};
+        use std::net::TcpListener;
+        const SECRET: &str = "eyJhIjoi-made-up-tunnel-token";
+        let s = Arc::new(crate::Shared {
+            peer_secret: SECRET.to_string(),
+            ..shared("full", "ro")
+        });
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = {
+            let s = Arc::clone(&s);
+            std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                crate::serve_connection(&s, &mut stream);
+            })
+        };
+        let dir = tempfile::tempdir().expect("tempdir");
+        let launch = cctop_core::remote_open::NewAgent {
+            agent: "claude".into(),
+            dir: dir.path().to_string_lossy().into_owned(),
+            options: cctop_core::launch_opts::Options {
+                model: Some("opus".into()),
+                permissions: cctop_core::launch_opts::Permissions::Plan,
+            },
+        };
+        let peer =
+            cctop_core::peer::Peer::fixed("box", &format!("http://127.0.0.1:{port}"), SECRET);
+        let key = cctop_core::ws::new_key();
+        let headers = [
+            ("Upgrade".to_string(), "websocket".to_string()),
+            ("Connection".to_string(), "Upgrade".to_string()),
+            ("Sec-WebSocket-Key".to_string(), key.clone()),
+            ("Sec-WebSocket-Version".to_string(), "13".to_string()),
+        ];
+        let mut up = peer
+            .socket(&launch.route(), "cols=100&rows=30", &headers)
+            .expect("socket");
+        let mut got = Vec::new();
+        let end = loop {
+            if let Some(at) = got.windows(4).position(|w| w == b"\r\n\r\n") {
+                break at + 4;
+            }
+            assert!(up.read_ready(&mut got).unwrap(), "closed before the head");
+        };
+        let head = String::from_utf8_lossy(&got[..end]).into_owned();
+        assert!(head.starts_with("HTTP/1.1 101"), "{head}");
+        let mut decoder = Decoder::default();
+        decoder.push(&got[end..]);
+        let mut screen = String::new();
+        let want = format!("new claude {} --model opus --permissions plan", launch.dir);
+        while !screen.contains(&want) {
+            while let Some((op, payload)) = decoder.frame().unwrap() {
+                if op == Op::Binary {
+                    screen.push_str(&String::from_utf8_lossy(&payload));
+                }
+            }
+            if screen.contains(&want) {
+                break;
+            }
+            let mut more = Vec::new();
+            assert!(up.read_ready(&mut more).unwrap(), "closed: {screen}");
+            decoder.push(&more);
+        }
+        up.write_all(&cctop_core::ws::frame(Op::Close, b"", true))
+            .unwrap();
+        server.join().unwrap();
     }
 
     /// End to end over a socket, as a sibling's tab reaches it: signed with

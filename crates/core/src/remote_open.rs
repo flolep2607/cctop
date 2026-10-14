@@ -29,6 +29,15 @@
 //!   ControlMaster socket when one is up, so a host that wants a password asks
 //!   for it in the tab, once.
 //!
+//! The launcher reaches a sibling the same way for an agent that does not
+//! exist yet: `machine:path` in its `in` field, for a machine on the account,
+//! runs [`bridge_new`] (`cctop mux launch`), which opens the sibling's
+//! [`NEW_ROUTE`]; the sibling runs `cctop mux new` ([`new_here`]), which starts
+//! the agent in its rmux, in that directory, and attaches. What is asked for
+//! travels as a [`NewAgent`] — words, never an argv — and the far side builds
+//! the command itself. A sibling too old to know the route answers "no such
+//! page", and the tab says to update it.
+//!
 //! Every name in here — the host, the session id, the provider — came out of
 //! another machine's answer, so each is checked before it goes anywhere near a
 //! command line: [`remote_launch::host_ok`] for an ssh destination, [`id_ok`]
@@ -55,6 +64,201 @@ pub fn id_ok(id: &str) -> bool {
         && id
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b))
+}
+
+/// Where a sibling is asked for a terminal on a *new* agent, rather than on
+/// one of its sessions.
+///
+/// A route of its own rather than a new shape of `/api/term/`, because of what
+/// an older sibling does with it: one that predates this answers a path it
+/// has never heard of with the router's "no such page", which [`refusal`]
+/// reads as "update cctop there". The same request under `/api/term/` would
+/// reach the old session route and come back "no such session", which says
+/// nothing about updating.
+pub const NEW_ROUTE: &str = "/api/new-term/";
+
+/// A new agent to start on a sibling — what the launcher's `machine:path`
+/// asks for when the machine is reached through its Cloudflare tunnel.
+///
+/// The far side gets words, not a command: the agent's name, a directory, and
+/// the [`Options`](crate::launch_opts::Options) as names for settings. It
+/// checks each one again ([`NewAgent::check`]) and builds the argv itself, so
+/// nothing in the request is ever run as written.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewAgent {
+    pub agent: String,
+    /// As the launcher took it: `~`, `~/…`, or absolute. Empty is the home.
+    pub dir: String,
+    pub options: crate::launch_opts::Options,
+}
+
+/// Whether `dir` may be handed on as the directory to start an agent in.
+///
+/// Absolute or under the home, the two spellings the launcher's field takes,
+/// and nothing a terminal or a shell would read as anything but a path. Empty
+/// is the home. Whether it *exists* is the far side's to say, and it says so
+/// before the terminal opens ([`NewAgent::problem_here`]).
+pub fn dir_ok(dir: &str) -> bool {
+    dir.len() <= 4096
+        && !dir.chars().any(char::is_control)
+        && (dir.is_empty() || dir == "~" || dir.starts_with("~/") || dir.starts_with('/'))
+}
+
+impl NewAgent {
+    /// Every part checked: an agent cctop starts, a directory spelled as one,
+    /// and settings that agent takes.
+    pub fn check(&self) -> Result<(), String> {
+        if !crate::alias::AGENTS
+            .split_whitespace()
+            .any(|known| known == self.agent)
+        {
+            return Err(format!("{:?} is not an agent cctop starts", self.agent));
+        }
+        if !dir_ok(&self.dir) {
+            return Err(format!(
+                "{:?} is not a directory cctop will pass on",
+                self.dir
+            ));
+        }
+        self.options.flags(&self.agent).map(|_| ())
+    }
+
+    /// The route on the sibling, every part of it in the path so that the
+    /// signature covers it: the agent, the permission setting, then the model
+    /// and the directory as hex — either may hold a `/`, and a path segment
+    /// that may hold one cannot be split back apart. `-` stands for none.
+    pub fn route(&self) -> String {
+        let hex_or_dash = |s: Option<&str>| match s.filter(|s| !s.is_empty()) {
+            Some(s) => hex(s),
+            None => "-".to_string(),
+        };
+        format!(
+            "{NEW_ROUTE}{}/{}/{}/{}",
+            self.agent,
+            self.options.permissions.word(),
+            hex_or_dash(self.options.model.as_deref()),
+            hex_or_dash(Some(&self.dir)),
+        )
+    }
+
+    /// Read back what [`NewAgent::route`] wrote, after the `NEW_ROUTE`
+    /// prefix, and check it.
+    pub fn from_route(rest: &str) -> Result<NewAgent, String> {
+        let parts: Vec<&str> = rest.split('/').collect();
+        let [agent, permissions, model, dir] = parts[..] else {
+            return Err("not a launch this cctop understands".into());
+        };
+        let unhex_or_none = |s: &str| match s {
+            "-" => Ok(None),
+            s => unhex(s).map(Some),
+        };
+        let spec = NewAgent {
+            agent: agent.to_string(),
+            dir: unhex_or_none(dir)?.unwrap_or_default(),
+            options: crate::launch_opts::Options {
+                model: unhex_or_none(model)?,
+                permissions: crate::launch_opts::Permissions::parse(permissions)
+                    .ok_or_else(|| format!("{permissions:?} is not a permission setting"))?,
+            },
+        };
+        spec.check()?;
+        Ok(spec)
+    }
+
+    /// As arguments to `cctop mux new` or `cctop mux launch`: the agent, the
+    /// directory, then the settings as flags of cctop's own.
+    pub fn args(&self) -> Vec<String> {
+        let mut args = vec![self.agent.clone(), self.dir.clone()];
+        args.extend(self.options.to_args());
+        args
+    }
+
+    /// Read back what [`NewAgent::args`] wrote, and check it.
+    pub fn from_args(args: &[String]) -> Result<NewAgent, String> {
+        let [agent, dir, rest @ ..] = args else {
+            return Err("usage: AGENT DIR [--model MODEL] [--permissions SETTING]".into());
+        };
+        let spec = NewAgent {
+            agent: agent.clone(),
+            dir: dir.clone(),
+            options: crate::launch_opts::Options::from_args(rest)?,
+        };
+        spec.check()?;
+        Ok(spec)
+    }
+
+    /// Why this machine cannot start it, asked before a terminal is opened
+    /// for it: the agent is not installed here, or the directory is not one.
+    pub fn problem_here(&self) -> Option<String> {
+        if !crate::actions::agents().contains(&self.agent) {
+            return Some(format!("{} is not installed on this machine", self.agent));
+        }
+        let dir = self.dir.trim();
+        if !dir.is_empty() && !Path::new(&crate::util::untildify(dir)).is_dir() {
+            return Some(format!("{dir} is not a directory on this machine"));
+        }
+        None
+    }
+}
+
+/// Lowercase hex of `s`'s bytes.
+fn hex(s: &str) -> String {
+    s.bytes().map(|b| format!("{b:02x}")).collect()
+}
+
+/// The string [`hex`] wrote, or why this is not one.
+fn unhex(s: &str) -> Result<String, String> {
+    let bad = || format!("{s:?} is not hex");
+    if !s.len().is_multiple_of(2) {
+        return Err(bad());
+    }
+    let bytes = (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(s.get(i..i + 2)?, 16).ok())
+        .collect::<Option<Vec<u8>>>()
+        .ok_or_else(bad)?;
+    String::from_utf8(bytes).map_err(|_| bad())
+}
+
+/// What a tab here runs to start `spec` on the sibling `machine`: this
+/// cctop's `mux launch`, which bridges to the sibling's [`NEW_ROUTE`].
+pub fn new_argv(machine: &str, exe: &Path, spec: &NewAgent) -> Result<Vec<String>, String> {
+    if !host_ok(machine) {
+        return Err(format!("{machine:?} is not a machine name"));
+    }
+    spec.check()?;
+    let mut argv = vec![
+        exe.to_string_lossy().into_owned(),
+        "mux".into(),
+        "launch".into(),
+        machine.to_string(),
+    ];
+    argv.extend(spec.args());
+    Ok(argv)
+}
+
+/// `cctop mux new AGENT DIR [--model M] [--permissions P]`: on the machine
+/// the agent is to run on, start it in rmux, the way the browser's launcher
+/// does, and attach to it. `--check` answers `ok`.
+///
+/// In rmux, not on the pty this runs on, so the agent outlives the
+/// connection: the tab on the other machine closing detaches, and the agent
+/// is one this machine's dashboard lists and its `R` reattaches to.
+pub fn new_here(args: &[String]) -> Result<(), String> {
+    if let [flag] = args
+        && flag == "--check"
+    {
+        println!("ok");
+        return Ok(());
+    }
+    let spec = NewAgent::from_args(args)?;
+    eprint!("Starting {} on this machine…\r\n", spec.agent);
+    let done = crate::actions::launch_new(&spec.agent, Some(&spec.dir), &spec.options)
+        .map_err(|(_, why)| why)?;
+    match done.rmux {
+        Some(name) => attach(&name),
+        None => Err(done.message),
+    }
 }
 
 /// The local rmux session a remote tab's transport runs in.
@@ -378,6 +582,43 @@ pub fn bridge(args: &[String]) -> Result<(), String> {
         return Err("that is not a machine, harness and session cctop will pass on".into());
     }
     eprint!("Reaching {machine}…\r\n");
+    terminal(
+        machine,
+        &format!("/api/term/{provider}/{id}"),
+        "to open its sessions on another machine",
+        "open the row again",
+    )
+}
+
+/// `cctop mux launch MACHINE AGENT DIR [--model M] [--permissions P]`: the
+/// tab's end of a new agent on a sibling. Opens the sibling's [`NEW_ROUTE`],
+/// where its `cctop mux new` starts the agent, and pumps this terminal
+/// through it — the launcher's way onto a machine with no ssh route.
+pub fn bridge_new(args: &[String]) -> Result<(), String> {
+    let [machine, rest @ ..] = args else {
+        return Err(
+            "usage: cctop mux launch MACHINE AGENT DIR [--model M] [--permissions P]".into(),
+        );
+    };
+    if !host_ok(machine) {
+        return Err(format!("{machine:?} is not a machine name"));
+    }
+    let spec = NewAgent::from_args(rest)?;
+    eprint!("Reaching {machine} to start {}…\r\n", spec.agent);
+    terminal(
+        machine,
+        &spec.route(),
+        "to start agents for another machine",
+        "start it again",
+    )
+}
+
+/// Open a terminal socket at `path` on the sibling `machine`, signed as this
+/// machine, and pump this terminal through it until either side closes.
+///
+/// `too_old` and `again` finish the sentence for a sibling that does not
+/// know the route: what it is too old to do, and what to do once updated.
+fn terminal(machine: &str, path: &str, too_old: &str, again: &str) -> Result<(), String> {
     let peer = crate::peer::lookup(machine)?;
     let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
     let key = crate::ws::new_key();
@@ -387,8 +628,7 @@ pub fn bridge(args: &[String]) -> Result<(), String> {
         ("Sec-WebSocket-Key".to_string(), key.clone()),
         ("Sec-WebSocket-Version".to_string(), "13".to_string()),
     ];
-    let path = format!("/api/term/{provider}/{id}");
-    let mut up = peer.socket(&path, &format!("cols={cols}&rows={rows}"), &headers)?;
+    let mut up = peer.socket(path, &format!("cols={cols}&rows={rows}"), &headers)?;
 
     let mut got = Vec::new();
     let end = loop {
@@ -416,7 +656,13 @@ pub fn bridge(args: &[String]) -> Result<(), String> {
             .unwrap_or(0)
             .min(MAX_HEAD);
         while body.len() < wanted && up.read_ready(&mut body).unwrap_or(false) {}
-        return Err(refusal(machine, status, &String::from_utf8_lossy(&body)));
+        return Err(refusal(
+            machine,
+            status,
+            &String::from_utf8_lossy(&body),
+            too_old,
+            again,
+        ));
     }
     if header(&head, "sec-websocket-accept") != Some(crate::ws::accept_key(&key).as_str()) {
         return Err(format!(
@@ -441,12 +687,12 @@ fn header<'a>(head: &'a str, name: &str) -> Option<&'a str> {
 /// A sibling that has never heard of the route answers it like any unknown
 /// page, which is the one refusal that means "update that machine" rather
 /// than whatever it says.
-fn refusal(machine: &str, status: u16, body: &str) -> String {
+fn refusal(machine: &str, status: u16, body: &str, too_old: &str, again: &str) -> String {
     let said = body.lines().next().unwrap_or("").trim();
     match status {
         404 if said.ends_with("no such page") || said.is_empty() => format!(
-            "{machine}'s cctop is too old to open its sessions on another machine — \
-             update it there (cctop --update) and open the row again"
+            "{machine}'s cctop is too old {too_old} — \
+             update it there (cctop --update) and {again}"
         ),
         _ => format!("{machine} refused: {said}"),
     }
@@ -745,14 +991,135 @@ mod tests {
 
     #[test]
     fn a_refusal_from_an_old_sibling_says_to_update_it() {
-        let old = refusal("pc", 404, "404 Not Found: no such page\n");
+        let old = refusal(
+            "pc",
+            404,
+            "404 Not Found: no such page\n",
+            "to do that",
+            "try again",
+        );
         assert!(old.contains("cctop --update"), "{old}");
+        assert!(old.contains("too old to do that"), "{old}");
         let gone = refusal(
             "pc",
             404,
             "404 Not Found: no such session on this machine\n",
+            "to do that",
+            "try again",
         );
         assert!(gone.contains("no such session"), "{gone}");
+    }
+
+    fn spec(agent: &str, dir: &str) -> NewAgent {
+        NewAgent {
+            agent: agent.into(),
+            dir: dir.into(),
+            options: crate::launch_opts::Options::default(),
+        }
+    }
+
+    /// The route carries every part of the launch in its path, where the
+    /// signature covers it, and reads back to the same launch — including a
+    /// model and a directory that hold slashes and spaces.
+    #[test]
+    fn a_new_agent_survives_its_route_and_its_command_line() {
+        let launch = NewAgent {
+            agent: "opencode".into(),
+            dir: "/srv/my project/api".into(),
+            options: crate::launch_opts::Options {
+                model: Some("anthropic/claude-sonnet-4".into()),
+                permissions: crate::launch_opts::Permissions::Ask,
+            },
+        };
+        let route = launch.route();
+        let rest = route.strip_prefix(NEW_ROUTE).expect("prefix");
+        assert_eq!(rest.split('/').count(), 4, "{route}");
+        assert!(!rest.contains(' '), "{route}");
+        assert_eq!(NewAgent::from_route(rest), Ok(launch.clone()));
+        assert_eq!(NewAgent::from_args(&launch.args()), Ok(launch.clone()));
+
+        let home = spec("claude", "");
+        assert!(
+            home.route().ends_with("/claude/ask/-/-"),
+            "{}",
+            home.route()
+        );
+        assert_eq!(
+            NewAgent::from_route(home.route().strip_prefix(NEW_ROUTE).unwrap()),
+            Ok(home)
+        );
+    }
+
+    /// Whatever arrives is checked before it is anything: an agent cctop does
+    /// not start, a directory that is not spelled as one, a setting the agent
+    /// does not have, hex that is not hex, a path of the wrong shape.
+    #[test]
+    fn a_hostile_launch_is_refused_before_it_starts_anything() {
+        for bad in [
+            spec("sh", "~"),
+            spec("-x", "~"),
+            spec("claude", "relative/dir"),
+            spec("claude", "-oProxyCommand=x"),
+            spec("claude", "~/a\nb"),
+            NewAgent {
+                options: crate::launch_opts::Options {
+                    model: None,
+                    permissions: crate::launch_opts::Permissions::Plan,
+                },
+                ..spec("codex", "~")
+            },
+            NewAgent {
+                options: crate::launch_opts::Options {
+                    model: Some("--dangerously-skip-permissions".into()),
+                    permissions: crate::launch_opts::Permissions::Ask,
+                },
+                ..spec("claude", "~")
+            },
+        ] {
+            assert!(bad.check().is_err(), "{bad:?}");
+            assert!(
+                new_argv("box", Path::new("/usr/bin/cctop"), &bad).is_err(),
+                "{bad:?}"
+            );
+        }
+        for rest in [
+            "claude/ask/-",
+            "claude/ask/-/-/x",
+            "claude/root/-/-",
+            "claude/ask/zz/-",
+            "claude/ask/-/abc",
+            "claude/ask/-/ff",
+            "sh/ask/-/-",
+        ] {
+            assert!(NewAgent::from_route(rest).is_err(), "{rest}");
+        }
+        assert!(new_argv("-x", Path::new("/usr/bin/cctop"), &spec("claude", "~")).is_err());
+    }
+
+    #[test]
+    fn a_new_agent_tab_runs_this_cctops_launch_bridge() {
+        let launch = NewAgent {
+            options: crate::launch_opts::Options {
+                model: Some("opus".into()),
+                permissions: crate::launch_opts::Permissions::Plan,
+            },
+            ..spec("claude", "~/src/api")
+        };
+        assert_eq!(
+            new_argv("computer36", Path::new("/usr/bin/cctop"), &launch).expect("argv"),
+            [
+                "/usr/bin/cctop",
+                "mux",
+                "launch",
+                "computer36",
+                "claude",
+                "~/src/api",
+                "--model",
+                "opus",
+                "--permissions",
+                "plan"
+            ]
+        );
     }
 
     /// An ssh that fails keeps the tab until Enter and says what ssh said and

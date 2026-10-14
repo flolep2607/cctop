@@ -677,6 +677,10 @@ pub fn main(args: &[String]) -> i32 {
         // machine's end of a sibling's terminal.
         Some("open") => crate::remote_open::held(crate::remote_open::open_here(&args[1..])),
         Some("reach") => crate::remote_open::held(crate::remote_open::bridge(&args[1..])),
+        // A new agent rather than a session: `new` starts it here, `launch`
+        // is the other machine's end of it.
+        Some("new") => crate::remote_open::held(crate::remote_open::new_here(&args[1..])),
+        Some("launch") => crate::remote_open::held(crate::remote_open::bridge_new(&args[1..])),
         Some("kill-session") => match args.get(1..) {
             Some([flag, name]) if flag == "-t" => kill_session(name),
             _ => Err("usage: cctop mux kill-session -t <name>".to_string()),
@@ -684,7 +688,8 @@ pub fn main(args: &[String]) -> i32 {
         Some("socket") => socket().map(|path| println!("{}", path.display())),
         _ => Err(
             "usage: cctop mux <attach NAME | ls | kill-session -t NAME | socket | \
-             open PROVIDER ID [DIR] | reach MACHINE PROVIDER ID>"
+             open PROVIDER ID [DIR] | reach MACHINE PROVIDER ID | new AGENT DIR | \
+             launch MACHINE AGENT DIR>"
                 .to_string(),
         ),
     };
