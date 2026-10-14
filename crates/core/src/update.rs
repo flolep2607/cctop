@@ -236,31 +236,50 @@ const MIRROR_LIST: &str = "https://cctop-releases.ecorsiste.workers.dev/releases
 /// the files.
 const MIRROR_ASSETS: &str = "https://cctop-releases.ecorsiste.workers.dev/assets";
 
-/// The ed25519 key release archives are signed with, as base64 of its 32 raw
-/// bytes; `tools/release-key.sh` makes the pair and prints this half.
+/// The ed25519 key the release workflow signs archives with, as base64 of its
+/// 32 raw bytes; `tools/release-key.sh` makes the pair, puts the private half
+/// in the `RELEASE_SIGNING_KEY` secret and prints this half.
 ///
 /// Empty, nothing would be verified and the mirror's archives would never be
 /// installed (see [`fetch_archive`]); set, as it has been since 2026-10-14,
 /// the release workflow refuses to publish a release it cannot sign
-/// with the matching private key, so no binary that carries a key is ever
+/// with a key this source trusts, so no binary that carries a key is ever
 /// offered a release without a signature.
-///
-/// ponytail: one key, no rotation. A new key would be refused by every
-/// binary that carries the old one, so replacing it means a release signed
-/// with the old key that carries the new one, then the swap.
 const RELEASE_PUBLIC_KEY: &str = "2jAYv8fEMNScPRcA2tMDJKFADuDmvyW08dy2onhpHjQ=";
 
-/// [`RELEASE_PUBLIC_KEY`] decoded, or `None` while it is the placeholder.
-fn release_key() -> Option<Vec<u8>> {
+/// The second key every binary trusts, whose private half never goes near CI:
+/// it is kept offline by a maintainer and signs nothing in the normal course.
+///
+/// It is there so the primary can be replaced. A binary refuses a release
+/// signed by any key it does not carry, so with one key a primary that leaked
+/// would stay trusted by every installed cctop for good, and one that was lost
+/// would leave them unable to update at all. With two, the way out is a
+/// release whose source trusts a new primary and this backup — and not the old
+/// primary — signed with this backup (`tools/release-key.sh
+/// --sign-with-backup`): every installed binary accepts it, and every binary
+/// it installs has dropped the old key. A backup that is itself used is
+/// replaced the same way, from the new primary, in the release after.
+const RELEASE_BACKUP_KEY: &str = "koQR1/ymr3u5wDk+ub+pJiJhfZf1tB61pgo6IpDbMG0=";
+
+/// Every key a release archive may be signed with: a signature by any one of
+/// them is accepted (see [`verify`]).
+const RELEASE_KEYS: [&str; 2] = [RELEASE_PUBLIC_KEY, RELEASE_BACKUP_KEY];
+
+/// [`RELEASE_KEYS`] decoded, leaving out a placeholder; empty, nothing is
+/// checked.
+fn release_keys() -> Vec<Vec<u8>> {
     use base64::Engine;
-    if RELEASE_PUBLIC_KEY.is_empty() {
-        return None;
-    }
-    let key = base64::engine::general_purpose::STANDARD
-        .decode(RELEASE_PUBLIC_KEY)
-        .expect("RELEASE_PUBLIC_KEY is base64");
-    assert_eq!(key.len(), 32, "RELEASE_PUBLIC_KEY is an ed25519 key");
-    Some(key)
+    RELEASE_KEYS
+        .iter()
+        .filter(|key| !key.is_empty())
+        .map(|key| {
+            let key = base64::engine::general_purpose::STANDARD
+                .decode(key)
+                .expect("a release key is base64");
+            assert_eq!(key.len(), 32, "a release key is an ed25519 key");
+            key
+        })
+        .collect()
 }
 
 /// Newest published version, refreshed at most once an hour.
@@ -649,7 +668,7 @@ fn install(
     let placement = place()?;
 
     println!("Downloading {}…", asset.name);
-    let body = fetch_archive(release, asset, release_key().as_deref(), &|url| {
+    let body = fetch_archive(release, asset, &release_keys(), &|url| {
         // The signature is a line of base64: no bar for that.
         match url.ends_with(SIGNATURE_SUFFIX) {
             true => fetch_small(url),
@@ -721,7 +740,7 @@ fn fetch_small(url: &str) -> Result<Vec<u8>> {
 const SIGNATURE_SUFFIX: &str = ".sig";
 
 /// The archive `asset` of `release`, from GitHub or else from the mirror,
-/// checked against `key` when there is one. `get` is the network.
+/// checked against `keys` when there are any. `get` is the network.
 ///
 /// GitHub first, because it is the source; the mirror ([`MIRROR_ASSETS`]) when
 /// GitHub fails to serve either file for any reason — down, a 5xx, a limit —
@@ -737,22 +756,22 @@ const SIGNATURE_SUFFIX: &str = ".sig";
 /// source: an archive that does not match its signature is not a network
 /// fault, and is said so.
 ///
-/// Without a key (the placeholder [`RELEASE_PUBLIC_KEY`], during rollout)
+/// Without a key (the placeholder [`RELEASE_KEYS`], during rollout)
 /// GitHub's archive is installed as it always was, on TLS alone, and the
 /// mirror is not used at all: an unsigned file from it is exactly what the
 /// signature is there to refuse.
 fn fetch_archive(
     release: &Release,
     asset: &Asset,
-    key: Option<&[u8]>,
+    keys: &[Vec<u8>],
     get: &dyn Fn(&str) -> Result<Vec<u8>>,
 ) -> Result<Vec<u8>> {
     let signature_name = format!("{}{SIGNATURE_SUFFIX}", asset.name);
     let from_github = || -> Result<(Vec<u8>, Option<Vec<u8>>)> {
         let body = get(&asset.browser_download_url)?;
-        let Some(_) = key else {
+        if keys.is_empty() {
             return Ok((body, None));
-        };
+        }
         let signature = release
             .assets
             .iter()
@@ -762,16 +781,16 @@ fn fetch_archive(
     };
     let github = match from_github() {
         Ok((body, signature)) => {
-            if let (Some(key), Some(signature)) = (key, signature) {
-                verify(key, &body, &signature, "GitHub")?;
+            if let Some(signature) = signature {
+                verify(keys, &body, &signature, "GitHub")?;
             }
             return Ok(body);
         }
         Err(github) => github,
     };
-    let Some(key) = key else {
+    if keys.is_empty() {
         return Err(github);
-    };
+    }
     eprintln!("GitHub did not serve it ({github:#}); trying the mirror…");
     let mirror = |name: &str| format!("{MIRROR_ASSETS}/{}/{name}", release.tag_name);
     let from_mirror = || -> Result<(Vec<u8>, Vec<u8>)> {
@@ -782,21 +801,25 @@ fn fetch_archive(
             "could not download the release archive: {github:#}; the mirror failed too: {mirror:#}"
         )
     })?;
-    verify(key, &body, &signature, "the mirror")?;
+    verify(keys, &body, &signature, "the mirror")?;
     Ok(body)
 }
 
 /// Check `body` against `signature`, a line of base64 as the release workflow
-/// writes it (`tools/sign-release.sh`).
-fn verify(key: &[u8], body: &[u8], signature: &[u8], from: &str) -> Result<()> {
+/// writes it (`tools/sign-release.sh`): valid if any one of `keys` made it.
+/// There is one signature per archive, not one per key, since only one key
+/// signs a given release — the primary, or the backup when rotating.
+fn verify(keys: &[Vec<u8>], body: &[u8], signature: &[u8], from: &str) -> Result<()> {
     use base64::Engine;
     let signature = base64::engine::general_purpose::STANDARD
         .decode(signature.trim_ascii())
         .ok();
     let valid = signature.is_some_and(|s| {
-        ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, key)
-            .verify(body, &s)
-            .is_ok()
+        keys.iter().any(|key| {
+            ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, key)
+                .verify(body, &s)
+                .is_ok()
+        })
     });
     match valid {
         true => Ok(()),
@@ -2165,7 +2188,8 @@ mod tests {
     fn a_github_outage_downloads_from_the_mirror() {
         let (release, key, get, asked) = signed(b"archive", b"archive", false, true);
         let asset = archive(&release, "x86_64-unknown-linux-musl").unwrap();
-        let body = fetch_archive(&release, asset, Some(&key), &get).expect("mirror serves it");
+        let body = fetch_archive(&release, asset, std::slice::from_ref(&key), &get)
+            .expect("mirror serves it");
         assert_eq!(body, b"archive");
         let asked = asked.borrow();
         assert_eq!(
@@ -2187,14 +2211,14 @@ mod tests {
         let (release, key, get, asked) = signed(b"archive", b"archive", true, true);
         let asset = archive(&release, "x86_64-unknown-linux-musl").unwrap();
         assert_eq!(
-            fetch_archive(&release, asset, Some(&key), &get).unwrap(),
+            fetch_archive(&release, asset, std::slice::from_ref(&key), &get).unwrap(),
             b"archive"
         );
         assert!(asked.borrow().iter().all(|u| !u.starts_with(MIRROR_ASSETS)));
 
         let (release, key, get, _) = signed(b"swapped", b"archive", true, true);
         let asset = archive(&release, "x86_64-unknown-linux-musl").unwrap();
-        let error = fetch_archive(&release, asset, Some(&key), &get).unwrap_err();
+        let error = fetch_archive(&release, asset, std::slice::from_ref(&key), &get).unwrap_err();
         assert!(format!("{error:#}").contains("does not match its signature"));
     }
 
@@ -2204,7 +2228,7 @@ mod tests {
     fn the_mirror_is_refused_a_bad_or_missing_signature() {
         let (release, key, get, _) = signed(b"swapped", b"archive", false, true);
         let asset = archive(&release, "x86_64-unknown-linux-musl").unwrap();
-        let error = fetch_archive(&release, asset, Some(&key), &get).unwrap_err();
+        let error = fetch_archive(&release, asset, std::slice::from_ref(&key), &get).unwrap_err();
         assert!(
             format!("{error:#}").contains("does not match its signature"),
             "{error:#}"
@@ -2216,12 +2240,12 @@ mod tests {
             true => Ok(b"not a signature".to_vec()),
             false => get(url),
         };
-        assert!(fetch_archive(&release, asset, Some(&key), &unsigned).is_err());
+        assert!(fetch_archive(&release, asset, std::slice::from_ref(&key), &unsigned).is_err());
         let missing = |url: &str| match url.ends_with(SIGNATURE_SUFFIX) {
             true => bail!("http status 404"),
             false => Ok(b"archive".to_vec()),
         };
-        assert!(fetch_archive(&release, asset, Some(&key), &missing).is_err());
+        assert!(fetch_archive(&release, asset, std::slice::from_ref(&key), &missing).is_err());
     }
 
     /// Before the key exists, GitHub's archive installs on TLS alone, and the
@@ -2231,12 +2255,12 @@ mod tests {
         let (release, _, get, _) = signed(b"archive", b"other", true, true);
         let asset = archive(&release, "x86_64-unknown-linux-musl").unwrap();
         assert_eq!(
-            fetch_archive(&release, asset, None, &get).unwrap(),
+            fetch_archive(&release, asset, &[], &get).unwrap(),
             b"archive"
         );
 
         let (release, _, get, asked_down) = signed(b"archive", b"archive", false, true);
-        assert!(fetch_archive(&release, asset, None, &get).is_err());
+        assert!(fetch_archive(&release, asset, &[], &get).is_err());
         assert!(
             asked_down
                 .borrow()
@@ -2256,17 +2280,66 @@ mod tests {
             .decode("wEYVgvyAla9mJiMA9bdsAnEk5Tk/sppE3lZYGay4XCA=")
             .unwrap();
         let signature = b"J2MUNPetewdRNp7NFIoJMscJgrwZSQfaXSoW/J3BRrNXjxhLMXRvE7EGwv9lRaWiXiBUXpWKixGce0RzmmMpDQ==\n";
-        verify(&key, b"a cctop release archive", signature, "GitHub").expect("verifies");
-        assert!(verify(&key, b"a cctop release archivE", signature, "GitHub").is_err());
+        let keys = [key];
+        verify(&keys, b"a cctop release archive", signature, "GitHub").expect("verifies");
+        assert!(verify(&keys, b"a cctop release archivE", signature, "GitHub").is_err());
     }
 
-    /// The key compiled in decodes, so a pasted key that is not one fails
+    /// The keys compiled in decode, so a pasted key that is not one fails
     /// here and not on someone's update.
     #[test]
-    fn the_release_key_is_an_ed25519_key_or_absent() {
-        if let Some(key) = release_key() {
+    fn the_release_keys_are_ed25519_keys_or_absent() {
+        for key in release_keys() {
             assert_eq!(key.len(), 32);
         }
+    }
+
+    /// A signature by either trusted key is accepted, and one by a key outside
+    /// the set is refused; with no keys at all, `verify` accepts nothing.
+    #[test]
+    fn the_primary_or_the_backup_verifies_and_no_other_key() {
+        use base64::Engine;
+        use ring::signature::KeyPair;
+        let pair =
+            |seed| ring::signature::Ed25519KeyPair::from_seed_unchecked(&[seed; 32]).unwrap();
+        let (primary, backup, stranger) = (pair(1), pair(2), pair(3));
+        let keys = [
+            primary.public_key().as_ref().to_vec(),
+            backup.public_key().as_ref().to_vec(),
+        ];
+        let body = b"a cctop release archive";
+        let signed_by = |pair: &ring::signature::Ed25519KeyPair| {
+            base64::engine::general_purpose::STANDARD
+                .encode(pair.sign(body))
+                .into_bytes()
+        };
+        verify(&keys, body, &signed_by(&primary), "GitHub").expect("the primary verifies");
+        verify(&keys, body, &signed_by(&backup), "GitHub").expect("the backup verifies");
+        let error = verify(&keys, body, &signed_by(&stranger), "GitHub").unwrap_err();
+        assert!(format!("{error:#}").contains("does not match its signature"));
+        assert!(verify(&[], body, &signed_by(&primary), "GitHub").is_err());
+    }
+
+    /// The backup compiled in is the public half of the key kept offline:
+    /// this signature was made with that key by `openssl pkeyutl -sign
+    /// -rawin`, as `tools/release-key.sh --sign-with-backup` would make it.
+    /// A pasted half of some other key would leave the backup unable to sign
+    /// anything a binary accepts, which is the one day it is needed.
+    #[test]
+    fn the_compiled_in_backup_verifies_its_offline_key() {
+        let signature = b"6DwS4LArUf4L5Dd9Wf8HSCp+PPBTfNiE+ggtYxLrRkO+bbnDzAgzx99UiB8LoiFhOHiBJeGq9yI1QUceUpPiBg==";
+        let keys = release_keys();
+        verify(&keys, b"a cctop release archive", signature, "GitHub").expect("verifies");
+        let primary_only = &keys[..1];
+        assert!(
+            verify(
+                primary_only,
+                b"a cctop release archive",
+                signature,
+                "GitHub"
+            )
+            .is_err()
+        );
     }
 
     /// The archive is told apart from its checksum sidecar, which shares its
