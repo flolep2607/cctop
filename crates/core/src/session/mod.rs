@@ -321,7 +321,17 @@ pub struct Session {
     pub surface: Surface,
     pub session_id: String,
     pub started_at: String,
+    /// When the session last said or did something: the timestamp of the
+    /// newest message or tool call in its transcript, which is what the table's
+    /// "last" column shows and sorts by. A transcript is also written to
+    /// without anything happening — a title, a summary, a file-history snapshot
+    /// on resume — and that is not activity a person would recognise.
     pub last_active: String,
+    /// When the transcript was last written to, by whatever: its file's mtime,
+    /// newest across subagent transcripts too. Empty for a provider that has no
+    /// file of its own to stat. What liveness and cache stamps want, where any
+    /// write counts — read it through [`Session::touched`].
+    pub touched_at: String,
     pub model: String,
     /// Where the agent is hosted, when it can be inferred (for example Cursor
     /// versus a terminal CLI). This is intentionally distinct from `model`.
@@ -610,6 +620,7 @@ impl Session {
             session_id,
             started_at: String::new(),
             last_active: String::new(),
+            touched_at: String::new(),
             model: String::new(),
             harness: String::new(),
             label_source: String::new(),
@@ -680,6 +691,15 @@ impl Session {
         buf.clear();
         let _ = write!(buf, "{}:{}", self.provider.as_str(), self.session_id);
         buf
+    }
+
+    /// When anything was last written for this session: [`Self::touched_at`],
+    /// or [`Self::last_active`] for a provider that only has the one.
+    pub fn touched(&self) -> &str {
+        match self.touched_at.is_empty() {
+            true => &self.last_active,
+            false => &self.touched_at,
+        }
     }
 
     /// The id a running process would name to mean this session: the one it was

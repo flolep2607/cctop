@@ -176,11 +176,16 @@ impl App {
         });
         // Its own mtime, so the panels refresh while the subagent is working and
         // not merely when its parent writes something.
-        stand_in.last_active = stand_in
+        stand_in.touched_at = stand_in
             .data_file
             .as_ref()
             .map(|f| cctop_core::util::ms_to_rfc3339(cctop_core::config::file_mtime_ms(f) as i64))
             .unwrap_or_default();
+        // And its own last turn as what it shows, as the parent's row does.
+        stand_in.last_active = sub
+            .last_active
+            .clone()
+            .unwrap_or_else(|| stand_in.touched_at.clone());
         Some(stand_in)
     }
 
@@ -205,7 +210,7 @@ impl App {
             Row::Subagent { .. } => false,
             _ => {
                 keyed_as(&self.panel_key, session.provider, &session.session_id)
-                    && session.last_active == self.panel_stamp
+                    && session.touched() == self.panel_stamp
             }
         }
     }
@@ -237,11 +242,11 @@ impl App {
         if session.remote.is_some() {
             self.panel_data = None;
             self.panel_key = session.key();
-            self.panel_stamp = session.last_active.clone();
+            self.panel_stamp = session.touched().to_string();
             return;
         }
         let key = session.key();
-        let stamp = session.last_active.clone();
+        let stamp = session.touched().to_string();
         let switched = key != self.panel_key;
         // A live session keeps growing, so re-request whenever its newest
         // activity moves — otherwise the panels freeze at whatever the session

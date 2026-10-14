@@ -630,7 +630,7 @@ pub struct App {
     pub bottom_tab: usize,
     pub panel_data: Option<SessionData>,
     panel_key: String,
-    /// `last_active` of the session when its panel data was requested, so an
+    /// [`Session::touched`] of the session when its panel data was requested, so an
     /// append can be told apart from an unchanged session.
     panel_stamp: String,
     pub info_scroll: u16,
