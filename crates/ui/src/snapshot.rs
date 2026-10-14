@@ -395,7 +395,11 @@ fn help_modal() {
 /// filtered.
 #[test]
 fn settings_page() {
-    use super::connect::Connected;
+    use super::connect::{Connected, Row, Setup, Typing};
+    use super::settings::Item;
+    use cctop_core::cloudflare::Zone;
+    use cctop_core::cloudflare::access::{Invite, Level, Settings};
+    use cctop_core::tunnel::Account;
     let mut app = fixture();
     app.settings_open = true;
     snap("settings", &mut app);
@@ -407,30 +411,74 @@ fn settings_page() {
     app.settings_filter = "alert when".into();
     snap("settings_filtered", &mut app);
 
-    // The Cloudflare account's row, which opens a popup rather than a field.
+    // The tunnel section with nothing connected: the two ways in.
     let mut app = fixture();
     app.settings_open = true;
-    app.settings_filter = "cloudflare".into();
-    snap("settings_cloudflare", &mut app);
+    app.settings_filter = "tunnel".into();
+    snap("settings_tunnel", &mut app);
 
-    // The same row with an account connected, which is the only frame in which
-    // it says anything: every mark it carries is a fact the dashboard already
-    // held and the row used to hide behind a popup. The address is made up, and
-    // the rename is a refusal so that the one mark for a negative is here too.
+    // Connected, with Access on and two invites, the cursor on remove and
+    // remove asking. Every address is made up, and the token never shows.
     let mut app = fixture();
     app.settings_open = true;
-    app.settings_filter = "cloudflare".into();
-    app.connected = Some(Connected {
+    app.settings_filter = "tunnel".into();
+    app.connected = Some(Connected::from(&Account {
+        token: "eyJhIjoi-made-up".into(),
         hostname: Some("cctop.example.com".into()),
-        from_env: true,
         share_hostname: Some("cctop-share.example.com".into()),
-        zone: Some("example.com".into()),
-        rename: Err("the token cannot write DNS"),
-        access_owner: Some("owner@example.com".into()),
-        link_hostname: Some("cctop-link.example.com".into()),
-        public_links: false,
+        account_id: Some("acct1".into()),
+        zone_id: Some("zone1".into()),
+        tunnel_id: Some("tunnel1".into()),
+        api_token: Some("made-up-api-token".into()),
+        access: Some(Box::new(Settings {
+            owner: "owner@example.com".into(),
+            invites: vec![
+                Invite {
+                    who: "@example.com".into(),
+                    level: Level::Read,
+                },
+                Invite {
+                    who: "boss@example.org".into(),
+                    level: Level::Full,
+                },
+            ],
+            link_hostname: Some("cctop-link.example.com".into()),
+            ..Settings::default()
+        })),
+        ..Account::default()
+    }));
+    app.settings_cursor = app
+        .settings_shown()
+        .iter()
+        .position(|i| *i == Item::Tunnel(Row::Remove))
+        .expect("a remove row");
+    app.cf.confirm = Some(Row::Remove);
+    snap("settings_tunnel_connected", &mut app);
+
+    // A setup half done: two domains to cycle, and the name open to create.
+    let mut app = fixture();
+    app.settings_open = true;
+    app.settings_filter = "tunnel".into();
+    let zone = |name: &str| Zone {
+        id: format!("id-{name}"),
+        name: name.to_string(),
+        account_id: "acct".to_string(),
+        active: true,
+    };
+    app.cf.setup = Some(Setup::Picked {
+        auth: "made-up-api-token".into(),
+        zones: vec![zone("example.com"), zone("example.org")],
+        at: 0,
+        hostname: "cctop-box.example.com".into(),
     });
-    snap("settings_cloudflare_connected", &mut app);
+    app.settings_cursor = app
+        .settings_shown()
+        .iter()
+        .position(|i| *i == Item::Tunnel(Row::SetupHostname))
+        .expect("a hostname row");
+    app.cf.typing = Some(Typing::SetupHostname);
+    app.settings_input = Some("cctop-box.example.com".into());
+    snap("settings_tunnel_setup", &mut app);
 }
 
 /// A binding is drawn as a cap, which no text frame can show — and the footer
@@ -815,155 +863,6 @@ fn dead_pane() {
     app.tabs.push(tabs::Tab::new(pane));
     app.tab = 1;
     snap("dead_pane", &mut app);
-}
-
-/// The Cloudflare popup at the steps worth a look: the browser login, and its
-/// address shown for a browser elsewhere; the link with a paste in the field
-/// (masked); the domain picker, the no-domain refusal, and done.
-/// Every token here is made up, and none of them reaches the screen.
-#[test]
-fn connect_popup() {
-    use super::connect::{Connect, Step};
-    use cctop_core::cloudflare::{Error, Zone};
-    let open = |step: Step| {
-        let mut app = fixture();
-        app.connect = Some(Connect::new(step, Mode::Serve));
-        app.mode = Mode::Connect;
-        app
-    };
-
-    let mut app = open(Step::Start {
-        method: super::connect::Method::Browser,
-        field: Default::default(),
-    });
-    snap("connect_login", &mut app);
-
-    let mut app = open(Step::LoggingIn {
-        url: "https://dash.cloudflare.com/argotunnel?aud=&callback=made-up".into(),
-        opened: false,
-    });
-    snap("connect_login_waiting", &mut app);
-
-    let mut app = open(Step::Start {
-        method: super::connect::Method::Paste,
-        field: "made-up-api-token".into(),
-    });
-    snap("connect_link", &mut app);
-
-    let zone = |name: &str| Zone {
-        id: format!("id-{name}"),
-        name: name.to_string(),
-        account_id: "acct".to_string(),
-        active: true,
-    };
-    let mut app = open(Step::Zones {
-        auth: "made-up-api-token".into(),
-        zones: vec![zone("example.com"), zone("example.org")],
-        cursor: 1,
-    });
-    snap("connect_zones", &mut app);
-
-    let mut app = open(Step::Failed {
-        message: Error::NoDomain.to_string(),
-        then: super::connect::Method::Browser,
-    });
-    snap("connect_no_domain", &mut app);
-
-    let mut app = open(Step::Done {
-        hostname: Some("cctop.example.com".into()),
-        shares: true,
-    });
-    snap("connect_done", &mut app);
-}
-
-/// Who may log in: the connected account with Access on, its invite list with
-/// public token links on, then off; and Access off with the owner's field
-/// open. Every address here is made up.
-#[test]
-fn connect_access() {
-    use super::connect::{Connect, Step, Typing};
-    use cctop_core::cloudflare::access::{Invite, Level, Settings};
-    use cctop_core::tunnel::Account;
-    let settings = Settings {
-        owner: "owner@example.com".into(),
-        invites: vec![
-            Invite {
-                who: "@example.com".into(),
-                level: Level::Read,
-            },
-            Invite {
-                who: "boss@example.org".into(),
-                level: Level::Full,
-            },
-        ],
-        app_id: Some("app1".into()),
-        link_hostname: Some("cctop-link.example.com".into()),
-        link_record_id: Some("rec-link".into()),
-        ..Settings::default()
-    };
-    let account = |access: Option<Settings>| Account {
-        token: "eyJhIjoi-made-up".into(),
-        hostname: Some("cctop.example.com".into()),
-        share_hostname: Some("cctop-share.example.com".into()),
-        access: access.map(Box::new),
-        ..Account::default()
-    };
-    let open = |step: Step| {
-        let mut app = fixture();
-        app.connect = Some(Connect::new(step, Mode::List));
-        app.mode = Mode::Connect;
-        app
-    };
-
-    let mut app = open(Step::Connected {
-        account: account(Some(settings.clone())),
-        confirm: false,
-    });
-    snap("connect_connected_access", &mut app);
-
-    let mut app = open(Step::Access {
-        account: account(Some(settings.clone())),
-        cursor: 1,
-        field: None,
-        confirm: false,
-        said: vec!["Invited boss@example.org, with full access.".into()],
-    });
-    snap("connect_access_on", &mut app);
-
-    let mut app = open(Step::Access {
-        account: account(Some(Settings {
-            public_links: false,
-            link_hostname: None,
-            link_record_id: None,
-            ..settings
-        })),
-        cursor: 0,
-        field: Some((Typing::Invite, "guest@".into())),
-        confirm: false,
-        said: Vec::new(),
-    });
-    snap("connect_access_links_off", &mut app);
-
-    let mut app = open(Step::Access {
-        account: account(None),
-        cursor: 0,
-        field: Some((Typing::Owner, "owner@example.com".into())),
-        confirm: false,
-        said: Vec::new(),
-    });
-    snap("connect_access_off", &mut app);
-
-    let mut app = open(Step::Access {
-        account: Account {
-            login: true,
-            ..account(None)
-        },
-        cursor: 0,
-        field: Some((Typing::Token, "made-up".into())),
-        confirm: false,
-        said: Vec::new(),
-    });
-    snap("connect_access_login_token", &mut app);
 }
 
 /// Choosing an address: the share panel with its `Address` line, the field

@@ -9,15 +9,15 @@ expression: screen
 │This month        $0.00                               ⡀  Agent CPU   3.2%     │
 │All time         $28.51 $0.00/day this month             Agent mem 592 MB     │
 ╰──────────────────────────────────────────────────────────────────────────────╯
-╭ Settings ─────────────────────────────────────────────────────── /cloudflare ╮
+╭ Settings ─────────────────────────────────────────────────────────── /tunnel ╮
 │  File ~/.config/cctop/config.toml                                            │
 │                                                                              │
 │config.toml · [tunnel]                                                        │
-│  cloudflare        cctop.example.c… * Your Cloudflare tunnel: links that stay│
+│  status            not connected             links that stay                 │
+│  zone              example.com           ↻   domain                          │
+│  hostname          cctop-box.example.com█    ↵ create · ⌫ cancel             │
 │                                                                              │
 │  ↵ change   ⌫ reset   e open the file in an editor   Esc back to the table   │
-│                                                                              │
-│                                                                              │
 │                                                                              │
 │                                                                              │
 │                                                                              │

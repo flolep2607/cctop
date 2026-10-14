@@ -37,13 +37,10 @@ pub enum Item {
     View(usize),
     /// An entry of `[keys]`, by index into [`cctop_core::settings::BINDINGS`].
     Key(usize),
-    /// The Cloudflare account `t` and `W` use: `[tunnel]`, which is not a
-    /// value to type but a flow to go through, so Enter opens its popup.
-    Cloudflare,
+    /// One row of `[tunnel]`, the Cloudflare account `t` and `W` use. Which
+    /// rows there are depends on the account: see [`App::tunnel_rows`].
+    Tunnel(super::connect::Row),
 }
-
-/// What the Cloudflare row says it is for.
-pub const CLOUDFLARE_WHAT: &str = "Your Cloudflare tunnel: links that stay";
 
 /// How a view choice is read and changed.
 ///
@@ -429,7 +426,7 @@ impl App {
         (0..cctop_core::settings::SETTINGS.len())
             .map(Item::Setting)
             .chain((0..VIEWS.len()).map(Item::View))
-            .chain(std::iter::once(Item::Cloudflare))
+            .chain(self.tunnel_rows().into_iter().map(Item::Tunnel))
             .chain((0..cctop_core::settings::BINDINGS.len()).map(Item::Key))
             .collect()
     }
@@ -466,10 +463,15 @@ impl App {
                             self.settings.key_for(action)
                         )
                     }
-                    Item::Cloudflare => format!(
-                        "cloudflare tunnel {CLOUDFLARE_WHAT} {}",
-                        self.cloudflare_value()
-                    ),
+                    Item::Tunnel(row) => {
+                        let shown = self.tunnel_view(*row);
+                        format!(
+                            "cloudflare tunnel {} {} {}",
+                            row.name(),
+                            shown.value,
+                            shown.what
+                        )
+                    }
                 };
                 hay.to_lowercase().contains(&needle)
             })
@@ -537,55 +539,8 @@ impl App {
             Item::Key(_) => self.settings_capture = true,
             Item::View(i) => self.view_activate(i),
             Item::Setting(i) => self.setting_activate(cctop_core::settings::SETTINGS[i].0),
-            Item::Cloudflare => self.open_connect(Mode::List),
+            Item::Tunnel(row) => self.tunnel_activate(row),
         }
-    }
-
-    /// What the Cloudflare row shows: whether one is connected, and where.
-    ///
-    /// A summary of what the dashboard already knows, so that a row you have to
-    /// open to understand is not a row. The Enter popup stays the place the
-    /// prose lives, and every mark here is one word wide at most — a fact worth
-    /// reading twice is a fact the popup should carry instead. The order is the
-    /// order of the questions: where is it, who may in, can they from outside,
-    /// where do shares ride, is this really mine, and may I write to it.
-    pub(super) fn cloudflare_value(&self) -> String {
-        let Some(c) = &self.connected else {
-            return "not connected".to_string();
-        };
-        let mut out = c
-            .hostname
-            .clone()
-            .unwrap_or_else(|| "connected".to_string());
-        if let Some(zone) = &c.zone {
-            out.push_str(&format!(" · zone {zone}"));
-        }
-        if let Some(owner) = &c.access_owner {
-            out.push_str(&format!(" · Access {owner}"));
-        }
-        // One clause for both link states: the difference worth knowing is
-        // whether a link works from outside, not which hostname it uses when it
-        // does not. `From<&Account>` calls an account with no Access public, so
-        // the clause always says which of the two you have.
-        match (&c.link_hostname, c.public_links) {
-            (_, true) => out.push_str(" · links public"),
-            (Some(where_), false) => out.push_str(&format!(" · links {where_}")),
-            (None, false) => {}
-        }
-        if let Some(shares) = &c.share_hostname {
-            out.push_str(&format!(" · shares {shares}"));
-        }
-        // A hostname the environment supplied is one `config.toml` does not
-        // carry, which is usually the reason somebody is reading this row.
-        if c.from_env {
-            out.push_str(" · from env");
-        }
-        // Only a refusal earns a word. A mark on `Ok(())` would train somebody
-        // to skip the column, and the next refusal along with it.
-        if let Err(why) = c.rename {
-            out.push_str(&format!(" · no DNS write: {why}"));
-        }
-        out
     }
 
     /// Turn a view choice to its next value, or open a field for a number.
@@ -670,9 +625,7 @@ impl App {
             }
             Item::Key(i) => self.write_setting("keys", cctop_core::settings::BINDINGS[i].0, None),
             Item::View(i) => self.view_reset(i),
-            // Not on a key that also clears a field: disconnecting deletes
-            // things on Cloudflare, and the popup asks first.
-            Item::Cloudflare => self.set_status("Enter on cloudflare to disconnect it"),
+            Item::Tunnel(row) => self.tunnel_reset(row),
         }
     }
 
@@ -743,6 +696,9 @@ impl App {
             return;
         };
         let text = text.trim();
+        if let Item::Tunnel(row) = item {
+            return self.tunnel_commit(row, text);
+        }
         let Item::Setting(i) = item else {
             return self.view_commit(item, text);
         };

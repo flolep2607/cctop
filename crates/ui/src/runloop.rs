@@ -847,7 +847,7 @@ fn event_loop(
         // spinner to turn.
         app.needs_redraw |= app.tick_share();
         app.needs_redraw |= app.tick_address();
-        app.needs_redraw |= app.tick_connect();
+        app.needs_redraw |= app.tick_tunnel();
         // The footer's own line refreshes on its own clock, and its command
         // answers on a channel nothing polls but this.
         app.needs_redraw |= app.footer_extra.tick();

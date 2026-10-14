@@ -1,0 +1,28 @@
+---
+source: crates/ui/src/snapshot.rs
+expression: screen
+---
+ 1:Dashboard │ + Tab (t) ───────────────────────────────────────────── Settings
+╭ Overview ────────────────────────────────────────────────────────────────────╮
+│Live rate         $0.04                               ⡀  Models               │
+│Today             $8.97                               ⡀  Sessions  4 · 2 live │
+│This month        $0.00                               ⡀  Agent CPU   3.2%     │
+│All time         $28.51 $0.00/day this month             Agent mem 592 MB     │
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭ Settings ─────────────────────────────────────────────────────────── /tunnel ╮
+│  File ~/.config/cctop/config.toml                                            ┃
+│                                                                              ┃
+│config.toml · [tunnel]                                                        ┃
+│  status            connected                   Cloudflare tunnel             ┃
+│  hostname          cctop.example.com         * dashboard address             ┃
+│  zone              example.com               * domain · fixed                ┃
+│  share_hostname    cctop-share.example.com   * W shares · fixed              ┃
+│  access            [x]                       * Cloudflare Access login       ┃
+│  owner             owner@example.com         * Access owner, full            ┃
+│  public_links      [x]                         token links · cctop-link.exam…┃
+│  invite            @example.com · read     ↻ * ↵ read/full · ⌫ remove        ┃
+│  invite            boss@example.org · full ↻ * ↵ read/full · ⌫ remove        ┃
+│  invite            + add                       email or @domain              │
+│  remove            y / n                       delete tunnel + DNS?          │
+╰ 11 of 91   ↑↓ scroll   / filter   Esc back ──────────────────────────────────╯
+/ Filter ↵ Change ⌫ Reset e Edit file , Back Alt+←→ Tabs F1 Help        ⧉ share
