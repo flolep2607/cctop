@@ -311,6 +311,9 @@ impl Peer {
     /// Open a WebSocket to `path` on this sibling, signed, carrying the
     /// browser's handshake headers that make it one — and nothing else of the
     /// browser's: its cookie is this machine's credential, not the sibling's.
+    /// [`RESUME_HEADER`](crate::ws::RESUME_HEADER) goes too, for a tab coming
+    /// back to its terminal; it means nothing to the rmux sockets a browser's
+    /// handshake is relayed to.
     ///
     /// The `Origin` is the sibling's own, which is the frontend its share was
     /// minted for when the hub asked for the terminal ([`relayed_link`]).
@@ -338,7 +341,11 @@ impl Peer {
         );
         for (name, value) in headers {
             let lower = name.to_ascii_lowercase();
-            if lower.starts_with("sec-websocket-") || lower == "upgrade" || lower == "connection" {
+            if lower.starts_with("sec-websocket-")
+                || lower == "upgrade"
+                || lower == "connection"
+                || name.eq_ignore_ascii_case(crate::ws::RESUME_HEADER)
+            {
                 head.push_str(&format!("{name}: {value}\r\n"));
             }
         }

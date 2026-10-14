@@ -11,12 +11,15 @@
 //! browser running rmux's own client, which a pane on another machine is not;
 //! this is a pty's bytes in binary frames, and a resize as a text frame.
 //!
+//! A tab that asks for it can come back to the same terminal when its socket
+//! drops, and is sent what it missed: see [`crate::resume`].
+//!
 //! Who may: a full link with actions on — the same line `relay_terminal`
 //! draws for a tab's terminal, since typing into an agent is acting on it. A
 //! sibling's signature is a full link (see the peer check in `handle`).
 
 use crate::http::{self, Request};
-use crate::{Access, Shared, current};
+use crate::{Access, Shared, current, resume};
 use cctop_core::ws::{self, Op, frame};
 use std::io::{Read, Write};
 use std::net::TcpStream;
@@ -60,7 +63,7 @@ pub(crate) fn route(
     if !known {
         return http::respond_error(stream, Some(request), 404, NO_SESSION);
     }
-    terminal(stream, request, &open_argv(provider, id));
+    open_or_resume(stream, request, || open_argv(provider, id));
 }
 
 /// `/api/new-term/<agent>/<permissions>/<model>/<dir>`: a *new* agent on this
@@ -98,11 +101,16 @@ pub(crate) fn route_new(
     if let Some(why) = problem_here(&spec) {
         return http::respond_error(stream, Some(request), 404, &why);
     }
-    terminal(stream, request, &new_argv(&spec));
+    open_or_resume(stream, request, || new_argv(&spec));
 }
 
-/// Upgrade to a WebSocket and pump a pty running `argv` through it.
-fn terminal(stream: &mut TcpStream, request: &Request, argv: &[String]) {
+/// Open a terminal running what `argv` builds, or resume the one the request's
+/// `Cctop-Resume` header names — see [`crate::resume`].
+///
+/// Called only once the route's own checks have passed, so a resume is let in
+/// exactly as an open of the same route would be. A resume never runs `argv`:
+/// for a new agent's route, that would start a second agent.
+fn open_or_resume(stream: &mut TcpStream, request: &Request, argv: impl FnOnce() -> Vec<String>) {
     let key = request.header("sec-websocket-key");
     if key.is_empty() {
         return http::respond_error(stream, Some(request), 400, "no Sec-WebSocket-Key");
@@ -116,31 +124,110 @@ fn terminal(stream: &mut TcpStream, request: &Request, argv: &[String]) {
             .unwrap_or(default)
     };
     let size = (size("cols", 80), size("rows", 24));
+    let resume = request.header(ws::RESUME_HEADER).trim();
+    if resume.is_empty() || resume == ws::RESUME_NEW {
+        return terminal(stream, request, key, &argv(), size, !resume.is_empty());
+    }
+    let Some((token, offset)) = resume
+        .split_once(' ')
+        .and_then(|(token, offset)| Some((token, offset.trim().parse::<u64>().ok()?)))
+    else {
+        return http::respond_error(stream, Some(request), 400, "not a resume cctop understands");
+    };
+    let term = match resume::claim(token, &request.path) {
+        Ok(term) => term,
+        Err(why) => return http::respond_error(stream, Some(request), 410, why),
+    };
+    // Out of the ring, the gap cannot be filled from here; the terminal is
+    // ended with this answer, since the tab will not come back to it.
+    let Some(missed) = term.ring.since(offset) else {
+        return http::respond_error(
+            stream,
+            Some(request),
+            410,
+            "too much was said while you were away to replay it",
+        );
+    };
+    // The tab may have been resized while it was away.
+    cctop_core::shim::set_pty_size(&term.master, size.0, size.1);
+    if upgrade(stream, key, term.token()).is_ok() {
+        run(term, stream, &missed);
+    }
+}
+
+/// Spawn `argv` on a pty, upgrade to a WebSocket, and pump the one through
+/// the other. `resumable` when the tab asked for a token to come back with.
+fn terminal(
+    stream: &mut TcpStream,
+    request: &Request,
+    key: &str,
+    argv: &[String],
+    size: (u16, u16),
+    resumable: bool,
+) {
     // A server started by systemd has no TERM, and an attach with none draws
     // nothing a terminal can read.
     let env = match std::env::var_os("TERM") {
         Some(_) => Vec::new(),
         None => vec![("TERM".to_string(), "xterm-256color".to_string())],
     };
-    let (mut child, master) = match cctop_core::shim::spawn_pty(argv, size, &env) {
+    let (child, master) = match cctop_core::shim::spawn_pty(argv, size, &env) {
         Ok(spawned) => spawned,
         Err(error) => {
             return http::respond_error(stream, Some(request), 500, &error.to_string());
         }
     };
+    let term = resume::Term::new(child, master, resumable.then_some(request.path.as_str()));
+    if upgrade(stream, key, term.token()).is_ok() {
+        run(term, stream, &[]);
+    }
+}
+
+/// Answer the handshake, with the token to resume by when there is one.
+fn upgrade(stream: &mut TcpStream, key: &str, token: Option<&str>) -> std::io::Result<()> {
+    let resume = match token {
+        Some(token) => format!("{}: {token}\r\n", ws::RESUME_HEADER),
+        None => String::new(),
+    };
     let accept = format!(
         "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\
-         Sec-WebSocket-Accept: {}\r\n\r\n",
+         Sec-WebSocket-Accept: {}\r\n{resume}\r\n",
         ws::accept_key(key)
     );
-    if stream.write_all(accept.as_bytes()).is_ok() {
-        pump(stream, master);
-    }
-    // The pty's program is an rmux client, or a shell started for this
-    // socket: ending it detaches, and the agent in rmux carries on.
-    let _ = child.kill();
-    let _ = child.wait();
+    stream.write_all(accept.as_bytes())
 }
+
+/// Pump `term` through `stream` — `missed` first, what the tab has not seen —
+/// and when the socket drops, park it for the tab to come back to. Returns
+/// once the terminal is over, or another connection has it.
+fn run(mut term: resume::Term, stream: &mut TcpStream, missed: &[u8]) {
+    // A terminal sits quiet for minutes; the request deadlines would cut it.
+    let _ = stream.set_read_timeout(None);
+    // But a write that makes no progress is a socket nobody is reading, and a
+    // thread stuck in it could neither park the terminal nor hand it over.
+    let _ = stream.set_write_timeout(Some(WRITE_TIMEOUT));
+    let sent = missed
+        .chunks(16 * 1024)
+        .try_for_each(|chunk| stream.write_all(&frame(Op::Binary, chunk, false)));
+    let pumped = match sent {
+        Ok(()) => pump(stream, &mut term),
+        Err(_) => Pumped::Dropped,
+    };
+    match pumped {
+        Pumped::Ended => {}
+        // Refused only when the asker gave up waiting, and then the terminal
+        // ends with the send.
+        Pumped::Claimed(reply) => {
+            let _ = reply.send(term);
+        }
+        Pumped::Dropped => resume::park(term, resume::GRACE),
+    }
+}
+
+/// How long a write to the tab may make no progress before the socket is
+/// taken for dropped. Well inside `resume`'s wait for a claim, so a terminal
+/// stuck writing to a dead socket is still handed over.
+pub(crate) const WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 const NO_SESSION: &str = "no such session on this machine";
 
@@ -197,24 +284,45 @@ fn new_argv(spec: &cctop_core::remote_open::NewAgent) -> Vec<String> {
 /// as test filters: a shell stands in, saying what it was asked and at what
 /// size, then echoing a line back — enough to see both directions and the
 /// resize arrive.
+///
+/// Two session ids get other programs, for the resume tests: `count` says
+/// numbered lines in two bursts either side of a pause, and `flood` says more
+/// than [`resume::RING`] holds; each then echoes a line back.
 #[cfg(test)]
 fn open_argv(provider: &str, id: &str) -> Vec<String> {
+    let script = match id {
+        "count" => {
+            r#"i=0; while [ $i -lt 600 ]; do echo "line $i"; i=$((i+1)); [ $i = 300 ] && sleep 0.2; done; read line; echo "got $line""#
+        }
+        "flood" => {
+            r#"head -c 200000 /dev/zero | tr '\0' x; echo; echo flooded; read line; echo "got $line""#
+        }
+        _ => {
+            r#"echo "opened $0 $1 $(stty size)"; read line; echo "got $line"; read line; echo "now $(stty size)""#
+        }
+    };
     vec![
         "sh".into(),
         "-c".into(),
-        r#"echo "opened $0 $1 $(stty size)"; read line; echo "got $line"; read line; echo "now $(stty size)""#.into(),
+        script.into(),
         provider.into(),
         id.into(),
     ]
 }
 
-/// Pump the pty and the socket into each other until either closes.
-fn pump(stream: &mut TcpStream, master: std::fs::File) {
-    // A terminal sits quiet for minutes; the request deadlines would cut it.
-    let _ = stream.set_read_timeout(None);
-    let _ = stream.set_write_timeout(None);
-    let mut pty_out = &master;
-    let mut pty_in = &master;
+/// How a socket's turn with a terminal ended.
+enum Pumped {
+    /// The terminal is over: closed by the tab, or its program ended.
+    Ended,
+    /// The socket went without a Close: the tab may come back.
+    Dropped,
+    /// A resume on another connection wants the terminal.
+    Claimed(std::sync::mpsc::Sender<resume::Term>),
+}
+
+/// Pump the pty and the socket into each other until either closes, the
+/// socket drops, or a resume claims the terminal.
+fn pump(stream: &mut TcpStream, term: &mut resume::Term) -> Pumped {
     let mut decoder = ws::Decoder::default();
     let mut buf = [0u8; 16 * 1024];
     loop {
@@ -225,28 +333,41 @@ fn pump(stream: &mut TcpStream, master: std::fs::File) {
                 revents: 0,
             },
             libc::pollfd {
-                fd: master.as_raw_fd(),
+                fd: term.master.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            },
+            libc::pollfd {
+                fd: term.wake_fd(),
                 events: libc::POLLIN,
                 revents: 0,
             },
         ];
-        // SAFETY: two valid pollfds on fds both owned for this call.
-        if unsafe { libc::poll(fds.as_mut_ptr(), 2, -1) } < 0 {
+        // SAFETY: three valid pollfds (or -1, which poll skips) on fds owned
+        // for this call.
+        if unsafe { libc::poll(fds.as_mut_ptr(), 3, -1) } < 0 {
             if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
                 continue;
             }
-            return;
+            return Pumped::Dropped;
+        }
+        // The tab is back on another connection: this one was dead and had
+        // not said so, which is how a network that went away ends a socket.
+        if fds[2].revents != 0
+            && let Some(reply) = term.take_claim()
+        {
+            return Pumped::Claimed(reply);
         }
         if fds[0].revents != 0 {
             match stream.read(&mut buf) {
                 Ok(n) if n > 0 => decoder.push(&buf[..n]),
-                _ => return,
+                _ => return Pumped::Dropped,
             }
             loop {
                 match decoder.frame() {
                     Ok(Some((Op::Close, _))) => {
                         let _ = stream.write_all(&frame(Op::Close, b"", false));
-                        return;
+                        return Pumped::Ended;
                     }
                     // Said, with the protocol-error code, so the tab shows why
                     // instead of closing as though the terminal had ended.
@@ -254,23 +375,27 @@ fn pump(stream: &mut TcpStream, master: std::fs::File) {
                         let mut payload = 1002u16.to_be_bytes().to_vec();
                         payload.extend(why.bytes().take(120));
                         let _ = stream.write_all(&frame(Op::Close, &payload, false));
-                        return;
+                        return Pumped::Ended;
                     }
                     Ok(Some((Op::Ping, payload))) => {
                         if stream.write_all(&frame(Op::Pong, &payload, false)).is_err() {
-                            return;
+                            return Pumped::Dropped;
                         }
                     }
                     Ok(Some((Op::Pong, _))) => {}
-                    // Text is the resize; nothing else is sent as text.
+                    // Text is a resize, or a resumed tab asking for a redraw;
+                    // nothing else is sent as text.
                     Ok(Some((Op::Text, text))) => {
                         if let Some((cols, rows)) = ws::parse_resize(&text) {
-                            cctop_core::shim::set_pty_size(&master, cols, rows);
+                            cctop_core::shim::set_pty_size(&term.master, cols, rows);
+                        } else if ws::is_redraw(&text) {
+                            redraw(&term.master);
                         }
                     }
                     Ok(Some((Op::Binary | Op::Other(_), keys))) => {
-                        if pty_in.write_all(&keys).is_err() {
-                            return;
+                        if (&term.master).write_all(&keys).is_err() {
+                            let _ = stream.write_all(&frame(Op::Close, b"", false));
+                            return Pumped::Ended;
                         }
                     }
                     Ok(None) => break,
@@ -278,22 +403,40 @@ fn pump(stream: &mut TcpStream, master: std::fs::File) {
             }
         }
         if fds[1].revents != 0 {
-            match pty_out.read(&mut buf) {
+            match (&term.master).read(&mut buf) {
                 Ok(n) if n > 0 => {
+                    // Kept before it is sent, so a socket that fails partway
+                    // through the frame loses nothing a resume cannot replay.
+                    term.ring.push(&buf[..n]);
                     if stream
                         .write_all(&frame(Op::Binary, &buf[..n], false))
                         .is_err()
                     {
-                        return;
+                        return Pumped::Dropped;
                     }
                 }
                 // EIO once the program on it has exited: the far tab is told
                 // the terminal closed, and shows what it last said.
                 _ => {
                     let _ = stream.write_all(&frame(Op::Close, b"", false));
-                    return;
+                    return Pumped::Ended;
                 }
             }
+        }
+    }
+}
+
+/// Have the program on the pty draw its screen again, as it would for a
+/// resize: SIGWINCH to the pty's foreground process group. A resumed tab asks
+/// for it when it wrote over its own screen while it was away. Setting the
+/// same size again would not do: the kernel only signals a size that changed.
+fn redraw(master: &std::fs::File) {
+    // SAFETY: `master` is a live pty master; both calls only read their
+    // arguments.
+    unsafe {
+        let group = libc::tcgetpgrp(master.as_raw_fd());
+        if group > 0 {
+            libc::kill(-group, libc::SIGWINCH);
         }
     }
 }
@@ -525,5 +668,256 @@ mod tests {
         until(&mut up, "now 40 120");
         up.write_all(&frame(Op::Close, b"", true)).unwrap();
         server.join().unwrap();
+    }
+
+    /// A server answering `n` connections, each on its own thread as the real
+    /// accept loop would, with the sessions `ids` known.
+    fn serving(ids: &[&str], n: usize) -> (u16, Arc<crate::Shared>) {
+        use std::net::TcpListener;
+        let s = Arc::new(crate::Shared {
+            peer_secret: SECRET.to_string(),
+            ..shared("full", "ro")
+        });
+        *s.latest.lock().unwrap() = Arc::new(Snapshot {
+            version: 1,
+            json: "[]".into(),
+            rows: Vec::new(),
+            sessions: ids.iter().map(|id| session(id)).collect(),
+            host_errors: Vec::new(),
+        });
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = Arc::clone(&s);
+        std::thread::spawn(move || {
+            for _ in 0..n {
+                let (mut stream, _) = listener.accept().unwrap();
+                let s = Arc::clone(&server);
+                std::thread::spawn(move || crate::serve_connection(&s, &mut stream));
+            }
+        });
+        (port, s)
+    }
+
+    const SECRET: &str = "eyJhIjoi-made-up-tunnel-token";
+
+    /// A sibling's tab, as the bridge keeps it: the socket, what it has been
+    /// handed, and how to come back.
+    struct Tab {
+        up: cctop_core::peer::Upstream,
+        decoder: cctop_core::ws::Decoder,
+        token: Option<String>,
+        /// Output bytes handed over, which a resume asks the rest from.
+        received: u64,
+        screen: Vec<u8>,
+    }
+
+    /// Open `path` (resuming with `resume` when given), and the answer's head
+    /// when it is not an upgrade.
+    fn tab(port: u16, path: &str, resume: &str) -> Result<Tab, String> {
+        use cctop_core::ws;
+        let peer =
+            cctop_core::peer::Peer::fixed("box", &format!("http://127.0.0.1:{port}"), SECRET);
+        let headers = [
+            ("Upgrade".to_string(), "websocket".to_string()),
+            ("Connection".to_string(), "Upgrade".to_string()),
+            ("Sec-WebSocket-Key".to_string(), ws::new_key()),
+            ("Sec-WebSocket-Version".to_string(), "13".to_string()),
+            (ws::RESUME_HEADER.to_string(), resume.to_string()),
+        ];
+        let mut up = peer
+            .socket(path, "cols=100&rows=30", &headers)
+            .expect("socket");
+        let mut got = Vec::new();
+        let end = loop {
+            if let Some(at) = got.windows(4).position(|w| w == b"\r\n\r\n") {
+                break at + 4;
+            }
+            if !up.read_ready(&mut got).unwrap() {
+                return Err(String::from_utf8_lossy(&got).into_owned());
+            }
+        };
+        let head = String::from_utf8_lossy(&got[..end]).into_owned();
+        if !head.starts_with("HTTP/1.1 101") {
+            // The body, which says why, follows the head.
+            while up.read_ready(&mut got).unwrap_or(false) {}
+            return Err(String::from_utf8_lossy(&got).into_owned());
+        }
+        let token = head.lines().find_map(|line| {
+            let (k, v) = line.split_once(':')?;
+            k.eq_ignore_ascii_case(ws::RESUME_HEADER)
+                .then(|| v.trim().to_string())
+        });
+        let mut decoder = ws::Decoder::default();
+        decoder.push(&got[end..]);
+        Ok(Tab {
+            up,
+            decoder,
+            token,
+            received: 0,
+            screen: Vec::new(),
+        })
+    }
+
+    impl Tab {
+        /// Read until the screen holds `want`, counting what is handed over.
+        fn until(&mut self, want: &str) {
+            use cctop_core::ws::Op;
+            loop {
+                while let Some((op, payload)) = self.decoder.frame().unwrap() {
+                    if op == Op::Binary {
+                        self.received += payload.len() as u64;
+                        self.screen.extend_from_slice(&payload);
+                    }
+                }
+                if String::from_utf8_lossy(&self.screen).contains(want) {
+                    return;
+                }
+                let mut more = Vec::new();
+                let open = self.up.read_ready(&mut more).unwrap();
+                assert!(
+                    open || !more.is_empty(),
+                    "closed: {}",
+                    String::from_utf8_lossy(&self.screen)
+                );
+                self.decoder.push(&more);
+            }
+        }
+
+        fn resume_header(&self) -> String {
+            format!(
+                "{} {}",
+                self.token.as_deref().expect("a token"),
+                self.received
+            )
+        }
+
+        fn send(&mut self, keys: &[u8]) {
+            use cctop_core::ws::{Op, frame};
+            self.up.write_all(&frame(Op::Binary, keys, true)).unwrap();
+        }
+
+        fn close(mut self) {
+            use cctop_core::ws::{Op, frame};
+            let _ = self.up.write_all(&frame(Op::Close, b"", true));
+        }
+    }
+
+    /// The whole of what `count` says, as a pty hands it over.
+    fn counted() -> String {
+        (0..600).map(|i| format!("line {i}\r\n")).collect()
+    }
+
+    /// The socket drops partway through the output — whatever was in flight
+    /// with it is lost — and the tab comes back with how much it had: it is
+    /// handed exactly the rest, nothing twice and nothing missing, and it is
+    /// the same program on the same pty, which answers what is typed next.
+    #[test]
+    fn a_dropped_tab_resumes_where_it_left_off_on_the_same_terminal() {
+        use cctop_core::ws::RESUME_NEW;
+        let (port, _s) = serving(&["count"], 2);
+        let mut first = tab(port, "/api/term/claude/count", RESUME_NEW).expect("open");
+        first.until("line 5\r\n");
+        // Dropped mid-stream: the frames behind the one read are thrown away
+        // with the socket, as a network that went away throws them.
+        let resume = first.resume_header();
+        let before = std::mem::take(&mut first.screen);
+        let received = first.received;
+        drop(first);
+        let mut back = tab(port, "/api/term/claude/count", &resume).expect("resumed");
+        back.received = received;
+        back.until("line 599\r\n");
+        let mut whole = before;
+        whole.extend_from_slice(&back.screen);
+        assert_eq!(String::from_utf8_lossy(&whole), counted());
+        back.send(b"again\r");
+        back.until("got again");
+        back.close();
+    }
+
+    /// A resume the server cannot honour is answered `410 Gone`, and nothing
+    /// else changes: a token with the wrong secret, or for another route,
+    /// leaves the terminal parked for the right one; a fresh open still works.
+    #[test]
+    fn a_wrong_token_is_gone_and_the_right_one_still_resumes() {
+        use cctop_core::ws::RESUME_NEW;
+        let (port, _s) = serving(&["abc", "count"], 6);
+        let mut first = tab(port, "/api/term/claude/abc", RESUME_NEW).expect("open");
+        first.until("opened claude abc");
+        let resume = first.resume_header();
+        drop(first);
+        let (token, offset) = resume.split_once(' ').unwrap();
+        let (id, secret) = token.split_once('.').unwrap();
+        // One hex digit off.
+        let first = if secret.starts_with('0') { '1' } else { '0' };
+        let wrong = format!("{id}.{first}{} {offset}", &secret[1..]);
+        let said = tab(port, "/api/term/claude/abc", &wrong)
+            .err()
+            .expect("refused");
+        assert!(said.starts_with("HTTP/1.1 410"), "{said}");
+        let said = tab(port, "/api/term/claude/count", &resume)
+            .err()
+            .expect("another route is refused");
+        assert!(said.starts_with("HTTP/1.1 410"), "{said}");
+        let said = tab(port, "/api/term/claude/abc", "nonsense")
+            .err()
+            .expect("garbled");
+        assert!(said.starts_with("HTTP/1.1 400"), "{said}");
+        let mut back = tab(port, "/api/term/claude/abc", &resume).expect("resumed");
+        back.send(b"hello\r");
+        back.until("got hello");
+        back.close();
+        // An old tab, which asks for nothing, is given no token.
+        let old = tab(port, "/api/term/claude/abc", "").expect("open");
+        assert_eq!(old.token, None);
+        old.close();
+    }
+
+    /// More was said while the tab was away than the ring holds: the resume
+    /// is `410`, the terminal behind it ended, and a fresh open — the
+    /// fallback — is a terminal again.
+    #[test]
+    fn a_resume_past_what_the_ring_holds_is_gone() {
+        use cctop_core::ws::RESUME_NEW;
+        let (port, _s) = serving(&["flood"], 3);
+        let mut first = tab(port, "/api/term/claude/flood", RESUME_NEW).expect("open");
+        // Read all of it, but say only the first byte was received: the rest
+        // is what a resume would have to replay.
+        first.until("flooded");
+        assert!(first.received > super::resume::RING as u64);
+        let resume = format!("{} 1", first.token.clone().unwrap());
+        drop(first);
+        let said = tab(port, "/api/term/claude/flood", &resume)
+            .err()
+            .expect("past the ring");
+        assert!(said.starts_with("HTTP/1.1 410"), "{said}");
+        let token = resume.split(' ').next().unwrap();
+        assert!(!super::resume::registered(token), "ended with the answer");
+        let mut fresh = tab(port, "/api/term/claude/flood", RESUME_NEW).expect("reopened");
+        fresh.until("flooded");
+        fresh.close();
+    }
+
+    /// A new agent's tab resumes like any other — and a resume never starts
+    /// the agent again: the program that answers is the one already running.
+    #[test]
+    fn a_new_agents_tab_resumes_without_starting_a_second() {
+        use cctop_core::ws::RESUME_NEW;
+        let (port, _s) = serving(&[], 2);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let launch = cctop_core::remote_open::NewAgent {
+            agent: "claude".into(),
+            dir: dir.path().to_string_lossy().into_owned(),
+            options: Default::default(),
+        };
+        let mut first = tab(port, &launch.route(), RESUME_NEW).expect("open");
+        first.until("new claude");
+        let resume = first.resume_header();
+        drop(first);
+        let mut back = tab(port, &launch.route(), &resume).expect("resumed");
+        back.send(b"one\r");
+        back.until("got one");
+        let screen = String::from_utf8_lossy(&back.screen).into_owned();
+        assert!(!screen.contains("new claude"), "started again: {screen}");
+        back.close();
     }
 }

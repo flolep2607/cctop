@@ -576,9 +576,10 @@ const MAX_HEAD: usize = 64 * 1024;
 /// restarts, cloudflared moves to another of its connections, a laptop's
 /// network changes. Each of those ends the socket without a word, and the
 /// bridge used to read that as the far side closing and take the tab with it
-/// — "the tab closes itself after a while". The session over there lives in
-/// its rmux and does not notice, so getting back is a fresh open, which
-/// reattaches. Long enough to ride out a tunnel reconnecting; short enough
+/// — "the tab closes itself after a while". The far side keeps the terminal
+/// for as long ([`terminal`] resumes it), and the session over there lives in
+/// its rmux besides, so a fresh open reattaches when a resume cannot be had.
+/// Long enough to ride out a tunnel reconnecting; short enough
 /// that a machine that is really gone is said to be within a couple of
 /// minutes.
 const RECONNECT_FOR: std::time::Duration = std::time::Duration::from_secs(120);
@@ -641,7 +642,8 @@ pub fn bridge_new(args: &[String]) -> Result<(), String> {
     }
     let spec = NewAgent::from_args(rest)?;
     eprint!("Reaching {machine} to start {}…\r\n", spec.agent);
-    // Not reconnected: opening the route again would start a second agent.
+    // Resumed, never reopened: opening the route again would start a second
+    // agent.
     terminal(
         machine,
         &spec.route(),
@@ -654,51 +656,124 @@ pub fn bridge_new(args: &[String]) -> Result<(), String> {
 }
 
 /// Open a terminal socket at `path` on the sibling `machine`, signed as this
-/// machine, and pump this terminal through it until either side closes —
-/// reconnecting a dropped connection when `reconnect`, which is only for a
-/// route that is safe to open twice.
+/// machine, and pump this terminal through it until either side closes.
 ///
-// ponytail: a new agent's tab is not reconnected. Its route starts an agent,
-// so a second open would start a second one; the agent itself lives on in the
-// sibling's rmux, and once it has written a transcript its row's `R` gets back
-// to it.
-fn terminal(machine: &str, path: &str, old: Old, reconnect: bool) -> Result<(), String> {
+/// A dropped connection is *resumed* when the sibling gave a token for it
+/// (see [`crate::ws::RESUME_HEADER`]): the same terminal over there, sent
+/// what this one missed, nothing started again. When it cannot be — the
+/// sibling let it go, or is older than resume — the route is opened afresh
+/// if `reopen`, which is only for a route that is safe to open twice, and
+/// redraws the screen.
+///
+// ponytail: a new agent's tab is only ever resumed, never reopened. Its route
+// starts an agent, so a second open would start a second one; when the far
+// side has let the terminal go (gone past its grace, too much missed, or a
+// sibling older than resume), the agent lives on in that sibling's rmux, and
+// once it has written a transcript its row's `R` gets back to it.
+fn terminal(machine: &str, path: &str, old: Old, reopen: bool) -> Result<(), String> {
     let peer = crate::peer::lookup(machine)?;
-    let (mut up, mut decoder, mut size) = connect(&peer, machine, path, old)?;
+    let mut conn = connect(&peer, machine, path, old, None)?;
+    // How much of the far terminal's output this one has been handed since
+    // it was opened: where a resume picks up.
+    let mut received = 0u64;
     loop {
-        let why = match pump(&mut up, &mut decoder, size)? {
+        let why = match pump(&mut conn.up, &mut conn.decoder, conn.size, &mut received)? {
             End::Closed(None) => return Ok(()),
             End::Closed(Some(why)) => return Err(format!("{machine} closed the terminal: {why}")),
-            End::Dropped(why) if !reconnect => {
-                return Err(format!(
-                    "lost {machine}: {why}. The agent goes on running there — \
-                     its row's R gets back to it once it has a session"
-                ));
-            }
             End::Dropped(why) => why,
         };
-        eprint!("\r\n\x1b[0m[lost {machine}: {why} — reconnecting]\r\n");
-        let since = std::time::Instant::now();
-        let mut wait = std::time::Duration::from_secs(1);
-        (up, decoder, size) = loop {
-            std::thread::sleep(wait);
-            match connect(&peer, machine, path, old) {
-                Ok(again) => break again,
-                // A refusal is the far side's answer — the session has gone,
-                // or this machine is no longer let in — and asking again
-                // will not change it.
-                Err(Failed::Refused(why)) => return Err(why),
-                Err(Failed::Unreached(why)) if since.elapsed() >= RECONNECT_FOR => {
-                    return Err(format!(
-                        "lost {machine} and could not reach it again for {}s: {why}",
-                        RECONNECT_FOR.as_secs()
-                    ));
+        let (again, resumed) = reconnect(
+            &peer,
+            machine,
+            path,
+            old,
+            conn.token.take().map(|token| (token, received)),
+            reopen,
+            &why,
+        )?;
+        conn = again;
+        if !resumed {
+            received = 0;
+        }
+    }
+}
+
+/// Get back to a sibling after the socket dropped for `why`: resume `resume`
+/// (its token, and how much was received) when there is one, and open afresh
+/// when not and `reopen`. Says whether it resumed.
+///
+/// The first try is at once and says nothing, so a blip the tunnel recovers
+/// from at once leaves the screen as it was. Only when that fails is the
+/// person told — on the screen itself, which the far side is then asked to
+/// redraw over once it is resumed (a fresh open redraws anyway).
+///
+/// Keys typed while the tab was away are dropped, not sent: they were typed
+/// at a screen that was not answering, and would land on one that has moved
+/// on — an Enter meant for a prompt that has since gone.
+fn reconnect(
+    peer: &crate::peer::Peer,
+    machine: &str,
+    path: &str,
+    old: Old,
+    mut resume: Option<(String, u64)>,
+    reopen: bool,
+    why: &str,
+) -> Result<(Conn, bool), String> {
+    let lost = |gone: &str| {
+        format!(
+            "lost {machine}: {gone}. The agent goes on running there — \
+             its row's R gets back to it once it has a session"
+        )
+    };
+    if resume.is_none() && !reopen {
+        return Err(lost(why));
+    }
+    let since = std::time::Instant::now();
+    let mut wait = std::time::Duration::from_secs(1);
+    let mut said = false;
+    loop {
+        let asked = resume.as_ref().map(|(token, at)| (token.as_str(), *at));
+        match connect(peer, machine, path, old, asked) {
+            Ok(mut conn) => {
+                // A sibling that read the resume answers with its token; one
+                // too old to answers like a fresh open.
+                let resumed = asked.is_some() && conn.token.is_some();
+                // SAFETY: tcflush on stdin only discards what is queued on it.
+                unsafe { libc::tcflush(0, libc::TCIFLUSH) };
+                if resumed && said {
+                    let redraw =
+                        crate::ws::frame(crate::ws::Op::Text, crate::ws::REDRAW.as_bytes(), true);
+                    let _ = conn.up.write_all(&redraw);
                 }
-                Err(Failed::Unreached(_)) => {
-                    wait = (wait * 2).min(std::time::Duration::from_secs(10))
-                }
+                return Ok((conn, resumed));
             }
-        };
+            // The far terminal is gone: open afresh at once, which redraws,
+            // or — where that would start a second agent — say so.
+            Err(Failed::Gone(gone)) => {
+                resume = None;
+                if !reopen {
+                    return Err(lost(&gone));
+                }
+                continue;
+            }
+            // A refusal is the far side's answer — the session has gone, or
+            // this machine is no longer let in — and asking again will not
+            // change it.
+            Err(Failed::Refused(why)) => return Err(why),
+            Err(Failed::Unreached(why)) if since.elapsed() >= RECONNECT_FOR => {
+                return Err(format!(
+                    "lost {machine} and could not reach it again for {}s: {why}",
+                    RECONNECT_FOR.as_secs()
+                ));
+            }
+            Err(Failed::Unreached(_)) => {}
+        }
+        if !said {
+            eprint!("\r\n\x1b[0m[lost {machine}: {why} — reconnecting]\r\n");
+            said = true;
+        }
+        std::thread::sleep(wait);
+        wait = (wait * 2).min(std::time::Duration::from_secs(10));
     }
 }
 
@@ -708,24 +783,38 @@ enum Failed {
     Refused(String),
     /// The sibling was not reached, or stopped answering partway.
     Unreached(String),
+    /// The terminal a resume asked for is not there any more.
+    Gone(String),
 }
 
 impl From<Failed> for String {
     fn from(failed: Failed) -> String {
         match failed {
-            Failed::Refused(why) | Failed::Unreached(why) => why,
+            Failed::Refused(why) | Failed::Unreached(why) | Failed::Gone(why) => why,
         }
     }
 }
 
-/// Open the sibling's terminal at `path`, sized to this one, and hand back
-/// the socket with whatever arrived behind the handshake's answer.
+/// A terminal socket, open.
+struct Conn {
+    up: crate::peer::Upstream,
+    /// Holding whatever arrived behind the handshake's answer.
+    decoder: crate::ws::Decoder,
+    /// This terminal's size when it was opened.
+    size: (u16, u16),
+    /// What to resume it with, when the sibling gave one.
+    token: Option<String>,
+}
+
+/// Open the sibling's terminal at `path`, sized to this one — or, with
+/// `resume`, get back to the one its token names, from that offset.
 fn connect(
     peer: &crate::peer::Peer,
     machine: &str,
     path: &str,
     old: Old,
-) -> Result<(crate::peer::Upstream, crate::ws::Decoder, (u16, u16)), Failed> {
+    resume: Option<(&str, u64)>,
+) -> Result<Conn, Failed> {
     let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
     let key = crate::ws::new_key();
     let headers = [
@@ -733,6 +822,13 @@ fn connect(
         ("Connection".to_string(), "Upgrade".to_string()),
         ("Sec-WebSocket-Key".to_string(), key.clone()),
         ("Sec-WebSocket-Version".to_string(), "13".to_string()),
+        (
+            crate::ws::RESUME_HEADER.to_string(),
+            match resume {
+                Some((token, offset)) => format!("{token} {offset}"),
+                None => crate::ws::RESUME_NEW.to_string(),
+            },
+        ),
     ];
     let mut up = peer
         .socket(path, &format!("cols={cols}&rows={rows}"), &headers)
@@ -766,13 +862,13 @@ fn connect(
             .unwrap_or(0)
             .min(MAX_HEAD);
         while body.len() < wanted && up.read_ready(&mut body).unwrap_or(false) {}
-        let why = refusal(
-            machine,
-            status,
-            &String::from_utf8_lossy(&body),
-            old.too_old,
-            old.again,
-        );
+        let body = String::from_utf8_lossy(&body);
+        if status == 410 {
+            let said = body.lines().next().unwrap_or("").trim();
+            let said = said.split_once(": ").map_or(said, |(_, why)| why);
+            return Err(Failed::Gone(said.to_string()));
+        }
+        let why = refusal(machine, status, &body, old.too_old, old.again);
         // The edge's own pages — a 502 while the tunnel is down, a 530 while
         // its connector is away — are Cloudflare saying the sibling is not
         // there right now, not the sibling saying no.
@@ -788,7 +884,12 @@ fn connect(
     }
     let mut decoder = crate::ws::Decoder::default();
     decoder.push(&got[end..]);
-    Ok((up, decoder, (cols, rows)))
+    Ok(Conn {
+        up,
+        decoder,
+        size: (cols, rows),
+        token: header(&head, crate::ws::RESUME_HEADER).map(str::to_string),
+    })
 }
 
 /// What a close frame's payload says about why: nothing for a plain ending
@@ -857,6 +958,7 @@ fn pump(
     up: &mut crate::peer::Upstream,
     decoder: &mut crate::ws::Decoder,
     mut size: (u16, u16),
+    received: &mut u64,
 ) -> Result<End, String> {
     use crate::ws::{Op, frame};
     use std::io::{Read, Write};
@@ -891,7 +993,13 @@ fn pump(
                     }
                 }
                 Op::Pong => {}
-                Op::Text | Op::Binary | Op::Other(_) => {
+                // Output, counted once it is on this terminal: what a resume
+                // asks the rest from.
+                Op::Binary => {
+                    stdout.write_all(&payload).map_err(|e| e.to_string())?;
+                    *received += payload.len() as u64;
+                }
+                Op::Text | Op::Other(_) => {
                     stdout.write_all(&payload).map_err(|e| e.to_string())?;
                 }
             }
@@ -1178,6 +1286,135 @@ mod tests {
             decide(Some(&s), "abc", |_| Some("x".into()), |_| false),
             Step::Shell(why) if why.contains("did not start")
         ));
+    }
+
+    /// How a fake sibling answers one request.
+    enum Answer {
+        /// `410 Gone`, as for a terminal that can no longer be resumed.
+        Gone,
+        /// An upgrade, with a resume token or — like a sibling older than
+        /// resume — without.
+        Upgrade(Option<&'static str>),
+    }
+
+    /// A sibling that answers each request in turn with the next of
+    /// `answers`, and reports the `Cctop-Resume` each one asked with.
+    fn fake_sibling(
+        answers: Vec<Answer>,
+    ) -> (crate::peer::Peer, std::sync::mpsc::Receiver<String>) {
+        use std::io::{BufRead, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (asked, heard) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for answer in answers {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut reader = std::io::BufReader::new(stream.try_clone().unwrap());
+                let (mut key, mut resume) = (String::new(), String::new());
+                loop {
+                    let mut line = String::new();
+                    reader.read_line(&mut line).unwrap();
+                    let line = line.trim_end();
+                    if line.is_empty() {
+                        break;
+                    }
+                    if let Some((k, v)) = line.split_once(':') {
+                        match k.to_ascii_lowercase().as_str() {
+                            "sec-websocket-key" => key = v.trim().to_string(),
+                            "cctop-resume" => resume = v.trim().to_string(),
+                            _ => {}
+                        }
+                    }
+                }
+                asked.send(resume).unwrap();
+                let reply = match answer {
+                    Answer::Gone => {
+                        let body = "410 Gone: that terminal has ended\n";
+                        format!(
+                            "HTTP/1.1 410 Gone\r\nContent-Length: {}\r\n\r\n{body}",
+                            body.len()
+                        )
+                    }
+                    Answer::Upgrade(token) => format!(
+                        "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n\
+                         Connection: Upgrade\r\nSec-WebSocket-Accept: {}\r\n{}\r\n",
+                        crate::ws::accept_key(&key),
+                        token.map_or(String::new(), |t| format!("Cctop-Resume: {t}\r\n")),
+                    ),
+                };
+                stream.write_all(reply.as_bytes()).unwrap();
+            }
+        });
+        let peer = crate::peer::Peer::fixed("box", &format!("http://127.0.0.1:{port}"), "made-up");
+        (peer, heard)
+    }
+
+    const OLD: Old = Old {
+        too_old: "to do that",
+        again: "try again",
+    };
+
+    /// Coming back with a token asks for the bytes after what was received,
+    /// and an answer with a token is a resume.
+    #[test]
+    fn a_dropped_tab_asks_to_resume_from_what_it_received() {
+        let (peer, asked) = fake_sibling(vec![Answer::Upgrade(Some("id.s2"))]);
+        let resume = Some(("id.s1".to_string(), 42));
+        let (conn, resumed) =
+            reconnect(&peer, "box", "/api/term/claude/a", OLD, resume, false, "x").expect("back");
+        assert!(resumed);
+        assert_eq!(conn.token.as_deref(), Some("id.s2"));
+        assert_eq!(asked.recv().unwrap(), "id.s1 42");
+    }
+
+    /// A terminal the sibling let go: a session's tab opens afresh at once
+    /// (asking for a token for next time), and a new agent's tab — which
+    /// must never open its route twice — says where the agent went.
+    #[test]
+    fn a_resume_that_is_gone_reopens_only_where_that_is_safe() {
+        let (peer, asked) = fake_sibling(vec![Answer::Gone, Answer::Upgrade(Some("id.new"))]);
+        let resume = Some(("id.old".to_string(), 7));
+        let (conn, resumed) = reconnect(
+            &peer,
+            "box",
+            "/api/term/claude/a",
+            OLD,
+            resume.clone(),
+            true,
+            "x",
+        )
+        .expect("reopened");
+        assert!(!resumed, "a fresh open redraws from nothing");
+        assert_eq!(conn.token.as_deref(), Some("id.new"));
+        assert_eq!(asked.recv().unwrap(), "id.old 7");
+        assert_eq!(asked.recv().unwrap(), crate::ws::RESUME_NEW);
+
+        let (peer, asked) = fake_sibling(vec![Answer::Gone]);
+        let why = reconnect(&peer, "box", NEW_ROUTE, OLD, resume, false, "x")
+            .err()
+            .expect("not reopened");
+        assert!(why.contains("goes on running there"), "{why}");
+        assert!(why.contains("that terminal has ended"), "{why}");
+        assert_eq!(asked.recv().unwrap(), "id.old 7");
+        assert!(asked.try_recv().is_err(), "asked only once");
+    }
+
+    /// A sibling older than resume gives no token: a session's tab reopens
+    /// as it always did, and a new agent's tab is not reconnected at all.
+    #[test]
+    fn a_sibling_older_than_resume_is_reopened_as_before() {
+        let (peer, asked) = fake_sibling(vec![Answer::Upgrade(None)]);
+        let (conn, resumed) =
+            reconnect(&peer, "box", "/api/term/claude/a", OLD, None, true, "x").expect("open");
+        assert!(!resumed);
+        assert_eq!(conn.token, None);
+        assert_eq!(asked.recv().unwrap(), crate::ws::RESUME_NEW);
+        let (peer, asked) = fake_sibling(vec![]);
+        let why = reconnect(&peer, "box", NEW_ROUTE, OLD, None, false, "it dropped")
+            .err()
+            .expect("not reconnected");
+        assert!(why.contains("it dropped"), "{why}");
+        assert!(asked.try_recv().is_err(), "nothing was asked");
     }
 
     #[test]
