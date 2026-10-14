@@ -293,15 +293,21 @@ serve keeps them too when it is on your tunnel, in the same file, so a bookmark
 opens whichever of the two is running; `r` in its panel serves on new tokens,
 which revokes every link handed out before.
 
-**From the dashboard**, the same setup is a popup: `a` in the serve panel (`B`),
-or the `cloudflare` row in Settings. It opens on **Log in with browser**, which
-opens the login page — or, over ssh, shows its address with `Ctrl+O` to copy it
-and a QR code — and waits for it; `Tab` moves to **Paste a token**, which shows
-the link (`Ctrl+O` copies it,
-`Ctrl+Q` draws it as a QR code), takes the paste in a masked field, asks for the
-domain when there is more than one and offers the hostname, then offers to start
-serving on it. With an account connected, the same popup shows it and
-disconnects it, which deletes what setup made, as `cctop tunnel remove` does.
+**From the dashboard**, the same setup is the `[tunnel]` section of Settings
+(`,`, or `a` in the serve panel `B`, which jumps there). With no account it has
+two rows: `login` opens Cloudflare's login page and copies its address — over
+ssh, paste it into a browser wherever you are — and waits for it; `token` takes
+an API token or a tunnel token in a masked field (`Ctrl+O` copies the link that
+makes an API token with the right permissions). Then a `zone` row, which Enter
+cycles when the token reaches more than one domain, and a `hostname` field,
+pre-filled; Enter creates the tunnel. Backspace on any of them gives up.
+
+With an account connected, every part of it is a row: `status`, `hostname`
+(Enter renames the dashboard's address, as `e` on it in the serve panel does),
+`zone` and `share_hostname` (fixed at setup), `access`, and `remove`, which asks
+`y / n` and deletes what setup made, as `cctop tunnel remove` does. A call to
+Cloudflare spins in its row, and what it came to — a refusal above all — is that
+row's description until the next change.
 
 While that serve runs, terminal shares (`W` in the dashboard) ride the same
 tunnel on the `-share` hostname instead of opening a quick tunnel of their own —
@@ -374,8 +380,10 @@ cctop tunnel access links off                    # token links: login only
 cctop tunnel access off                          # delete it again
 ```
 
-The same list is in the dashboard — `a` on the account in the Cloudflare popup
-(the `cloudflare` row in Settings, or `a` in the serve panel) — and on the web
+The same list is in the dashboard — the `[tunnel]` rows in Settings: `access`
+turns it on (asking for the owner's email) or off (asking `y / n`), `owner`
+moves it, each `invite` row flips read and full on Enter and goes on Backspace,
+and `invite + add` takes a new one — and on the web
 page, behind the shield beside the address in the header. The web page shows it
 only to the full link or the owner's own login: a read-only link, a read-only
 login and a full invite who is not the owner all get 403, from the list as well
@@ -416,8 +424,8 @@ team name and the free plan.
   there helps only someone who can also log in.
 
 **Public token links: on or off.** `public_links` in `[tunnel.access]`, on
-unless turned off; `cctop tunnel access links on|off`, `l` in the dashboard's
-Access popup, or the switch on the web page. Off:
+unless turned off; `cctop tunnel access links on|off`, the
+`public_links` row in Settings, or the switch on the web page. Off:
 
 - the token hostname's DNS record and ingress entry are deleted, and the
   tunnel stops routing it;

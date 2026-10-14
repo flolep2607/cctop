@@ -40,5 +40,5 @@ expression: screen
 │  cost_floor        $0               Only sessions costing at least $X (0 for all)                                    │
 │  bottom_panel      Processes    ↻ * Which panel opens under the table                                                │
 │  tool_show_diff    [ ]              Show each edit's diff under its row                                              │
-╰ 81   ↑↓ scroll   / filter   Esc back ────────────────────────────────────────────────────────────────────────────────╯
+╰ 83   ↑↓ scroll   / filter   Esc back ────────────────────────────────────────────────────────────────────────────────╯
 / Filter ↵ Change ⌫ Reset e Edit file , Back Alt+←→ Tabs F1 Help F10 Quit                                       ⧉ share

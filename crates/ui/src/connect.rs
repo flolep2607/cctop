@@ -1,148 +1,176 @@
-//! Connecting a Cloudflare account from the dashboard: the popup behind `a` in
-//! the serve panel and the `cloudflare` row in Settings.
+//! The Cloudflare tunnel as rows of the settings page: `[tunnel]` read,
+//! changed and set up in place, the way every other row is.
+//!
+//! It used to be one summary row whose Enter opened a popup, and the popup was
+//! where everything happened. A row you have to open to change is a row the
+//! page cannot show, so each fact is its own row now — the hostname, the zone,
+//! the share hostname, Access and its owner, the token links, each invite —
+//! with the same verbs as the rest of the page: Enter changes it, Backspace
+//! takes it out, a field opens under the cursor for text.
 //!
 //! Everything it does is [`cctop_core::cloudflare`]'s and
-//! [`cctop_core::tunnel`]'s, the same calls `cctop tunnel setup` and `remove`
-//! make; this only draws them and keeps them off the UI thread. Every call to
-//! Cloudflare runs on a thread of its own with a spinner on screen, the way
-//! `t`'s tunnel does ([`share::Opening`](super::share::Opening)), and nothing
-//! is written to stderr, which a TUI would have painted over.
+//! [`cctop_core::tunnel`]'s, the same calls `cctop tunnel setup`, `remove`,
+//! `access` and `invite` make; this only keeps them off the UI thread. A call
+//! in flight is a spinner in its own row's value, and what it came to — a
+//! refusal above all — is that row's description until the next change, so
+//! nothing about it needs a box over the page.
 //!
-//! # Ways in
+//! # Setting one up
 //!
-//! The first step is one of two [`Method`]s, side by side on a row that Tab
-//! moves along: log in through the browser, the way `cloudflared tunnel login`
-//! does, or paste a token made from a pre-filled link. The login comes first,
-//! since pasting a token is the chore it exists to spare.
-//!
-//! A login opens the authorize page in this machine's browser, except over
-//! ssh, where that browser is not the user's: the address is drawn instead,
-//! with a QR code a key away, and the login is waited for from here either
-//! way. Both ways then meet at the same domain and hostname steps, carrying an
-//! [`Auth`] that says which kind of token they hold.
-//!
-//! # Who may log in
-//!
-//! `a` on the connected account opens [`Step::Access`]: Cloudflare Access on
-//! or off, the invite list, and whether token links still work from outside.
-//! Every edit is [`access_setup::apply`], the one `cctop tunnel access` and the
-//! web page make too, on a thread of its own like every other call here; it
-//! saves `config.toml` there, so a popup closed mid-call still leaves the file
-//! and Cloudflare agreeing.
+//! With no account, the section is the two ways in: `login`, which opens
+//! Cloudflare's login (copying its address, which over ssh is the way to a
+//! browser at all) and waits for it, and `token`, a masked field for an API
+//! token or a tunnel token. Either way ends on a `zone` row and a `hostname`
+//! field, pre-filled; Enter in it creates the tunnel.
 //!
 //! # Credentials on screen
 //!
-//! Never. The paste field is masked from the first character, the tokens are
-//! held only inside the [`Step`]s that need them, and every sentence the popup
-//! or the status line says is Cloudflare's error or one written here — neither
-//! of which quotes the token.
+//! Never. A token field is drawn as dots from the first character, the tokens
+//! are held only in [`Setup`] and the worker threads, and every note a row
+//! shows is Cloudflare's error or one written here — neither of which quotes
+//! the token.
 
+use super::settings::Item;
 use super::*;
-use cctop_core::cloudflare::access::Level;
+use cctop_core::cloudflare::access::{Invite, Level};
 use cctop_core::cloudflare::access_setup::{self, Applied, Change};
 use cctop_core::cloudflare::login::Login;
-use cctop_core::cloudflare::{self, Auth, Pasted, Zone};
+use cctop_core::cloudflare::{self, Auth, Pasted, Renamed, Zone};
 use cctop_core::tunnel::Account;
-use line_edit::LineEdit;
-use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, TryRecvError, channel};
 
-/// The ways to connect an account, in the order the popup offers them.
-pub const METHODS: [Method; 2] = [Method::Browser, Method::Paste];
+/// How long a token can be: Cloudflare's are 40 characters and a tunnel
+/// token a few hundred. Generous, so a paste is never cut short.
+pub const TOKEN_MAX: usize = 4096;
+/// A DNS name's limit.
+const HOSTNAME_MAX: usize = 253;
 
-/// One way to connect.
+/// One row of the `[tunnel]` section.
+///
+/// Which rows exist depends on the account: a connected one is its facts and
+/// the way to remove it, Access's rows only while Access is on; no account is
+/// the ways in, and a setup half done is its domain and its name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Method {
-    /// Log in on Cloudflare's own page and pick the domain there; a
-    /// certificate comes back with a token in it.
-    Browser,
-    /// Make an API token from the pre-filled link, paste it. A tunnel token
-    /// from the dashboard works in the same field.
-    Paste,
+pub enum Row {
+    /// Connected or not: read-only.
+    Status,
+    /// The dashboard's address, renamed in place.
+    Hostname,
+    /// The domain, fixed at setup.
+    Zone,
+    /// The default share hostname, fixed at setup.
+    Shares,
+    /// Cloudflare Access on or off.
+    Access,
+    /// Who owns Access, while it is on.
+    Owner,
+    /// Whether token links work from outside, while Access is on.
+    Links,
+    /// One invite, by index into the account's list.
+    Invite(usize),
+    /// The field that adds an invite.
+    AddInvite,
+    /// Delete what setup made, or forget an account it did not make.
+    Remove,
+    /// Set up by logging in with the browser.
+    Login,
+    /// Set up with a pasted API token or tunnel token.
+    Token,
+    /// The domain a setup creates the tunnel on, cycled when there are more.
+    SetupZone,
+    /// The name a setup creates the tunnel at.
+    SetupHostname,
 }
 
-impl Method {
-    /// What the popup calls it.
-    pub fn label(self) -> &'static str {
+impl Row {
+    /// The name the row is drawn and filtered under.
+    pub fn name(self) -> &'static str {
         match self {
-            Method::Browser => "Log in with browser",
-            Method::Paste => "Paste a token",
+            Row::Status => "status",
+            Row::Hostname | Row::SetupHostname => "hostname",
+            Row::Zone | Row::SetupZone => "zone",
+            Row::Shares => "share_hostname",
+            Row::Access => "access",
+            Row::Owner => "owner",
+            Row::Links => "public_links",
+            Row::Invite(_) | Row::AddInvite => "invite",
+            Row::Remove => "remove",
+            Row::Login => "login",
+            Row::Token => "token",
         }
     }
-
-    /// The one after it on the row, round to the first.
-    pub fn next(self) -> Method {
-        let at = METHODS.iter().position(|m| *m == self).unwrap_or(0);
-        METHODS[(at + 1) % METHODS.len()]
-    }
 }
 
-/// Where the popup is.
-pub enum Step {
-    /// Already connected: what, and the way to disconnect.
-    Connected { account: Account, confirm: bool },
-    /// The ways in. For [`Method::Paste`]: the link, and the masked field.
-    Start { method: Method, field: LineEdit },
-    /// The login page is open, or its address is on screen, and the
-    /// certificate is being waited for. `opened` when a browser here was
-    /// asked to open it.
-    LoggingIn { url: String, opened: bool },
-    /// The token worked; which domain.
-    Zones {
-        auth: Auth,
-        zones: Vec<Zone>,
-        cursor: usize,
-    },
-    /// The domain is picked; the hostname, pre-filled. A login whose
-    /// domain's name could not be read has a `zone` with no name, and the
-    /// whole hostname is typed ([`cloudflare::login_zone_from`]).
-    Hostname {
-        auth: Auth,
-        zone: Zone,
-        field: LineEdit,
-    },
-    /// A tunnel token was pasted: the hostname it serves, if the user knows
-    /// it. Left empty, it is learned from the configuration the edge pushes.
-    TunnelHostname { token: String, field: LineEdit },
-    /// Connected just now, at this hostname when it is known.
-    /// `shares` when it has a share hostname too, which only one cctop
-    /// created has.
-    Done {
-        hostname: Option<String>,
-        shares: bool,
-    },
-    /// What stopped it, in Cloudflare's or cctop's words, and the way in
-    /// that Enter starts over at.
-    Failed { message: String, then: Method },
-    /// Disconnected, and anything left on Cloudflare to delete by hand.
-    Disconnected { left: Vec<String>, made_here: bool },
-    /// Cloudflare Access on the connected account: on or off, the invites
-    /// with one under the cursor, and the token links' switch.
-    Access {
-        account: Account,
-        cursor: usize,
-        /// A field open for an address, and what Enter does with it.
-        field: Option<(Typing, LineEdit)>,
-        /// Asking before Access is turned off.
-        confirm: bool,
-        /// What the last edit said, or left behind on Cloudflare.
-        said: Vec<String>,
-    },
-}
-
-/// What the Access step's field is for.
+/// What the page's open field is for, while it is on a tunnel row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Typing {
-    /// The owner's email, to turn Access on.
+    /// The dashboard's new address.
+    Hostname,
+    /// The owner's email, which turns Access on or moves it.
     Owner,
     /// An email or `@domain` to invite, read-only.
     Invite,
     /// An API token to replace a browser login's, which Cloudflare never lets
-    /// manage Access. Asked for before Access is turned on, rather than after
-    /// Cloudflare refuses it.
-    Token,
+    /// manage Access. Asked for before Access is turned on, not after
+    /// Cloudflare refuses.
+    ApiToken,
+    /// The token a setup starts from: an API token or a tunnel token.
+    SetupToken,
+    /// The name a setup creates the tunnel at.
+    SetupHostname,
+    /// The hostname a pasted tunnel token serves, which may be left empty.
+    TunnelHostname,
+}
+
+impl Typing {
+    /// Whether the field holds a credential, and is drawn as dots.
+    pub fn masked(self) -> bool {
+        matches!(self, Typing::ApiToken | Typing::SetupToken)
+    }
+
+    /// How much it takes.
+    pub fn max(self) -> usize {
+        match self.masked() {
+            true => TOKEN_MAX,
+            false => HOSTNAME_MAX,
+        }
+    }
+}
+
+/// A setup under way: the login being waited for, or the domain and name it
+/// will create.
+pub enum Setup {
+    LoggingIn {
+        url: String,
+    },
+    Picked {
+        auth: Auth,
+        zones: Vec<Zone>,
+        at: usize,
+        /// The name offered, or the one last typed.
+        hostname: String,
+    },
+    /// A tunnel token was pasted, and its hostname is being typed.
+    TunnelToken {
+        token: String,
+    },
+}
+
+/// What the last change on a row came to, said where it was made.
+pub struct Note {
+    pub row: Row,
+    pub text: String,
+    pub error: bool,
+}
+
+/// A call to Cloudflare in flight, and the row that asked for it.
+pub struct Working {
+    rx: Receiver<Answer>,
+    pub row: Row,
+    pub what: &'static str,
 }
 
 /// What a worker thread comes back with.
@@ -151,38 +179,30 @@ enum Answer {
     /// could not be read.
     LoggedIn(Result<(Auth, Zone), cloudflare::Error>),
     Zones(Auth, Result<Vec<Zone>, cloudflare::Error>),
-    Suggested(Auth, Zone, Result<String, cloudflare::Error>),
+    Suggested(Auth, Vec<Zone>, usize, Result<String, cloudflare::Error>),
     Created(Result<Account, String>),
     /// The account with a pasted token in place of its login's.
     Adopted(Result<Account, String>),
     Removed(Result<(Vec<String>, bool), String>),
     Access(Result<Applied, String>),
+    Renamed(Result<Renamed, String>),
 }
 
 /// How an Access edit is made: [`access_setup::apply`], except in a test,
 /// which applies it to an account of its own against the fake API.
 pub type ApplyAccess = Arc<dyn Fn(Change) -> Result<Applied, String> + Send + Sync>;
 
-/// A call to Cloudflare in flight.
-pub struct Working {
-    rx: Receiver<Answer>,
-    /// What the spinner says.
-    pub what: &'static str,
-}
-
-/// The popup's state, while `Mode::Connect` is up.
-pub struct Connect {
-    pub step: Step,
-    /// What Esc goes back to: the serve panel, or the table under Settings.
-    pub back: Mode,
+/// The tunnel rows' state beyond what `config.toml` holds.
+pub struct Rows {
     pub working: Option<Working>,
-    /// Whether the link is drawn as a QR code as well.
-    pub qr: bool,
-    /// A problem with what was just typed, said under the field it is about
-    /// rather than ending the flow.
-    pub problem: Option<String>,
-    /// Set when this popup goes, so a login still waiting stops polling
-    /// rather than holding a thread for the ten minutes it would wait.
+    pub note: Option<Note>,
+    /// A row waiting for `y`: Access off, or remove.
+    pub confirm: Option<Row>,
+    /// What the page's open field is for, when it is on one of these rows.
+    pub typing: Option<Typing>,
+    pub setup: Option<Setup>,
+    /// Set when a login is given up on, so its thread stops polling rather
+    /// than waiting out its ten minutes.
     cancel: Arc<AtomicBool>,
     /// Where a login starts: Cloudflare, and in a test the fake, so that no
     /// test polls the real store.
@@ -190,75 +210,65 @@ pub struct Connect {
     apply_access: ApplyAccess,
 }
 
-impl Drop for Connect {
-    fn drop(&mut self) {
-        self.cancel.store(true, Ordering::Relaxed);
-    }
-}
-
-impl Connect {
-    pub(super) fn new(step: Step, back: Mode) -> Connect {
-        Connect {
-            step,
-            back,
+impl Default for Rows {
+    fn default() -> Rows {
+        Rows {
             working: None,
-            qr: false,
-            problem: None,
+            note: None,
+            confirm: None,
+            typing: None,
+            setup: None,
             cancel: Arc::default(),
             new_login: Box::new(Login::new),
             apply_access: Arc::new(access_setup::apply),
         }
     }
+}
 
-    /// The first step, empty.
-    pub fn start(back: Mode) -> Connect {
-        Connect::start_at(back, METHODS[0])
+impl Drop for Rows {
+    fn drop(&mut self) {
+        self.cancel.store(true, Ordering::Relaxed);
+    }
+}
+
+impl Rows {
+    /// Whether the open field holds a credential.
+    pub fn masked(&self) -> bool {
+        self.typing.is_some_and(Typing::masked)
     }
 
-    /// The first step, empty, with `method` chosen.
-    fn start_at(back: Mode, method: Method) -> Connect {
-        Connect::new(
-            Step::Start {
-                method,
-                field: LineEdit::default(),
-            },
-            back,
-        )
+    /// How much the open field takes, when it is one of these.
+    pub fn max(&self) -> Option<usize> {
+        self.typing.map(Typing::max)
     }
+}
 
-    /// Whether a text field has the keyboard, so that letters are text.
-    pub fn typing(&self) -> bool {
-        self.working.is_none()
-            && matches!(
-                self.step,
-                Step::Start {
-                    method: Method::Paste,
-                    ..
-                } | Step::Hostname { .. }
-                    | Step::TunnelHostname { .. }
-                    | Step::Access { field: Some(_), .. }
-            )
-    }
+/// How a row's value is drawn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Shape {
+    Text,
+    Bool(bool),
+    /// Enter turns it to the next one.
+    Cycle,
+}
 
-    /// The field that has the keyboard, if one has.
-    pub fn field(&mut self) -> Option<&mut LineEdit> {
-        if self.working.is_some() {
-            return None;
-        }
-        match &mut self.step {
-            Step::Start {
-                field,
-                method: Method::Paste,
-            }
-            | Step::Hostname { field, .. }
-            | Step::TunnelHostname { field, .. }
-            | Step::Access {
-                field: Some((_, field)),
-                ..
-            } => Some(field),
-            _ => None,
-        }
-    }
+/// How a row's description is inked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tone {
+    Dim,
+    /// A question waiting for `y`.
+    Ask,
+    Error,
+}
+
+/// One row as the page draws it.
+pub struct Shown {
+    pub value: String,
+    pub shape: Shape,
+    /// Whether `config.toml` holds it, which is the page's `*`.
+    pub set: bool,
+    pub what: String,
+    pub tone: Tone,
 }
 
 /// What the dashboard knows of the connected account, read when it may have
@@ -279,6 +289,13 @@ pub struct Connected {
     /// outside at all.
     pub link_hostname: Option<String>,
     pub public_links: bool,
+    /// Who else may log in, while Access is on.
+    pub invites: Vec<Invite>,
+    /// Connected by browser login, whose token cannot manage Access.
+    pub login: bool,
+    /// Made by cctop's setup, which holds an API token: removing it deletes
+    /// the tunnel. Otherwise removing only forgets it.
+    pub made_here: bool,
 }
 
 impl From<&Account> for Connected {
@@ -295,161 +312,539 @@ impl From<&Account> for Connected {
                 .as_ref()
                 .and_then(|a| a.link_hostname.clone()),
             public_links: account.access.as_ref().is_none_or(|a| a.public_links),
+            invites: account
+                .access
+                .as_ref()
+                .map(|a| a.invites.clone())
+                .unwrap_or_default(),
+            login: account.login,
+            made_here: account.api_token.is_some(),
         }
     }
 }
 
-/// A refusal in the popup's words: Cloudflare's sentence, except that one
-/// whose way out is a new token points at the token link one Enter away
-/// rather than spelling out its five hundred characters of query string, which
-/// wrap across the popup's border and cannot be copied or clicked.
-fn said(error: &cloudflare::Error) -> String {
+/// A refusal, short. The two whose way out is a new token say so rather than
+/// spelling out the link, which `token`'s `Ctrl+O` copies.
+fn short(error: &cloudflare::Error) -> String {
     match error {
-        cloudflare::Error::MissingPermission(permission) => format!(
-            "That token lacks the permission \"{permission}\". Enter goes back to the \
-             link, which makes one with all three."
-        ),
-        cloudflare::Error::LoginRefused(permission) => format!(
-            "Cloudflare did not let the browser login do this (it needs \
-             \"{permission}\"). Enter goes to the token link instead, which makes a \
-             token that can."
-        ),
+        cloudflare::Error::MissingPermission(permission) => {
+            format!("token lacks \"{permission}\" · Ctrl+O on token: link")
+        }
+        cloudflare::Error::LoginRefused(permission) => {
+            format!("login can't \"{permission}\" · use token")
+        }
         other => other.to_string(),
     }
 }
 
-/// The failed step for `error`: back to the token link when a token is the
-/// way out, back to the first way in otherwise.
-fn failed(error: &cloudflare::Error) -> Step {
-    let then = match error {
-        cloudflare::Error::MissingPermission(_) | cloudflare::Error::LoginRefused(_) => {
-            Method::Paste
-        }
-        _ => METHODS[0],
-    };
-    Step::Failed {
-        message: said(error),
-        then,
+/// `host` without its zone, which is what a field for a name under it holds.
+fn label_of(host: &str, zone: Option<&str>) -> String {
+    match zone {
+        Some(zone) => host
+            .strip_suffix(&format!(".{zone}"))
+            .unwrap_or(host)
+            .to_string(),
+        None => host.to_string(),
     }
 }
 
-/// How long a token can be: Cloudflare's are 40 characters and a tunnel
-/// token a few hundred. Generous, so a paste is never cut short.
-const TOKEN_MAX: usize = 4096;
-/// A DNS name's limit.
-const HOSTNAME_MAX: usize = 253;
-
 impl App {
-    /// Read the connected account again: after a connect or a disconnect here,
-    /// and whenever `config.toml` changed, since `cctop tunnel setup` in
-    /// another terminal writes the same table.
+    /// Read the connected account again: after a change here, and whenever
+    /// `config.toml` changed, since `cctop tunnel setup` in another terminal
+    /// writes the same table.
     pub(super) fn refresh_connected(&mut self) {
         self.connected = cctop_core::tunnel::account().map(|a| Connected::from(&a));
     }
 
-    /// Open the popup over `back`: managing the account when one is
-    /// connected, the first step of connecting one when not.
-    pub(super) fn open_connect(&mut self, back: Mode) {
-        let account = cctop_core::tunnel::account();
-        self.connected = account.as_ref().map(Connected::from);
-        self.connect = Some(match account {
-            Some(account) => Connect::new(
-                Step::Connected {
-                    account,
-                    confirm: false,
-                },
-                back,
-            ),
-            None => Connect::start(back),
-        });
-        self.mode = Mode::Connect;
-        self.needs_redraw = true;
+    /// The section's rows, for the account as it is now.
+    pub(super) fn tunnel_rows(&self) -> Vec<Row> {
+        let mut rows = vec![Row::Status];
+        match &self.connected {
+            Some(c) => {
+                rows.extend([Row::Hostname, Row::Zone, Row::Shares, Row::Access]);
+                if c.access_owner.is_some() {
+                    rows.extend([Row::Owner, Row::Links]);
+                    rows.extend((0..c.invites.len()).map(Row::Invite));
+                    rows.push(Row::AddInvite);
+                }
+                rows.push(Row::Remove);
+            }
+            None => match &self.cf.setup {
+                Some(Setup::Picked { .. }) => rows.extend([Row::SetupZone, Row::SetupHostname]),
+                _ => rows.extend([Row::Login, Row::Token]),
+            },
+        }
+        rows
     }
 
-    /// Close the popup, back to wherever it was opened from. A call still in
-    /// flight finishes on its own thread: the two that write (create, remove)
-    /// write `config.toml` there too, so closing never leaves Cloudflare and
-    /// the file disagreeing.
-    pub(super) fn close_connect(&mut self) {
-        let back = self.connect.take().map_or(Mode::List, |c| c.back);
-        self.mode = back;
-        self.needs_redraw = true;
+    /// `a` in the serve panel: the page, on the first tunnel row.
+    pub(super) fn open_tunnel_settings(&mut self) {
+        self.mode = Mode::List;
+        if !self.on_settings() {
+            self.goto_settings();
+        }
+        self.settings_filter.clear();
+        self.settings_typing = false;
+        self.tunnel_focus(Row::Status);
     }
 
-    /// Run `call` off the UI thread, with `what` on the spinner.
-    fn connect_work(&mut self, what: &'static str, call: impl FnOnce() -> Answer + Send + 'static) {
-        let Some(flow) = self.connect.as_mut() else {
-            return;
+    /// Put the cursor on `row`, clearing a filter that hides it.
+    fn tunnel_focus(&mut self, row: Row) {
+        let find = |app: &App| {
+            app.settings_shown()
+                .iter()
+                .position(|i| *i == Item::Tunnel(row))
         };
+        let at = match find(self) {
+            Some(at) => Some(at),
+            None => {
+                self.settings_filter.clear();
+                self.settings_typing = false;
+                find(self)
+            }
+        };
+        if let Some(at) = at {
+            self.settings_cursor = at;
+        }
+        self.needs_redraw = true;
+    }
+
+    /// Keep the cursor on the page after the rows changed under it.
+    fn tunnel_clamp(&mut self) {
+        let shown = self.settings_shown().len();
+        self.settings_cursor = self.settings_cursor.min(shown.saturating_sub(1));
+    }
+
+    fn tunnel_note(&mut self, row: Row, text: impl Into<String>, error: bool) {
+        self.cf.note = Some(Note {
+            row,
+            text: text.into(),
+            error,
+        });
+        self.needs_redraw = true;
+    }
+
+    /// Open the page's field on the cursor's row, for `typing`.
+    fn tunnel_type(&mut self, typing: Typing, text: &str) {
+        self.cf.typing = Some(typing);
+        self.settings_input = Some(text.to_string().into());
+        self.needs_redraw = true;
+    }
+
+    /// Close the page's field without committing it, and whatever it was the
+    /// last step of.
+    pub(super) fn settings_drop_input(&mut self) {
+        self.settings_input = None;
+        self.cf.confirm = None;
+        if self.cf.typing.take() == Some(Typing::TunnelHostname) {
+            self.cf.setup = None;
+        }
+    }
+
+    /// One row as the page draws it.
+    pub(super) fn tunnel_view(&self, row: Row) -> Shown {
+        let c = self.connected.as_ref();
+        let text = |value: &str, what: &str| (value.to_string(), Shape::Text, what.to_string());
+        let or_dash = |v: Option<&String>| v.cloned().unwrap_or_else(|| "—".to_string());
+        let (mut value, mut shape, mut what) = match row {
+            Row::Status => match c {
+                Some(c) => {
+                    let value = match c.from_env {
+                        true => "connected · env",
+                        false => "connected",
+                    };
+                    let what = match c.rename {
+                        Err(why) => why,
+                        Ok(()) => "Cloudflare tunnel",
+                    };
+                    text(value, what)
+                }
+                None => text("not connected", "links that stay"),
+            },
+            Row::Hostname => (
+                or_dash(c.and_then(|c| c.hostname.as_ref())),
+                Shape::Text,
+                "dashboard address".to_string(),
+            ),
+            Row::Zone => (
+                or_dash(c.and_then(|c| c.zone.as_ref())),
+                Shape::Text,
+                "domain · fixed".to_string(),
+            ),
+            Row::Shares => (
+                or_dash(c.and_then(|c| c.share_hostname.as_ref())),
+                Shape::Text,
+                "W shares · fixed".to_string(),
+            ),
+            Row::Access => (
+                String::new(),
+                Shape::Bool(c.is_some_and(|c| c.access_owner.is_some())),
+                "Cloudflare Access login".to_string(),
+            ),
+            Row::Owner => (
+                or_dash(c.and_then(|c| c.access_owner.as_ref())),
+                Shape::Text,
+                "Access owner, full".to_string(),
+            ),
+            Row::Links => {
+                let on = c.is_none_or(|c| c.public_links);
+                let what = match c.and_then(|c| c.link_hostname.as_ref()) {
+                    Some(host) if on => format!("token links · {host}"),
+                    _ => "token links from outside".to_string(),
+                };
+                (String::new(), Shape::Bool(on), what)
+            }
+            Row::Invite(i) => match c.and_then(|c| c.invites.get(i)) {
+                Some(invite) => (
+                    format!("{} · {}", invite.who, invite.level.word()),
+                    Shape::Cycle,
+                    "↵ read/full · ⌫ remove".to_string(),
+                ),
+                None => text("—", ""),
+            },
+            Row::AddInvite => text("+ add", "email or @domain"),
+            Row::Remove => match c.is_some_and(|c| c.made_here) {
+                true => text("↵ delete", "tunnel + DNS records"),
+                false => text("↵ forget", "stays on Cloudflare"),
+            },
+            Row::Login => text("↵ browser", "log in, pick domain"),
+            Row::Token => text("↵ paste", "API or tunnel token · Ctrl+O link"),
+            Row::SetupZone => match &self.cf.setup {
+                Some(Setup::Picked { zones, at, .. }) => {
+                    let name = zones.get(*at).map_or("", |z| z.name.as_str());
+                    let value = match name.is_empty() {
+                        true => "from login",
+                        false => name,
+                    };
+                    let shape = match zones.len() > 1 {
+                        true => Shape::Cycle,
+                        false => Shape::Text,
+                    };
+                    (value.to_string(), shape, "domain".to_string())
+                }
+                _ => text("—", "domain"),
+            },
+            Row::SetupHostname => match &self.cf.setup {
+                Some(Setup::Picked { hostname, .. }) => text(hostname, "↵ create · ⌫ cancel"),
+                _ => text("—", ""),
+            },
+        };
+        if row == Row::Token && self.cf.typing == Some(Typing::TunnelHostname) {
+            what = "hostname it serves · empty: learned".to_string();
+        }
+        let mut tone = Tone::Dim;
+        if self.cf.confirm == Some(row) {
+            value = "y / n".to_string();
+            shape = Shape::Text;
+            tone = Tone::Ask;
+            what = match row {
+                Row::Access => "Access off? invites forgotten".to_string(),
+                _ => {
+                    let mut ask = match c.is_some_and(|c| c.made_here) {
+                        true => "delete tunnel + DNS?".to_string(),
+                        false => "forget it here?".to_string(),
+                    };
+                    if self.serving_on_account() {
+                        ask.push_str(" · stops serve");
+                    }
+                    ask
+                }
+            };
+        } else if let Some(working) = self.cf.working.as_ref().filter(|w| w.row == row) {
+            value = format!("{} {}", share::spinner_frame(), working.what);
+            shape = Shape::Text;
+        }
+        if let Some(note) = self.cf.note.as_ref().filter(|n| n.row == row)
+            && self.cf.confirm != Some(row)
+        {
+            what = note.text.clone();
+            if note.error {
+                tone = Tone::Error;
+            }
+        }
+        let set = match row {
+            Row::Hostname => c.is_some_and(|c| c.hostname.is_some()),
+            Row::Zone => c.is_some_and(|c| c.zone.is_some()),
+            Row::Shares => c.is_some_and(|c| c.share_hostname.is_some()),
+            Row::Access | Row::Owner | Row::Invite(_) => {
+                c.is_some_and(|c| c.access_owner.is_some())
+            }
+            Row::Links => c.is_some_and(|c| !c.public_links),
+            _ => false,
+        };
+        Shown {
+            value,
+            shape,
+            set,
+            what,
+            tone,
+        }
+    }
+
+    /// Run `call` off the UI thread, with `what` spinning in `row`'s value.
+    fn tunnel_work(
+        &mut self,
+        row: Row,
+        what: &'static str,
+        call: impl FnOnce() -> Answer + Send + 'static,
+    ) {
         let (tx, rx) = channel();
         std::thread::spawn(move || {
             let _ = tx.send(call());
         });
-        flow.problem = None;
-        flow.working = Some(Working { rx, what });
+        self.cf.note = None;
+        self.cf.working = Some(Working { rx, row, what });
         self.needs_redraw = true;
     }
 
-    /// Enter on the first step: log in, or tell the paste apart and go on.
-    fn submit_token(&mut self) {
-        let Some(flow) = self.connect.as_mut() else {
+    /// Make an Access `change` off the UI thread.
+    fn access_work(&mut self, row: Row, what: &'static str, change: Change) {
+        let apply = self.cf.apply_access.clone();
+        self.tunnel_work(row, what, move || Answer::Access(apply(change)));
+    }
+
+    /// Enter on a tunnel row.
+    pub(super) fn tunnel_activate(&mut self, row: Row) {
+        let logging_in = matches!(self.cf.setup, Some(Setup::LoggingIn { .. }));
+        if self.cf.working.is_some() && !(row == Row::Login && logging_in) {
+            return self.set_status("Cloudflare is still answering");
+        }
+        self.cf.note = None;
+        let Some(c) = self.connected.clone() else {
+            return self.setup_activate(row);
+        };
+        // Every Access row writes Cloudflare through the account's API token,
+        // so one that cannot is refused here and not after typing.
+        let writes = matches!(
+            row,
+            Row::Hostname | Row::Access | Row::Owner | Row::Links | Row::Invite(_) | Row::AddInvite
+        );
+        if writes && let Err(why) = c.rename {
+            return self.tunnel_note(row, why, true);
+        }
+        match row {
+            Row::Hostname => {
+                let label = label_of(c.hostname.as_deref().unwrap_or_default(), c.zone.as_deref());
+                self.tunnel_type(Typing::Hostname, &label);
+            }
+            Row::Zone => self.tunnel_note(row, "fixed · remove, set up again", false),
+            Row::Shares => self.tunnel_note(row, "fixed · per agent: e in W", false),
+            Row::Access => match (&c.access_owner, c.login) {
+                (Some(_), _) => self.cf.confirm = Some(Row::Access),
+                // A browser login's token cannot manage Access; an API token
+                // can, and keeps the tunnel as it is.
+                (None, true) => {
+                    self.tunnel_type(Typing::ApiToken, "");
+                    self.tunnel_note(row, "login can't: paste API token · Ctrl+O link", false);
+                }
+                (None, false) => {
+                    self.tunnel_type(Typing::Owner, "");
+                    self.tunnel_note(row, "owner email", false);
+                }
+            },
+            Row::Owner => {
+                let owner = c.access_owner.clone().unwrap_or_default();
+                self.tunnel_type(Typing::Owner, &owner);
+            }
+            Row::Links => {
+                self.access_work(row, "saving", Change::PublicLinks(!c.public_links));
+            }
+            Row::Invite(i) => {
+                if let Some(invite) = c.invites.get(i) {
+                    let level = match invite.level {
+                        Level::Read => Level::Full,
+                        Level::Full => Level::Read,
+                    };
+                    let who = invite.who.clone();
+                    self.access_work(row, "saving", Change::Invite { who, level });
+                }
+            }
+            Row::AddInvite => self.tunnel_type(Typing::Invite, ""),
+            Row::Remove => self.cf.confirm = Some(Row::Remove),
+            _ => {}
+        }
+    }
+
+    /// Enter on a row of a setup.
+    fn setup_activate(&mut self, row: Row) {
+        match row {
+            Row::Login => match &self.cf.setup {
+                Some(Setup::LoggingIn { url }) => {
+                    render::copy_to_clipboard(url);
+                    self.tunnel_note(row, "link copied · ⌫ cancel", false);
+                }
+                _ => self.log_in(),
+            },
+            Row::Token => {
+                self.cf.setup = None;
+                self.tunnel_type(Typing::SetupToken, "");
+            }
+            Row::SetupZone => {
+                let Some(Setup::Picked {
+                    auth, zones, at, ..
+                }) = &self.cf.setup
+                else {
+                    return;
+                };
+                if zones.len() > 1 {
+                    let next = (*at + 1) % zones.len();
+                    let (auth, zones) = (auth.clone(), zones.clone());
+                    self.suggest_for(auth, zones, next);
+                }
+            }
+            Row::SetupHostname => {
+                if let Some(Setup::Picked { hostname, .. }) = &self.cf.setup {
+                    let hostname = hostname.clone();
+                    self.tunnel_type(Typing::SetupHostname, &hostname);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Backspace on a tunnel row: an invite goes, and a setup is given up.
+    pub(super) fn tunnel_reset(&mut self, row: Row) {
+        match row {
+            Row::Invite(i) => {
+                if self.cf.working.is_some() {
+                    return self.set_status("Cloudflare is still answering");
+                }
+                let who = self
+                    .connected
+                    .as_ref()
+                    .and_then(|c| c.invites.get(i))
+                    .map(|i| i.who.clone());
+                if let Some(who) = who {
+                    self.access_work(row, "removing", Change::Uninvite { who });
+                }
+            }
+            Row::Login | Row::Token | Row::SetupZone | Row::SetupHostname
+                if self.cf.setup.is_some() =>
+            {
+                self.cancel_setup();
+            }
+            _ => {}
+        }
+    }
+
+    /// Give up on a setup, telling a login still waiting to stop.
+    fn cancel_setup(&mut self) {
+        self.cf.cancel.store(true, Ordering::Relaxed);
+        self.cf.cancel = Arc::default();
+        self.cf.working = None;
+        self.cf.setup = None;
+        self.cf.note = None;
+        self.tunnel_focus(Row::Login);
+        self.set_status("Tunnel setup cancelled");
+    }
+
+    /// `y` on a row that asked.
+    fn tunnel_confirmed(&mut self, row: Row) {
+        match row {
+            Row::Access => self.access_work(row, "turning off", Change::Off),
+            Row::Remove => self.tunnel_remove(),
+            _ => {}
+        }
+    }
+
+    /// The key after a row asked: `y` does it, anything else keeps it.
+    pub(super) fn tunnel_answer_key(&mut self, key: KeyEvent) {
+        let Some(row) = self.cf.confirm.take() else {
             return;
         };
-        let Step::Start { field, method } = &mut flow.step else {
+        if key.code == KeyCode::Char('y') {
+            self.tunnel_confirmed(row);
+        }
+        self.needs_redraw = true;
+    }
+
+    /// Enter in the field on a tunnel row.
+    pub(super) fn tunnel_commit(&mut self, row: Row, text: &str) {
+        let Some(typing) = self.cf.typing.take() else {
             return;
         };
-        if *method == Method::Browser {
-            self.log_in();
-            return;
+        // A refusal keeps the field open on what was typed, with the reason
+        // where the description was.
+        let refuse = |app: &mut App, why: &str| {
+            app.tunnel_type(typing, text);
+            app.tunnel_note(row, why, true);
+        };
+        let who = cctop_core::cloudflare::access::parse_who(text);
+        match typing {
+            Typing::Hostname if text.is_empty() => refuse(self, "type a name"),
+            Typing::Hostname => {
+                let typed = text.to_string();
+                self.tunnel_work(row, "moving", move || {
+                    Answer::Renamed(cloudflare::name_dashboard(&typed))
+                });
+            }
+            Typing::Owner => match who {
+                Some(owner) if !owner.starts_with('@') => {
+                    self.access_work(row, "saving", Change::On { owner })
+                }
+                _ => refuse(self, "one email address"),
+            },
+            Typing::Invite => match who {
+                Some(who) => self.access_work(
+                    row,
+                    "inviting",
+                    Change::Invite {
+                        who,
+                        level: Level::Read,
+                    },
+                ),
+                None => refuse(self, "email or @domain"),
+            },
+            Typing::ApiToken | Typing::SetupToken if text.is_empty() => {
+                refuse(self, "paste the token")
+            }
+            Typing::ApiToken => {
+                let typed = text.to_string();
+                self.tunnel_work(row, "checking", move || {
+                    Answer::Adopted(cloudflare::adopt_token(&typed))
+                });
+            }
+            Typing::SetupToken => self.submit_token(row, text),
+            Typing::SetupHostname => self.create_tunnel(row, text),
+            Typing::TunnelHostname => self.save_tunnel_token(row, text),
         }
-        let pasted = field.trim().to_string();
-        if pasted.is_empty() {
-            flow.problem = Some("Paste the token first.".to_string());
-            return;
-        }
-        field.clear();
-        match cloudflare::classify(&pasted) {
+    }
+
+    /// A pasted token: a tunnel token goes on to its hostname, an API token
+    /// to Cloudflare to find its domains.
+    fn submit_token(&mut self, row: Row, pasted: &str) {
+        match cloudflare::classify(pasted) {
             Pasted::Tunnel(token) => match cloudflare::check_tunnel_token(&token) {
                 Ok(()) => {
-                    flow.step = Step::TunnelHostname {
-                        token,
-                        field: LineEdit::default(),
-                    };
-                    flow.problem = None;
+                    self.cf.setup = Some(Setup::TunnelToken { token });
+                    self.tunnel_type(Typing::TunnelHostname, "");
                 }
-                Err(why) => flow.problem = Some(why),
+                Err(why) => self.tunnel_note(row, why, true),
             },
-            Pasted::Api(token) => self.connect_work("Checking the token with Cloudflare…", {
-                move || {
-                    let api = cloudflare::Api::new(&token);
-                    let zones = api
-                        .verify()
-                        .and_then(|()| api.zones())
-                        .and_then(cloudflare::usable);
-                    Answer::Zones(Auth::Pasted(token), zones)
-                }
+            Pasted::Api(token) => self.tunnel_work(row, "checking", move || {
+                let api = cloudflare::Api::new(&token);
+                let zones = api
+                    .verify()
+                    .and_then(|()| api.zones())
+                    .and_then(cloudflare::usable);
+                Answer::Zones(Auth::Pasted(token), zones)
             }),
         }
     }
 
     /// Start a browser login: open the page where a browser here would be
-    /// the user's, and wait for the certificate off the UI thread.
+    /// the user's, copy its address for one elsewhere, and wait off the UI
+    /// thread.
     fn log_in(&mut self) {
-        let Some(flow) = self.connect.as_ref() else {
-            return;
-        };
-        let login = (flow.new_login)();
+        let login = (self.cf.new_login)();
         let url = login.url().to_string();
         // A test drives this with no browser to bother.
         let opened = !cfg!(test) && !render::over_ssh() && share::open_in_browser(&url);
-        let Some(flow) = self.connect.as_mut() else {
-            return;
-        };
-        flow.step = Step::LoggingIn { url, opened };
-        // Over ssh the code is the quickest way to a browser, on a phone.
-        flow.qr = !opened;
-        let cancel = flow.cancel.clone();
-        self.connect_work("Waiting for the login in the browser…", move || {
+        render::copy_to_clipboard(&url);
+        self.cf.cancel = Arc::default();
+        let cancel = self.cf.cancel.clone();
+        self.cf.setup = Some(Setup::LoggingIn { url });
+        self.tunnel_work(Row::Login, "waiting", move || {
             let logged_in = login.wait(&|| cancel.load(Ordering::Relaxed)).map(|cert| {
                 let auth = cert.auth();
                 let zone = cloudflare::Api::with(&auth)
@@ -464,80 +859,72 @@ impl App {
             });
             Answer::LoggedIn(logged_in)
         });
+        self.tunnel_note(
+            Row::Login,
+            match opened {
+                true => "browser opened · link copied · ⌫ cancel",
+                false => "link copied: open it · ↵ copy · ⌫ cancel",
+            },
+            false,
+        );
     }
 
-    /// Copy the login page's address, the way [`App::copy_token_link`]
-    /// copies the token link — the one thing to do with it over ssh.
-    fn copy_login_link(&mut self) {
-        let Some(Step::LoggingIn { url, .. }) = self.connect.as_ref().map(|c| &c.step) else {
-            return;
+    fn suggest_for(&mut self, auth: Auth, zones: Vec<Zone>, at: usize) {
+        let row = match self.cf.setup {
+            Some(Setup::Picked { .. }) => Row::SetupZone,
+            _ => self.cf.working.as_ref().map_or(Row::Login, |w| w.row),
         };
-        render::copy_to_clipboard(url);
-        self.set_status("Copied the login link — open it in your browser");
-    }
-
-    /// A domain is picked: find the name to offer for it.
-    fn pick_zone(&mut self) {
-        let Some(flow) = self.connect.as_mut() else {
-            return;
-        };
-        let Step::Zones {
-            auth,
-            zones,
-            cursor,
-        } = &flow.step
-        else {
-            return;
-        };
-        let (auth, zone) = (auth.clone(), zones[(*cursor).min(zones.len() - 1)].clone());
-        self.suggest_for(auth, zone);
-    }
-
-    fn suggest_for(&mut self, auth: Auth, zone: Zone) {
-        self.connect_work("Looking for a free name…", move || {
+        let zone = zones[at].clone();
+        self.tunnel_work(row, "naming", move || {
             let api = cloudflare::Api::with(&auth);
             let suggested = cloudflare::suggest_hostname(&api, &zone, &cloudflare::machine_label());
-            Answer::Suggested(auth, zone, suggested)
+            Answer::Suggested(auth, zones, at, suggested)
         });
     }
 
-    /// Enter on the hostname: create everything, and store it.
-    fn create_tunnel(&mut self) {
-        let Some(flow) = self.connect.as_mut() else {
+    /// Enter in the setup's hostname: create everything, and store it.
+    fn create_tunnel(&mut self, row: Row, typed: &str) {
+        let Some(Setup::Picked {
+            auth,
+            zones,
+            at,
+            hostname,
+        }) = &mut self.cf.setup
+        else {
             return;
         };
-        let Step::Hostname { auth, zone, field } = &flow.step else {
-            return;
-        };
+        *hostname = typed.to_string();
+        let zone = zones[*at].clone();
+        let auth = auth.clone();
         // A login's domain with no name takes it from what was typed.
         let zone = match zone.name.is_empty() {
-            true => match cloudflare::login_zone_from(&zone.id, &zone.account_id, field) {
+            true => match cloudflare::login_zone_from(&zone.id, &zone.account_id, typed) {
                 Ok(zone) => zone,
                 Err(e) => {
-                    flow.problem = Some(e.to_string());
-                    return;
+                    self.tunnel_type(Typing::SetupHostname, typed);
+                    return self.tunnel_note(row, e.to_string(), true);
                 }
             },
-            false => zone.clone(),
+            false => zone,
         };
-        // Checked here first, so a typo is a line under the field and not a
-        // spinner followed by a dead end.
-        if let Err(e) = cloudflare::check_hostname(field, &zone) {
-            flow.problem = Some(e.to_string());
-            return;
+        // Checked here first, so a typo is a note and not a spinner followed
+        // by a dead end.
+        if let Err(e) = cloudflare::check_hostname(typed, &zone) {
+            self.tunnel_type(Typing::SetupHostname, typed);
+            return self.tunnel_note(row, e.to_string(), true);
         }
-        let (auth, hostname) = (auth.clone(), field.to_string());
-        self.connect_work("Creating the tunnel and its DNS records…", move || {
+        let hostname = typed.to_string();
+        self.tunnel_work(row, "creating", move || {
             let api = cloudflare::Api::with(&auth);
             let made = cloudflare::create(&api, &zone, &hostname, &cloudflare::machine_label())
                 .map_err(|e| e.to_string())
                 .and_then(|account| {
-                    // Saved here and not by whoever receives this: the popup
-                    // may be closed by now, and a tunnel made on Cloudflare
-                    // that nothing remembers is one nothing can remove.
+                    // Saved here and not by whoever receives this: the page
+                    // may have moved on, and a tunnel made on Cloudflare that
+                    // nothing remembers is one nothing can remove.
                     cctop_core::tunnel::save_account(&account)
                         .map(|()| account)
-                        .map_err(|e| format!("Could not write config.toml: {e}"))
+                        .map_err(|e| format!("could not write config.toml: {e}"))
                 });
             Answer::Created(made)
         });
@@ -545,74 +932,51 @@ impl App {
 
     /// Enter on a tunnel token's hostname: store it. Nothing on Cloudflare is
     /// created for one, so there is nothing to wait for.
-    fn save_tunnel_token(&mut self) {
-        let Some(flow) = self.connect.as_mut() else {
-            return;
-        };
-        let Step::TunnelHostname { token, field } = &flow.step else {
+    fn save_tunnel_token(&mut self, row: Row, typed: &str) {
+        let Some(Setup::TunnelToken { token }) = self.cf.setup.take() else {
             return;
         };
         let hostname =
-            Some(field.trim().trim_end_matches('.').to_ascii_lowercase()).filter(|h| !h.is_empty());
+            Some(typed.trim_end_matches('.').to_ascii_lowercase()).filter(|h| !h.is_empty());
         let account = Account {
-            token: token.clone(),
-            hostname: hostname.clone(),
+            token,
+            hostname,
             ..Account::default()
         };
         match cctop_core::tunnel::save_account(&account) {
             Ok(()) => {
-                flow.step = Step::Done {
-                    hostname,
-                    shares: false,
-                };
-                flow.problem = None;
                 self.connected = Some(Connected::from(&account));
+                self.tunnel_focus(Row::Status);
+                self.tunnel_note(Row::Status, "saved · t serves on it", false);
             }
-            Err(e) => flow.problem = Some(format!("Could not write config.toml: {e}")),
+            Err(e) => self.tunnel_note(row, format!("could not write config.toml: {e}"), true),
         }
     }
 
-    /// `y` on the confirmation: delete what setup made, and forget it.
-    fn disconnect(&mut self) {
-        let Some(flow) = self.connect.as_mut() else {
-            return;
-        };
-        let Step::Connected { account, .. } = &flow.step else {
-            return;
-        };
-        let account = account.clone();
-        if account.from_env {
-            flow.step = Step::Failed {
-                message: "That tunnel comes from CCTOP_TUNNEL_TOKEN, not from setup: unset \
-                          it to stop using it, and delete the tunnel in the Cloudflare \
-                          dashboard."
-                    .to_string(),
-                then: METHODS[0],
-            };
-            return;
+    /// `y` on remove: delete what setup made, and forget it.
+    fn tunnel_remove(&mut self) {
+        let row = Row::Remove;
+        if self.connected.as_ref().is_some_and(|c| c.from_env) {
+            return self.tunnel_note(row, "from CCTOP_TUNNEL_TOKEN: unset it", true);
         }
+        let Some(account) = cctop_core::tunnel::account() else {
+            self.refresh_connected();
+            return self.tunnel_clamp();
+        };
         // This dashboard's own serve would be pulled out from under itself;
-        // it is stopped first, which the confirmation said.
+        // it is stopped first, which the question said.
         if self.serving_on_account() {
             self.stop_serving();
         }
         if cctop_core::tunnel::in_use(&account) {
-            if let Some(flow) = self.connect.as_mut() {
-                flow.step = Step::Failed {
-                    message: "Another cctop on this machine is serving over this tunnel. \
-                              Stop it first, then disconnect."
-                        .to_string(),
-                    then: METHODS[0],
-                };
-            }
-            return;
+            return self.tunnel_note(row, "another cctop serves on it: stop it first", true);
         }
-        self.connect_work("Deleting the tunnel and its DNS records…", move || {
+        self.tunnel_work(row, "deleting", move || {
             let left = cloudflare::remove(&account);
             Answer::Removed(
                 cctop_core::tunnel::clear_account()
                     .map(|()| (left.0, account.api_token.is_some()))
-                    .map_err(|e| format!("Could not update config.toml: {e}")),
+                    .map_err(|e| format!("could not update config.toml: {e}")),
             )
         });
     }
@@ -635,170 +999,6 @@ impl App {
                 .flatten()
                 .any(|h| h.eq_ignore_ascii_case(host))
         })
-    }
-
-    /// `a` on the connected account: its Access, as `config.toml` has it.
-    fn open_access(&mut self) {
-        let Some(flow) = self.connect.as_mut() else {
-            return;
-        };
-        let Step::Connected { account, .. } = &flow.step else {
-            return;
-        };
-        flow.step = Step::Access {
-            account: account.clone(),
-            cursor: 0,
-            field: None,
-            confirm: false,
-            said: Vec::new(),
-        };
-        flow.problem = None;
-    }
-
-    /// Make `change` off the UI thread.
-    fn access_work(&mut self, what: &'static str, change: Change) {
-        let Some(flow) = self.connect.as_ref() else {
-            return;
-        };
-        let apply = flow.apply_access.clone();
-        self.connect_work(what, move || Answer::Access(apply(change)));
-    }
-
-    /// A key on the Access step, with no field open.
-    fn on_key_access(&mut self, key: KeyEvent) {
-        let Some(flow) = self.connect.as_mut() else {
-            return;
-        };
-        let Step::Access {
-            account,
-            cursor,
-            field,
-            confirm,
-            ..
-        } = &mut flow.step
-        else {
-            return;
-        };
-        let settings = account.access.as_deref().cloned();
-        if *confirm {
-            match key.code {
-                KeyCode::Char('y') => {
-                    *confirm = false;
-                    self.access_work("Taking the page out of Access…", Change::Off);
-                }
-                KeyCode::Char('n') | KeyCode::Esc => *confirm = false,
-                _ => {}
-            }
-            return;
-        }
-        let selected = settings
-            .as_ref()
-            .and_then(|s| s.invites.get(*cursor).cloned());
-        match (key.code, &settings) {
-            (KeyCode::Esc, _) => {
-                let account = account.clone();
-                flow.step = Step::Connected {
-                    account,
-                    confirm: false,
-                };
-                flow.problem = None;
-            }
-            (KeyCode::Char('o'), None) => {
-                let typing = match account.login {
-                    true => Typing::Token,
-                    false => Typing::Owner,
-                };
-                *field = Some((typing, LineEdit::default()));
-            }
-            (KeyCode::Char('o'), Some(_)) => *confirm = true,
-            (KeyCode::Char('i'), Some(_)) => *field = Some((Typing::Invite, LineEdit::default())),
-            (KeyCode::Up | KeyCode::Char('k'), Some(_)) => *cursor = cursor.saturating_sub(1),
-            (KeyCode::Down | KeyCode::Char('j'), Some(s)) => {
-                *cursor = (*cursor + 1).min(s.invites.len().saturating_sub(1))
-            }
-            (KeyCode::Char('x') | KeyCode::Delete, Some(_)) => {
-                if let Some(invite) = selected {
-                    self.access_work(
-                        "Updating who may log in…",
-                        Change::Uninvite { who: invite.who },
-                    );
-                }
-            }
-            (KeyCode::Char('f'), Some(_)) => {
-                if let Some(invite) = selected {
-                    let level = match invite.level {
-                        Level::Read => Level::Full,
-                        Level::Full => Level::Read,
-                    };
-                    self.access_work(
-                        "Updating who may log in…",
-                        Change::Invite {
-                            who: invite.who,
-                            level,
-                        },
-                    );
-                }
-            }
-            (KeyCode::Char('l'), Some(s)) => {
-                let on = !s.public_links;
-                self.access_work(
-                    match on {
-                        true => "Making the token hostname…",
-                        false => "Deleting the token hostname…",
-                    },
-                    Change::PublicLinks(on),
-                );
-            }
-            _ => {}
-        }
-    }
-
-    /// Enter in the Access step's field.
-    fn submit_access_field(&mut self) {
-        let Some(flow) = self.connect.as_mut() else {
-            return;
-        };
-        let Step::Access { field, .. } = &mut flow.step else {
-            return;
-        };
-        let Some((typing, text)) = field.as_ref() else {
-            return;
-        };
-        let typed = text.trim().to_string();
-        let who = cctop_core::cloudflare::access::parse_who(&typed);
-        let typing = *typing;
-        let refused = match typing {
-            Typing::Owner if who.as_ref().is_none_or(|w| w.starts_with('@')) => {
-                Some("The owner is one email address.")
-            }
-            Typing::Invite if who.is_none() => {
-                Some("An email address, or a whole domain written @company.com.")
-            }
-            Typing::Token if typed.is_empty() => Some("Paste the token first."),
-            _ => None,
-        };
-        if let Some(why) = refused {
-            flow.problem = Some(why.to_string());
-            return;
-        }
-        *field = None;
-        match (typing, who) {
-            (Typing::Token, _) => self.connect_work("Checking the token with Cloudflare…", {
-                move || Answer::Adopted(cloudflare::adopt_token(&typed))
-            }),
-            (Typing::Owner, Some(owner)) => self.access_work(
-                "Putting the page behind Cloudflare Access…",
-                Change::On { owner },
-            ),
-            (Typing::Invite, Some(who)) => self.access_work(
-                "Updating who may log in…",
-                Change::Invite {
-                    who,
-                    level: Level::Read,
-                },
-            ),
-            (_, None) => {}
-        }
     }
 
     /// The links this dashboard hands out, after Access or its token links
@@ -836,334 +1036,161 @@ impl App {
 
     /// Take a worker's answer, if one has come. Returns whether the screen
     /// changed — every tick while one is in flight, for the spinner.
-    pub(super) fn tick_connect(&mut self) -> bool {
-        let Some(flow) = self.connect.as_mut() else {
+    pub(super) fn tick_tunnel(&mut self) -> bool {
+        let Some(working) = &self.cf.working else {
             return false;
         };
-        let Some(working) = &flow.working else {
-            return false;
-        };
+        let row = working.row;
         let answer = match working.rx.try_recv() {
             Err(TryRecvError::Empty) => return true,
             Ok(answer) => answer,
             Err(TryRecvError::Disconnected) => {
-                flow.working = None;
-                flow.step = Step::Failed {
-                    message: "The call to Cloudflare gave no answer.".to_string(),
-                    then: METHODS[0],
-                };
+                self.cf.working = None;
+                self.cf.setup = None;
+                self.tunnel_note(row, "no answer from Cloudflare", true);
                 return true;
             }
         };
-        flow.working = None;
-        self.connect_answer(answer);
+        self.cf.working = None;
+        self.tunnel_answer(row, answer);
         true
     }
 
-    fn connect_answer(&mut self, answer: Answer) {
-        let Some(flow) = self.connect.as_mut() else {
-            return;
-        };
+    fn tunnel_answer(&mut self, row: Row, answer: Answer) {
         match answer {
             // The domain was picked in the browser: on to its name, or —
             // when its name could not be read — to typing the whole address.
-            Answer::LoggedIn(Ok((auth, zone))) => {
-                flow.qr = false;
-                match zone.name.is_empty() {
-                    true => {
-                        flow.step = Step::Hostname {
-                            auth,
-                            zone,
-                            field: LineEdit::default(),
-                        }
-                    }
-                    false => self.suggest_for(auth, zone),
-                }
-            }
-            Answer::Zones(auth, Ok(zones)) => match zones.len() {
-                // One domain is no choice: straight on to its name.
-                1 => {
-                    let zone = zones.into_iter().next().expect("one zone");
-                    self.suggest_for(auth, zone);
-                }
-                _ => {
-                    flow.step = Step::Zones {
+            Answer::LoggedIn(Ok((auth, zone))) => match zone.name.is_empty() {
+                true => {
+                    self.cf.setup = Some(Setup::Picked {
                         auth,
-                        zones,
-                        cursor: 0,
-                    }
+                        zones: vec![zone],
+                        at: 0,
+                        hostname: String::new(),
+                    });
+                    self.tunnel_focus(Row::SetupHostname);
+                    self.tunnel_type(Typing::SetupHostname, "");
+                    self.tunnel_note(
+                        Row::SetupHostname,
+                        "whole address: cctop.example.com",
+                        false,
+                    );
                 }
+                false => self.suggest_for(auth, vec![zone], 0),
             },
-            Answer::Suggested(auth, zone, Ok(name)) => {
-                flow.step = Step::Hostname {
-                    auth,
-                    zone,
-                    field: name.into(),
+            Answer::Zones(auth, Ok(zones)) => self.suggest_for(auth, zones, 0),
+            Answer::Suggested(auth, zones, at, suggested) => {
+                let (hostname, problem) = match suggested {
+                    Ok(name) => (name, None),
+                    // Every name it would offer is taken: an empty field.
+                    Err(cloudflare::Error::Hostname(why)) => (String::new(), Some(why)),
+                    Err(e) => {
+                        self.cf.setup = None;
+                        self.tunnel_clamp();
+                        return self.tunnel_note(row, short(&e), true);
+                    }
                 };
-            }
-            // Every name it would offer is taken: an empty field to type one.
-            Answer::Suggested(auth, zone, Err(cloudflare::Error::Hostname(why))) => {
-                flow.step = Step::Hostname {
+                self.cf.setup = Some(Setup::Picked {
                     auth,
-                    zone,
-                    field: LineEdit::default(),
-                };
-                flow.problem = Some(why);
+                    zones,
+                    at,
+                    hostname: hostname.clone(),
+                });
+                self.tunnel_focus(Row::SetupHostname);
+                self.tunnel_type(Typing::SetupHostname, &hostname);
+                if let Some(why) = problem {
+                    self.tunnel_note(Row::SetupHostname, why, true);
+                }
             }
-            Answer::LoggedIn(Err(e))
-            | Answer::Zones(_, Err(e))
-            | Answer::Suggested(_, _, Err(e)) => {
-                flow.qr = false;
-                flow.step = failed(&e);
+            Answer::LoggedIn(Err(e)) | Answer::Zones(_, Err(e)) => {
+                self.cf.setup = None;
+                self.tunnel_clamp();
+                self.tunnel_note(row, short(&e), true);
             }
             Answer::Created(Ok(account)) => {
-                flow.step = Step::Done {
-                    hostname: account.hostname.clone(),
-                    shares: account.share_hostname.is_some(),
-                };
+                self.cf.setup = None;
                 self.connected = Some(Connected::from(&account));
-                self.set_status("Cloudflare account connected");
+                self.tunnel_focus(Row::Status);
+                self.tunnel_note(Row::Status, "set up · t serves on it", false);
             }
             Answer::Created(Err(message)) => {
-                // A taken or malformed name is the user's to fix where they
-                // typed it, not a reason to start over.
-                if let Step::Hostname { .. } = flow.step
-                    && message.contains("DNS record")
-                {
-                    flow.problem = Some(message);
-                } else {
-                    flow.step = Step::Failed {
-                        message,
-                        then: METHODS[0],
-                    };
+                if let Some(Setup::Picked { hostname, .. }) = &self.cf.setup {
+                    let hostname = hostname.clone();
+                    self.tunnel_focus(Row::SetupHostname);
+                    self.tunnel_type(Typing::SetupHostname, &hostname);
                 }
+                self.tunnel_note(Row::SetupHostname, message, true);
             }
             Answer::Removed(Ok((left, made_here))) => {
-                flow.step = Step::Disconnected { left, made_here };
                 self.connected = None;
-                self.set_status("Cloudflare account disconnected");
-            }
-            Answer::Removed(Err(message)) => {
-                flow.step = Step::Failed {
-                    message,
-                    then: METHODS[0],
+                self.tunnel_focus(Row::Status);
+                match left.is_empty() {
+                    true => self.tunnel_note(
+                        Row::Status,
+                        match made_here {
+                            true => "removed",
+                            false => "forgotten · still on Cloudflare",
+                        },
+                        false,
+                    ),
+                    false => self.tunnel_note(
+                        Row::Status,
+                        format!("left on Cloudflare: {}", left.join(", ")),
+                        true,
+                    ),
                 }
             }
+            Answer::Removed(Err(message)) => self.tunnel_note(row, message, true),
             Answer::Access(Ok(applied)) => {
-                let Step::Access {
-                    account,
-                    cursor,
-                    said,
-                    ..
-                } = &mut flow.step
-                else {
-                    return;
-                };
-                *account = applied.account.clone();
-                let count = account.access.as_ref().map_or(0, |a| a.invites.len());
-                *cursor = (*cursor).min(count.saturating_sub(1));
-                *said = std::iter::once(applied.said.clone())
-                    .chain(
-                        applied
-                            .left
-                            .iter()
-                            .map(|item| format!("Left on Cloudflare to delete by hand: {item}")),
-                    )
-                    .collect();
                 self.connected = Some(Connected::from(&applied.account));
                 self.retarget_links(&applied.account);
-                self.set_status(applied.said);
+                self.tunnel_clamp();
+                if !applied.left.is_empty() {
+                    let row = match self.tunnel_rows().contains(&row) {
+                        true => row,
+                        false => Row::Access,
+                    };
+                    self.tunnel_note(
+                        row,
+                        format!("left on Cloudflare: {}", applied.left.join(", ")),
+                        true,
+                    );
+                }
             }
-            Answer::Access(Err(message)) => flow.problem = Some(message),
+            Answer::Access(Err(message)) => self.tunnel_note(row, message, true),
             Answer::Adopted(Ok(adopted)) => {
-                let Step::Access { account, field, .. } = &mut flow.step else {
-                    return;
-                };
-                *account = adopted.clone();
-                // Straight on to what the token was for.
-                *field = Some((Typing::Owner, LineEdit::default()));
                 self.connected = Some(Connected::from(&adopted));
-                self.set_status("The account now uses your API token");
+                // Straight on to what the token was for.
+                self.tunnel_focus(Row::Access);
+                self.tunnel_type(Typing::Owner, "");
+                self.tunnel_note(Row::Access, "token saved · owner email", false);
             }
-            Answer::Adopted(Err(message)) => flow.problem = Some(message),
+            Answer::Adopted(Err(message)) => self.tunnel_note(row, message, true),
+            Answer::Renamed(Ok(renamed)) => {
+                self.refresh_connected();
+                self.follow_page_host();
+                match (&renamed.note, &renamed.old, renamed.changed) {
+                    (Some(note), ..) => self.tunnel_note(row, note.clone(), true),
+                    (None, Some(old), true) => {
+                        self.tunnel_note(row, format!("moved · {old} stops"), false)
+                    }
+                    _ => self.tunnel_note(row, "unchanged", false),
+                }
+            }
+            Answer::Renamed(Err(message)) => self.tunnel_note(row, message, true),
         }
-    }
-
-    /// `s` on the last step: serve over the account now.
-    fn serve_now(&mut self) {
-        self.connect = None;
-        // A serve already up is on a quick tunnel or none; this one is the
-        // point of having connected.
-        self.stop_serving();
-        self.start_serving(true);
-        self.mode = Mode::Serve;
-        self.serve_qr = false;
     }
 
     /// Copy the token link, and open it where a browser would be on this
-    /// machine — the add-account popup's `Ctrl+O`.
-    fn copy_token_link(&mut self) {
+    /// machine — `Ctrl+O` in a token field.
+    pub(super) fn copy_token_link(&mut self) {
         let link = cloudflare::token_link();
         render::copy_to_clipboard(&link);
-        let opened = !render::over_ssh() && share::open_in_browser(&link);
+        let opened = !cfg!(test) && !render::over_ssh() && share::open_in_browser(&link);
         self.set_status(match opened {
-            true => "Copied the token link, and asked the browser to open it",
-            false => "Copied the token link — paste it into your browser",
+            true => "Token link copied and opened",
+            false => "Token link copied",
         });
-    }
-
-    pub(super) fn on_key_connect(&mut self, key: KeyEvent) {
-        let Some(flow) = self.connect.as_mut() else {
-            self.mode = Mode::List;
-            return;
-        };
-        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-        if flow.working.is_some() {
-            // Waiting on a login is waiting on the user, who may need the
-            // link again or its code; nothing else waits on anyone.
-            let login = matches!(flow.step, Step::LoggingIn { .. });
-            match key.code {
-                KeyCode::Esc => self.close_connect(),
-                KeyCode::Char('o') if ctrl && login => self.copy_login_link(),
-                KeyCode::Char('q') if ctrl && login => flow.qr = !flow.qr,
-                _ => {}
-            }
-            return;
-        }
-        match &mut flow.step {
-            Step::Start { field, method } => match key.code {
-                KeyCode::Esc => self.close_connect(),
-                KeyCode::Enter => self.submit_token(),
-                KeyCode::Tab | KeyCode::BackTab => {
-                    *method = method.next();
-                    flow.problem = None;
-                    flow.qr = false;
-                }
-                KeyCode::Char('o') if ctrl && *method == Method::Paste => self.copy_token_link(),
-                KeyCode::Char('q') if ctrl && *method == Method::Paste => flow.qr = !flow.qr,
-                // The login has no field: keys are not text there.
-                _ if *method == Method::Browser => {}
-                _ => {
-                    if field.key(key, TOKEN_MAX).changed() {
-                        flow.problem = None;
-                    }
-                }
-            },
-            Step::Zones { zones, cursor, .. } => match key.code {
-                KeyCode::Esc => self.close_connect(),
-                KeyCode::Up | KeyCode::Char('k') => *cursor = cursor.saturating_sub(1),
-                KeyCode::Down | KeyCode::Char('j') => {
-                    *cursor = (*cursor + 1).min(zones.len().saturating_sub(1))
-                }
-                KeyCode::Enter => self.pick_zone(),
-                _ => {}
-            },
-            Step::Hostname { field, .. } => match key.code {
-                KeyCode::Esc => self.close_connect(),
-                KeyCode::Enter => self.create_tunnel(),
-                _ => {
-                    if field.key(key, HOSTNAME_MAX).changed() {
-                        flow.problem = None;
-                    }
-                }
-            },
-            Step::TunnelHostname { field, .. } => match key.code {
-                KeyCode::Esc => self.close_connect(),
-                KeyCode::Enter => self.save_tunnel_token(),
-                _ => {
-                    field.key(key, HOSTNAME_MAX);
-                }
-            },
-            Step::Done { .. } => match key.code {
-                KeyCode::Char('s') => self.serve_now(),
-                KeyCode::Esc | KeyCode::Enter => self.close_connect(),
-                _ => {}
-            },
-            Step::Failed { then, .. } => match key.code {
-                // Back to the start rather than out: the usual next move is
-                // another token, made with the permission that was missing.
-                KeyCode::Enter => {
-                    let (back, then) = (flow.back, *then);
-                    *flow = Connect::start_at(back, then);
-                }
-                KeyCode::Esc => self.close_connect(),
-                _ => {}
-            },
-            Step::Access { field: Some(_), .. } => match key.code {
-                KeyCode::Esc => {
-                    if let Step::Access { field, .. } = &mut flow.step {
-                        *field = None;
-                    }
-                    flow.problem = None;
-                }
-                KeyCode::Enter => self.submit_access_field(),
-                KeyCode::Char('o')
-                    if ctrl
-                        && matches!(
-                            flow.step,
-                            Step::Access {
-                                field: Some((Typing::Token, _)),
-                                ..
-                            }
-                        ) =>
-                {
-                    self.copy_token_link()
-                }
-                _ => {
-                    let max = match &flow.step {
-                        Step::Access {
-                            field: Some((Typing::Token, _)),
-                            ..
-                        } => TOKEN_MAX,
-                        _ => HOSTNAME_MAX,
-                    };
-                    if let Some(field) = flow.field()
-                        && field.key(key, max).changed()
-                    {
-                        flow.problem = None;
-                    }
-                }
-            },
-            Step::Access { .. } => self.on_key_access(key),
-            Step::Connected { confirm, .. } => match (key.code, *confirm) {
-                (KeyCode::Char('a'), false) => self.open_access(),
-                (KeyCode::Char('d'), false) => *confirm = true,
-                (KeyCode::Char('y'), true) => self.disconnect(),
-                (KeyCode::Char('n') | KeyCode::Esc, true) => *confirm = false,
-                (KeyCode::Esc | KeyCode::Enter, false) => self.close_connect(),
-                _ => {}
-            },
-            Step::Disconnected { .. } => {
-                if matches!(key.code, KeyCode::Esc | KeyCode::Enter) {
-                    self.close_connect();
-                }
-            }
-            // Only while working, handled above; a login that came back has
-            // moved on to another step.
-            Step::LoggingIn { .. } => {
-                if key.code == KeyCode::Esc {
-                    self.close_connect();
-                }
-            }
-        }
-    }
-
-    /// A paste goes to whichever field has the keyboard.
-    pub(super) fn paste_connect(&mut self, text: &str) {
-        let Some(flow) = self.connect.as_mut() else {
-            return;
-        };
-        let cap = match flow.step {
-            Step::Start { .. } => TOKEN_MAX,
-            _ => HOSTNAME_MAX,
-        };
-        if let Some(field) = flow.field() {
-            // A token has no inner whitespace, and a paste from a web page
-            // often brings a newline with it.
-            let text: String = text.chars().filter(|c| !c.is_whitespace()).collect();
-            field.insert_str(&text, cap);
-            flow.problem = None;
-        }
     }
 }
 
@@ -1171,28 +1198,9 @@ impl App {
 mod tests {
     use super::*;
 
+    use crate::line_edit::LineEdit;
     use crate::tests::test_app;
-
-    /// The popup over the serve panel, opened without reading anybody's
-    /// config.
-    fn app() -> App {
-        let mut app = test_app();
-        app.open_connect_at(Connect::new(
-            Step::Start {
-                method: Method::Paste,
-                field: LineEdit::default(),
-            },
-            Mode::Serve,
-        ));
-        app
-    }
-
-    impl App {
-        pub(crate) fn open_connect_at(&mut self, flow: Connect) {
-            self.connect = Some(flow);
-            self.mode = Mode::Connect;
-        }
-    }
+    use ratatui::crossterm::event::KeyModifiers;
 
     fn zone(name: &str) -> Zone {
         Zone {
@@ -1203,272 +1211,213 @@ mod tests {
         }
     }
 
-    fn step(app: &App) -> &Step {
-        &app.connect.as_ref().expect("the popup").step
+    /// The settings page, with nothing connected and the cursor on `row`.
+    fn on(app: &mut App, row: Row) {
+        app.settings_open = true;
+        app.tunnel_focus(row);
+    }
+
+    fn key(app: &mut App, code: KeyCode) {
+        app.on_key(KeyEvent::from(code));
+    }
+
+    fn note(app: &App) -> Option<(Row, String, bool)> {
+        app.cf
+            .note
+            .as_ref()
+            .map(|n| (n.row, n.text.clone(), n.error))
+    }
+
+    fn type_in(app: &mut App, text: &str) {
+        app.on_paste(text);
+        key(app, KeyCode::Enter);
     }
 
     #[test]
-    fn a_paste_is_masked_trimmed_and_never_on_screen() {
-        let mut app = app();
-        app.paste_connect("  made-up-api-token\n");
-        let Step::Start { field, .. } = step(&app) else {
-            panic!("not the first step");
-        };
-        assert_eq!(field.to_string(), "made-up-api-token");
+    fn with_nothing_connected_the_section_is_the_ways_in() {
+        let app = test_app();
+        assert_eq!(app.tunnel_rows(), [Row::Status, Row::Login, Row::Token]);
+        assert_eq!(app.tunnel_view(Row::Status).value, "not connected");
     }
 
     #[test]
-    fn an_empty_paste_is_a_problem_not_a_call() {
-        let mut app = app();
-        app.on_key_connect(KeyCode::Enter.into());
-        let flow = app.connect.as_ref().unwrap();
-        assert!(flow.working.is_none());
-        assert!(flow.problem.is_some());
+    fn a_token_is_masked_and_a_bad_one_is_refused_without_repeating_it() {
+        let mut app = test_app();
+        on(&mut app, Row::Token);
+        key(&mut app, KeyCode::Enter);
+        assert_eq!(app.cf.typing, Some(Typing::SetupToken));
+        assert!(app.cf.masked());
+        // An empty paste is a refusal, not a call.
+        key(&mut app, KeyCode::Enter);
+        assert!(app.cf.working.is_none());
+        assert!(note(&app).is_some_and(|(_, _, error)| error));
+        assert!(app.settings_input.is_some(), "the field stays open");
+
+        app.settings_input = Some(LineEdit::default());
+        // Longer than any other field takes, as a tunnel token is.
+        let long = format!("eyJhIjoimade-up-and-broken{}", "x".repeat(400));
+        type_in(&mut app, &long);
+        let (row, text, error) = note(&app).expect("a refusal");
+        assert_eq!(row, Row::Token);
+        assert!(error);
+        assert!(!text.contains("made-up"), "{text}");
     }
 
     #[test]
-    fn a_bad_tunnel_token_is_said_without_repeating_it() {
-        let mut app = app();
-        app.paste_connect("eyJhIjoimade-up-and-broken");
-        app.on_key_connect(KeyCode::Enter.into());
-        let flow = app.connect.as_ref().unwrap();
-        let problem = flow.problem.clone().expect("a problem");
-        assert!(!problem.contains("made-up"), "{problem}");
-        assert!(matches!(flow.step, Step::Start { .. }));
-    }
-
-    #[test]
-    fn several_domains_are_a_choice_and_one_is_not() {
-        let mut app = app();
-        app.connect_answer(Answer::Zones(
-            "made-up".into(),
-            Ok(vec![zone("a.test"), zone("b.test")]),
-        ));
-        assert!(matches!(step(&app), Step::Zones { zones, .. } if zones.len() == 2));
-        app.on_key_connect(KeyCode::Down.into());
-        assert!(matches!(step(&app), Step::Zones { cursor: 1, .. }));
-
-        let mut app = self::app();
-        app.connect_answer(Answer::Zones("made-up".into(), Ok(vec![zone("a.test")])));
-        // Straight on to finding a name, without asking which of one.
-        let flow = app.connect.as_ref().unwrap();
+    fn several_domains_cycle_and_the_name_opens_ready_to_create() {
+        let mut app = test_app();
+        on(&mut app, Row::Token);
+        app.tunnel_answer(
+            Row::Token,
+            Answer::Suggested(
+                "made-up".into(),
+                vec![zone("a.test"), zone("b.test")],
+                0,
+                Ok("cctop.a.test".into()),
+            ),
+        );
         assert_eq!(
-            flow.working.as_ref().map(|w| w.what),
-            Some("Looking for a free name…")
+            app.tunnel_rows(),
+            [Row::Status, Row::SetupZone, Row::SetupHostname]
+        );
+        assert_eq!(app.settings_item(), Some(Item::Tunnel(Row::SetupHostname)));
+        assert_eq!(app.cf.typing, Some(Typing::SetupHostname));
+        assert_eq!(
+            app.settings_input.as_ref().map(|i| i.to_string()),
+            Some("cctop.a.test".into())
+        );
+        let zone_row = app.tunnel_view(Row::SetupZone);
+        assert_eq!(zone_row.value, "a.test");
+        assert_eq!(zone_row.shape, Shape::Cycle);
+
+        // A deeper name is refused before any call, the field still open.
+        app.settings_input = Some("a.b.a.test".into());
+        key(&mut app, KeyCode::Enter);
+        assert!(app.cf.working.is_none());
+        assert!(note(&app).is_some_and(|(_, t, e)| e && t.contains("two levels")));
+        assert!(app.settings_input.is_some());
+
+        // Esc closes the field and keeps the setup; Backspace gives it up.
+        key(&mut app, KeyCode::Esc);
+        assert!(app.settings_input.is_none());
+        assert!(matches!(app.cf.setup, Some(Setup::Picked { .. })));
+        key(&mut app, KeyCode::Backspace);
+        assert!(app.cf.setup.is_none());
+        assert_eq!(app.tunnel_rows(), [Row::Status, Row::Login, Row::Token]);
+    }
+
+    #[test]
+    fn a_taken_name_stays_on_the_name_and_created_is_connected() {
+        let mut app = test_app();
+        on(&mut app, Row::Token);
+        app.tunnel_answer(
+            Row::Token,
+            Answer::Suggested(
+                "made-up".into(),
+                vec![zone("example.test")],
+                0,
+                Ok("cctop.example.test".into()),
+            ),
+        );
+        app.tunnel_answer(
+            Row::SetupHostname,
+            Answer::Created(Err(
+                "cctop.example.test already has a DNS record that cctop did not make".into(),
+            )),
+        );
+        assert!(
+            note(&app)
+                .is_some_and(|(r, t, e)| r == Row::SetupHostname && e && t.contains("DNS record"))
+        );
+        assert_eq!(app.cf.typing, Some(Typing::SetupHostname));
+
+        app.tunnel_answer(
+            Row::SetupHostname,
+            Answer::Created(Ok(Account {
+                token: "made-up".into(),
+                hostname: Some("cctop.example.test".into()),
+                ..Account::default()
+            })),
+        );
+        assert!(app.cf.setup.is_none());
+        assert_eq!(app.settings_item(), Some(Item::Tunnel(Row::Status)));
+        assert_eq!(
+            app.tunnel_view(Row::Hostname).value,
+            "cctop.example.test",
+            "the account's rows are up"
         );
     }
 
     #[test]
-    fn each_refusal_ends_on_its_own_sentence() {
-        // Each with the way in Enter starts over at: the token link when a
-        // token is the way out, the first way in otherwise.
-        for (error, then) in [
-            (cloudflare::Error::NoDomain, METHODS[0]),
-            (
-                cloudflare::Error::ZonePending("example.test".into()),
-                METHODS[0],
-            ),
-            (cloudflare::Error::TokenRefused, METHODS[0]),
-            (
-                cloudflare::Error::MissingPermission(cloudflare::PERMISSIONS[0]),
-                Method::Paste,
-            ),
-            (
-                cloudflare::Error::LoginRefused(cloudflare::PERMISSIONS[0]),
-                Method::Paste,
-            ),
+    fn each_refusal_is_said_short_in_the_row() {
+        for error in [
+            cloudflare::Error::NoDomain,
+            cloudflare::Error::TokenRefused,
+            cloudflare::Error::MissingPermission(cloudflare::PERMISSIONS[0]),
+            cloudflare::Error::LoginRefused(cloudflare::PERMISSIONS[0]),
         ] {
-            let mut app = app();
-            app.connect_answer(Answer::Zones("made-up".into(), Err(error.clone())));
-            let Step::Failed { message, .. } = step(&app) else {
-                panic!("{error:?} did not fail");
-            };
-            assert_eq!(*message, said(&error));
-            assert!(!message.contains("permissionGroupKeys"), "{message}");
-            app.on_key_connect(KeyCode::Enter.into());
-            assert!(
-                matches!(step(&app), Step::Start { field, method } if field.is_empty() && *method == then),
-                "{error:?}"
+            let mut app = test_app();
+            on(&mut app, Row::Token);
+            app.tunnel_answer(
+                Row::Token,
+                Answer::Zones("made-up".into(), Err(error.clone())),
             );
+            let (row, text, e) = note(&app).expect("a note");
+            assert_eq!(row, Row::Token);
+            assert!(e);
+            assert_eq!(text, short(&error));
+            assert!(!text.contains("permissionGroupKeys"), "{text}");
         }
     }
 
     #[test]
-    fn a_taken_name_stays_on_the_name() {
-        let mut app = app();
-        app.connect_answer(Answer::Suggested(
-            "made-up".into(),
-            zone("example.test"),
-            Ok("cctop.example.test".into()),
-        ));
-        assert!(
-            matches!(step(&app), Step::Hostname { field, .. } if *field == "cctop.example.test")
-        );
-        app.connect_answer(Answer::Created(Err(
-            "cctop.example.test already has a DNS record that cctop did not make".into(),
-        )));
-        let flow = app.connect.as_ref().unwrap();
-        assert!(matches!(flow.step, Step::Hostname { .. }));
-        assert!(
-            flow.problem
-                .as_deref()
-                .is_some_and(|p| p.contains("DNS record"))
-        );
-    }
-
-    #[test]
-    fn a_deeper_name_is_refused_before_any_call() {
-        let mut app = app();
-        app.connect_answer(Answer::Suggested(
-            "made-up".into(),
-            zone("example.test"),
-            Ok("a.b.example.test".into()),
-        ));
-        app.on_key_connect(KeyCode::Enter.into());
-        let flow = app.connect.as_ref().unwrap();
-        assert!(flow.working.is_none());
-        assert!(
-            flow.problem
-                .as_deref()
-                .is_some_and(|p| p.contains("two levels"))
-        );
-    }
-
-    #[test]
-    fn created_is_done_and_remembered() {
-        let mut app = app();
-        app.connect_answer(Answer::Created(Ok(Account {
-            token: "made-up".into(),
-            hostname: Some("cctop.example.test".into()),
-            ..Account::default()
-        })));
-        assert!(
-            matches!(step(&app), Step::Done { hostname: Some(h), .. } if h == "cctop.example.test")
-        );
-        assert_eq!(
-            app.connected.as_ref().and_then(|c| c.hostname.as_deref()),
-            Some("cctop.example.test")
-        );
-        app.on_key_connect(KeyCode::Esc.into());
-        assert!(app.connect.is_none());
-        assert_eq!(app.mode, Mode::Serve, "back where it was opened");
-    }
-
-    #[test]
-    fn tab_moves_between_the_ways_in_and_the_login_has_no_field() {
+    fn enter_on_login_waits_and_backspace_cancels_it() {
         let mut app = test_app();
-        app.open_connect_at(Connect::start(Mode::Serve));
-        assert!(matches!(
-            step(&app),
-            Step::Start {
-                method: Method::Browser,
-                ..
-            }
-        ));
-        let flow = app.connect.as_ref().unwrap();
-        assert!(!flow.typing(), "letters are not text on the login");
-        app.paste_connect("made-up-api-token");
-        app.on_key_connect(KeyCode::Char('x').into());
-        app.on_key_connect(KeyCode::Tab.into());
-        let Step::Start { method, field } = step(&app) else {
-            panic!("not the first step");
-        };
-        assert_eq!(*method, Method::Paste);
-        assert!(field.is_empty(), "nothing reached the paste field");
-        assert!(app.connect.as_ref().unwrap().typing());
-        app.on_key_connect(KeyCode::Tab.into());
-        assert!(matches!(
-            step(&app),
-            Step::Start {
-                method: Method::Browser,
-                ..
-            }
-        ));
-    }
-
-    #[test]
-    fn enter_on_the_login_waits_and_esc_cancels_it() {
-        let mut app = test_app();
-        let mut flow = Connect::start(Mode::Serve);
         let store = cctop_core::cloudflare::login::fake::server(
             cctop_core::cloudflare::login::fake::Store::Working,
         );
-        flow.new_login = Box::new(move || Login::fake(&store));
-        app.open_connect_at(flow);
-        app.on_key_connect(KeyCode::Enter.into());
-        let flow = app.connect.as_ref().unwrap();
-        let Step::LoggingIn { url, opened } = &flow.step else {
+        app.cf.new_login = Box::new(move || Login::fake(&store));
+        on(&mut app, Row::Login);
+        key(&mut app, KeyCode::Enter);
+        let Some(Setup::LoggingIn { url }) = &app.cf.setup else {
             panic!("not waiting on the login");
         };
         assert!(url.contains("/argotunnel?aud=&callback="), "{url}");
-        assert!(!opened);
-        assert!(flow.working.is_some());
-        assert!(flow.qr, "with no browser here, the code is up");
-        let cancel = flow.cancel.clone();
-        app.on_key_connect(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL));
-        assert!(!app.connect.as_ref().unwrap().qr);
-        app.on_key_connect(KeyCode::Esc.into());
-        assert!(app.connect.is_none());
+        assert!(app.cf.working.is_some());
+        assert!(app.tunnel_view(Row::Login).value.ends_with("waiting"));
+        let cancel = app.cf.cancel.clone();
+        // Enter again copies the address rather than starting another.
+        key(&mut app, KeyCode::Enter);
+        assert!(app.cf.working.is_some());
+        key(&mut app, KeyCode::Backspace);
+        assert!(app.cf.setup.is_none());
+        assert!(app.cf.working.is_none());
         assert!(cancel.load(Ordering::Relaxed), "the wait was told to stop");
     }
 
-    fn login_zone(name: &str) -> Zone {
-        Zone {
-            name: name.to_string(),
-            ..zone("x")
-        }
-    }
-
     #[test]
-    fn a_login_goes_on_to_the_name_or_asks_for_the_whole_address() {
-        let auth = Auth::Login("made-up-login-token".into());
-        let mut app = app();
-        app.connect_answer(Answer::LoggedIn(Ok((
-            auth.clone(),
-            login_zone("example.test"),
-        ))));
-        assert_eq!(
-            app.connect
-                .as_ref()
-                .unwrap()
-                .working
-                .as_ref()
-                .map(|w| w.what),
-            Some("Looking for a free name…")
-        );
-
-        let mut app = self::app();
-        app.connect_answer(Answer::LoggedIn(Ok((auth.clone(), login_zone("")))));
-        let Step::Hostname {
-            auth: kept, field, ..
-        } = step(&app)
-        else {
-            panic!("not the hostname");
+    fn a_login_with_no_domain_name_asks_for_the_whole_address() {
+        let mut app = test_app();
+        on(&mut app, Row::Login);
+        let nameless = Zone {
+            name: String::new(),
+            ..zone("x")
         };
-        assert_eq!(*kept, auth);
-        assert!(field.is_empty());
+        app.tunnel_answer(
+            Row::Login,
+            Answer::LoggedIn(Ok((Auth::Login("made-up".into()), nameless))),
+        );
+        assert_eq!(app.cf.typing, Some(Typing::SetupHostname));
+        assert_eq!(app.tunnel_view(Row::SetupZone).value, "from login");
         // A bare label cannot say which domain: refused before any call.
-        app.paste_connect("cctop");
-        app.on_key_connect(KeyCode::Enter.into());
-        let flow = app.connect.as_ref().unwrap();
-        assert!(flow.working.is_none());
-        assert!(
-            flow.problem
-                .as_deref()
-                .is_some_and(|p| p.contains("whole address"))
-        );
-
-        let mut app = self::app();
-        app.connect_answer(Answer::LoggedIn(Err(cloudflare::Error::Login(
-            "No login arrived within ten minutes; start again.".into(),
-        ))));
-        assert!(
-            matches!(step(&app), Step::Failed { message, .. } if message.contains("ten minutes"))
-        );
+        app.settings_input = Some("cctop".into());
+        key(&mut app, KeyCode::Enter);
+        assert!(app.cf.working.is_none());
+        assert!(note(&app).is_some_and(|(_, t, e)| e && t.contains("whole address")));
     }
 
-    /// The Access step over an account cctop set up, whose edits go to the
-    /// fake Cloudflare API rather than `config.toml`. Every token is made up.
+    /// A connected account whose Access edits go to the fake Cloudflare API
+    /// rather than `config.toml`. Every token is made up.
     fn access_app() -> (App, cctop_core::cloudflare::fake::Seen) {
         use cctop_core::cloudflare::{Api, fake};
         let (base, seen) = fake::api(fake::accepting(None));
@@ -1482,15 +1431,10 @@ mod tests {
             api_token: Some("made-up-api-token".into()),
             ..Account::default()
         };
-        let held = Arc::new(std::sync::Mutex::new(account.clone()));
-        let mut flow = Connect::new(
-            Step::Connected {
-                account,
-                confirm: false,
-            },
-            Mode::List,
-        );
-        flow.apply_access = Arc::new(move |change| {
+        let mut app = test_app();
+        app.connected = Some(Connected::from(&account));
+        let held = Arc::new(std::sync::Mutex::new(account));
+        app.cf.apply_access = Arc::new(move |change| {
             let mut account = held.lock().unwrap();
             let api = Api::fake(&base, "made-up-api-token");
             let applied =
@@ -1498,119 +1442,65 @@ mod tests {
             *account = applied.account.clone();
             Ok(applied)
         });
-        let mut app = test_app();
-        app.open_connect_at(flow);
+        app.settings_open = true;
         (app, seen)
-    }
-
-    #[test]
-    fn a_login_account_is_asked_for_a_token_before_access_not_after() {
-        let account = Account {
-            hostname: Some("cctop.example.test".into()),
-            api_token: Some("made-up-login-token".into()),
-            login: true,
-            ..Account::default()
-        };
-        let mut app = test_app();
-        app.open_connect_at(Connect::new(
-            Step::Access {
-                account: account.clone(),
-                cursor: 0,
-                field: None,
-                confirm: false,
-                said: Vec::new(),
-            },
-            Mode::List,
-        ));
-        app.on_key_connect(KeyCode::Char('o').into());
-        assert!(matches!(
-            step(&app),
-            Step::Access {
-                field: Some((Typing::Token, _)),
-                ..
-            }
-        ));
-        // A token far longer than an email still fits.
-        for _ in 0..300 {
-            app.on_key_connect(KeyCode::Char('x').into());
-        }
-        let Step::Access {
-            field: Some((_, edit)),
-            ..
-        } = step(&app)
-        else {
-            panic!("the field closed");
-        };
-        assert_eq!(edit.chars().count(), 300);
-
-        // Once the token is taken, the owner's email is next.
-        app.connect_answer(Answer::Adopted(Ok(Account {
-            login: false,
-            ..account
-        })));
-        assert!(matches!(
-            step(&app),
-            Step::Access {
-                field: Some((Typing::Owner, _)),
-                account,
-                ..
-            } if !account.login
-        ));
     }
 
     /// Wait for the call in flight, as the tick would.
     fn settle(app: &mut App) {
         cctop_core::test_wait::eventually_true("the Access edit", || {
-            app.tick_connect();
-            app.connect.as_ref().is_some_and(|c| c.working.is_none())
+            app.tick_tunnel();
+            app.cf.working.is_none()
         });
-    }
-
-    fn settings(app: &App) -> Option<cctop_core::cloudflare::access::Settings> {
-        match step(app) {
-            Step::Access { account, .. } => account.access.as_deref().cloned(),
-            _ => panic!("not the Access step"),
-        }
-    }
-
-    fn type_in(app: &mut App, text: &str) {
-        app.paste_connect(text);
-        app.on_key_connect(KeyCode::Enter.into());
     }
 
     #[test]
     fn access_goes_on_invites_change_and_the_edge_follows() {
         let (mut app, seen) = access_app();
-        app.on_key_connect(KeyCode::Char('a').into());
-        assert_eq!(settings(&app), None);
-        // A domain is no owner: refused under the field, before any call.
-        app.on_key_connect(KeyCode::Char('o').into());
-        assert!(app.connect.as_ref().unwrap().typing());
+        assert_eq!(
+            app.tunnel_rows(),
+            [
+                Row::Status,
+                Row::Hostname,
+                Row::Zone,
+                Row::Shares,
+                Row::Access,
+                Row::Remove
+            ]
+        );
+        app.tunnel_focus(Row::Access);
+        assert_eq!(app.tunnel_view(Row::Access).shape, Shape::Bool(false));
+        // A domain is no owner: refused in the row, before any call.
+        key(&mut app, KeyCode::Enter);
+        assert_eq!(app.cf.typing, Some(Typing::Owner));
         type_in(&mut app, "@example.test");
-        assert!(app.connect.as_ref().unwrap().problem.is_some());
+        assert!(note(&app).is_some_and(|(_, _, e)| e));
         assert!(seen.lock().unwrap().is_empty());
-        app.on_key_connect(KeyCode::Esc.into());
-        app.on_key_connect(KeyCode::Char('o').into());
+        app.settings_input = Some(LineEdit::default());
         type_in(&mut app, "Owner@Example.test");
         settle(&mut app);
-        let on = settings(&app).expect("Access is on");
-        assert_eq!(on.owner, "owner@example.test");
-        assert_eq!(on.link_hostname.as_deref(), Some("cctop-link.example.test"));
-        assert_eq!(
-            app.connected
-                .as_ref()
-                .and_then(|c| c.access_owner.as_deref()),
-            Some("owner@example.test")
-        );
+        let c = app.connected.clone().unwrap();
+        assert_eq!(c.access_owner.as_deref(), Some("owner@example.test"));
+        assert_eq!(c.link_hostname.as_deref(), Some("cctop-link.example.test"));
+        assert_eq!(app.tunnel_view(Row::Owner).value, "owner@example.test");
 
-        app.on_key_connect(KeyCode::Char('i').into());
+        // Invite, read-only; Enter on it makes it full.
+        app.tunnel_focus(Row::AddInvite);
+        key(&mut app, KeyCode::Enter);
         type_in(&mut app, "guest@elsewhere.test");
         settle(&mut app);
-        app.on_key_connect(KeyCode::Char('f').into());
+        assert!(app.tunnel_rows().contains(&Row::Invite(0)));
+        assert_eq!(
+            app.tunnel_view(Row::Invite(0)).value,
+            "guest@elsewhere.test · read"
+        );
+        app.tunnel_focus(Row::Invite(0));
+        key(&mut app, KeyCode::Enter);
         settle(&mut app);
-        let invites = settings(&app).unwrap().invites;
-        assert_eq!(invites.len(), 1);
-        assert_eq!(invites[0].level, Level::Full);
+        assert_eq!(
+            app.connected.as_ref().unwrap().invites[0].level,
+            Level::Full
+        );
         let policy = seen
             .lock()
             .unwrap()
@@ -1622,55 +1512,161 @@ mod tests {
         assert!(policy.contains("guest@elsewhere.test"), "{policy}");
 
         // Token links off and on: the hostname goes and comes back.
-        app.on_key_connect(KeyCode::Char('l').into());
+        app.tunnel_focus(Row::Links);
+        key(&mut app, KeyCode::Enter);
         settle(&mut app);
-        let off = settings(&app).unwrap();
-        assert!(!off.public_links);
-        assert_eq!(off.link_hostname, None);
-        assert!(!app.connected.as_ref().unwrap().public_links);
-        app.on_key_connect(KeyCode::Char('l').into());
+        let c = app.connected.clone().unwrap();
+        assert!(!c.public_links);
+        assert_eq!(c.link_hostname, None);
+        assert_eq!(app.tunnel_view(Row::Links).shape, Shape::Bool(false));
+        key(&mut app, KeyCode::Enter);
         settle(&mut app);
-        assert!(settings(&app).unwrap().public_links);
+        assert!(app.connected.as_ref().unwrap().public_links);
 
-        app.on_key_connect(KeyCode::Char('x').into());
+        // Backspace on an invite takes it out.
+        app.tunnel_focus(Row::Invite(0));
+        key(&mut app, KeyCode::Backspace);
         settle(&mut app);
-        assert!(settings(&app).unwrap().invites.is_empty());
+        assert!(app.connected.as_ref().unwrap().invites.is_empty());
 
-        // Off asks first.
-        app.on_key_connect(KeyCode::Char('o').into());
-        assert!(settings(&app).is_some());
-        app.on_key_connect(KeyCode::Char('y').into());
+        // Off asks first: `n` keeps it, `y` turns it off.
+        app.tunnel_focus(Row::Access);
+        key(&mut app, KeyCode::Enter);
+        assert_eq!(app.cf.confirm, Some(Row::Access));
+        assert_eq!(app.tunnel_view(Row::Access).value, "y / n");
+        key(&mut app, KeyCode::Char('n'));
+        assert!(app.cf.confirm.is_none());
+        assert!(app.connected.as_ref().unwrap().access_owner.is_some());
+        key(&mut app, KeyCode::Enter);
+        key(&mut app, KeyCode::Char('y'));
         settle(&mut app);
-        assert_eq!(settings(&app), None);
-        app.on_key_connect(KeyCode::Esc.into());
-        assert!(matches!(step(&app), Step::Connected { .. }));
+        assert_eq!(app.connected.as_ref().unwrap().access_owner, None);
+        assert!(!app.tunnel_rows().contains(&Row::Owner));
     }
 
     #[test]
-    fn disconnect_asks_first() {
+    fn a_login_account_is_asked_for_a_token_before_access_not_after() {
         let mut app = test_app();
-        app.open_connect_at(Connect::new(
-            Step::Connected {
-                account: Account {
-                    token: "made-up".into(),
-                    from_env: true,
-                    ..Account::default()
-                },
-                confirm: false,
-            },
-            Mode::List,
-        ));
-        app.on_key_connect(KeyCode::Char('y').into());
-        assert!(matches!(step(&app), Step::Connected { confirm: false, .. }));
-        app.on_key_connect(KeyCode::Char('d').into());
-        assert!(matches!(step(&app), Step::Connected { confirm: true, .. }));
-        app.on_key_connect(KeyCode::Char('n').into());
-        assert!(matches!(step(&app), Step::Connected { confirm: false, .. }));
-        // One from the environment is not cctop's to delete.
-        app.on_key_connect(KeyCode::Char('d').into());
-        app.on_key_connect(KeyCode::Char('y').into());
+        app.connected = Some(Connected::from(&Account {
+            hostname: Some("cctop.example.test".into()),
+            api_token: Some("made-up-login-token".into()),
+            account_id: Some("acct1".into()),
+            zone_id: Some("zone1".into()),
+            tunnel_id: Some("tunnel1".into()),
+            login: true,
+            ..Account::default()
+        }));
+        on(&mut app, Row::Access);
+        key(&mut app, KeyCode::Enter);
+        assert_eq!(app.cf.typing, Some(Typing::ApiToken));
+        assert!(app.cf.masked());
+        app.on_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL));
         assert!(
-            matches!(step(&app), Step::Failed { message, .. } if message.contains("CCTOP_TUNNEL_TOKEN"))
+            app.settings_input.as_ref().is_some_and(|i| i.is_empty()),
+            "Ctrl+O copies the link, it is not typed"
         );
+        // A token far longer than an email still fits.
+        for _ in 0..300 {
+            key(&mut app, KeyCode::Char('x'));
+        }
+        assert_eq!(
+            app.settings_input.as_ref().map(|i| i.chars().count()),
+            Some(300)
+        );
+
+        // Once the token is taken, the owner's email is next.
+        app.settings_input = None;
+        app.cf.typing = None;
+        app.tunnel_answer(
+            Row::Access,
+            Answer::Adopted(Ok(Account {
+                hostname: Some("cctop.example.test".into()),
+                api_token: Some("made-up-api-token".into()),
+                ..Account::default()
+            })),
+        );
+        assert_eq!(app.cf.typing, Some(Typing::Owner));
+        assert_eq!(app.settings_item(), Some(Item::Tunnel(Row::Access)));
+    }
+
+    #[test]
+    fn remove_asks_first_and_an_env_tunnel_is_not_ours() {
+        let mut app = test_app();
+        app.connected = Some(Connected::from(&Account {
+            token: "made-up".into(),
+            from_env: true,
+            ..Account::default()
+        }));
+        on(&mut app, Row::Remove);
+        key(&mut app, KeyCode::Char('y'));
+        assert!(app.cf.confirm.is_none(), "y alone does nothing");
+        key(&mut app, KeyCode::Enter);
+        assert_eq!(app.cf.confirm, Some(Row::Remove));
+        assert_eq!(app.tunnel_view(Row::Remove).tone, Tone::Ask);
+        key(&mut app, KeyCode::Esc);
+        assert!(app.cf.confirm.is_none());
+        assert!(app.on_settings(), "Esc answered the question, not the page");
+        key(&mut app, KeyCode::Enter);
+        key(&mut app, KeyCode::Char('y'));
+        assert!(
+            note(&app)
+                .is_some_and(|(r, t, e)| r == Row::Remove && e && t.contains("CCTOP_TUNNEL_TOKEN"))
+        );
+        assert!(app.connected.is_some());
+    }
+
+    #[test]
+    fn a_dns_refusal_is_said_on_the_rows_that_would_write() {
+        let mut app = test_app();
+        let mut c = Connected::from(&Account {
+            token: "made-up".into(),
+            hostname: Some("cctop.example.test".into()),
+            ..Account::default()
+        });
+        c.rename = Err("the token cannot write DNS");
+        app.connected = Some(c);
+        on(&mut app, Row::Hostname);
+        key(&mut app, KeyCode::Enter);
+        assert!(app.settings_input.is_none());
+        assert!(
+            note(&app)
+                .is_some_and(|(r, t, e)| r == Row::Hostname && e && t.contains("cannot write DNS"))
+        );
+    }
+
+    #[test]
+    fn a_rename_opens_on_the_label_and_its_answer_lands_in_the_row() {
+        let mut app = test_app();
+        app.connected = Some(Connected::from(&Account {
+            token: "made-up".into(),
+            hostname: Some("cctop.example.test".into()),
+            account_id: Some("acct1".into()),
+            zone_id: Some("zone1".into()),
+            tunnel_id: Some("tunnel1".into()),
+            api_token: Some("made-up-api-token".into()),
+            ..Account::default()
+        }));
+        on(&mut app, Row::Hostname);
+        key(&mut app, KeyCode::Enter);
+        assert_eq!(app.cf.typing, Some(Typing::Hostname));
+        assert!(!app.cf.masked());
+        // The zone comes from the account's stored zone name, which this
+        // made-up one does not have, so the whole hostname is the field.
+        assert_eq!(
+            app.settings_input.as_ref().map(|i| i.to_string()),
+            Some(label_of(
+                "cctop.example.test",
+                app.connected.as_ref().unwrap().zone.as_deref()
+            ))
+        );
+        key(&mut app, KeyCode::Esc);
+        app.tunnel_answer(
+            Row::Hostname,
+            Answer::Renamed(Err(
+                "new.example.test is already used by the dashboard".into()
+            )),
+        );
+        assert!(note(&app).is_some_and(|(r, _, e)| r == Row::Hostname && e));
+        assert_eq!(app.tunnel_view(Row::Hostname).tone, Tone::Error);
     }
 }

@@ -407,7 +407,7 @@ impl App {
     /// Put the served links on the hostname the account's tunnel answers the
     /// page on now, when a rename — here or on the web page — moved it.
     /// Whether anything changed.
-    fn follow_page_host(&mut self) -> bool {
+    pub(super) fn follow_page_host(&mut self) -> bool {
         let Some(page) = cctop_core::tunnel::page_host() else {
             return false;
         };

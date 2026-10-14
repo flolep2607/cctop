@@ -831,6 +831,9 @@ mod tests {
             access_owner: None,
             link_hostname: None,
             public_links: true,
+            invites: Vec::new(),
+            login: false,
+            made_here: true,
         });
         app
     }

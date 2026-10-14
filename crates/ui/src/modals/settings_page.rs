@@ -143,8 +143,8 @@ fn settings_filter_border(app: &App) -> String {
 /// Decided where the value comes from rather than from its text, because the
 /// text does not say: a `[settings]` entry takes its type from the schema (the
 /// parser for bools, the shape of the default for number-versus-string), a view
-/// choice from its `View` variant, and a keybind or the Cloudflare row is
-/// neither config-typed nor cycled. A bool carries its state because both
+/// choice from its `View` variant, a tunnel row from its `Shape`, and a keybind
+/// is neither config-typed nor cycled. A bool carries its state because both
 /// channels read it — the hue, green against red, and the checkbox glyph the
 /// row draws in place of the word.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -294,16 +294,18 @@ fn settings_lines(
     // decides what survives with this same string; the mark says which part of
     // the row is why.
     let needle = app.settings_filter.to_string().trim().to_lowercase();
-    // A value may claim the frame's spare room, but never a description's. The
-    // Cloudflare row carries a zone, a link state and a share hostname, and at
-    // eighty columns that and a sentence do not both fit: the value is cut
-    // first, and `Step::Connected` stays where the whole story is read. The
-    // floor is the length of the longest description this page shows in full,
-    // because below that a description stops being a phrase — and descriptions
-    // were already elided to whatever room was left over, so this only stops a
-    // long value making that worse.
-    const DESC_MIN: usize = crate::settings::CLOUDFLARE_WHAT.len();
+    // A value may claim the frame's spare room, but never a description's. A
+    // tunnel row's value is a hostname, and at eighty columns a long one and
+    // its description do not both fit: the value is cut first. The floor is
+    // what a tunnel row's description needs to stay a phrase rather than a
+    // stub — and descriptions were already elided to whatever room was left
+    // over, so this only stops a long value making that worse.
+    const DESC_MIN: usize = 24;
     let max_value = VALUE_W.saturating_add(width.saturating_sub(LEAD + DESC_MIN));
+    // The value column's width, which a section may widen for itself: the
+    // tunnel's values are hostnames, and a column that fits them keeps its
+    // descriptions in one column rather than each pushed out by its own.
+    let value_w = std::cell::Cell::new(VALUE_W);
     // One row, in every section. `at` is the position in the *filtered* list,
     // which is what the cursor counts in, so a filter that moved the page
     // moves the cursor with it.
@@ -314,6 +316,7 @@ fn settings_lines(
                    value: String,
                    set: bool,
                    what: &str,
+                   tone: Style,
                    kind: Kind| {
         let here = at == cursor;
         // The type's own ink, and for a set value a wash beside it. Bold stays
@@ -378,11 +381,19 @@ fn settings_lines(
                 theme::attention_lit(theme::colors().cost_mid),
             )]
         } else if here && let Some(input) = &app.settings_input {
-            let mut spans = input.spans(usize::MAX, style, accent, "█");
+            // A token is dots from the first character: a paste is seen to
+            // land whole, and nothing on screen can be read off it.
+            let mut spans = match app.cf.masked() {
+                true => vec![
+                    Span::styled("•".repeat(input.chars().count().min(24)), style),
+                    Span::styled("█".to_string(), accent),
+                ],
+                false => input.spans(usize::MAX, style, accent, "█"),
+            };
             // Padded back out to the column the other rows fill, so the marker
             // and the description do not shift as the value is typed. Styled
             // like the text above: a set value keeps its wash while edited.
-            pad_to(&mut spans, VALUE_W);
+            pad_to(&mut spans, value_w.get());
             spans
         } else {
             // A key's cap covers the key and nothing else — capping the padding
@@ -404,8 +415,8 @@ fn settings_lines(
             pad_to(
                 &mut spans,
                 match kind {
-                    Kind::Cycles => VALUE_W - 1,
-                    _ => VALUE_W,
+                    Kind::Cycles => value_w.get() - 1,
+                    _ => value_w.get(),
                 },
             );
             if kind == Kind::Cycles {
@@ -420,16 +431,16 @@ fn settings_lines(
         // list, and the cursor's row becomes two rows tall — which breaks the
         // arithmetic this page scrolls by.
         //
-        // A value wider than its column is charged its own overflow, so that
-        // the Cloudflare row can carry the zone and the link state without
-        // pushing the description off the frame. Every other row pads to
-        // exactly `VALUE_W`, so their room — and so every existing row — is
-        // untouched by this.
+        // A value wider than `VALUE_W` — or a section's wider column — is
+        // charged its own overflow, so that a tunnel row can carry a whole
+        // hostname without pushing the description off the frame. Every other
+        // row pads to exactly `VALUE_W`, so their room — and so every existing
+        // row — is untouched by this.
         let drawn: usize = value.iter().map(Span::width).sum();
         let room = width.saturating_sub(LEAD + drawn.saturating_sub(VALUE_W));
         let mut line = Line::from_iter(name_spans(name, &needle).into_iter().chain(value).chain([
             Span::styled(if set { " * " } else { "   " }, theme::dim()),
-            Span::styled(util::truncate(what, room), theme::dim()),
+            Span::styled(util::truncate(what, room), tone),
         ]));
         if here {
             cursor_line = lines.len() as u16;
@@ -460,7 +471,17 @@ fn settings_lines(
             } else {
                 ValueKind::Text
             };
-            row(&mut lines, at, name, kind, value, set, what, Kind::Plain);
+            row(
+                &mut lines,
+                at,
+                name,
+                kind,
+                value,
+                set,
+                what,
+                theme::dim(),
+                Kind::Plain,
+            );
         }
     }
 
@@ -481,29 +502,61 @@ fn settings_lines(
                 View::Choice { .. } => (ValueKind::Cycle, Kind::Cycles),
                 View::Number { .. } => (ValueKind::Number, Kind::Plain),
             };
-            row(&mut lines, at, name, ty, value, set, what, kind);
+            row(
+                &mut lines,
+                at,
+                name,
+                ty,
+                value,
+                set,
+                what,
+                theme::dim(),
+                kind,
+            );
         }
     }
 
-    if wanted(|r| matches!(r, Item::Cloudflare)) {
+    if wanted(|r| matches!(r, Item::Tunnel(_))) {
+        use crate::connect::{Shape, Tone};
         lines.push(Line::default());
         lines.push(section("config.toml · [tunnel]"));
+        let widest = rows
+            .iter()
+            .filter_map(|r| match r {
+                Item::Tunnel(t) => Some(app.tunnel_view(*t).value.chars().count() + 2),
+                _ => None,
+            })
+            .max()
+            .unwrap_or(0);
+        value_w.set(widest.clamp(VALUE_W, max_value.max(VALUE_W)));
         for (at, entry) in rows.iter().enumerate() {
-            if *entry == Item::Cloudflare {
-                let value = app.cloudflare_value();
-                let set = app.connected.is_some();
-                row(
-                    &mut lines,
-                    at,
-                    "cloudflare",
-                    ValueKind::Text,
-                    value,
-                    set,
-                    super::settings::CLOUDFLARE_WHAT,
-                    Kind::Plain,
-                );
-            }
+            let Item::Tunnel(tunnel) = entry else {
+                continue;
+            };
+            let shown = app.tunnel_view(*tunnel);
+            let (ty, kind) = match shown.shape {
+                Shape::Text => (ValueKind::Text, Kind::Plain),
+                Shape::Bool(on) => (ValueKind::Bool(on), Kind::Plain),
+                Shape::Cycle => (ValueKind::Cycle, Kind::Cycles),
+            };
+            let tone = match shown.tone {
+                Tone::Dim => theme::dim(),
+                Tone::Ask => Style::default().fg(theme::colors().cost_mid),
+                Tone::Error => theme::failed(),
+            };
+            row(
+                &mut lines,
+                at,
+                tunnel.name(),
+                ty,
+                shown.value,
+                shown.set,
+                &shown.what,
+                tone,
+                kind,
+            );
         }
+        value_w.set(VALUE_W);
     }
 
     if wanted(|r| matches!(r, Item::Key(_))) {
@@ -522,6 +575,7 @@ fn settings_lines(
                 key,
                 set,
                 what,
+                theme::dim(),
                 Kind::Key,
             );
         }
@@ -750,71 +804,22 @@ mod tests {
         assert_eq!(super::find_fold("ab", "abc"), None);
     }
 
-    /// Every fact the Cloudflare row is asked to carry, in the order the
-    /// questions are asked.
-    #[test]
-    fn the_cloudflare_row_says_what_the_dashboard_knows() {
-        use crate::connect::Connected;
-        let mut app = crate::tests::test_app();
-        assert_eq!(app.cloudflare_value(), "not connected");
-        app.connected = Some(Connected {
-            hostname: Some("cctop.example".into()),
-            from_env: true,
-            share_hostname: Some("share.cctop.example".into()),
-            zone: Some("example.com".into()),
-            rename: Err("the token cannot write DNS"),
-            access_owner: Some("me@example.com".into()),
-            link_hostname: Some("go.example.com".into()),
-            public_links: false,
-        });
-        assert_eq!(
-            app.cloudflare_value(),
-            "cctop.example · zone example.com · Access me@example.com \
-             · links go.example.com · shares share.cctop.example · from env \
-             · no DNS write: the token cannot write DNS"
-        );
-    }
-
-    /// `Ok(())` is the ordinary case, so only a refusal earns a word — a mark
-    /// on every row would train somebody to skip the column, and the next
-    /// refusal along with it. The links clause still says which of the two
-    /// states an account with no Access at all is in.
-    #[test]
-    fn the_cloudflare_row_marks_a_refusal_and_nothing_else() {
-        use crate::connect::Connected;
-        let mut app = crate::tests::test_app();
-        app.connected = Some(Connected {
-            hostname: Some("cctop.example".into()),
-            from_env: false,
-            share_hostname: None,
-            zone: None,
-            rename: Ok(()),
-            access_owner: None,
-            link_hostname: None,
-            public_links: true,
-        });
-        assert_eq!(app.cloudflare_value(), "cctop.example · links public");
-    }
-
-    /// A value wider than its column is charged its own overflow, so the
-    /// Cloudflare row can carry the zone and the link state without pushing
-    /// the description off an 80-column frame.
+    /// A tunnel row's value is a hostname, wider than its column: it is
+    /// charged its own overflow, so the description stays on an 80-column
+    /// frame.
     #[test]
     fn a_long_value_leaves_the_description_on_the_frame() {
-        use crate::connect::Connected;
+        use crate::connect::{Connected, Row};
         let mut app = crate::tests::test_app();
         app.settings_open = true;
-        app.connected = Some(Connected {
-            hostname: Some("a-very-long-tunnel-hostname.example.com".into()),
-            from_env: false,
-            share_hostname: None,
-            zone: Some("example.com".into()),
-            rename: Ok(()),
-            access_owner: None,
-            link_hostname: None,
-            public_links: true,
+        app.connected = Some(Connected::from(&cctop_core::tunnel::Account {
+            token: "made-up".into(),
+            hostname: Some("cctop-a-long-name.example.com".into()),
+            ..Default::default()
+        }));
+        at_row(&mut app, |i| {
+            *i == crate::settings::Item::Tunnel(Row::Hostname)
         });
-        at_row(&mut app, |i| *i == crate::settings::Item::Cloudflare);
         let rows = app.settings_shown();
         let cursor = app.settings_cursor;
         let (lines, at, _) = super::settings_lines(&app, &rows, cursor, 80);
@@ -823,9 +828,30 @@ mod tests {
         assert!(drawn <= 80, "the row ran off the frame: {line:?}");
         let text: String = line.spans.iter().map(|s| s.content.to_string()).collect();
         assert!(
-            text.contains("Your Cloudflare tunnel"),
+            text.contains("cctop-a-long-name.example.com"),
+            "the hostname was cut: {line:?}"
+        );
+        assert!(
+            text.contains("dashboard address"),
             "the description left the frame: {line:?}"
         );
+    }
+
+    /// A token being typed is dots, never the token.
+    #[test]
+    fn a_token_field_is_drawn_as_dots() {
+        use crate::connect::Row;
+        let mut app = crate::tests::test_app();
+        app.settings_open = true;
+        at_row(&mut app, |i| {
+            *i == crate::settings::Item::Tunnel(Row::Token)
+        });
+        app.settings_activate();
+        app.settings_input = Some("made-up-secret".into());
+        let value = value(&app);
+        let text: String = value.iter().map(|(t, _)| t.as_str()).collect();
+        assert!(!text.contains("made-up"), "{text}");
+        assert!(text.starts_with(&"•".repeat(14)), "{text}");
     }
 
     /// Each value type in its own ink, the wash a set value wears, and a bool

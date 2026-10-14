@@ -221,7 +221,6 @@ impl App {
             Mode::RenameTab => self.on_key_rename(key),
             Mode::SwitchTab => self.on_key_switch(key),
             Mode::AddAccount => self.on_key_add_account(key),
-            Mode::Connect => self.on_key_connect(key),
             Mode::Launch => self.on_key_launch(key),
             Mode::LaunchOptions => self.on_key_launch_options(key),
             Mode::RowMenu => self.on_key_menu(key),
@@ -386,7 +385,6 @@ impl App {
                 }
                 None => {}
             },
-            Mode::Connect => self.paste_connect(text),
             Mode::Search => {
                 if paste_into(&mut self.search, text, usize::MAX) {
                     self.search_edited();
@@ -438,10 +436,17 @@ impl App {
             // and guessing wrong would paste a cost floor into the filter that
             // finds rows.
             Mode::List if self.on_settings() => {
+                let cap = self.cf.max().unwrap_or(SETTING_MAX);
+                // A token has no inner whitespace, and a paste from a web
+                // page often brings a newline with it.
+                let text = match self.cf.masked() {
+                    true => text.chars().filter(|c| !c.is_whitespace()).collect(),
+                    false => text.to_string(),
+                };
                 if let Some(input) = &mut self.settings_input {
-                    paste_into(input, text, SETTING_MAX);
+                    paste_into(input, &text, cap);
                 } else {
-                    let pasted = paste_into(&mut self.settings_filter, text, SETTING_FILTER_MAX);
+                    let pasted = paste_into(&mut self.settings_filter, &text, SETTING_FILTER_MAX);
                     if pasted {
                         self.settings_after_filter();
                     }
@@ -618,7 +623,6 @@ impl App {
                 let flow = &self.add_account;
                 flow.pane.is_none() && flow.outcome.is_none() && !flow.named
             }
-            Mode::Connect => self.connect.as_ref().is_some_and(|c| c.typing()),
             Mode::List if self.on_settings() => {
                 self.settings_input.is_some() && !self.settings_capture
             }
@@ -821,7 +825,7 @@ impl App {
             KeyCode::Char('l') => self.start_serving(false),
             KeyCode::Char('t') => self.start_serving(true),
             KeyCode::Char('x') => self.stop_serving(),
-            KeyCode::Char('a') => self.open_connect(Mode::Serve),
+            KeyCode::Char('a') => self.open_tunnel_settings(),
             KeyCode::Char('r') => self.serve_on_new_links(),
             KeyCode::Char('e') => self.rename_dashboard_prompt(),
             // Only a tunnel's link is worth a code: the loopback one is the
@@ -949,14 +953,24 @@ impl App {
         if self.settings_capture {
             return self.settings_capture_key(key);
         }
+        // A tunnel row asking before it deletes something takes the next key
+        // as its answer, Esc included: `y` does it, anything else keeps it.
+        if self.cf.confirm.is_some() {
+            return self.tunnel_answer_key(key);
+        }
         // A value being typed is readline, not navigation: every key that is
         // not Enter or Esc belongs to the field.
+        let cap = self.cf.max().unwrap_or(SETTING_MAX);
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         if let Some(input) = &mut self.settings_input {
             match key.code {
-                KeyCode::Esc => self.settings_input = None,
+                KeyCode::Esc => self.settings_drop_input(),
                 KeyCode::Enter => self.settings_commit_input(),
+                // The link that makes a token with the right permissions,
+                // from the one field that wants a token.
+                KeyCode::Char('o') if ctrl && self.cf.masked() => self.copy_token_link(),
                 _ => {
-                    input.key(key, SETTING_MAX);
+                    input.key(key, cap);
                 }
             }
             return;
@@ -1055,6 +1069,7 @@ impl App {
     /// it.
     fn settings_click(&mut self, at: usize) {
         self.settings_capture = false;
+        self.cf.confirm = None;
         if self.settings_input.is_some() {
             self.settings_commit_input();
         }
@@ -1106,7 +1121,7 @@ impl App {
             return self.go_to_tab(self.tab);
         }
         self.settings_capture = false;
-        self.settings_input = None;
+        self.settings_drop_input();
         self.settings_typing = false;
         self.settings_open = true;
         // A page reached from a bar that has changed under it — a tab closed
@@ -2098,9 +2113,7 @@ impl App {
             }
             // A click beside the popup must not cancel a sign-in half done in
             // the browser; only its own Esc does.
-            // Nor one half way through connecting Cloudflare: a stray click
-            // would throw away a pasted token.
-            if matches!(self.mode, Mode::AddAccount | Mode::Connect) {
+            if self.mode == Mode::AddAccount {
                 return;
             }
             // The row menu answers a single click: unlike the launcher, every
