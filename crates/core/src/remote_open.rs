@@ -822,6 +822,12 @@ fn connect(
         ("Connection".to_string(), "Upgrade".to_string()),
         ("Sec-WebSocket-Key".to_string(), key.clone()),
         ("Sec-WebSocket-Version".to_string(), "13".to_string()),
+        // The far side's output compressed, when it can: a sibling older
+        // than that answers without the header, and nothing is.
+        (
+            "Sec-WebSocket-Extensions".to_string(),
+            crate::ws::DEFLATE.to_string(),
+        ),
         (
             crate::ws::RESUME_HEADER.to_string(),
             match resume {
@@ -883,6 +889,9 @@ fn connect(
         )));
     }
     let mut decoder = crate::ws::Decoder::default();
+    if header(&head, "sec-websocket-extensions").is_some_and(crate::ws::deflate_agreed) {
+        decoder = decoder.inflating();
+    }
     decoder.push(&got[end..]);
     Ok(Conn {
         up,
