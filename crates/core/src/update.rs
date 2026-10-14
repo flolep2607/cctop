@@ -239,16 +239,16 @@ const MIRROR_ASSETS: &str = "https://cctop-releases.ecorsiste.workers.dev/assets
 /// The ed25519 key release archives are signed with, as base64 of its 32 raw
 /// bytes; `tools/release-key.sh` makes the pair and prints this half.
 ///
-/// Empty until that has been run. While it is, nothing is verified and the
-/// mirror's archives are never installed (see [`fetch_archive`]); once it is
-/// set, the release workflow refuses to publish a release it cannot sign
+/// Empty, nothing would be verified and the mirror's archives would never be
+/// installed (see [`fetch_archive`]); set, as it has been since 2026-10-14,
+/// the release workflow refuses to publish a release it cannot sign
 /// with the matching private key, so no binary that carries a key is ever
 /// offered a release without a signature.
 ///
 /// ponytail: one key, no rotation. A new key would be refused by every
 /// binary that carries the old one, so replacing it means a release signed
 /// with the old key that carries the new one, then the swap.
-const RELEASE_PUBLIC_KEY: &str = "";
+const RELEASE_PUBLIC_KEY: &str = "2jAYv8fEMNScPRcA2tMDJKFADuDmvyW08dy2onhpHjQ=";
 
 /// [`RELEASE_PUBLIC_KEY`] decoded, or `None` while it is the placeholder.
 fn release_key() -> Option<Vec<u8>> {
