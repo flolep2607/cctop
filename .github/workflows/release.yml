@@ -288,6 +288,23 @@ jobs:
     if: "!cancelled() && !failure() && needs.prepare-release.outputs.release == 'true'"
     runs-on: ubuntu-24.04
     steps:
+      # This workflow's own commit, for the scripts — a dispatch for an old tag
+      # would not have them — with the tags, so the signing script can read
+      # the public key the released source carries.
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      # Before publishing, so a release is never public without its
+      # signatures. A failure here — no key for a source that expects one, or
+      # a key that does not match it — leaves the release a draft, which is
+      # the right place for a release none of its users could install.
+      - name: Sign the archives
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ needs.prepare-release.outputs.tag }}
+          RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
+        run: tools/sign-release.sh "$RELEASE_TAG"
       - name: Publish the draft release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -295,9 +312,10 @@ jobs:
           RELEASE_TAG: ${{ needs.prepare-release.outputs.tag }}
         run: gh release edit "$RELEASE_TAG" --draft=false
       # Here and not on `release: published`, which a release made public by
-      # this workflow's own token does not fire.
-      - uses: actions/checkout@v6
-      - name: Push the latest release to the updater's mirror
+      # this workflow's own token does not fire. Allowed to fail: the release
+      # is public and complete by now, and the mirror is only its fallback.
+      - name: Push the latest release and its files to the updater's mirror
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}

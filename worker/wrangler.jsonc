@@ -1,12 +1,23 @@
 // The updater's release mirror, and where cctop's anonymous usage reports land:
-// see src/index.js. Deploy with `npx wrangler deploy` from this directory;
+// see src/index.js.
+//
+// Deployed by Cloudflare Workers Builds on every push to main that it sees
+// (Git integration on this repository, root directory `worker/`, deploy
+// command `npx wrangler deploy`), so this file is the whole deploy: nothing is
+// passed on the command line, and nothing here is deployed by hand. Whatever a
+// binding below names must exist in the account before the change that adds
+// it merges, or that deploy fails — the R2 bucket is made once with
+// `npx wrangler r2 bucket create cctop-releases`.
+//
 // PUSH_TOKEN is a secret (`npx wrangler secret put PUSH_TOKEN`), the same value
-// as the repository's RELEASE_MIRROR_TOKEN.
+// as the repository's RELEASE_MIRROR_TOKEN. Secrets survive deploys.
 {
   "name": "cctop-releases",
   "main": "src/index.js",
   "compatibility_date": "2026-09-01",
   "workers_dev": true,
   "kv_namespaces": [{ "binding": "RELEASES", "id": "be62ae5005234a6b97d1cf36eba5857d" }],
+  // The release files, under <tag>/<name>; the Worker keeps the last few.
+  "r2_buckets": [{ "binding": "RELEASE_FILES", "bucket_name": "cctop-releases" }],
   "analytics_engine_datasets": [{ "binding": "TELEMETRY", "dataset": "cctop_telemetry" }]
 }

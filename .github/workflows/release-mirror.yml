@@ -1,6 +1,6 @@
 name: Release mirror
 
-# Keeps the updater's fallback copy of the latest release (worker/) in step with
+# Keeps the updater's fallback copy of the latest release and its files (worker/) in step with
 # GitHub when a release's notes are edited by hand, which is how a note that
 # landed badly gets fixed. A new release is pushed by release.yml itself.
 on:
