@@ -1,6 +1,7 @@
 import { memo, useEffect, useRef, useState } from "react";
 import { getJson } from "@/lib/api";
 import { withToken } from "@/lib/config";
+import { altEnter, isShiftEnter } from "@/lib/keys";
 
 // A session's terminal, drawn inside the page. rmux's terminal app is served
 // from this origin at /term/ precisely so it can be framed; a share link
@@ -77,6 +78,38 @@ export const TerminalFrame = memo(function TerminalFrame({ url, title, name, onB
       }
     }, 1500);
     return () => clearInterval(look);
+  }, [url]);
+  // Shift+Enter as a newline, not a submit — see `isShiftEnter`. Heard on the
+  // frame's window in the capture phase, so it is taken before xterm.js's own
+  // listener on its textarea sees it, and re-pressed there as Alt+Enter. Only
+  // a press xterm.js would have read: a key in the app's own dialogs is left
+  // alone. Re-wired on every load, as below.
+  useEffect(() => {
+    const frame = ref.current;
+    if (!frame) return;
+    const onKey = (e: KeyboardEvent) => {
+      // The frame's own realm: an `instanceof` against this window's classes
+      // is false for every element in it.
+      const win = frame.contentWindow as (Window & typeof globalThis) | null;
+      const target = e.target;
+      if (!win || !isShiftEnter(e) || !(target instanceof win.HTMLTextAreaElement)) return;
+      if (!target.classList.contains("xterm-helper-textarea")) return;
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      target.dispatchEvent(altEnter(win));
+    };
+    let wired: Window | null = null;
+    const wire = () => {
+      wired?.removeEventListener("keydown", onKey, true);
+      wired = frame.contentWindow;
+      wired?.addEventListener("keydown", onKey, true);
+    };
+    frame.addEventListener("load", wire);
+    wire();
+    return () => {
+      frame.removeEventListener("load", wire);
+      wired?.removeEventListener("keydown", onKey, true);
+    };
   }, [url]);
   useEffect(() => {
     const frame = ref.current;

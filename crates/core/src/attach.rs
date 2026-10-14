@@ -919,13 +919,13 @@ pub fn attach(pid: u32) -> Option<Attach> {
     // The shim announces the pty's size before anything else, so the parser can
     // be built to match. Bounded: a peer that never answers must not wedge the
     // UI thread that called this.
-    let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(2)));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
 
     let mut decoder = frame::Decoder::default();
     let mut buf = [0u8; 8192];
     let mut early = Vec::new();
     let size = loop {
-        let n = stream.read(&mut buf).ok()?;
+        let n = read_by(&mut stream, &mut buf, deadline)?;
         if n == 0 {
             return None;
         }
@@ -957,10 +957,16 @@ pub fn attach(pid: u32) -> Option<Attach> {
     let mut reader = stream.try_clone().ok()?;
     std::thread::spawn(move || {
         let mut buf = [0u8; 8192];
-        while let Ok(n) = reader.read(&mut buf) {
-            if n == 0 {
-                break;
-            }
+        loop {
+            // A signal is not a hangup: taking one for it would freeze a live
+            // pane on whatever it last drew. Without a timeout an `SA_RESTART`
+            // handler never gets here, but not every handler is one.
+            let n = match reader.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => n,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(_) => break,
+            };
             decoder.push(&buf[..n]);
             let mut pending = collector
                 .lock()
@@ -993,6 +999,37 @@ fn connect(pid: u32) -> Option<std::os::unix::net::UnixStream> {
     let mut stream = std::os::unix::net::UnixStream::connect(path).ok()?;
     stream.write_all(crate::shim::ATTACH_MAGIC).ok()?;
     Some(stream)
+}
+
+/// One read of the handshake, given up on at `deadline`.
+///
+/// A signal is retried rather than taken as the shim's answer. With a receive
+/// timeout set, Linux never restarts a socket read after a signal, whatever
+/// `SA_RESTART` says (see signal(7)), so any handler in this process — the
+/// SIGCHLD of an agent that exits as it starts, which is exactly the one whose
+/// pane must open to say why, or a window resize — failed the attach, and with
+/// it the launch: "started but its terminal could not be opened". The timeout
+/// is re-armed with what is left, so a stream of signals cannot stretch the
+/// wait past the deadline either.
+fn read_by(
+    stream: &mut std::os::unix::net::UnixStream,
+    buf: &mut [u8],
+    deadline: std::time::Instant,
+) -> Option<usize> {
+    use std::io::Read;
+    loop {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        // `set_read_timeout` refuses a zero rather than reading it as "now".
+        if left.is_zero() {
+            return None;
+        }
+        stream.set_read_timeout(Some(left)).ok()?;
+        match stream.read(buf) {
+            Ok(n) => return Some(n),
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => return None,
+        }
+    }
 }
 
 /// `cctop attach [pid]` — put an agent on *this* terminal, with no cctop in the
@@ -1328,6 +1365,75 @@ fn csi_tilde(number: u8, mods: KeyModifiers) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
+
+    /// The flaky launch: a signal landing in the handshake read failed the
+    /// attach, and the tab with it. Linux does not restart a socket read that
+    /// has a timeout, even for a handler installed with `SA_RESTART` — which is
+    /// what this one is, so it is the kernel's rule being tested and not a
+    /// careless handler.
+    #[test]
+    fn a_signal_during_the_handshake_is_not_the_shims_answer() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static HITS: AtomicUsize = AtomicUsize::new(0);
+        extern "C" fn count(_: libc::c_int) {
+            HITS.fetch_add(1, Ordering::SeqCst);
+        }
+        // SIGURG because nothing else here sends it, and with no handler it is
+        // ignored, so installing one changes nothing for any other test.
+        // SAFETY: a handler that only touches an atomic is async-signal-safe,
+        // and the struct is zeroed before the fields that matter are set.
+        unsafe {
+            let mut action: libc::sigaction = std::mem::zeroed();
+            action.sa_sigaction = count as extern "C" fn(libc::c_int) as usize;
+            action.sa_flags = libc::SA_RESTART;
+            libc::sigemptyset(&mut action.sa_mask);
+            assert_eq!(
+                libc::sigaction(libc::SIGURG, &action, std::ptr::null_mut()),
+                0
+            );
+        }
+
+        let (mut shim, mut ours) = std::os::unix::net::UnixStream::pair().expect("pair");
+        let (tx, rx) = std::sync::mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            // SAFETY: both only name the calling thread.
+            let _ = tx.send(unsafe { (libc::pthread_self(), libc::gettid()) });
+            let mut buf = [0u8; 16];
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            read_by(&mut ours, &mut buf, deadline).map(|n| buf[..n].to_vec())
+        });
+        let (thread, tid) = rx.recv().expect("the reader's id");
+        let blocked = || {
+            std::fs::read_to_string(format!("/proc/self/task/{tid}/stat"))
+                .is_ok_and(|stat| stat.rsplit(") ").next().is_some_and(|s| s.starts_with('S')))
+        };
+        // Each signal is sent only once the reader is asleep in the read, so it
+        // interrupts the read and not the setup around it. A reader that gave
+        // up has failed already, and the join says so.
+        for sent in 1..=3 {
+            crate::test_wait::eventually_true("the reader to block", || {
+                reader.is_finished() || blocked()
+            });
+            if reader.is_finished() {
+                break;
+            }
+            // SAFETY: `thread` is not joined until below, so it still names
+            // this reader even if it has just returned.
+            let _ = unsafe { libc::pthread_kill(thread, libc::SIGURG) };
+            crate::test_wait::eventually_true("the signal to land", || {
+                HITS.load(Ordering::SeqCst) >= sent || reader.is_finished()
+            });
+        }
+        // Unchecked: to a reader that already gave up this is a broken pipe,
+        // and the join below is what says what went wrong.
+        let _ = std::io::Write::write_all(&mut shim, b"size");
+
+        assert_eq!(
+            reader.join().expect("reader").as_deref(),
+            Some(&b"size"[..]),
+            "a signal ended the handshake"
+        );
+    }
 
     /// An agent is told only what it asked for. Reporting more than that is how
     /// a click becomes stray text in somebody's prompt: a press-only agent reads

@@ -570,10 +570,35 @@ const KEEPALIVE: std::time::Duration = std::time::Duration::from_secs(30);
 /// The most of a refusal the bridge will read before giving up on the rest.
 const MAX_HEAD: usize = 64 * 1024;
 
+/// How long the bridge keeps trying to get back to a sibling it lost.
+///
+/// A connection through Cloudflare's edge does not last for ever: the edge
+/// restarts, cloudflared moves to another of its connections, a laptop's
+/// network changes. Each of those ends the socket without a word, and the
+/// bridge used to read that as the far side closing and take the tab with it
+/// — "the tab closes itself after a while". The session over there lives in
+/// its rmux and does not notice, so getting back is a fresh open, which
+/// reattaches. Long enough to ride out a tunnel reconnecting; short enough
+/// that a machine that is really gone is said to be within a couple of
+/// minutes.
+const RECONNECT_FOR: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// How the bridge's socket ended.
+#[derive(Debug, PartialEq)]
+enum End {
+    /// The far side closed it on purpose, or this terminal went away: the
+    /// tab's work is over. `Some` carries a reason the far side gave for a
+    /// close that was not a plain ending.
+    Closed(Option<String>),
+    /// It went away without a close: the network, not either end, decided.
+    Dropped(String),
+}
+
 /// `cctop mux reach MACHINE PROVIDER ID`: the tab's end of a sibling's
 /// terminal. Finds the sibling, opens `/api/term/<provider>/<id>` there,
 /// signed as this machine, and pumps this terminal through it until either
-/// side closes.
+/// side closes — reconnecting, for up to [`RECONNECT_FOR`], when the
+/// connection is dropped instead.
 pub fn bridge(args: &[String]) -> Result<(), String> {
     let [machine, provider, id] = args else {
         return Err("usage: cctop mux reach MACHINE PROVIDER SESSION-ID".into());
@@ -585,9 +610,20 @@ pub fn bridge(args: &[String]) -> Result<(), String> {
     terminal(
         machine,
         &format!("/api/term/{provider}/{id}"),
-        "to open its sessions on another machine",
-        "open the row again",
+        Old {
+            too_old: "to open its sessions on another machine",
+            again: "open the row again",
+        },
+        true,
     )
+}
+
+/// How to finish the sentence for a sibling that does not know the route:
+/// what it is too old to do, and what to do once it is updated.
+#[derive(Clone, Copy)]
+struct Old {
+    too_old: &'static str,
+    again: &'static str,
 }
 
 /// `cctop mux launch MACHINE AGENT DIR [--model M] [--permissions P]`: the
@@ -605,21 +641,91 @@ pub fn bridge_new(args: &[String]) -> Result<(), String> {
     }
     let spec = NewAgent::from_args(rest)?;
     eprint!("Reaching {machine} to start {}…\r\n", spec.agent);
+    // Not reconnected: opening the route again would start a second agent.
     terminal(
         machine,
         &spec.route(),
-        "to start agents for another machine",
-        "start it again",
+        Old {
+            too_old: "to start agents for another machine",
+            again: "start it again",
+        },
+        false,
     )
 }
 
 /// Open a terminal socket at `path` on the sibling `machine`, signed as this
-/// machine, and pump this terminal through it until either side closes.
+/// machine, and pump this terminal through it until either side closes —
+/// reconnecting a dropped connection when `reconnect`, which is only for a
+/// route that is safe to open twice.
 ///
-/// `too_old` and `again` finish the sentence for a sibling that does not
-/// know the route: what it is too old to do, and what to do once updated.
-fn terminal(machine: &str, path: &str, too_old: &str, again: &str) -> Result<(), String> {
+// ponytail: a new agent's tab is not reconnected. Its route starts an agent,
+// so a second open would start a second one; the agent itself lives on in the
+// sibling's rmux, and once it has written a transcript its row's `R` gets back
+// to it.
+fn terminal(machine: &str, path: &str, old: Old, reconnect: bool) -> Result<(), String> {
     let peer = crate::peer::lookup(machine)?;
+    let (mut up, mut decoder, mut size) = connect(&peer, machine, path, old)?;
+    loop {
+        let why = match pump(&mut up, &mut decoder, size)? {
+            End::Closed(None) => return Ok(()),
+            End::Closed(Some(why)) => return Err(format!("{machine} closed the terminal: {why}")),
+            End::Dropped(why) if !reconnect => {
+                return Err(format!(
+                    "lost {machine}: {why}. The agent goes on running there — \
+                     its row's R gets back to it once it has a session"
+                ));
+            }
+            End::Dropped(why) => why,
+        };
+        eprint!("\r\n\x1b[0m[lost {machine}: {why} — reconnecting]\r\n");
+        let since = std::time::Instant::now();
+        let mut wait = std::time::Duration::from_secs(1);
+        (up, decoder, size) = loop {
+            std::thread::sleep(wait);
+            match connect(&peer, machine, path, old) {
+                Ok(again) => break again,
+                // A refusal is the far side's answer — the session has gone,
+                // or this machine is no longer let in — and asking again
+                // will not change it.
+                Err(Failed::Refused(why)) => return Err(why),
+                Err(Failed::Unreached(why)) if since.elapsed() >= RECONNECT_FOR => {
+                    return Err(format!(
+                        "lost {machine} and could not reach it again for {}s: {why}",
+                        RECONNECT_FOR.as_secs()
+                    ));
+                }
+                Err(Failed::Unreached(_)) => {
+                    wait = (wait * 2).min(std::time::Duration::from_secs(10))
+                }
+            }
+        };
+    }
+}
+
+/// Why an open did not become a terminal.
+enum Failed {
+    /// The sibling answered, and the answer was no.
+    Refused(String),
+    /// The sibling was not reached, or stopped answering partway.
+    Unreached(String),
+}
+
+impl From<Failed> for String {
+    fn from(failed: Failed) -> String {
+        match failed {
+            Failed::Refused(why) | Failed::Unreached(why) => why,
+        }
+    }
+}
+
+/// Open the sibling's terminal at `path`, sized to this one, and hand back
+/// the socket with whatever arrived behind the handshake's answer.
+fn connect(
+    peer: &crate::peer::Peer,
+    machine: &str,
+    path: &str,
+    old: Old,
+) -> Result<(crate::peer::Upstream, crate::ws::Decoder, (u16, u16)), Failed> {
     let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
     let key = crate::ws::new_key();
     let headers = [
@@ -628,7 +734,9 @@ fn terminal(machine: &str, path: &str, too_old: &str, again: &str) -> Result<(),
         ("Sec-WebSocket-Key".to_string(), key.clone()),
         ("Sec-WebSocket-Version".to_string(), "13".to_string()),
     ];
-    let mut up = peer.socket(path, &format!("cols={cols}&rows={rows}"), &headers)?;
+    let mut up = peer
+        .socket(path, &format!("cols={cols}&rows={rows}"), &headers)
+        .map_err(Failed::Unreached)?;
 
     let mut got = Vec::new();
     let end = loop {
@@ -638,9 +746,11 @@ fn terminal(machine: &str, path: &str, too_old: &str, again: &str) -> Result<(),
         if got.len() > MAX_HEAD
             || !up
                 .read_ready(&mut got)
-                .map_err(|e| format!("{machine} hung up: {e}"))?
+                .map_err(|e| Failed::Unreached(format!("{machine} hung up: {e}")))?
         {
-            return Err(format!("{machine} hung up before it answered"));
+            return Err(Failed::Unreached(format!(
+                "{machine} hung up before it answered"
+            )));
         }
     };
     let head = String::from_utf8_lossy(&got[..end]).into_owned();
@@ -656,22 +766,47 @@ fn terminal(machine: &str, path: &str, too_old: &str, again: &str) -> Result<(),
             .unwrap_or(0)
             .min(MAX_HEAD);
         while body.len() < wanted && up.read_ready(&mut body).unwrap_or(false) {}
-        return Err(refusal(
+        let why = refusal(
             machine,
             status,
             &String::from_utf8_lossy(&body),
-            too_old,
-            again,
-        ));
+            old.too_old,
+            old.again,
+        );
+        // The edge's own pages — a 502 while the tunnel is down, a 530 while
+        // its connector is away — are Cloudflare saying the sibling is not
+        // there right now, not the sibling saying no.
+        return Err(match status {
+            502..=504 | 520..=530 => Failed::Unreached(why),
+            _ => Failed::Refused(why),
+        });
     }
     if header(&head, "sec-websocket-accept") != Some(crate::ws::accept_key(&key).as_str()) {
-        return Err(format!(
+        return Err(Failed::Refused(format!(
             "{machine} answered with something that is not a terminal"
-        ));
+        )));
     }
     let mut decoder = crate::ws::Decoder::default();
     decoder.push(&got[end..]);
-    pump(&mut up, &mut decoder, (cols, rows))
+    Ok((up, decoder, (cols, rows)))
+}
+
+/// What a close frame's payload says about why: nothing for a plain ending
+/// (no code, or 1000), the reason — or the code, when it gave none — for
+/// anything else.
+fn close_reason(payload: &[u8]) -> Option<String> {
+    let [hi, lo, reason @ ..] = payload else {
+        return None;
+    };
+    let code = u16::from_be_bytes([*hi, *lo]);
+    if code == 1000 {
+        return None;
+    }
+    let reason = String::from_utf8_lossy(reason).trim().to_string();
+    Some(match reason.is_empty() {
+        true => format!("close code {code}"),
+        false => reason,
+    })
 }
 
 /// A header's value out of a response head, by name.
@@ -709,11 +844,20 @@ impl Drop for Raw {
     }
 }
 
+/// How long the sibling may say nothing — not even the answer to a
+/// keepalive — before the connection is taken for dead.
+///
+/// A socket whose far end vanished without a FIN, which is how a dropped
+/// network ends one, stays open here for as long as the kernel cares to
+/// retry: the tab would sit frozen rather than close. Two keepalives
+/// unanswered and some slack is a connection that is not coming back.
+const SILENCE: std::time::Duration = std::time::Duration::from_secs(75);
+
 fn pump(
     up: &mut crate::peer::Upstream,
     decoder: &mut crate::ws::Decoder,
     mut size: (u16, u16),
-) -> Result<(), String> {
+) -> Result<End, String> {
     use crate::ws::{Op, frame};
     use std::io::{Read, Write};
     use std::os::fd::AsRawFd;
@@ -723,18 +867,29 @@ fn pump(
     let mut stdin = std::io::stdin();
     let mut stdout = std::io::stdout();
     let mut said = std::time::Instant::now();
+    let mut heard = std::time::Instant::now();
     let mut buf = [0u8; 16 * 1024];
     let mut incoming = Vec::new();
-    // Anything that arrived with the handshake's answer.
+    let dropped = |e: std::io::Error| End::Dropped(e.to_string());
+    // Every frame decoded so far; `Some` once one of them ends the socket.
     let mut deliver = |decoder: &mut crate::ws::Decoder,
                        up: &mut crate::peer::Upstream|
-     -> Result<bool, String> {
-        while let Some((op, payload)) = decoder.frame()? {
+     -> Result<Option<End>, String> {
+        loop {
+            let (op, payload) = match decoder.frame() {
+                Ok(Some(next)) => next,
+                Ok(None) => break,
+                // A stream that no longer parses is a connection gone wrong
+                // in transit; a fresh one starts clean.
+                Err(why) => return Ok(Some(End::Dropped(why))),
+            };
             match op {
-                Op::Close => return Ok(false),
-                Op::Ping => up
-                    .write_all(&frame(Op::Pong, &payload, true))
-                    .map_err(|e| e.to_string())?,
+                Op::Close => return Ok(Some(End::Closed(close_reason(&payload)))),
+                Op::Ping => {
+                    if let Err(e) = up.write_all(&frame(Op::Pong, &payload, true)) {
+                        return Ok(Some(dropped(e)));
+                    }
+                }
                 Op::Pong => {}
                 Op::Text | Op::Binary | Op::Other(_) => {
                     stdout.write_all(&payload).map_err(|e| e.to_string())?;
@@ -742,10 +897,11 @@ fn pump(
             }
         }
         stdout.flush().map_err(|e| e.to_string())?;
-        Ok(true)
+        Ok(None)
     };
-    if !deliver(decoder, up)? {
-        return Ok(());
+    // Anything that arrived with the handshake's answer.
+    if let Some(end) = deliver(decoder, up)? {
+        return Ok(end);
     }
     loop {
         let mut fds = [
@@ -775,36 +931,56 @@ fn pump(
         {
             size = now;
             let resize = crate::ws::resize_message(now.0, now.1);
-            up.write_all(&frame(Op::Text, resize.as_bytes(), true))
-                .map_err(|e| e.to_string())?;
+            if let Err(e) = up.write_all(&frame(Op::Text, resize.as_bytes(), true)) {
+                return Ok(dropped(e));
+            }
             said = std::time::Instant::now();
         }
         if said.elapsed() >= KEEPALIVE {
-            up.write_all(&frame(Op::Ping, b"", true))
-                .map_err(|e| e.to_string())?;
+            if let Err(e) = up.write_all(&frame(Op::Ping, b"", true)) {
+                return Ok(dropped(e));
+            }
             said = std::time::Instant::now();
+        }
+        if heard.elapsed() >= SILENCE {
+            return Ok(End::Dropped(format!(
+                "no answer for {}s",
+                SILENCE.as_secs()
+            )));
         }
         if fds[0].revents != 0 {
             match stdin.read(&mut buf) {
                 Ok(n) if n > 0 => {
-                    up.write_all(&frame(Op::Binary, &buf[..n], true))
-                        .map_err(|e| e.to_string())?;
+                    if let Err(e) = up.write_all(&frame(Op::Binary, &buf[..n], true)) {
+                        return Ok(dropped(e));
+                    }
                     said = std::time::Instant::now();
                 }
                 // This terminal went away: the far side's attach is detached
                 // by the socket closing, and the agent there carries on.
                 _ => {
                     let _ = up.write_all(&frame(Op::Close, b"", true));
-                    return Ok(());
+                    return Ok(End::Closed(None));
                 }
             }
         }
         if fds[1].revents != 0 {
             incoming.clear();
-            let open = up.read_ready(&mut incoming).map_err(|e| e.to_string())?;
+            let open = match up.read_ready(&mut incoming) {
+                Ok(open) => open,
+                Err(e) => return Ok(dropped(e)),
+            };
+            if !incoming.is_empty() {
+                heard = std::time::Instant::now();
+            }
             decoder.push(&incoming);
-            if !deliver(decoder, up)? || !open {
-                return Ok(());
+            if let Some(end) = deliver(decoder, up)? {
+                return Ok(end);
+            }
+            // The socket ended with no close frame: nobody said goodbye, so
+            // nobody meant it.
+            if !open {
+                return Ok(End::Dropped("the connection ended".into()));
             }
         }
     }
@@ -827,6 +1003,21 @@ mod tests {
             target: target.into(),
             command: command.into(),
         }
+    }
+
+    /// A close with no code, or 1000, is the terminal ending and closes the
+    /// tab quietly; any other code is a reason the tab holds on screen.
+    #[test]
+    fn only_a_plain_close_ends_the_tab_without_a_word() {
+        assert_eq!(close_reason(b""), None);
+        assert_eq!(close_reason(&1000u16.to_be_bytes()), None);
+        let mut garbled = 1002u16.to_be_bytes().to_vec();
+        garbled.extend(b"frame too large");
+        assert_eq!(close_reason(&garbled).as_deref(), Some("frame too large"));
+        assert_eq!(
+            close_reason(&1011u16.to_be_bytes()).as_deref(),
+            Some("close code 1011")
+        );
     }
 
     #[test]
