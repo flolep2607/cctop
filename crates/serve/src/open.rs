@@ -124,9 +124,13 @@ fn open_or_resume(stream: &mut TcpStream, request: &Request, argv: impl FnOnce()
             .unwrap_or(default)
     };
     let size = (size("cols", 80), size("rows", 24));
+    // Compressed when the tab offers it, on this socket alone: a resume
+    // agrees afresh, and the ring keeps what the pty said, uncompressed.
+    let deflate = ws::accept_deflate(request.header("sec-websocket-extensions"));
     let resume = request.header(ws::RESUME_HEADER).trim();
     if resume.is_empty() || resume == ws::RESUME_NEW {
-        return terminal(stream, request, key, &argv(), size, !resume.is_empty());
+        let resumable = !resume.is_empty();
+        return terminal(stream, request, key, &argv(), size, resumable, deflate);
     }
     let Some((token, offset)) = resume
         .split_once(' ')
@@ -150,8 +154,8 @@ fn open_or_resume(stream: &mut TcpStream, request: &Request, argv: impl FnOnce()
     };
     // The tab may have been resized while it was away.
     cctop_core::shim::set_pty_size(&term.master, size.0, size.1);
-    if upgrade(stream, key, term.token()).is_ok() {
-        run(term, stream, &missed);
+    if upgrade(stream, key, term.token(), deflate.as_ref()).is_ok() {
+        run(term, stream, &missed, deflate.map(|(_, d)| d));
     }
 }
 
@@ -164,6 +168,7 @@ fn terminal(
     argv: &[String],
     size: (u16, u16),
     resumable: bool,
+    deflate: Option<(String, ws::Deflater)>,
 ) {
     // A server started by systemd has no TERM, and an attach with none draws
     // nothing a terminal can read.
@@ -178,20 +183,30 @@ fn terminal(
         }
     };
     let term = resume::Term::new(child, master, resumable.then_some(request.path.as_str()));
-    if upgrade(stream, key, term.token()).is_ok() {
-        run(term, stream, &[]);
+    if upgrade(stream, key, term.token(), deflate.as_ref()).is_ok() {
+        run(term, stream, &[], deflate.map(|(_, d)| d));
     }
 }
 
-/// Answer the handshake, with the token to resume by when there is one.
-fn upgrade(stream: &mut TcpStream, key: &str, token: Option<&str>) -> std::io::Result<()> {
+/// Answer the handshake, with the token to resume by when there is one, and
+/// the compression agreed to when there is any.
+fn upgrade(
+    stream: &mut TcpStream,
+    key: &str,
+    token: Option<&str>,
+    deflate: Option<&(String, ws::Deflater)>,
+) -> std::io::Result<()> {
     let resume = match token {
         Some(token) => format!("{}: {token}\r\n", ws::RESUME_HEADER),
         None => String::new(),
     };
+    let deflate = match deflate {
+        Some((answer, _)) => format!("Sec-WebSocket-Extensions: {answer}\r\n"),
+        None => String::new(),
+    };
     let accept = format!(
         "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\
-         Sec-WebSocket-Accept: {}\r\n{resume}\r\n",
+         Sec-WebSocket-Accept: {}\r\n{resume}{deflate}\r\n",
         ws::accept_key(key)
     );
     stream.write_all(accept.as_bytes())
@@ -200,7 +215,13 @@ fn upgrade(stream: &mut TcpStream, key: &str, token: Option<&str>) -> std::io::R
 /// Pump `term` through `stream` — `missed` first, what the tab has not seen —
 /// and when the socket drops, park it for the tab to come back to. Returns
 /// once the terminal is over, or another connection has it.
-fn run(mut term: resume::Term, stream: &mut TcpStream, missed: &[u8]) {
+fn run(
+    mut term: resume::Term,
+    stream: &mut TcpStream,
+    missed: &[u8],
+    deflate: Option<ws::Deflater>,
+) {
+    let mut out = Output(deflate);
     // A terminal sits quiet for minutes; the request deadlines would cut it.
     let _ = stream.set_read_timeout(None);
     // But a write that makes no progress is a socket nobody is reading, and a
@@ -208,9 +229,9 @@ fn run(mut term: resume::Term, stream: &mut TcpStream, missed: &[u8]) {
     let _ = stream.set_write_timeout(Some(WRITE_TIMEOUT));
     let sent = missed
         .chunks(16 * 1024)
-        .try_for_each(|chunk| stream.write_all(&frame(Op::Binary, chunk, false)));
+        .try_for_each(|chunk| stream.write_all(&out.frame(chunk)));
     let pumped = match sent {
-        Ok(()) => pump(stream, &mut term),
+        Ok(()) => pump(stream, &mut term, &mut out),
         Err(_) => Pumped::Dropped,
     };
     match pumped {
@@ -221,6 +242,28 @@ fn run(mut term: resume::Term, stream: &mut TcpStream, missed: &[u8]) {
             let _ = reply.send(term);
         }
         Pumped::Dropped => resume::park(term, resume::GRACE),
+    }
+}
+
+/// How a terminal's output is framed for one socket: compressed when the tab
+/// agreed to it.
+struct Output(Option<ws::Deflater>);
+
+impl Output {
+    fn frame(&mut self, bytes: &[u8]) -> Vec<u8> {
+        match &mut self.0 {
+            Some(deflater) => deflater.binary(bytes),
+            None => frame(Op::Binary, bytes, false),
+        }
+    }
+
+    /// The decoder for what the tab sends: it may compress too, once
+    /// deflate is agreed, though a cctop tab never does.
+    fn decoder(&self) -> ws::Decoder {
+        match self.0 {
+            Some(_) => ws::Decoder::default().inflating(),
+            None => ws::Decoder::default(),
+        }
     }
 }
 
@@ -322,8 +365,8 @@ enum Pumped {
 
 /// Pump the pty and the socket into each other until either closes, the
 /// socket drops, or a resume claims the terminal.
-fn pump(stream: &mut TcpStream, term: &mut resume::Term) -> Pumped {
-    let mut decoder = ws::Decoder::default();
+fn pump(stream: &mut TcpStream, term: &mut resume::Term, out: &mut Output) -> Pumped {
+    let mut decoder = out.decoder();
     let mut buf = [0u8; 16 * 1024];
     loop {
         let mut fds = [
@@ -408,10 +451,7 @@ fn pump(stream: &mut TcpStream, term: &mut resume::Term) -> Pumped {
                     // Kept before it is sent, so a socket that fails partway
                     // through the frame loses nothing a resume cannot replay.
                     term.ring.push(&buf[..n]);
-                    if stream
-                        .write_all(&frame(Op::Binary, &buf[..n], false))
-                        .is_err()
-                    {
+                    if stream.write_all(&out.frame(&buf[..n])).is_err() {
                         return Pumped::Dropped;
                     }
                 }
@@ -709,21 +749,37 @@ mod tests {
         /// Output bytes handed over, which a resume asks the rest from.
         received: u64,
         screen: Vec<u8>,
+        /// Bytes off the socket after the head: what crossed the wire.
+        wire: u64,
+        /// Whether the server agreed to compress.
+        deflated: bool,
     }
 
     /// Open `path` (resuming with `resume` when given), and the answer's head
     /// when it is not an upgrade.
     fn tab(port: u16, path: &str, resume: &str) -> Result<Tab, String> {
+        tab_offering(port, path, resume, "")
+    }
+
+    /// [`tab`], offering `extensions` as a tab's handshake does — or none,
+    /// as an older tab's did, when empty.
+    fn tab_offering(port: u16, path: &str, resume: &str, extensions: &str) -> Result<Tab, String> {
         use cctop_core::ws;
         let peer =
             cctop_core::peer::Peer::fixed("box", &format!("http://127.0.0.1:{port}"), SECRET);
-        let headers = [
+        let mut headers = vec![
             ("Upgrade".to_string(), "websocket".to_string()),
             ("Connection".to_string(), "Upgrade".to_string()),
             ("Sec-WebSocket-Key".to_string(), ws::new_key()),
             ("Sec-WebSocket-Version".to_string(), "13".to_string()),
             (ws::RESUME_HEADER.to_string(), resume.to_string()),
         ];
+        if !extensions.is_empty() {
+            headers.push((
+                "Sec-WebSocket-Extensions".to_string(),
+                extensions.to_string(),
+            ));
+        }
         let mut up = peer
             .socket(path, "cols=100&rows=30", &headers)
             .expect("socket");
@@ -747,7 +803,15 @@ mod tests {
             k.eq_ignore_ascii_case(ws::RESUME_HEADER)
                 .then(|| v.trim().to_string())
         });
+        let deflated = head.lines().any(|line| {
+            line.split_once(':').is_some_and(|(k, v)| {
+                k.eq_ignore_ascii_case("sec-websocket-extensions") && ws::deflate_agreed(v)
+            })
+        });
         let mut decoder = ws::Decoder::default();
+        if deflated {
+            decoder = decoder.inflating();
+        }
         decoder.push(&got[end..]);
         Ok(Tab {
             up,
@@ -755,6 +819,8 @@ mod tests {
             token,
             received: 0,
             screen: Vec::new(),
+            wire: (got.len() - end) as u64,
+            deflated,
         })
     }
 
@@ -774,6 +840,7 @@ mod tests {
                 }
                 let mut more = Vec::new();
                 let open = self.up.read_ready(&mut more).unwrap();
+                self.wire += more.len() as u64;
                 assert!(
                     open || !more.is_empty(),
                     "closed: {}",
@@ -815,7 +882,10 @@ mod tests {
     fn a_dropped_tab_resumes_where_it_left_off_on_the_same_terminal() {
         use cctop_core::ws::RESUME_NEW;
         let (port, _s) = serving(&["count"], 2);
-        let mut first = tab(port, "/api/term/claude/count", RESUME_NEW).expect("open");
+        let deflate = cctop_core::ws::DEFLATE;
+        let mut first =
+            tab_offering(port, "/api/term/claude/count", RESUME_NEW, deflate).expect("open");
+        assert!(first.deflated);
         first.until("line 5\r\n");
         // Dropped mid-stream: the frames behind the one read are thrown away
         // with the socket, as a network that went away throws them.
@@ -823,7 +893,8 @@ mod tests {
         let before = std::mem::take(&mut first.screen);
         let received = first.received;
         drop(first);
-        let mut back = tab(port, "/api/term/claude/count", &resume).expect("resumed");
+        let mut back =
+            tab_offering(port, "/api/term/claude/count", &resume, deflate).expect("resumed");
         back.received = received;
         back.until("line 599\r\n");
         let mut whole = before;
@@ -895,6 +966,39 @@ mod tests {
         let mut fresh = tab(port, "/api/term/claude/flood", RESUME_NEW).expect("reopened");
         fresh.until("flooded");
         fresh.close();
+    }
+
+    /// A tab that offers deflate is sent its output compressed — the same
+    /// bytes on its screen for a fraction on the wire — and one that offers
+    /// nothing, as every tab before this did, is sent it as it always was.
+    #[test]
+    fn output_is_compressed_for_a_tab_that_offers_it_and_only_then() {
+        use cctop_core::ws::{DEFLATE, RESUME_NEW};
+        let (port, _s) = serving(&["flood"], 2);
+        let mut new =
+            tab_offering(port, "/api/term/claude/flood", RESUME_NEW, DEFLATE).expect("open");
+        assert!(new.deflated);
+        new.until("flooded");
+        assert!(
+            new.wire * 20 < new.received,
+            "{} on the wire for {}",
+            new.wire,
+            new.received
+        );
+        new.send(b"hi\r");
+        new.until("got hi");
+        new.close();
+
+        let mut old = tab(port, "/api/term/claude/flood", "").expect("open");
+        assert!(!old.deflated);
+        old.until("flooded");
+        assert!(
+            old.wire > old.received,
+            "{} on the wire for {}",
+            old.wire,
+            old.received
+        );
+        old.close();
     }
 
     /// A new agent's tab resumes like any other — and a resume never starts

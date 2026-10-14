@@ -19,8 +19,32 @@
 //! kind of message it continues, and a resize split in two would reach the
 //! pty as keystrokes.
 //!
-//! ponytail: no extensions. Neither end offers `permessage-deflate`, so no
-//! frame here is ever compressed.
+//! Terminal output is compressed when both ends agree: `permessage-deflate`
+//! (RFC 7692), negotiated in the handshake — see [`accept_deflate`]. A peer
+//! older than this offers or accepts nothing, and every frame stays as it was.
+//!
+//! With context takeover — the deflate window carried from one message to the
+//! next — rather than without. A terminal's messages are one `read` of a pty
+//! each, often a few hundred bytes, and what makes them compress is what they
+//! share with the ones before: the same escape sequences, the same status
+//! line redrawn every tenth of a second, a screen repainted with what it
+//! already held. Each alone has little to find in itself. Measured on Claude
+//! Code's screen, the window is most of the saving: its working spinner,
+//! repainted three hundred times, goes over the wire at 4% of its size with
+//! the window and 36% without (the pull request that brought this in has the
+//! rest). It costs no memory that a fresh window would not: the compressor
+//! and decompressor are held for the connection either way, a few hundred
+//! kilobytes per open terminal.
+//!
+//! Only the server compresses. What a tab sends is keystrokes and resizes, a
+//! few bytes each, which deflate would make no smaller; RFC 7692 lets either
+//! end leave any message uncompressed, so the tab never sets the bit, and the
+//! server still reads one that does.
+//!
+//! What a compressed message decompresses to is held to the same
+//! [`MAX_MESSAGE`] as any other, counted while it is inflated, so a few
+//! kilobytes that would inflate to gigabytes are refused at the cap rather
+//! than after.
 
 /// The GUID RFC 6455 fixes for the handshake's accept key.
 const GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
@@ -88,8 +112,14 @@ fn random<const N: usize>() -> [u8; N] {
 /// One frame, finished. A client must mask what it sends and a server must
 /// not, so the side is the caller's to say.
 pub fn frame(op: Op, payload: &[u8], from_client: bool) -> Vec<u8> {
+    frame_with(0, op, payload, from_client)
+}
+
+/// [`frame`] with the RSV bits in `rsv` set: RSV1 (0x40) marks a compressed
+/// message.
+fn frame_with(rsv: u8, op: Op, payload: &[u8], from_client: bool) -> Vec<u8> {
     let mut out = Vec::with_capacity(payload.len() + 14);
-    out.push(0x80 | op.code());
+    out.push(0x80 | rsv | op.code());
     let mask_bit = if from_client { 0x80 } else { 0 };
     match payload.len() {
         n if n < 126 => out.push(mask_bit | n as u8),
@@ -126,19 +156,164 @@ const MAX_CONTROL: u64 = 125;
 /// The continuation opcode: more of the message a non-final frame began.
 const CONTINUATION: u8 = 0x0;
 
+/// The extension's name, and what a tab offers in `Sec-WebSocket-Extensions`.
+pub const DEFLATE: &str = "permessage-deflate";
+
+/// RSV1: the frame begins a compressed message.
+const RSV1: u8 = 0x40;
+
+/// The four bytes a sync flush ends with, which RFC 7692 has the sender drop
+/// and the receiver put back.
+const FLUSH_TAIL: [u8; 4] = [0, 0, 0xff, 0xff];
+
+/// Below this, a message goes uncompressed: deflate's own framing would eat
+/// what it saved on a keystroke's echo.
+const DEFLATE_FROM: usize = 32;
+
+/// The server's answer to a tab's `Sec-WebSocket-Extensions`, when one of its
+/// offers is a `permessage-deflate` this end can honour: the header value to
+/// answer with, and the compressor to send with.
+///
+/// Every parameter RFC 7692 defines is understood. One this end cannot honour
+/// declines that offer rather than the connection — a smaller server window
+/// than deflate's 32 KiB, which miniz cannot make — and an unknown or
+/// repeated parameter is not an offer at all.
+pub fn accept_deflate(offers: &str) -> Option<(String, Deflater)> {
+    offers.split(',').find_map(|offer| {
+        let mut parts = offer.split(';').map(str::trim);
+        if !parts.next()?.eq_ignore_ascii_case(DEFLATE) {
+            return None;
+        }
+        let mut answer = DEFLATE.to_string();
+        let mut reset = false;
+        let mut seen = Vec::new();
+        for param in parts {
+            let (name, value) = match param.split_once('=') {
+                Some((n, v)) => (n.trim(), Some(v.trim().trim_matches('"'))),
+                None => (param, None),
+            };
+            let name = name.to_ascii_lowercase();
+            if seen.contains(&name) {
+                return None;
+            }
+            match (name.as_str(), value) {
+                ("server_no_context_takeover", None) => {
+                    reset = true;
+                    answer.push_str("; server_no_context_takeover");
+                }
+                // The tab's window is the tab's to keep or not: the server
+                // inflates with the largest either way.
+                ("client_no_context_takeover", None) => {}
+                ("server_max_window_bits", Some("15")) => {
+                    answer.push_str("; server_max_window_bits=15");
+                }
+                ("client_max_window_bits", None) => {}
+                ("client_max_window_bits", Some(bits))
+                    if bits.parse::<u8>().is_ok_and(|b| (8..=15).contains(&b)) => {}
+                _ => return None,
+            }
+            seen.push(name);
+        }
+        Some((answer, Deflater::new(reset)))
+    })
+}
+
+/// Whether a server's `Sec-WebSocket-Extensions` answer agreed to deflate,
+/// so its messages may arrive compressed.
+pub fn deflate_agreed(answer: &str) -> bool {
+    answer.split(',').any(|ext| {
+        ext.split(';')
+            .next()
+            .is_some_and(|name| name.trim().eq_ignore_ascii_case(DEFLATE))
+    })
+}
+
+/// The sending half of `permessage-deflate`: one deflate stream across the
+/// connection's messages, or a fresh one for each when the tab asked for
+/// `server_no_context_takeover`.
+pub struct Deflater {
+    stream: flate2::Compress,
+    reset: bool,
+}
+
+impl Deflater {
+    fn new(reset: bool) -> Deflater {
+        Deflater {
+            stream: flate2::Compress::new(flate2::Compression::default(), false),
+            reset,
+        }
+    }
+
+    /// A server's binary frame of `payload`, compressed when that is worth it.
+    pub fn binary(&mut self, payload: &[u8]) -> Vec<u8> {
+        if payload.len() < DEFLATE_FROM {
+            return frame(Op::Binary, payload, false);
+        }
+        match self.compress(payload) {
+            Some(packed) => frame_with(RSV1, Op::Binary, &packed, false),
+            None => frame(Op::Binary, payload, false),
+        }
+    }
+
+    /// `payload` deflated and sync-flushed, without the flush's tail. `None`
+    /// when deflate failed, which leaves the stream unusable: it is reset,
+    /// and the message goes uncompressed, which RFC 7692 allows any message.
+    fn compress(&mut self, payload: &[u8]) -> Option<Vec<u8>> {
+        let mut out = Vec::with_capacity(payload.len() / 2 + 64);
+        let start = self.stream.total_in();
+        loop {
+            let used = (self.stream.total_in() - start) as usize;
+            if out.capacity() - out.len() < 64 {
+                out.reserve(out.capacity().max(1024));
+            }
+            let ok = self
+                .stream
+                .compress_vec(&payload[used..], &mut out, flate2::FlushCompress::Sync)
+                .is_ok();
+            if !ok {
+                self.stream.reset();
+                return None;
+            }
+            // All of it taken, and room to spare: the flush is complete.
+            let used = (self.stream.total_in() - start) as usize;
+            if used == payload.len() && out.len() < out.capacity() {
+                break;
+            }
+        }
+        if self.reset {
+            self.stream.reset();
+        }
+        if !out.ends_with(&FLUSH_TAIL) {
+            self.stream.reset();
+            return None;
+        }
+        out.truncate(out.len() - FLUSH_TAIL.len());
+        Some(out)
+    }
+}
+
 /// Messages out of a byte stream that arrives in whatever pieces the socket
 /// hands over.
 #[derive(Default)]
 pub struct Decoder {
     buf: Vec<u8>,
-    /// A message begun by a frame without FIN: its kind, and what has arrived
-    /// of it so far.
-    partial: Option<(Op, Vec<u8>)>,
+    /// A message begun by a frame without FIN: its kind, whether it is
+    /// compressed, and what has arrived of it so far.
+    partial: Option<(Op, bool, Vec<u8>)>,
+    /// The connection's inflate stream, once deflate is agreed. A message
+    /// marked compressed without it is a protocol error.
+    inflate: Option<flate2::Decompress>,
 }
 
 impl Decoder {
     pub fn push(&mut self, bytes: &[u8]) {
         self.buf.extend_from_slice(bytes);
+    }
+
+    /// Read compressed messages from here on: deflate was agreed.
+    pub fn inflating(mut self) -> Decoder {
+        self.inflate = Some(flate2::Decompress::new(false));
+        self
     }
 
     /// The next whole message, unmasked and reassembled from its fragments,
@@ -151,49 +326,110 @@ impl Decoder {
     /// nothing to continue, or a new message started inside another.
     pub fn frame(&mut self) -> Result<Option<(Op, Vec<u8>)>, String> {
         loop {
-            let Some((fin, code, payload)) = self.next_frame()? else {
+            let Some((flags, code, payload)) = self.next_frame()? else {
                 return Ok(None);
             };
+            let (fin, rsv) = (flags & 0x80 != 0, flags & 0x70);
             let op = Op::from_code(code);
+            // RSV1 only on the first frame of a data message, and only once
+            // deflate is agreed; no extension here gives RSV2 or RSV3 a
+            // meaning.
+            let compressed = rsv & RSV1 != 0;
+            if rsv & !RSV1 != 0
+                || (compressed && (code & 0x8 != 0 || code == CONTINUATION))
+                || (compressed && self.inflate.is_none())
+            {
+                return Err("a frame with reserved bits nobody agreed to".into());
+            }
             if code & 0x8 != 0 {
                 if !fin {
                     return Err("a control frame cannot be fragmented".into());
                 }
                 return Ok(Some((op, payload)));
             }
-            match (code, self.partial.take()) {
+            let whole = match (code, self.partial.take()) {
                 (CONTINUATION, None) => {
                     return Err("a continuation frame with nothing to continue".into());
                 }
-                (CONTINUATION, Some((op, mut so_far))) => {
+                (CONTINUATION, Some((op, compressed, mut so_far))) => {
                     so_far.extend_from_slice(&payload);
                     match fin {
-                        true => return Ok(Some((op, so_far))),
-                        false => self.partial = Some((op, so_far)),
+                        true => (op, compressed, so_far),
+                        false => {
+                            self.partial = Some((op, compressed, so_far));
+                            continue;
+                        }
                     }
                 }
                 (_, Some(_)) => {
                     return Err("a new message began before the last one ended".into());
                 }
-                (_, None) if fin => return Ok(Some((op, payload))),
-                (_, None) => self.partial = Some((op, payload)),
+                (_, None) if fin => (op, compressed, payload),
+                (_, None) => {
+                    self.partial = Some((op, compressed, payload));
+                    continue;
+                }
+            };
+            return match whole {
+                (op, true, packed) => Ok(Some((op, self.inflate(packed)?))),
+                (op, false, payload) => Ok(Some((op, payload))),
+            };
+        }
+    }
+
+    /// A compressed message's payload, inflated — refused once it passes
+    /// [`MAX_MESSAGE`], before the rest of it is inflated.
+    fn inflate(&mut self, mut packed: Vec<u8>) -> Result<Vec<u8>, String> {
+        let stream = self
+            .inflate
+            .as_mut()
+            .ok_or("a compressed message nobody agreed to")?;
+        packed.extend_from_slice(&FLUSH_TAIL);
+        let cap = MAX_MESSAGE as usize;
+        let mut out = Vec::with_capacity((packed.len() * 4).min(cap));
+        let start = stream.total_in();
+        loop {
+            let used = (stream.total_in() - start) as usize;
+            if out.len() == out.capacity() {
+                if out.len() > cap {
+                    return Err(format!("a message inflating past {cap} bytes"));
+                }
+                // One past the cap, so a message that reaches it is seen to.
+                out.reserve((out.capacity().max(1024)).min(cap + 1 - out.len()));
+            }
+            let before = (stream.total_in(), stream.total_out());
+            stream
+                .decompress_vec(&packed[used..], &mut out, flate2::FlushDecompress::Sync)
+                .map_err(|e| format!("a compressed message that does not inflate: {e}"))?;
+            if out.len() > cap {
+                return Err(format!("a message inflating past {cap} bytes"));
+            }
+            let used = (stream.total_in() - start) as usize;
+            let stuck = (stream.total_in(), stream.total_out()) == before;
+            // All of it taken, and the output not cut short by room — or
+            // nothing more coming out of nothing more going in.
+            if used == packed.len() && (out.len() < out.capacity() || stuck) {
+                return Ok(out);
+            }
+            if stuck {
+                return Err("a compressed message that does not inflate".into());
             }
         }
     }
 
-    /// One frame off the front of the buffer — its FIN bit, opcode and
-    /// unmasked payload — or `None` until all of it has arrived.
+    /// One frame off the front of the buffer — its FIN and RSV bits, opcode
+    /// and unmasked payload — or `None` until all of it has arrived.
     ///
     /// The size is checked against what the frame may still add, before its
     /// payload is waited for: a data frame against what is left of
     /// [`MAX_MESSAGE`] after the fragments already held, a control frame
     /// against [`MAX_CONTROL`].
-    fn next_frame(&mut self) -> Result<Option<(bool, u8, Vec<u8>)>, String> {
+    fn next_frame(&mut self) -> Result<Option<(u8, u8, Vec<u8>)>, String> {
         let b = &self.buf;
         if b.len() < 2 {
             return Ok(None);
         }
-        let fin = b[0] & 0x80 != 0;
+        let b0 = b[0];
         let code = b[0] & 0x0F;
         let masked = b[1] & 0x80 != 0;
         let (len, mut at) = match b[1] & 0x7F {
@@ -206,7 +442,7 @@ impl Decoder {
             126 | 127 => return Ok(None),
             n => (n as u64, 2),
         };
-        let held = self.partial.as_ref().map_or(0, |(_, p)| p.len() as u64);
+        let held = self.partial.as_ref().map_or(0, |(_, _, p)| p.len() as u64);
         if code & 0x8 != 0 && len > MAX_CONTROL {
             return Err(format!("a {len}-byte control frame is not a WebSocket's"));
         }
@@ -233,7 +469,7 @@ impl Decoder {
             }
         }
         self.buf.drain(..end);
-        Ok(Some((fin, code, payload)))
+        Ok(Some((b0 & 0xF0, code, payload)))
     }
 }
 
@@ -420,6 +656,154 @@ mod tests {
         assert!(d.frame().is_err());
     }
 
+    /// RFC 7692 section 7.2.3's own frames: "Hello" compressed, then again
+    /// with the window kept, which the second one leans on.
+    #[test]
+    fn the_rfcs_compressed_hellos_inflate() {
+        let mut d = Decoder::default().inflating();
+        d.push(&[0xc1, 0x07, 0xf2, 0x48, 0xcd, 0xc9, 0xc9, 0x07, 0x00]);
+        assert_eq!(d.frame().unwrap(), Some((Op::Text, b"Hello".to_vec())));
+        d.push(&[0xc1, 0x05, 0xf2, 0x00, 0x11, 0x00, 0x00]);
+        assert_eq!(d.frame().unwrap(), Some((Op::Text, b"Hello".to_vec())));
+        // The same, split across a non-final frame and its continuation:
+        // RSV1 is on the first, never the continuation.
+        let mut d = Decoder::default().inflating();
+        d.push(&[
+            0x41, 0x03, 0xf2, 0x48, 0xcd, 0x80, 0x04, 0xc9, 0xc9, 0x07, 0x00,
+        ]);
+        assert_eq!(d.frame().unwrap(), Some((Op::Text, b"Hello".to_vec())));
+    }
+
+    /// What the server deflates, the tab inflates, message after message on
+    /// one window — or a fresh one each, when that was asked for — and
+    /// however the bytes arrive. A keystroke's echo goes uncompressed.
+    #[test]
+    fn deflated_messages_round_trip_with_and_without_the_window() {
+        let screen: Vec<Vec<u8>> = (0..40)
+            .map(|i| {
+                format!("\x1b[{i};1H\x1b[38;5;153m line {i}: the same old status\x1b[39m\x1b[K")
+                    .into_bytes()
+            })
+            .collect();
+        for offer in [DEFLATE, "permessage-deflate; server_no_context_takeover"] {
+            let (_, mut deflater) = accept_deflate(offer).expect("accepted");
+            let mut wire = Vec::new();
+            for message in &screen {
+                wire.extend(deflater.binary(message));
+            }
+            wire.extend(deflater.binary(b"x"));
+            let mut d = Decoder::default().inflating();
+            let mut got = Vec::new();
+            for chunk in wire.chunks(7) {
+                d.push(chunk);
+                while let Some((op, payload)) = d.frame().unwrap() {
+                    assert_eq!(op, Op::Binary);
+                    got.push(payload);
+                }
+            }
+            let mut want = screen.clone();
+            want.push(b"x".to_vec());
+            assert_eq!(got, want, "{offer}");
+        }
+        let (_, mut deflater) = accept_deflate(DEFLATE).unwrap();
+        assert_eq!(
+            deflater.binary(b"x")[0],
+            0x82,
+            "a keystroke is not compressed"
+        );
+        assert_eq!(deflater.binary(&screen[0])[0], 0xc2, "a line of screen is");
+    }
+
+    /// A compressed frame on a connection that agreed to none, RSV1 on a
+    /// control frame or a continuation, and RSV2 or RSV3 at all, are each a
+    /// protocol error.
+    #[test]
+    fn reserved_bits_nobody_agreed_to_are_refused() {
+        let refused = |wire: &[u8], inflating: bool| {
+            let mut d = Decoder::default();
+            if inflating {
+                d = d.inflating();
+            }
+            d.push(wire);
+            d.frame().is_err()
+        };
+        let hello = [0xc1, 0x07, 0xf2, 0x48, 0xcd, 0xc9, 0xc9, 0x07, 0x00];
+        assert!(refused(&hello, false));
+        assert!(!refused(&hello, true));
+        assert!(refused(&[0xc9, 0x00], true), "a compressed ping");
+        assert!(refused(&[0xa2, 0x00], true), "RSV2");
+        assert!(refused(&[0x92, 0x00], true), "RSV3");
+        assert!(
+            refused(&[[0x02, 0x01, b'a'], [0xc0, 0x01, b'b']].concat(), true),
+            "RSV1 on a continuation"
+        );
+    }
+
+    /// A few kilobytes that would inflate to more than a message may be are
+    /// refused as they pass the cap.
+    #[test]
+    fn a_compressed_message_is_capped_by_what_it_inflates_to() {
+        let zeros = vec![0u8; MAX_MESSAGE as usize + 1024];
+        let mut c = flate2::Compress::new(flate2::Compression::best(), false);
+        let mut packed = Vec::with_capacity(64 * 1024);
+        c.compress_vec(&zeros, &mut packed, flate2::FlushCompress::Sync)
+            .unwrap();
+        assert!(packed.len() < 64 * 1024, "{}", packed.len());
+        packed.truncate(packed.len() - FLUSH_TAIL.len());
+        let mut d = Decoder::default().inflating();
+        d.push(&frame_with(RSV1, Op::Binary, &packed, false));
+        let why = d.frame().unwrap_err();
+        assert!(why.contains("inflating past"), "{why}");
+        // Just under the cap is a message.
+        let under = vec![0u8; MAX_MESSAGE as usize];
+        let (_, mut deflater) = accept_deflate(DEFLATE).unwrap();
+        let mut d = Decoder::default().inflating();
+        d.push(&deflater.binary(&under));
+        assert_eq!(d.frame().unwrap().map(|(_, p)| p.len()), Some(under.len()));
+    }
+
+    /// The server takes the first offer it can honour, and says back only
+    /// what it agreed to; an offer it cannot honour is declined, not
+    /// misread.
+    #[test]
+    fn a_deflate_offer_is_taken_only_as_far_as_it_can_be_honoured() {
+        let answer = |offers: &str| accept_deflate(offers).map(|(a, _)| a);
+        assert_eq!(answer(DEFLATE).as_deref(), Some(DEFLATE));
+        assert_eq!(
+            answer("permessage-deflate; client_max_window_bits").as_deref(),
+            Some(DEFLATE)
+        );
+        assert_eq!(
+            answer("permessage-deflate; server_no_context_takeover; client_no_context_takeover")
+                .as_deref(),
+            Some("permessage-deflate; server_no_context_takeover")
+        );
+        assert_eq!(
+            answer("permessage-deflate; server_max_window_bits=15").as_deref(),
+            Some("permessage-deflate; server_max_window_bits=15")
+        );
+        // A smaller window than miniz makes: that offer declined, the next
+        // one taken.
+        assert_eq!(
+            answer("permessage-deflate; server_max_window_bits=10, permessage-deflate").as_deref(),
+            Some(DEFLATE)
+        );
+        for declined in [
+            "",
+            "x-webkit-deflate-frame",
+            "permessage-deflate; server_max_window_bits=10",
+            "permessage-deflate; client_max_window_bits=99",
+            "permessage-deflate; mystery",
+            "permessage-deflate; server_no_context_takeover; server_no_context_takeover",
+        ] {
+            assert_eq!(answer(declined), None, "{declined}");
+        }
+        assert!(deflate_agreed(
+            "permessage-deflate; server_no_context_takeover"
+        ));
+        assert!(!deflate_agreed(""));
+        assert!(!deflate_agreed("x-webkit-deflate-frame"));
+    }
     #[test]
     fn a_resize_reads_back_and_nonsense_does_not() {
         assert_eq!(
