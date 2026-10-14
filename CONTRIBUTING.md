@@ -272,24 +272,51 @@ A few things that are less obvious from the code:
 
 ## Releasing
 
-Bump the root version — `version` under `[workspace.package]` in the root
-`Cargo.toml`, which is the `cctop` binary's and becomes the tag — and push that
-commit, with `Cargo.lock`, to `main`. GitHub Actions derives the matching
-`v<version>` tag, creates the GitHub release, builds the Linux archives, and
-publishes to crates.io. **The version bump is the release** — there is no
-separate confirmation step, and `cargo publish` to crates.io cannot be undone.
-Do not create a release tag by hand for a normal version bump.
+A release is a merged pull request, and it is always the same one. On every
+push to `main`, `.github/workflows/release-plz.yml` runs
+[release-plz](https://release-plz.dev), which keeps one pull request open —
+labelled `release`, titled `chore: release`, on a `release-plz-…` branch —
+that bumps every crate main would release, with `Cargo.lock` to match. It is
+rebuilt from scratch whenever main moves, so it is always current and never
+needs rebasing.
+
+**Merging it is the release.** That changes the root version, and on a change
+of the root version on `main` `release.yml` derives the matching `v<version>`
+tag, creates the GitHub release, builds the Linux archives and publishes to
+crates.io. There is no separate confirmation step, and `cargo publish` to
+crates.io cannot be undone. Do not create a release tag by hand, and do not
+let release-plz create one: tagging, the GitHub release and publishing are
+release.yml's alone, and `release-plz.toml` switches them off in release-plz.
+
+Before merging:
+
+1. **Write the release's prose at the top of the description**, above the
+   first line (an invisible marker). One paragraph saying what the release is
+   for, in the user's terms — the theme, and why the digit that moved moved.
+   `release.yml` puts it above the generated list of merged pull requests, and
+   `cctop --update` shows it to everyone who updates. release-plz rewrites the
+   description whenever main moves, so write it last; left empty, the release
+   is the generated list alone.
+2. **Check CI is green on it.** It runs like on any pull request, because
+   release-plz opens it with a real account's token (below).
+3. **Make it a minor if it should be one.** release-plz bumps the root by a
+   patch. When behaviour changed in existing installs, set the root version
+   (`version` under `[workspace.package]` in the root `Cargo.toml`) to the next
+   minor on the release branch, run `cargo update --workspace` for the lock,
+   and push both. Do it last too: a commit by anyone but release-plz makes the
+   next run close that pull request and open a fresh one, without it.
+
+### What gets bumped
 
 The four internal crates, `cctop-tunnel`, `cctop-core`, `cctop-serve` and
 `cctop-ui`, each have their own `version` in `crates/*/Cargo.toml`. The root
 requires each with a caret on the compatible part of its version under
 `[workspace.dependencies]` — `"0.28"`, meaning at least 0.28.0 and below 0.29
 — so a published `cctop-ui` keeps building beside a newer `cctop-core` of the
-same minor. A release bumps one only if it changed since the last `v*` tag,
-which is any of:
+same minor. release-plz bumps one only if it differs from its copy on
+crates.io, which is any of:
 
-1. **its files changed** — anything under its directory besides its own
-   `version` line;
+1. **its files changed**;
 2. **its packaged manifest changed** without that — a `[workspace.dependencies]`
    entry it uses was bumped, its requirement on an internal crate moved, or a
    `[workspace.package]` field it inherits (`edition`, `rust-version`,
@@ -297,17 +324,21 @@ which is any of:
 3. **an internal crate it depends on takes a breaking bump**, because that
    moves its requirement. Whether a crate's public API broke is
    [`cargo-semver-checks`](https://github.com/obi1kenobi/cargo-semver-checks)'
-   answer, against the same crate at the tag; a crate that broke takes
-   0.28.x → 0.29.0, and its requirement moves to `"0.29"`.
+   answer, against the same crate as published; a crate that broke takes
+   0.28.x → 0.29.0, and its requirement moves to `"0.29"`. The release pull
+   request says which crates broke, and what the tool found.
+
+The root `cctop` is bumped whenever anything is: `release.yml` releases on a
+change of its version and nothing else, and an internal crate is only reachable
+through a `cctop` that requires it.
 
 So a change to `crates/ui` alone bumps `cctop-ui` and `cctop`, one to
 `crates/core` that keeps its API bumps `cctop-core` and `cctop`, one that
 breaks it bumps core to the next minor and `cctop-serve` and `cctop-ui` by a
 patch for the moved requirement, and one to the binary's own `src/` bumps
-`cctop` alone. A patch bump is the crate's `version` line and `Cargo.lock`; a
-breaking one is its requirement as well. `pub` in these crates exists for use
-between them rather than as a designed API, so expect a breaking bump more
-often than a library would take one.
+`cctop` alone. `pub` in these crates exists for use between them rather than as
+a designed API, so expect a breaking bump more often than a library would take
+one.
 
 The carets let `cargo install cctop` *without* `--locked` pick a newer
 compatible core than the one released with it. The published crate carries its
@@ -315,38 +346,45 @@ compatible core than the one released with it. The published crate carries its
 `cargo-semver-checks` covers the API; what is left is a behaviour change that
 kept the API, reaching someone who typed a bare `cargo install cctop`.
 
-`tools/bump.sh <version>` makes those edits for you — the root to the version
-given, every crate the rules name up one patch or one breaking step, the
-requirements and the lock with them — but it is optional, and a bump by hand
-is as good. It needs `cargo-semver-checks` at the version pinned at the end of
-`rust-toolchain.toml` (`cargo install cargo-semver-checks@<that> --locked`), or
-`CCTOP_BREAKING` set to the crates whose API broke, space-separated, empty for
-none. Either way:
-
-- **`verify / release-plan`** (`tools/release-plan.sh check`) fails a release
-  commit — one whose root version differs from the last tag's — naming each
-  crate that changed but kept its version, each one bumped with nothing
-  changed, each one whose API broke without a breaking bump, and each
-  requirement that is not the caret on its dependency's current version. On
-  any other commit it passes with a notice, since a feature branch changes
-  crates without bumping them, and does not run `cargo-semver-checks`. Run it
-  locally after committing.
 - **`cargo-semver-checks` moves with the toolchain.** It reads the rustdoc JSON
   the pinned Rust writes, and each release of it understands a range of Rust
   versions, so its version sits at the end of `rust-toolchain.toml`, beside
-  `channel`. A pull request that moves `channel` checks its release notes and
-  moves that line too when it has to.
+  `channel`, and `release-plz.yml` installs that one. A pull request that moves
+  `channel` checks its release notes and moves that line too when it has to.
 - **`publish-crate`** asks the crates.io index which crates are missing at
-  their current version and publishes only those, dependency order first; the
-  rest are skipped with a notice. A run that failed part-way can be re-run
-  as it is.
+  their current version (`tools/unpublished-crates.sh`) and publishes only
+  those, dependency order first; the rest are skipped with a notice. A run that
+  failed part-way can be re-run as it is.
+- **To see what release-plz would do** without opening anything, run
+  `release-plz update` in a scratch clone (it edits the manifests in place) and
+  `git diff` there. It needs `cargo-semver-checks` at the pinned version on
+  `PATH`.
 
-**Name the pull request after what the release contains.** The notes GitHub
-generates are one line per merged PR, and `cctop --update` prints those lines to
-everyone who updates — so the PR title is the release note, and `chore: release
-0.7.4` tells a user nothing. `CLAUDE.md` has the full rule and the shapes to
-avoid; the short version is to write the sentence you would want someone three
-versions behind to read.
+### The token release-plz opens the pull request with
+
+A pull request opened with a workflow's own `GITHUB_TOKEN` starts no workflow,
+so CI would never run on the release pull request. `release-plz.yml` therefore
+uses the repository secret **`RELEASE_PLZ_TOKEN`**, and fails, saying so, when
+it is missing. Either of:
+
+- a **fine-grained personal access token** of a maintainer, for this
+  repository only, with *Contents: read and write* and *Pull requests: read and
+  write* (and *Metadata: read*, which GitHub adds itself); or
+- a **GitHub App** installation token with the same two permissions, minted in
+  the workflow by `actions/create-github-app-token` — it does not expire with a
+  person's token, at the cost of an app to keep.
+
+`gh secret set RELEASE_PLZ_TOKEN` stores it. A fine-grained token expires; when
+release-plz.yml starts failing on a 401, that is the first thing to renew.
+
+### Name every other pull request after what it changes
+
+The notes GitHub generates are one line per merged PR, and `cctop --update`
+prints those lines to everyone who updates — so a PR title is a release note.
+`CLAUDE.md` has the full rule and the shapes to avoid; the short version is to
+write the sentence you would want someone three versions behind to read. The
+release pull request is the one exception, left out of the list by its
+`release` label (`.github/release.yml`): its prose goes in its description.
 
 Notes are fetched when someone updates rather than when the release is cut, so a
 note that landed badly is still worth fixing: edit the release body on GitHub and

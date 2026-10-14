@@ -1,0 +1,12 @@
+# How GitHub generates a release's notes: one line per merged pull request,
+# which `cctop --update` prints to everyone who updates.
+#
+# The release pull request that release-plz opens (labelled by `pr_labels` in
+# release-plz.toml) is left out. Its title is a template saying only that a
+# release happened, which is what every release note would otherwise end with;
+# what the release is *for* is the prose written into its description, which
+# release.yml puts above this list.
+changelog:
+  exclude:
+    labels:
+      - release

@@ -1,6 +1,7 @@
 name: Release
 
-# Changing the package version on main cuts a release. The workflow derives a
+# Changing the package version on main cuts a release — normally by merging the
+# release pull request release-plz.yml keeps open. The workflow derives a
 # `v<version>` tag from Cargo.toml, then builds the tagged commit, attaches the
 # archives and checksums to a draft release that it publishes only once they are
 # all there, and publishes the crates. Existing tags can still be
@@ -143,86 +144,73 @@ jobs:
     needs: prepare-release
     if: "!cancelled() && !failure() && needs.prepare-release.outputs.release == 'true'"
     runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      # To read the description of the release pull request this tag merged.
+      pull-requests: read
     steps:
       - uses: actions/checkout@v6
         with:
           ref: ${{ needs.prepare-release.outputs.tag }}
-          # The notes below are read out of a commit that this one merged, which
-          # a shallow checkout does not have.
-          fetch-depth: 0
       # Generated notes are one line per merged pull request: a fine index and a
-      # poor summary — and `cctop --update` prints these to whoever updates. The
-      # release commit already says why the digit moved, in prose, and that was
-      # being thrown away.
+      # poor summary — and `cctop --update` prints these to whoever updates. So
+      # a release opens with a paragraph of prose saying what it is for, written
+      # by a person into the release pull request's description, above the
+      # marker line that release-plz.toml's `pr_body` starts with.
+      #
+      # It used to be the body of the `chore: release <version>` commit. That
+      # commit is release-plz's now, with nothing under its title, and the pull
+      # request is where a person looks the release over anyway.
       - id: notes
-        name: Take the release commit's own prose as the notes
+        name: Take the release pull request's prose as the notes
         # Through the environment rather than interpolated into the script: a
         # `${{ }}` expression is pasted in as text before bash parses the line,
         # so a Cargo.toml version carrying shell syntax would be run rather than
         # read. As a variable it is only ever data.
         env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ needs.prepare-release.outputs.tag }}
+          # Spelled the same in release-plz.toml's `pr_body`.
+          MARKER: "<!-- The release notes are what is written above this line. -->"
         run: |
-          # The tag lands on a merge commit whose message is GitHub's, so the
-          # prose is in the `chore: release` commit underneath it. `--no-merges`
-          # matters: a merge commit repeats the branch's subject in its own body,
-          # so without it the newest match is the merge and the whole body is one
-          # line reading "chore: release X.Y.Z".
+          # Every failure below is a warning and no prose, never a failed step:
+          # the tag is pushed by the time this runs, so exiting non-zero would
+          # leave a tag with no release at all — worse than a release carrying
+          # only the generated list.
           #
-          # The version is in the pattern because a search for any release commit
-          # walks past a release whose commit was titled differently and happily
-          # publishes the previous version's prose: v0.14.0, titled "Release
-          # 0.14.0", shipped v0.13.0's notes to everyone who updated. Matching
-          # this version alone turns that into a thinner note rather than a wrong
-          # one. Both ends are anchored and the dots escaped, so 0.1.0 is not
-          # answered by 0.1.0-beta or 10.1.0.
-          version="${RELEASE_TAG#v}"
-          pattern="^chore: release $(printf '%s' "$version" | sed 's/[.]/\\./g')\$"
-          sha="$(git log --no-merges --format=%H --grep="$pattern" -n 1 HEAD || true)"
+          # The tag is on the merge commit of the release pull request, and
+          # GitHub knows which pull request a commit merged. The label tells the
+          # release pull request from any other that contains the commit.
+          sha=$(git rev-parse "$RELEASE_TAG^{commit}")
           body=""
-          if [ -n "$sha" ]; then
-            body="$(git log --format=%b -n 1 "$sha")"
-            # `%b` carries the commit's trailers, and every commit here has a
-            # `Co-Authored-By:` one — which was published as the first thing an
-            # updater reads. Git decides what the trailer block is: the last
-            # paragraph, when `--parse` finds trailers in it. It is asked about
-            # the whole message (`%B`), because git reads a message's first
-            # paragraph as its title and never as trailers — fed `%b` alone, a
-            # body that is nothing but `Co-Authored-By:` is that title, and
-            # 0.17.0 went out reading exactly that line. `--no-divider` because
-            # this is a commit and not a patch: a markdown `---` in the prose is
-            # not where the message ends.
-            #
-            # Within that block every `Token: value` line and its folded
-            # continuations go, not only a known list of attribution names;
-            # prose sharing the paragraph stays. ponytail: a closing paragraph
-            # that happens to read `Note: ...` is a trailer to git, and goes
-            # with them. A body with nothing left contributes nothing, and the
-            # release is the generated list alone.
-            if [ -n "$(git log --format=%B -n 1 "$sha" | git interpret-trailers --parse --no-divider)" ]; then
-              body="$(printf '%s\n' "$body" | awk '
-                { line[NR] = $0 }
-                END {
-                  last = NR
-                  while (last > 0 && line[last] ~ /^[[:space:]]*$/) last--
-                  start = last
-                  while (start > 1 && line[start - 1] !~ /^[[:space:]]*$/) start--
-                  for (i = start; i <= last; i++) {
-                    if (line[i] ~ /^[A-Za-z0-9-]+[[:space:]]*:/) cut = 1
-                    else if (line[i] !~ /^[[:space:]]/) cut = 0
-                    drop[i] = cut
-                  }
-                  for (i = 1; i <= last; i++) if (!drop[i]) kept[++n] = line[i]
-                  while (n > 0 && kept[n] ~ /^[[:space:]]*$/) n--
-                  for (i = 1; i <= n; i++) print kept[i]
-                }')"
-            fi
-            echo "notes from $(git log --format='%h %s' -n 1 "$sha")"
+          if ! prs=$(gh api "repos/$GH_REPO/commits/$sha/pulls"); then
+            echo "::warning::could not ask GitHub which pull request $sha merged; publishing the generated notes alone"
           else
-            # A warning, not a failure: the tag is pushed by the time this
-            # runs, so exiting non-zero would leave a tag with no release at
-            # all — worse than a release carrying only the generated list.
-            echo "::warning::no commit titled 'chore: release $version' found; publishing the generated notes alone"
+            number=$(jq -r '[.[] | select(any(.labels[]; .name == "release"))][0].number // empty' <<<"$prs")
+            if [ -z "$number" ]; then
+              echo "::warning::$sha merged no pull request labelled 'release'; publishing the generated notes alone"
+            else
+              # A description edited in the browser has CRLF line ends.
+              description=$(jq -r --argjson n "$number" '.[] | select(.number == $n) | .body // ""' <<<"$prs" | tr -d '\r')
+              # Only what is above the marker: below it is release-plz's table
+              # of versions, written for the reviewer and not for an updater. No
+              # marker at all means the description was replaced wholesale, and
+              # then nothing in it is known to be prose.
+              if grep -qxF -- "$MARKER" <<<"$description"; then
+                # Up to the marker, without the blank lines around the prose.
+                body=$(awk -v m="$MARKER" '$0 == m { exit } { line[++n] = $0 }
+                  END {
+                    first = 1
+                    while (first <= n && line[first] ~ /^[[:space:]]*$/) first++
+                    while (n >= first && line[n] ~ /^[[:space:]]*$/) n--
+                    for (i = first; i <= n; i++) print line[i]
+                  }' <<<"$description")
+                echo "notes from #$number"
+              else
+                echo "::warning::#$number has no release-notes marker in its description; publishing the generated notes alone"
+              fi
+            fi
           fi
           {
             echo "body<<CCTOP_RELEASE_NOTES"
@@ -344,7 +332,7 @@ jobs:
           # verification on this fresh runner.
           #
           # Each crate has its own version and a release bumps only the ones
-          # that changed (`verify / release-plan` checked that), so the rest
+          # that changed (release-plz decided which: release-plz.toml), so the rest
           # are already on crates.io at the version they have. Which ones is
           # decided here, from the index, before anything is published —
           # never by reading cargo's "already exists" — so that every real
@@ -358,7 +346,7 @@ jobs:
           # An assignment rather than `mapfile < <(...)`, whose exit status
           # bash drops: an index the script could not read must stop here,
           # not read as "nothing left to publish".
-          list=$(tools/release-plan.sh unpublished)
+          list=$(tools/unpublished-crates.sh)
           if [ -z "$list" ]; then
             echo "::notice::every crate is on crates.io at its version already; nothing to publish"
             exit 0

@@ -130,8 +130,9 @@ jobs:
   #
   # Crates a release leaves at a version crates.io already has are packaged
   # too: in a dry run cargo only warns "already exists on crates.io index" and
-  # carries on, so this stays one command. What proves those unchanged crates
-  # is `release-plan` below — unchanged since the tag means what crates.io has.
+  # carries on, so this stays one command. That those unchanged crates really
+  # are what crates.io has is release-plz's answer: it compared each with its
+  # published copy before leaving it alone (release-plz.toml).
   package:
     runs-on: ubuntu-24.04
     steps:
@@ -145,53 +146,6 @@ jobs:
           pr-comment: false
           runtime-dir: ${{ runner.temp }}/kache
       - run: cargo publish --dry-run --workspace
-
-  # Each internal crate has its own version, and a release bumps exactly the
-  # ones that changed since the last tag (the rules are in the script). On a
-  # commit that bumps the root — a release — this fails naming any crate that
-  # changed but kept its version, or was bumped with nothing changed. On any
-  # other commit it passes with a notice: a feature branch changes crates
-  # without bumping them, and that is the normal state of things.
-  #
-  # On a release commit it also runs cargo-semver-checks on each internal crate
-  # that changed, against the same crate at the tag, and fails one whose
-  # public API broke without a breaking bump: the internal requirements are
-  # carets, and that is the promise they rest on. Its version is pinned in
-  # rust-toolchain.toml, beside the toolchain whose rustdoc it reads, and read
-  # from there; a prebuilt binary, so installing it costs seconds on the
-  # commits that never run it.
-  #
-  # The full history, because the comparison is against the last `v*` tag and
-  # a shallow checkout has no tags.
-  release-plan:
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          ref: ${{ inputs.ref }}
-          fetch-depth: 0
-      - run: rustup toolchain install
-      # cargo-semver-checks builds each crate's rustdoc twice, the tag's and
-      # this commit's, and each build in a target directory of its own, so
-      # without a cache every dependency compiles twice per changed crate:
-      # about six minutes of CPU for three crates. kache keys by content, not by
-      # directory, so it compiles each dependency once here and restores it in
-      # the other builds, and its Actions cache carries that to the next
-      # release. On a commit that is not a release nothing is built.
-      - uses: kunobi-ninja/kache-action@v1
-        with:
-          cache-key-prefix: kache-release-plan
-          pr-comment: false
-          runtime-dir: ${{ runner.temp }}/kache
-      - id: semver-checks
-        run: echo "version=$(sed -n 's/^# cargo-semver-checks //p' rust-toolchain.toml)" >>"$GITHUB_OUTPUT"
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-semver-checks@${{ steps.semver-checks.outputs.version }}
-      - run: tools/release-plan.sh check
-      # The guard's own cases, in a scratch repository: cheap, and the guard is
-      # otherwise only exercised for real once per release.
-      - run: tools/release-plan.test.sh
 
   # The web UI's built page is committed (crates/serve/src/assets/app/index.html) so
   # that `cargo install` needs no Node. This rebuilds it from web/ and fails if
