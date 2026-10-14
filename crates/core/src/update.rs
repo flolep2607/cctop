@@ -399,6 +399,28 @@ fn selected<'a>(releases: &'a [Release], from: &str, to: &str) -> Vec<&'a Releas
     picked
 }
 
+/// `body` without its HTML comments.
+///
+/// GitHub's generated notes open with one — `<!-- Release notes generated
+/// using configuration in .github/release.yml at v0.36.3 -->` — which the
+/// release page hides and a terminal does not. While the notes were only the
+/// generated list it was the first line and harmless; with a paragraph written
+/// above it, it printed as a bullet of its own. An unclosed comment hides the
+/// rest, as it would on the page.
+fn without_comments(body: &str) -> String {
+    let mut out = String::with_capacity(body.len());
+    let mut rest = body;
+    while let Some(start) = rest.find("<!--") {
+        out.push_str(&rest[..start]);
+        rest = match rest[start..].find("-->") {
+            Some(end) => &rest[start + end + 3..],
+            None => "",
+        };
+    }
+    out.push_str(rest);
+    out
+}
+
 /// A release body reduced to lines worth printing in a terminal.
 ///
 /// GitHub's generated notes are markdown written for a web page: a `What's
@@ -408,6 +430,7 @@ fn selected<'a>(releases: &'a [Release], from: &str, to: &str) -> Vec<&'a Releas
 /// lines to say nothing. Prose bodies — a release that wrote its own notes —
 /// come through as their own paragraphs, since there is nothing to strip.
 fn bullets(body: &str) -> Vec<String> {
+    let body = without_comments(body);
     let mut items: Vec<String> = Vec::new();
     let mut current: Option<String> = None;
     for line in body.lines().map(str::trim) {
@@ -2536,6 +2559,21 @@ mod tests {
 
     /// A release with no notes at all must not be silently skipped — a version
     /// missing from the list reads as though the jump went around it.
+    /// The comment GitHub's generated notes open with is the page's, not the
+    /// reader's: under a written paragraph it printed as a bullet.
+    #[test]
+    fn the_generated_notes_comment_is_not_a_note() {
+        let body = "Remote tabs grow up.\n\n\
+             <!-- Release notes generated using configuration in .github/release.yml at v0.36.3 -->\n\n\
+             ## What's Changed\n\
+             * Remote tabs reconnect by @flolep2607 in https://github.com/flolep2607/cctop/pull/288\n";
+        assert_eq!(
+            bullets(body),
+            ["Remote tabs grow up.", "Remote tabs reconnect"]
+        );
+        assert_eq!(without_comments("a <!-- b\nc --> d <!-- e"), "a  d ");
+    }
+
     #[test]
     fn a_release_with_no_notes_is_still_a_release() {
         let empty = Release {
