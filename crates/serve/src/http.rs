@@ -490,6 +490,7 @@ fn reason(status: u16) -> &'static str {
         404 => "Not Found",
         405 => "Method Not Allowed",
         409 => "Conflict",
+        410 => "Gone",
         411 => "Length Required",
         413 => "Payload Too Large",
         431 => "Request Header Fields Too Large",

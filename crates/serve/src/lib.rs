@@ -104,6 +104,9 @@ mod quota;
 /// The session routes answered by asking another machine: an ssh host or a
 /// sibling serve.
 mod remote;
+/// A terminal of `open`'s kept for a while when its socket drops, so the tab
+/// can come back to it.
+mod resume;
 mod search;
 /// The account tunnel's share hostnames: rmux's app and the share socket,
 /// on a listener of their own that has no other route.

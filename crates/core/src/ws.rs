@@ -237,6 +237,31 @@ impl Decoder {
     }
 }
 
+/// The header a terminal's resume rides on, both ways.
+///
+/// Asked with [`RESUME_NEW`] on an open, it says the tab can come back; the
+/// server answers the upgrade with a token in it. A tab that lost its socket
+/// asks again with `<token> <offset>`, the offset being how many bytes of
+/// the terminal's output it has been handed, and is answered with the rest
+/// on the same pty — or `410 Gone` when that cannot be done. A cctop older
+/// than this neither sends nor reads it, and the terminal is opened afresh
+/// each time, as it always was. See the server's `resume` module.
+pub const RESUME_HEADER: &str = "Cctop-Resume";
+
+/// [`RESUME_HEADER`]'s value on an open that may be resumed later.
+pub const RESUME_NEW: &str = "new";
+
+/// The text frame a resumed tab sends to have the far program draw its
+/// screen again — after the tab wrote over it to say it was reconnecting.
+/// A server older than resume never sees it: only a resumed socket sends it.
+pub const REDRAW: &str = r#"{"redraw":true}"#;
+
+/// Whether a text frame is [`REDRAW`].
+pub fn is_redraw(text: &[u8]) -> bool {
+    serde_json::from_slice::<serde_json::Value>(text)
+        .is_ok_and(|v| v.get("redraw") == Some(&serde_json::Value::Bool(true)))
+}
+
 /// A resize, as the text frame carries it: `{"cols":N,"rows":M}`.
 pub fn resize_message(cols: u16, rows: u16) -> String {
     serde_json::json!({ "cols": cols, "rows": rows }).to_string()
@@ -409,5 +434,10 @@ mod tests {
         ] {
             assert_eq!(parse_resize(junk), None);
         }
+        // A redraw is not a resize, nor a resize a redraw.
+        assert_eq!(parse_resize(REDRAW.as_bytes()), None);
+        assert!(is_redraw(REDRAW.as_bytes()));
+        assert!(!is_redraw(resize_message(120, 40).as_bytes()));
+        assert!(!is_redraw(br#"{"redraw":1}"#));
     }
 }
