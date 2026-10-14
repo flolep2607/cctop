@@ -305,6 +305,21 @@ jobs:
           RELEASE_TAG: ${{ needs.prepare-release.outputs.tag }}
           RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
         run: tools/sign-release.sh "$RELEASE_TAG"
+      # GitHub's generated notes open with an HTML comment naming the config
+      # they came from. Invisible on the release page, but `cctop --update`
+      # prints the body as text, and a cctop older than its comment-stripping
+      # showed it as a bullet. Taken out before anyone can read it.
+      - name: Drop the generated-notes comment from the body
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ needs.prepare-release.outputs.tag }}
+        run: |
+          gh release view "$RELEASE_TAG" --json body --jq .body > body.md
+          if grep -q '^<!-- Release notes generated' body.md; then
+            grep -v '^<!-- Release notes generated.*-->$' body.md > clean.md
+            gh release edit "$RELEASE_TAG" --notes-file clean.md
+          fi
       - name: Publish the draft release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
