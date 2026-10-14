@@ -103,7 +103,7 @@ pub(super) enum Response {
     UpdateAvailable(String),
     Terminated {
         session_key: String,
-        result: Result<(), String>,
+        result: Result<cctop_core::proc::Stopped, String>,
     },
     Deleted {
         session_key: String,
