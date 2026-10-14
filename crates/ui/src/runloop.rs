@@ -639,8 +639,15 @@ fn event_loop(
                     session_key,
                     result,
                 }) => match result {
-                    Ok(()) => {
-                        app.set_status("Termination signal sent");
+                    Ok(stopped) => {
+                        app.set_status(match stopped {
+                            cctop_core::proc::Stopped::Signalled => {
+                                "Termination signal sent".to_string()
+                            }
+                            cctop_core::proc::Stopped::AlreadyExited => {
+                                format!("{session_key} had already exited")
+                            }
+                        });
                         let _ = req_tx.send(Request::Refresh);
                         refresh_in_flight = true;
                     }
