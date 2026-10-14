@@ -357,6 +357,20 @@ pub fn resume(session: &Session) -> Result<Done, Failed> {
 /// has to name a directory that exists — anywhere else the agent would launch
 /// into, the terminal's launcher already knows about.
 pub fn launch_agent(agent: &str, cwd: Option<&str>) -> Result<Done, Failed> {
+    launch_new(agent, cwd, &crate::launch_opts::Options::default())
+}
+
+/// [`launch_agent`], with a model and a permission setting — what a sibling's
+/// launcher asks for when it starts an agent here (`cctop mux new`).
+///
+/// The settings arrive as words and become flags only here, through
+/// [`launch_opts`](crate::launch_opts), which refuses any this agent does not
+/// take: the argv is this machine's to build, never the asker's.
+pub fn launch_new(
+    agent: &str,
+    cwd: Option<&str>,
+    options: &crate::launch_opts::Options,
+) -> Result<Done, Failed> {
     if !agents().iter().any(|known| known == agent) {
         return Err((
             400,
@@ -378,8 +392,10 @@ pub fn launch_agent(agent: &str, cwd: Option<&str>) -> Result<Done, Failed> {
         // this server happened to be launched.
         None => Some(crate::config::HOME.clone()),
     };
+    let flags = options.flags(agent).map_err(|why| (400, why))?;
+    let argv: Vec<String> = std::iter::once(agent.to_string()).chain(flags).collect();
     let name = crate::rmux::free_name(agent);
-    launch(&[agent.to_string()], &name, dir.as_deref())?;
+    launch(&argv, &name, dir.as_deref())?;
     Ok(Done {
         message: format!("Started {agent} — attach with `cctop mux attach {name}`"),
         rmux: Some(name),

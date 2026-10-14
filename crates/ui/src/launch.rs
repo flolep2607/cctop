@@ -156,17 +156,17 @@ impl App {
     /// is another machine, and an agent beside it is the likelier want — and
     /// one keystroke in the directory field puts it back here.
     ///
-    /// Only for an ssh `--host`, which `host:path` launches over; a sibling
-    /// on the Cloudflare account may have no ssh route at all, and is left to
-    /// open its sessions with `R`. Taken unchecked, as an offline host is,
-    /// and checked by the sandbox in the tab.
+    /// An ssh `--host` launches under `cctop sandbox` here; a sibling on the
+    /// Cloudflare account starts the agent itself, over its tunnel, with no
+    /// ssh route needed. Taken unchecked either way, as an offline host is,
+    /// and checked in the tab — by the sandbox, or by the sibling.
     fn selected_remote_project(&self) -> Option<location::RemoteTarget> {
         let session = self.selected_session()?;
         let host = &session.remote.as_ref()?.host;
-        match self.reach_of(host).ok()? {
-            cctop_core::reach::Reach::Ssh(_) => {}
-            cctop_core::reach::Reach::Peer(_) => return None,
-        }
+        let peer = match self.reach_of(host).ok()? {
+            cctop_core::reach::Reach::Ssh(_) => false,
+            cctop_core::reach::Reach::Peer(_) => true,
+        };
         let path = match session.label_source.trim() {
             "" => "~".to_string(),
             path => path.to_string(),
@@ -178,6 +178,7 @@ impl App {
             facts: None,
             problem: None,
             unchecked: Some("the selected row's project".to_string()),
+            peer,
         })
     }
 
@@ -1063,7 +1064,27 @@ impl App {
             self.launch_remote_choice(&choice, &target);
             return;
         }
-        let cwd = self.launch_cwd.clone();
+        let mut cwd = self.launch_cwd.clone();
+        // The harness's options, settled before anything is started: flags it
+        // does not take, or a worktree git will not make, stop the launch here
+        // with the reason rather than start it some other way.
+        let mut options_said = String::new();
+        if let tabs::Choice::Start(argv) = &choice {
+            let agent = location::agent_of(argv);
+            if let Err(why) = self.with_options(argv.clone()) {
+                self.set_status(why);
+                return;
+            }
+            options_said = self.options_for(&agent).options.summary();
+            match self.make_launch_worktree(&agent) {
+                Ok(Some(path)) => cwd = Some(path),
+                Ok(None) => {}
+                Err(why) => {
+                    self.set_status(format!("Could not add worktree: {why}"));
+                    return;
+                }
+            }
+        }
         // Read off the choice rather than the argv below, which by then carries
         // the `env VAR=value` prefix a profile is passed through.
         let starting = match &choice {
@@ -1092,7 +1113,11 @@ impl App {
             // rather than a derived one.
             tabs::Choice::Start(argv) => {
                 let own = tabs::Own::Mux(cctop_core::rmux::free_name(&tabs::label_of(argv)));
-                (self.with_profile(argv.clone()), own)
+                // Checked above, so the flags are there to be had.
+                let flagged = self
+                    .with_options(argv.clone())
+                    .unwrap_or_else(|_| argv.clone());
+                (self.with_profile(flagged), own)
             }
             tabs::Choice::Handoff(target) => {
                 let own = tabs::Own::Mux(cctop_core::rmux::free_name(&target.agent));
@@ -1156,7 +1181,11 @@ impl App {
         // `Pane::launch` names it from the argv it was given, and that argv now
         // ends in a paragraph — or, for a fork, in the uuid of the copy, which
         // is the half of a resume nobody reads.
-        if opening.is_some() {
+        if let tabs::Choice::Start(bare) = &choice {
+            // Named for the agent, not for its flags: `claude --model opus
+            // --permission-mode plan` is a tab bar's worth of plumbing.
+            pane.label = tabs::label_of(bare);
+        } else if opening.is_some() {
             pane.label = tabs::label_of(argv);
         } else if carrying_conversation {
             // The agent the copy was resumed in, which a conversion makes a
@@ -1228,7 +1257,11 @@ impl App {
                     ),
                     _ => "",
                 };
-                format!("Started {label}{where_}{carried}{kept}{trust}")
+                let with = match options_said.is_empty() {
+                    true => String::new(),
+                    false => format!(" ({options_said})"),
+                };
+                format!("Started {label}{with}{where_}{carried}{kept}{trust}")
             }
         });
     }

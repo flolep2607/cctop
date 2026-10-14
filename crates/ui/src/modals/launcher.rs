@@ -2,6 +2,152 @@
 
 use super::*;
 
+/// One harness's options, over the launcher it was opened from: a line per
+/// setting the harness takes, where it will start, and the command that
+/// Enter would run — the last so that what a setting *means* is never a
+/// guess.
+fn draw_launch_options(
+    frame: &mut Frame,
+    area: Rect,
+    app: &App,
+    layout: &mut super::render::Layout,
+) {
+    use super::harness_opts::OptRow;
+    const WIDTH: u16 = 62;
+    const NAME: usize = 13;
+    let Some(agent) = app.launch_agent_name() else {
+        return;
+    };
+    let entry = app.options_for(&agent);
+    let editing = app.launch_opt_edit;
+    let mut lines: Vec<Line> = Vec::new();
+    for (i, row) in app.option_rows().into_iter().enumerate() {
+        let selected = i == app.launch_opt_cursor;
+        let (name, value, loud, why_not) = match row {
+            OptRow::Model => (
+                "model",
+                entry
+                    .options
+                    .model
+                    .clone()
+                    .unwrap_or_else(|| "default".to_string()),
+                false,
+                None,
+            ),
+            OptRow::Account => (
+                "account",
+                app.launch_profile()
+                    .map(|p| p.name.clone())
+                    .unwrap_or_default(),
+                false,
+                None,
+            ),
+            OptRow::Permissions => (
+                "permissions",
+                entry.options.permissions.label().to_string(),
+                super::harness_opts::permission_is_loud(entry.options.permissions),
+                None,
+            ),
+            OptRow::Worktree => match (&entry.branch, app.launch_worktree_point()) {
+                (_, Err(why)) => ("worktree", "—".to_string(), false, Some(why)),
+                (Some(branch), Ok(_)) => ("worktree", format!("new branch {branch}"), false, None),
+                (None, Ok(_)) => ("worktree", "off".to_string(), false, None),
+            },
+        };
+        let mut spans = vec![
+            Span::styled(
+                match selected {
+                    true => " › ",
+                    false => "   ",
+                },
+                theme::dim(),
+            ),
+            Span::styled(
+                format!("{name:<NAME$}"),
+                Style::default().fg(theme::colors().label),
+            ),
+        ];
+        if selected && editing == Some(row) {
+            spans.extend(app.launch_opt_input.spans(
+                WIDTH as usize - NAME - 8,
+                theme::value(),
+                theme::value(),
+                "▏",
+            ));
+        } else {
+            let style = match (selected, loud, why_not.is_some()) {
+                (_, _, true) => Style::default().fg(theme::colors().dimmer),
+                (_, true, _) => Style::default().fg(theme::colors().cost_high),
+                (true, _, _) => theme::selected(),
+                (false, _, _) => theme::value(),
+            };
+            let shown = match (selected, why_not.is_none()) {
+                // The arrows only where they do something.
+                (true, true) => format!("‹ {value} ›"),
+                _ => value,
+            };
+            spans.push(Span::styled(shown, style));
+            if let Some(why) = why_not {
+                spans.push(Span::styled(format!("  {why}"), theme::dim()));
+            }
+        }
+        lines.push(Line::from(spans));
+    }
+    lines.push(Line::from(""));
+
+    // Where, as the launcher's own line says it.
+    let place = match &app.launch_remote {
+        Some(target) => target.spelled(),
+        None => app
+            .launch_cwd
+            .as_ref()
+            .map(|d| cctop_core::util::tildify(&d.to_string_lossy()))
+            .unwrap_or_else(|| "this directory".to_string()),
+    };
+    lines.push(Line::from(vec![
+        Span::styled(" in ", Style::default().fg(theme::colors().label)),
+        Span::styled(
+            cctop_core::util::truncate(&place, WIDTH as usize - 22),
+            theme::value(),
+        ),
+        Span::styled("  (c to change)", theme::dim()),
+    ]));
+    // What Enter would run, flags and all, or why it would not.
+    let command = match app.with_options(vec![agent.clone()]) {
+        Ok(argv) => {
+            let on = match &app.launch_remote {
+                Some(target) if target.peer => format!("on {}: ", target.host),
+                Some(target) => format!("sandboxed to {}: ", target.host),
+                None => String::new(),
+            };
+            (format!(" {on}{}", argv.join(" ")), theme::dim())
+        }
+        Err(why) => (
+            format!(" {why}"),
+            Style::default().fg(theme::colors().cost_mid),
+        ),
+    };
+    lines.push(Line::from(Span::styled(
+        cctop_core::util::truncate(&command.0, WIDTH as usize - 4),
+        command.1,
+    )));
+    let keys = match editing {
+        Some(_) => " Enter keep  Esc cancel  (empty = default)",
+        None => match app.option_row() {
+            Some(OptRow::Model | OptRow::Worktree) => {
+                " ↑/↓  ←/→ change  e type  Enter start  Esc back"
+            }
+            _ => " ↑/↓  ←/→ change  Enter start  Esc back",
+        },
+    };
+    lines.push(Line::from(Span::styled(keys, theme::dim())));
+    let title = format!("{agent} options");
+    let (outer, _) = modal(frame, area, &title, lines, WIDTH);
+    layout.modal_rect = Some(outer);
+    layout.launch_rows = Vec::new();
+    layout.launch_cwd_rows = Vec::new();
+}
+
 /// The launcher: what to put in the tab, and where it will run.
 pub(crate) fn draw_launch(
     frame: &mut Frame,
@@ -17,6 +163,10 @@ pub(crate) fn draw_launch(
     const STATE: usize = 12;
     /// The lines held below the list: where it will run, and the keys.
     const FOOTER: usize = 2;
+
+    if app.mode == super::Mode::LaunchOptions {
+        return draw_launch_options(frame, area, app, layout);
+    }
 
     let choices = app.launch_choices();
     let waiting = choices
@@ -103,6 +253,11 @@ pub(crate) fn draw_launch(
         // other row; the full sentence is under the list when it is picked.
         let blocked = app.launch_blocked(choice);
         let at = match (choice, choice.cwd().is_some()) {
+            // A sibling starts agents and nothing else; what it will not
+            // start is what ssh is for.
+            _ if blocked.is_some() && app.launch_remote.as_ref().is_some_and(|t| t.peer) => {
+                "needs ssh".to_string()
+            }
             _ if blocked.is_some() => {
                 match app.launch_remote.as_ref().and_then(|t| t.problem.as_ref()) {
                     Some(_) if matches!(choice, tabs::Choice::Start(argv) if matches!(super::location::reach_of(argv), super::location::Reach::Sandbox(_))) => {
@@ -116,6 +271,12 @@ pub(crate) fn draw_launch(
                 .as_deref()
                 .map(|account| format!("as {account}"))
                 .unwrap_or_default(),
+            // What its options panel set, when anything differs from
+            // starting it bare — a model, a mode, a worktree — so a launch
+            // in plan mode or YOLO is never one nobody could see coming.
+            (tabs::Choice::Start(argv), _) => {
+                app.options_for(&super::location::agent_of(argv)).summary()
+            }
             (_, true) => short.next().unwrap_or_default(),
             (_, false) => String::new(),
         };
@@ -253,9 +414,13 @@ pub(crate) fn draw_launch(
                     format!(
                         " in {}{}  (c to change)",
                         cctop_core::util::truncate(&target.spelled(), WIDTH as usize - 34),
-                        match target.unchecked {
-                            Some(_) => " (unchecked)",
-                            None => "",
+                        // A sibling checks the directory itself, and is
+                        // reached a different way — which is the half worth
+                        // saying.
+                        match (target.peer, &target.unchecked) {
+                            (true, _) => " (via tunnel)",
+                            (false, Some(_)) => " (unchecked)",
+                            (false, None) => "",
                         }
                     )
                 }
@@ -291,6 +456,13 @@ pub(crate) fn draw_launch(
                 match aliases.is_empty() {
                     true => "  ssh host".to_string(),
                     false => format!("  ssh host · {}", aliases.join(", ")),
+                },
+            ),
+            super::location::Hit::Peer { offline, .. } => (
+                hit.text(),
+                match offline {
+                    None => "  cctop on this account".to_string(),
+                    Some(_) => "  cctop on this account · offline".to_string(),
                 },
             ),
             super::location::Hit::Remote { path, problem, .. } => (
@@ -369,6 +541,9 @@ pub(crate) fn draw_launch(
         (true, _) => " Enter accept  Esc keep the old one",
         (false, true) => " ↑/↓  Enter reattach  Esc cancel",
         (false, false) if picked_blocked.is_some() => " ↑/↓  c change folder  Esc cancel",
+        (false, false) if matches!(picked, Some(tabs::Choice::Start(_))) => {
+            " ↑/↓  → options  Enter start  Esc cancel"
+        }
         (false, false) => " ↑/↓  Enter start  Esc cancel",
     };
     lines.push(Line::from(Span::styled(

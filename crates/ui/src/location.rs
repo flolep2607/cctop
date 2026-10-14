@@ -74,6 +74,12 @@ pub enum Hit {
     /// An ssh host, offered as `name:` — taking it puts the host in the field
     /// and starts connecting.
     Host { name: String, aliases: Vec<String> },
+    /// A sibling cctop on the Cloudflare account, offered as `name:` like a
+    /// host, and why its last poll failed when it did.
+    Peer {
+        name: String,
+        offline: Option<String>,
+    },
     /// A directory on a host, and why it cannot be used if it cannot.
     Remote {
         host: String,
@@ -87,7 +93,7 @@ impl Hit {
     pub fn text(&self) -> String {
         match self {
             Hit::Dir(dir) => cctop_core::util::tildify(&dir.to_string_lossy()),
-            Hit::Host { name, .. } => format!("{name}:"),
+            Hit::Host { name, .. } | Hit::Peer { name, .. } => format!("{name}:"),
             Hit::Remote { host, path, .. } => format!("{host}:{path}"),
         }
     }
@@ -95,7 +101,7 @@ impl Hit {
     /// What Tab fills in: the text, ready to go one level deeper.
     fn fill(&self) -> String {
         match self {
-            Hit::Host { .. } => self.text(),
+            Hit::Host { .. } | Hit::Peer { .. } => self.text(),
             _ => format!("{}/", self.text().trim_end_matches('/')),
         }
     }
@@ -116,6 +122,10 @@ pub struct RemoteTarget {
     /// Why it was taken without asking the host: offline, or not connected
     /// yet. The sandbox checks it in the tab instead.
     pub unchecked: Option<String>,
+    /// The host is a sibling on the Cloudflare account, not an ssh host: the
+    /// agent runs *there*, started by that cctop ([`cctop_core::remote_open`]),
+    /// rather than here under `cctop sandbox`.
+    pub peer: bool,
 }
 
 impl RemoteTarget {
@@ -221,6 +231,61 @@ pub fn reach_of(argv: &[String]) -> Reach {
     }
 }
 
+/// A sibling the field offers, as the last listing of the account left it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PeerHost {
+    pub name: String,
+    /// Why its last poll failed, when it did.
+    pub offline: Option<String>,
+}
+
+/// The siblings on the Cloudflare account, as this process last found them.
+/// Not read under test, where the list is process-wide and other tests'.
+pub(super) fn peer_hosts() -> Vec<PeerHost> {
+    match cfg!(test) {
+        true => Vec::new(),
+        false => cctop_core::peer::known()
+            .into_iter()
+            .map(|(name, offline)| PeerHost { name, offline })
+            .collect(),
+    }
+}
+
+/// The projects a sibling's rows report, as directories to start in there,
+/// matching what is typed after `machine:`.
+///
+/// What the sibling already says about itself, and nothing more: there is no
+/// way to list a directory on a sibling, and its sessions' projects are the
+/// directories on it most worth starting in anyway. Last used first, as the
+/// local list is. A path typed in full is still taken as typed — the sibling
+/// checks it before it starts anything.
+pub(super) fn peer_projects(sessions: &[Session], machine: &str, typed: &str) -> Vec<String> {
+    let mut rows: Vec<&Session> = sessions
+        .iter()
+        .filter(|s| s.remote.as_ref().is_some_and(|r| r.host == machine))
+        .filter(|s| cctop_core::remote_open::dir_ok(s.label_source.trim()))
+        .filter(|s| !s.label_source.trim().is_empty())
+        .collect();
+    rows.sort_by(|a, b| b.last_active.cmp(&a.last_active));
+    let typed = typed.trim();
+    let needle = typed.to_lowercase();
+    let mut seen = HashSet::new();
+    rows.into_iter()
+        .map(|s| s.label_source.trim().to_string())
+        .filter(|dir| match typed.contains('/') || typed.starts_with('~') {
+            true => dir.starts_with(typed) && dir != typed,
+            // A bare word is a project's name, matched anywhere in its last
+            // part, the way the local list matches one.
+            false => dir
+                .rsplit('/')
+                .next()
+                .is_some_and(|leaf| leaf.to_lowercase().contains(&needle)),
+        })
+        .filter(|dir| seen.insert(dir.clone()))
+        .take(dirs::MAX_HITS)
+        .collect()
+}
+
 /// What a remote tab is called: the agent, then where it works.
 ///
 /// The arrow is the one the table's Host column puts after a sandboxed row's
@@ -293,15 +358,54 @@ impl App {
         hits
     }
 
-    /// The hosts matching a bare word, as hits.
+    /// The hosts matching a bare word, as hits: the siblings on the account
+    /// first — a machine already running cctop is the likelier place to
+    /// want an agent — then the ssh hosts.
     pub(super) fn host_hits(&self, word: &str) -> Vec<Hit> {
         let needle = word.trim().to_lowercase();
-        self.ssh_hosts
+        let peers = self
+            .peer_hosts
+            .iter()
+            .filter(|p| p.name.to_lowercase().contains(&needle))
+            .filter(|p| self.is_peer(&p.name))
+            .map(|p| Hit::Peer {
+                name: p.name.clone(),
+                offline: p.offline.clone(),
+            });
+        let ssh = self
+            .ssh_hosts
             .iter()
             .filter(|h| h.matches(&needle))
             .map(|h| Hit::Host {
                 name: h.name.clone(),
                 aliases: h.aliases.clone(),
+            });
+        peers.chain(ssh).collect()
+    }
+
+    /// Whether `host` in the field is a sibling on the Cloudflare account
+    /// rather than an ssh host.
+    ///
+    /// An ssh host of the same name wins, as it does for a row
+    /// ([`cctop_core::reach::reach`]): it is the one the user named, and the
+    /// one whose directories can be listed.
+    pub(super) fn is_peer(&self, host: &str) -> bool {
+        self.peer_hosts.iter().any(|p| p.name == host)
+            && !self
+                .ssh_hosts
+                .iter()
+                .any(|h| h.name == host || h.aliases.iter().any(|a| a == host))
+    }
+
+    /// The suggestions for `machine:path` on a sibling: the projects its
+    /// rows report.
+    pub(super) fn peer_hits(&self, machine: &str, path: &str) -> Vec<Hit> {
+        peer_projects(&self.sessions, machine, path)
+            .into_iter()
+            .map(|path| Hit::Remote {
+                host: machine.to_string(),
+                path,
+                problem: None,
             })
             .collect()
     }
@@ -381,6 +485,29 @@ impl App {
             "" => "~".to_string(),
             path => path.to_string(),
         };
+        // A sibling is not asked here: it checks the directory itself before
+        // it starts anything, and says why in the tab when it cannot.
+        if self.is_peer(host) {
+            if !cctop_core::remote_open::dir_ok(&path) {
+                self.refuse_launch_cwd(format!("a path on {host} starts with / or ~"));
+                return;
+            }
+            let offline = self
+                .peer_hosts
+                .iter()
+                .find(|p| p.name == host)
+                .and_then(|p| p.offline.clone());
+            self.take_remote(RemoteTarget {
+                host: host.to_string(),
+                path,
+                resolved: None,
+                facts: None,
+                problem: None,
+                unchecked: Some(offline.unwrap_or_else(|| format!("{host} checks it"))),
+                peer: true,
+            });
+            return;
+        }
         let unchecked = match self.ssh_states.get(host).map(|s| &s.conn) {
             Some(Conn::Ready { .. }) => {
                 self.launch_cwd_checking = Some((host.to_string(), path.clone()));
@@ -401,6 +528,7 @@ impl App {
             facts: None,
             problem: None,
             unchecked: Some(unchecked),
+            peer: false,
         });
     }
 
@@ -435,6 +563,7 @@ impl App {
             facts: Some(facts),
             problem,
             unchecked: None,
+            peer: false,
         });
     }
 
@@ -442,7 +571,7 @@ impl App {
         self.launch_remote = Some(target);
         self.launch_cwd_bad = false;
         self.launch_cwd_why = None;
-        self.mode = Mode::Launch;
+        self.mode = self.launch_cwd_from;
         self.needs_redraw = true;
     }
 
@@ -462,6 +591,24 @@ impl App {
         let Typed::Remote { host, path } = parse(&self.launch_cwd_input) else {
             return None;
         };
+        if self.is_peer(host) {
+            let offline = self
+                .peer_hosts
+                .iter()
+                .find(|p| p.name == host)
+                .and_then(|p| p.offline.as_ref());
+            return Some(match offline {
+                Some(why) => (format!("{host} offline: {why}"), true),
+                None if self.launch_cwd_hits.is_empty() => (
+                    format!("{host}'s projects are offered as it reports them — or type a path"),
+                    false,
+                ),
+                None => (
+                    format!("{host}'s projects, through its Cloudflare tunnel"),
+                    false,
+                ),
+            });
+        }
         let state = self.ssh_states.get(host)?;
         match &state.conn {
             Conn::Connecting => Some((format!("connecting to {host}…"), false)),
@@ -494,6 +641,22 @@ impl App {
             // Reattaching lands wherever that agent already is.
             tabs::Choice::Waiting(_) => None,
             tabs::Choice::Handoff(_) => Some("a handoff starts on this machine".to_string()),
+            // A sibling starts the agents cctop knows, and nothing else: a
+            // shell there is a shell for anyone on the account, which is what
+            // ssh is for.
+            tabs::Choice::Start(argv) if target.peer => {
+                let agent = agent_of(argv);
+                match cctop_core::alias::AGENTS
+                    .split_whitespace()
+                    .any(|a| a == agent)
+                {
+                    true => None,
+                    false => Some(format!(
+                        "{} starts agents, not {agent} — that needs ssh",
+                        target.host
+                    )),
+                }
+            }
             tabs::Choice::Start(argv) => match reach_of(argv) {
                 Reach::No(why) => Some(why),
                 Reach::Shell(_) => None,
@@ -519,6 +682,19 @@ impl App {
         let tabs::Choice::Start(argv) = choice else {
             return;
         };
+        let wanted = self.options_for(&agent_of(argv));
+        // Said rather than dropped: the row says `⑂ branch`, and an agent
+        // started somewhere else instead would be the surprise.
+        if wanted.branch.is_some() {
+            self.set_status(
+                "A worktree is made on this machine only — clear it in the options (→, ←)",
+            );
+            return;
+        }
+        let options = wanted.options;
+        if target.peer {
+            return self.launch_on_peer(argv, target, options);
+        }
         let (agent, argv) = match reach_of(argv) {
             Reach::No(why) => {
                 self.set_status(why);
@@ -533,7 +709,16 @@ impl App {
                         return;
                     }
                 };
-                let argv = sandbox_argv(&exe, &agent, &target.host, &target.path);
+                let mut argv = sandbox_argv(&exe, &agent, &target.host, &target.path);
+                // The model and the permission setting, as the agent arguments
+                // `cctop sandbox` hands on after the location.
+                match options.flags(&agent) {
+                    Ok(flags) => argv.extend(flags),
+                    Err(why) => {
+                        self.set_status(why);
+                        return;
+                    }
+                }
                 // The account `p` picked, carried the way a local launch
                 // carries it: as the environment the sandbox, and so the agent
                 // it starts, inherits.
@@ -576,6 +761,76 @@ impl App {
         }
         self.set_status(format!("Started {label} in {}{kept}", target.spelled()));
     }
+
+    /// Start the launcher's pick on a sibling: a tab here running this
+    /// cctop's `mux launch`, which asks the sibling's serve to start the
+    /// agent in its own rmux and bridges this terminal to it.
+    ///
+    /// No ssh anywhere, and no account of this machine's: which account the
+    /// agent runs as is the far machine's business, as it is for a session
+    /// opened there with `R`.
+    fn launch_on_peer(
+        &mut self,
+        argv: &[String],
+        target: &RemoteTarget,
+        options: cctop_core::launch_opts::Options,
+    ) {
+        let agent = agent_of(argv);
+        let exe = match std::env::current_exe() {
+            Ok(exe) => exe,
+            Err(error) => {
+                self.set_status(format!("Could not find cctop's own binary: {error}"));
+                return;
+            }
+        };
+        let spec = cctop_core::remote_open::NewAgent {
+            agent: agent.clone(),
+            dir: target.path.clone(),
+            options,
+        };
+        let argv = match cctop_core::remote_open::new_argv(&target.host, &exe, &spec) {
+            Ok(argv) => argv,
+            Err(why) => {
+                self.set_status(why);
+                return;
+            }
+        };
+        let host = &target.host;
+        let own = tabs::Own::Mux(cctop_core::rmux::free_name(&format!("{agent}-{host}")));
+        let mut pane = match tabs::Pane::launch(&argv, None, own) {
+            Ok(pane) => pane,
+            Err(error) => {
+                self.set_status(format!("Could not start {agent} on {host}: {error}"));
+                return;
+            }
+        };
+        let label = remote_label(&agent, host);
+        pane.label = label.clone();
+        match self.launch_into {
+            LaunchInto::Split { stacked } => {
+                let Some(tab) = self.active_tab() else { return };
+                tab.split(pane, stacked);
+            }
+            LaunchInto::Tab => {
+                self.tabs.push(tabs::Tab::new(pane));
+                self.go_to_tab(self.tabs.len());
+            }
+        }
+        self.set_status(format!(
+            "Starting {label} in {}, through its Cloudflare tunnel",
+            target.spelled()
+        ));
+    }
+}
+
+/// The agent a launcher row starts, by name: `claude` for `env X=1
+/// /usr/bin/claude`.
+pub(super) fn agent_of(argv: &[String]) -> String {
+    tabs::label_of(argv)
+        .split_whitespace()
+        .next()
+        .unwrap_or_default()
+        .to_string()
 }
 
 /// Shared prefix of several strings, cut to a whole character.
@@ -922,6 +1177,106 @@ mod tests {
             r,
             worker::Request::Location(Ask::Connect(h)) if h == "nz-b-procurementdb1"
         )));
+    }
+
+    fn on_peer(app: &mut App, machine: &str, project: &str, when: &str) {
+        let mut row = crate::tests::session(&format!("{machine}-{when}"), false, project);
+        row.remote = Some(cctop_core::session::Remote {
+            host: machine.into(),
+            ..Default::default()
+        });
+        row.last_active = when.into();
+        app.sessions.push(row);
+    }
+
+    /// A sibling on the account is offered beside the ssh hosts, and once it
+    /// is in the field its rows' projects are offered — with no ssh asked,
+    /// and nothing sent to the worker. Taking one points the launcher there.
+    #[test]
+    fn a_sibling_is_offered_and_its_projects_complete() {
+        let (mut app, rx) = app_with_requests();
+        app.mode = Mode::Launch;
+        on_peer(&mut app, "desk", "/srv/api", "2026-10-02T00:00:00Z");
+        on_peer(&mut app, "desk", "/home/me/notes", "2026-10-03T00:00:00Z");
+        on_peer(&mut app, "other", "/srv/elsewhere", "2026-10-04T00:00:00Z");
+        app.edit_launch_cwd();
+        app.peer_hosts = vec![PeerHost {
+            name: "desk".into(),
+            offline: None,
+        }];
+        app.launch_cwd_input.clear();
+        typed(&mut app, "de");
+        assert_eq!(
+            app.launch_cwd_hits.last(),
+            Some(&Hit::Peer {
+                name: "desk".into(),
+                offline: None
+            })
+        );
+        app.launch_cwd_pick = Some(app.launch_cwd_hits.len() - 1);
+        app.on_key(crate::tests::key(KeyCode::Enter));
+        assert_eq!(&*app.launch_cwd_input, "desk:");
+        assert_eq!(remote_paths(&app), ["/home/me/notes", "/srv/api"]);
+        typed(&mut app, "/s");
+        assert_eq!(remote_paths(&app), ["/srv/api"]);
+        assert!(
+            !rx.try_iter()
+                .any(|r| matches!(r, worker::Request::Location(_))),
+            "a sibling is never asked over ssh"
+        );
+        app.on_key(crate::tests::key(KeyCode::Down));
+        app.on_key(crate::tests::key(KeyCode::Enter));
+        assert_eq!(app.mode, Mode::Launch);
+        let target = app.launch_remote.clone().expect("taken");
+        assert!(target.peer);
+        assert_eq!(target.spelled(), "desk:/srv/api");
+
+        // The agents go; the shell, which a sibling does not start, does not.
+        let claude = tabs::Choice::Start(vec!["claude".into()]);
+        let codex = tabs::Choice::Start(vec!["codex".into()]);
+        assert_eq!(app.launch_blocked(&claude), None);
+        assert_eq!(app.launch_blocked(&codex), None, "no sandbox needed there");
+        let shell = tabs::Choice::Start(vec!["/bin/zsh".into()]);
+        assert!(
+            app.launch_blocked(&shell)
+                .is_some_and(|why| why.contains("needs ssh")),
+        );
+
+        // A path that is neither absolute nor under the home is refused in
+        // the field, as the sibling would refuse it.
+        app.edit_launch_cwd();
+        app.peer_hosts = vec![PeerHost {
+            name: "desk".into(),
+            offline: None,
+        }];
+        app.launch_cwd_input.set("desk:srv".to_string());
+        app.launch_cwd_edited();
+        app.on_key(crate::tests::key(KeyCode::Enter));
+        assert_eq!(app.mode, Mode::LaunchCwd);
+        assert!(app.launch_cwd_why.is_some());
+    }
+
+    /// An ssh host of the same name wins over a sibling, as it does for a
+    /// row: it is the one the user named.
+    #[test]
+    fn an_ssh_host_of_the_same_name_is_not_a_sibling() {
+        let mut app = crate::tests::test_app();
+        app.peer_hosts = vec![PeerHost {
+            name: "box".into(),
+            offline: None,
+        }];
+        assert!(app.is_peer("box"));
+        app.ssh_hosts = vec![cctop_core::ssh_config::Host {
+            name: "box".into(),
+            aliases: vec![],
+        }];
+        assert!(!app.is_peer("box"));
+        assert!(
+            app.host_hits("bo")
+                .iter()
+                .all(|h| matches!(h, Hit::Host { .. })),
+            "offered once, as the ssh host"
+        );
     }
 
     #[test]

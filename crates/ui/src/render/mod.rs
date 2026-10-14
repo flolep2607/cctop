@@ -340,7 +340,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) -> Layout {
         // A modal raised from the settings tab belongs to the tab, exactly as
         // one raised from the dashboard belongs to the dashboard.
         match app.mode {
-            Mode::Launch | Mode::LaunchCwd => modals::draw_launch(frame, area, app, &mut layout),
+            Mode::Launch | Mode::LaunchCwd | Mode::LaunchOptions => {
+                modals::draw_launch(frame, area, app, &mut layout)
+            }
             Mode::QuitConfirm => modals::draw_quit_confirm(frame, area, app, &mut layout),
             Mode::SwitchTab => modals::draw_switch_tab(frame, area, app, &mut layout),
             Mode::AddAccount => modals::draw_add_account(frame, area, app, &mut layout),
@@ -362,7 +364,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) -> Layout {
         draw_panes(frame, chunks[1], app, &mut layout);
         draw_footer(frame, chunks[2], app, &mut layout);
         match app.mode {
-            Mode::Launch | Mode::LaunchCwd => modals::draw_launch(frame, area, app, &mut layout),
+            Mode::Launch | Mode::LaunchCwd | Mode::LaunchOptions => {
+                modals::draw_launch(frame, area, app, &mut layout)
+            }
             // F10 is cctop's inside a pane, and when there is an agent to warn
             // about it raises a question. Drawn here as well as on the
             // dashboard, because a question asked on a screen you are not
@@ -469,7 +473,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) -> Layout {
         Mode::SwitchTab => modals::draw_switch_tab(frame, area, app, &mut layout),
         // The same modal: the directory field replaces one line of it, so the
         // list of agents stays on screen while the path is being typed.
-        Mode::Launch | Mode::LaunchCwd => modals::draw_launch(frame, area, app, &mut layout),
+        Mode::Launch | Mode::LaunchCwd | Mode::LaunchOptions => {
+            modals::draw_launch(frame, area, app, &mut layout)
+        }
         Mode::RowMenu => modals::draw_row_menu(frame, area, app, &mut layout),
         Mode::Hooks => modals::draw_hooks(frame, area, app),
         Mode::ProviderStatus => super::outage::draw(frame, area, app),

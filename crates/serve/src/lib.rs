@@ -1446,6 +1446,12 @@ fn serve_connection(shared: &Shared, stream: &mut TcpStream) {
     if let Some(rest) = path.strip_prefix("/api/term/") {
         return open::route(shared, stream, &request, rest, access);
     }
+    // A new agent on this machine, for a sibling's launcher — see
+    // [`open::route_new`]. Its own prefix, so a cctop older than it answers
+    // "no such page", which the asking side reads as "update it there".
+    if let Some(rest) = path.strip_prefix(cctop_core::remote_open::NEW_ROUTE) {
+        return open::route_new(shared, stream, &request, rest, access);
+    }
     // A sibling on the account, through this server — see [`forward`]. The
     // page never talks to another origin, so the content policy stays as it
     // is and a terminal frame keeps its same-origin URL.

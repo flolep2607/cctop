@@ -576,6 +576,23 @@ pub fn find(machine: &str) -> Option<Arc<Peer>> {
         .cloned()
 }
 
+/// Every sibling the last listing found, by name, with why its last poll
+/// failed when it did — what the launcher offers as places to start an agent.
+pub fn known() -> Vec<(String, Option<String>)> {
+    KNOWN
+        .lock()
+        .map(|known| {
+            known
+                .iter()
+                .map(|p| {
+                    let why = p.last_error.lock().ok().and_then(|e| e.clone());
+                    (p.machine.clone(), why)
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Every sibling whose last poll failed, and why: the offline dots.
 pub fn offline() -> Vec<(String, String)> {
     KNOWN

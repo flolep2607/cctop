@@ -22,7 +22,7 @@ pub(super) use {
 
 // What the dialogs name as `super::x`: they were written one level up, where
 // `super` was the crate.
-use super::{Mode, address, connect, idle, location, menu, scrollbar, settings};
+use super::{Mode, address, connect, harness_opts, idle, location, menu, scrollbar, settings};
 
 use super::columns::COLUMNS;
 use super::hyperlink;
