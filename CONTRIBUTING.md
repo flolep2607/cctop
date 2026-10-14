@@ -392,9 +392,11 @@ everyone who has not updated yet sees the better one.
 
 ### The mirror and the signature
 
-`cctop --update` asks GitHub first and falls back on a Cloudflare Worker,
-`worker/`, for both the release JSON and the archives: GitHub rate-limits
-anonymous API calls and is sometimes simply down. The release workflow keeps
+`cctop --update` asks GitHub first for the release JSON and falls back on a
+Cloudflare Worker, `worker/`: GitHub rate-limits anonymous API calls and is
+sometimes simply down. The archives go the other way — the Worker first, GitHub
+when it fails — because GitHub's downloads crawl from New Zealand (half a
+megabyte a second, against the Worker's 18 MB in under a second). The release workflow keeps
 the Worker in step (`tools/push-release-mirror.sh`), and a mirror failure
 never fails a release. The Worker is deployed by Cloudflare Workers Builds
 when a change to `worker/` reaches `main` — not by hand — so anything a new

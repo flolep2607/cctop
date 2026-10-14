@@ -746,14 +746,32 @@ pub fn mouse_wanted(name: &str) -> bool {
 ///
 /// By exact name: the protocol's session target is a name, not a prefix, so
 /// killing `cctop-claude` never takes `cctop-claude-2` with it.
+///
+/// A session that is already gone counts as ended, not as a failure: that is
+/// what was asked for, and a restart or a close of an agent that exited on its
+/// own should simply carry on. Only an error with the session still standing
+/// is one.
 pub fn kill(name: &str) -> Result<(), String> {
-    let killed = crate::mux::kill_session(name);
+    let killed = gone_counts_as_ended(crate::mux::kill_session(name), || exists(name));
     crate::elog::event(
         "rmux",
         "kill",
         serde_json::json!({ "session": name, "ok": killed.is_ok() }),
     );
     killed
+}
+
+/// [`kill`]'s verdict: a failed kill is still an end if the session is not
+/// there afterwards. Asked only on failure, so a kill that worked costs nothing
+/// more.
+fn gone_counts_as_ended(
+    killed: Result<(), String>,
+    still_there: impl FnOnce() -> bool,
+) -> Result<(), String> {
+    match killed {
+        Err(_) if !still_there() => Ok(()),
+        other => other,
+    }
 }
 
 /// Set one of the `@cctop_*` options on a session. Best effort, like
@@ -1578,6 +1596,19 @@ fn capture_bytes(raw: &[u8]) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
+    /// Closing or restarting a tab whose agent already ended is the end that
+    /// was asked for; only a kill that left the session standing failed.
+    #[test]
+    fn killing_a_session_that_is_already_gone_is_not_a_failure() {
+        let failed = || Err::<(), String>("can't find session".into());
+        assert_eq!(super::gone_counts_as_ended(failed(), || false), Ok(()));
+        assert!(super::gone_counts_as_ended(failed(), || true).is_err());
+        assert_eq!(
+            super::gone_counts_as_ended(Ok(()), || panic!("not asked")),
+            Ok(())
+        );
+    }
+
     #[test]
     fn a_share_for_a_page_elsewhere_goes_through_the_pages_own_origin() {
         let url = "https://x.trycloudflare.com/term/#e=ws://127.0.0.1:45691/share&t=abc&navbar=off";

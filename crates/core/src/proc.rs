@@ -36,11 +36,23 @@ pub struct ProcInfo {
     pub process_list: Vec<ProcEntry>,
 }
 
+/// How a stop that worked went.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stopped {
+    /// The signal was delivered; the process is on its way out.
+    Signalled,
+    /// Nothing was running by then. What a stop is for — the agent not
+    /// running — is already true, so this is not a failure: the row was a
+    /// moment out of date, and a refresh is all it needs.
+    AlreadyExited,
+}
+
 /// Gracefully stop an agent root process by PID.
 ///
 /// The process table is refreshed immediately before sending the signal, so a
-/// PID that exited after the confirmation dialog is never treated as a success.
-pub fn terminate(pid: u32) -> Result<(), String> {
+/// PID that exited after the confirmation dialog is told apart from one that
+/// was signalled, rather than either being reported as the other.
+pub fn terminate(pid: u32) -> Result<Stopped, String> {
     let mut sys = System::new();
     let process_pid = Pid::from_u32(pid);
     sys.refresh_processes_specifics(
@@ -48,11 +60,11 @@ pub fn terminate(pid: u32) -> Result<(), String> {
         true,
         ProcessRefreshKind::nothing(),
     );
-    let process = sys
-        .process(process_pid)
-        .ok_or_else(|| format!("process {pid} has already exited"))?;
+    let Some(process) = sys.process(process_pid) else {
+        return Ok(Stopped::AlreadyExited);
+    };
     match process.kill_with(Signal::Term) {
-        Some(true) => Ok(()),
+        Some(true) => Ok(Stopped::Signalled),
         Some(false) => Err(format!("permission denied stopping process {pid}")),
         None => Err("graceful termination is not supported on this platform".into()),
     }
@@ -767,26 +779,38 @@ impl Collector {
             // first and each keeps its own CPU and memory.
             pids.sort_by_key(|pid| (procs.get(pid).map_or(0, |s| s.start_time), *pid));
 
-            let mut claimed = 0;
-            if !cwd.is_empty()
-                && let Some(candidates) = cwd_index.get(&(provider, owner.as_deref(), cwd.as_str()))
-            {
-                let live = live_sessions_for_group(candidates, pids.len(), &roots);
-                for (pid, session) in pids.iter().zip(&live) {
-                    found.push(Attribution {
-                        pid: *pid,
-                        key: session.key(),
-                        argv: String::new(),
-                        rule: "no id on the command line; matched by working directory",
-                        matched: cwd.clone(),
-                    });
-                    claim_root(&mut roots, session.key(), *pid);
-                    claimed += 1;
+            let start_of = |pid: &u32| procs.get(pid).map_or(0, |s| s.start_time);
+            let mut unclaimed: Vec<u32> = Vec::new();
+            match cwd_index.get(&(provider, owner.as_deref(), cwd.as_str())) {
+                Some(candidates) if !cwd.is_empty() => {
+                    let earliest = pids.first().map_or(0, start_of);
+                    let live = live_sessions_for_group(candidates, pids.len(), &roots, earliest);
+                    for (i, pid) in pids.iter().enumerate() {
+                        // Paired oldest with oldest, but each pair is checked
+                        // again on its own: the group's earliest start let the
+                        // session through, and this process may be younger.
+                        let Some(session) = live
+                            .get(i)
+                            .filter(|s| written_since_start(s, start_of(pid)))
+                        else {
+                            unclaimed.push(*pid);
+                            continue;
+                        };
+                        found.push(Attribution {
+                            pid: *pid,
+                            key: session.key(),
+                            argv: String::new(),
+                            rule: "no id on the command line; matched by working directory",
+                            matched: cwd.clone(),
+                        });
+                        claim_root(&mut roots, session.key(), *pid);
+                    }
                 }
+                _ => unclaimed = pids,
             }
 
             // Whatever is left has no transcript that can own it.
-            for &pid in &pids[claimed..] {
+            for pid in unclaimed {
                 if provider == crate::pricing::Provider::Codex {
                     continue;
                 }
@@ -893,15 +917,21 @@ impl Collector {
 /// The result is ordered by start time so the caller can pair it against
 /// processes ordered the same way, keeping CPU and memory with the session that
 /// actually incurred them.
+///
+/// `earliest_start` is the oldest process's start, in seconds since the epoch:
+/// a session nothing has written to since then cannot be any of theirs, and is
+/// passed over rather than allowed to take a slot from one that can.
 fn live_sessions_for_group<'a>(
     candidates: &[&'a Session],
     process_count: usize,
     claimed: &HashMap<String, u32>,
+    earliest_start: u64,
 ) -> Vec<&'a Session> {
     let mut key = String::new();
     let mut live: Vec<&Session> = candidates
         .iter()
         .copied()
+        .filter(|s| written_since_start(s, earliest_start))
         // One buffer for the whole filter: a candidate's key is looked up and
         // dropped, and this runs for every process group on every refresh.
         .filter(|s| !claimed.contains_key(s.key_into(&mut key)))
@@ -909,6 +939,38 @@ fn live_sessions_for_group<'a>(
         .collect();
     live.sort_by_key(|s| util::parse_ts(&s.started_at));
     live
+}
+
+/// How long before a process started its transcript may have last been written
+/// and still be its own. Not zero, because the two clocks are not the same one:
+/// a process's start is boot time plus ticks, rounded to the second, and a
+/// transcript's is a file mtime or a timestamp the agent wrote.
+const START_SLACK_SECS: i64 = 10;
+
+/// Whether a session's transcript was written to after a process with no id on
+/// its command line started — that is, whether the process could be the one
+/// writing it.
+///
+/// A fresh `codex` or `claude` has written nothing yet (Codex creates its
+/// rollout only on the first prompt), so the directory's newest transcript is
+/// someone else's, however old: matching it anyway showed a months-old session
+/// as running, and stopping that row signalled the new agent. Such a process is
+/// left unclaimed instead, which is what an agent with no transcript yet already
+/// gets — a row of its own for Claude, nothing for Codex.
+///
+/// `codex resume --last` and `claude --continue` do reopen an old conversation
+/// without naming it. They show the same way until their first write — a resume
+/// writes to (or forks) a transcript, which then postdates the process — and
+/// are matched from then on.
+///
+/// A session with no readable timestamp, or a process with no start time, is
+/// not ruled out: this can only reject on evidence.
+fn written_since_start(session: &Session, start_secs: u64) -> bool {
+    if start_secs == 0 {
+        return true;
+    }
+    util::parse_ts(session.touched())
+        .is_none_or(|t| t.timestamp() + START_SLACK_SECS >= start_secs as i64)
 }
 
 /// Resolve each session's reported process tree to the one process that is its
@@ -1142,13 +1204,13 @@ mod tests {
         let candidates = vec![&newest, &older, &stale];
 
         // Two live processes: the two newest sessions are claimed, not just one.
-        let live = live_sessions_for_group(&candidates, 2, &HashMap::new());
+        let live = live_sessions_for_group(&candidates, 2, &HashMap::new(), 0);
         let ids: Vec<&str> = live.iter().map(|s| s.session_id.as_str()).collect();
         // Oldest start first, so it pairs with the oldest process.
         assert_eq!(ids, vec!["older", "newest"]);
 
         // One process still resolves to the newest session alone, as before.
-        let single = live_sessions_for_group(&candidates, 1, &HashMap::new());
+        let single = live_sessions_for_group(&candidates, 1, &HashMap::new(), 0);
         assert_eq!(
             single
                 .iter()
@@ -1158,7 +1220,40 @@ mod tests {
         );
 
         // Nothing is attributed when no process is running in the directory.
-        assert!(live_sessions_for_group(&candidates, 0, &HashMap::new()).is_empty());
+        assert!(live_sessions_for_group(&candidates, 0, &HashMap::new(), 0).is_empty());
+    }
+
+    /// Regression: a `codex` started in `~` before its first prompt has no
+    /// rollout yet, and was handed the newest one in `~` — written three months
+    /// earlier — which then showed as running, and whose stop signalled the
+    /// new agent.
+    #[test]
+    fn a_fresh_process_is_not_given_a_transcript_older_than_itself() {
+        let secs = |ts: &str| util::parse_ts(ts).unwrap().timestamp() as u64;
+        let mut old = session_at(
+            "old",
+            "2026-07-03T10:00:00+00:00",
+            "2026-07-03T10:02:00+00:00",
+        );
+        old.touched_at = "2026-07-03T10:02:00+00:00".into();
+        let candidates = vec![&old];
+        let started = secs("2026-10-14T09:00:00+00:00");
+
+        assert!(!written_since_start(&old, started));
+        assert!(live_sessions_for_group(&candidates, 1, &HashMap::new(), started).is_empty());
+
+        // Once the process writes, the transcript postdates it and it matches —
+        // which is also how a `codex resume --last` is picked up.
+        old.touched_at = "2026-10-14T09:00:30+00:00".into();
+        assert!(written_since_start(&old, started));
+        // A write a moment before the start is within the clocks' disagreement.
+        old.touched_at = "2026-10-14T08:59:55+00:00".into();
+        assert!(written_since_start(&old, started));
+
+        // With nothing to compare, nothing is ruled out.
+        let untimed = Session::new(crate::pricing::Provider::Codex, "untimed".into());
+        assert!(written_since_start(&untimed, started));
+        assert!(written_since_start(&old, 0));
     }
 
     /// The two lookups above write each candidate's key into one buffer the pass
@@ -1174,7 +1269,7 @@ mod tests {
 
         // Claiming the longer key must not take the shorter one with it.
         let claimed = HashMap::from([(long.key(), 7u32)]);
-        let live = live_sessions_for_group(&candidates, 2, &claimed);
+        let live = live_sessions_for_group(&candidates, 2, &claimed, 0);
         assert_eq!(
             live.iter()
                 .map(|s| s.session_id.as_str())
@@ -1184,7 +1279,7 @@ mod tests {
 
         // And claiming neither leaves both, so the buffer is not being reused
         // with anything still in it.
-        let both = live_sessions_for_group(&candidates, 2, &HashMap::new());
+        let both = live_sessions_for_group(&candidates, 2, &HashMap::new(), 0);
         assert_eq!(both.len(), 2);
 
         // The same for a resume: a forked session's key is the one compared, and
@@ -1234,7 +1329,7 @@ mod tests {
         let mut claimed = HashMap::new();
         claimed.insert(newest.key(), 4242);
 
-        let live = live_sessions_for_group(&candidates, 1, &claimed);
+        let live = live_sessions_for_group(&candidates, 1, &claimed, 0);
         assert_eq!(
             live.iter()
                 .map(|s| s.session_id.as_str())
@@ -1676,6 +1771,29 @@ mod tests {
         assert!(!admits("firefox", "/usr/bin/firefox"));
         assert!(!admits("cargo", "cargo build"));
         assert!(!admits("2.1.222", "/opt/other/2.1.222"));
+    }
+
+    /// Regression: stopping a row whose process had exited a moment earlier
+    /// said "Could not stop …: process N has already exited", for a stop whose
+    /// whole point — nothing running — was already true.
+    #[test]
+    fn stopping_a_process_that_already_exited_is_a_stop() {
+        let mut child = std::process::Command::new("true").spawn().expect("spawn");
+        let pid = child.id();
+        child.wait().expect("reaped");
+        assert_eq!(terminate(pid), Ok(Stopped::AlreadyExited));
+    }
+
+    #[test]
+    fn stopping_a_running_process_signals_it() {
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn");
+        assert_eq!(terminate(child.id()), Ok(Stopped::Signalled));
+        let status = child.wait().expect("reaped");
+        use std::os::unix::process::ExitStatusExt;
+        assert_eq!(status.signal(), Some(libc::SIGTERM));
     }
 
     #[test]

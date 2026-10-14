@@ -399,6 +399,28 @@ fn selected<'a>(releases: &'a [Release], from: &str, to: &str) -> Vec<&'a Releas
     picked
 }
 
+/// `body` without its HTML comments.
+///
+/// GitHub's generated notes open with one — `<!-- Release notes generated
+/// using configuration in .github/release.yml at v0.36.3 -->` — which the
+/// release page hides and a terminal does not. While the notes were only the
+/// generated list it was the first line and harmless; with a paragraph written
+/// above it, it printed as a bullet of its own. An unclosed comment hides the
+/// rest, as it would on the page.
+fn without_comments(body: &str) -> String {
+    let mut out = String::with_capacity(body.len());
+    let mut rest = body;
+    while let Some(start) = rest.find("<!--") {
+        out.push_str(&rest[..start]);
+        rest = match rest[start..].find("-->") {
+            Some(end) => &rest[start + end + 3..],
+            None => "",
+        };
+    }
+    out.push_str(rest);
+    out
+}
+
 /// A release body reduced to lines worth printing in a terminal.
 ///
 /// GitHub's generated notes are markdown written for a web page: a `What's
@@ -408,6 +430,7 @@ fn selected<'a>(releases: &'a [Release], from: &str, to: &str) -> Vec<&'a Releas
 /// lines to say nothing. Prose bodies — a release that wrote its own notes —
 /// come through as their own paragraphs, since there is nothing to strip.
 fn bullets(body: &str) -> Vec<String> {
+    let body = without_comments(body);
     let mut items: Vec<String> = Vec::new();
     let mut current: Option<String> = None;
     for line in body.lines().map(str::trim) {
@@ -739,27 +762,27 @@ fn fetch_small(url: &str) -> Result<Vec<u8>> {
 /// What a release archive's signature is called: the archive's name, plus this.
 const SIGNATURE_SUFFIX: &str = ".sig";
 
-/// The archive `asset` of `release`, from GitHub or else from the mirror,
+/// The archive `asset` of `release`, from the mirror or else from GitHub,
 /// checked against `keys` when there are any. `get` is the network.
 ///
-/// GitHub first, because it is the source; the mirror ([`MIRROR_ASSETS`]) when
-/// GitHub fails to serve either file for any reason — down, a 5xx, a limit —
-/// since the mirror exists for exactly the hours GitHub is not answering.
+/// The mirror ([`MIRROR_ASSETS`]) first, because it is the fast one: from New
+/// Zealand GitHub's release downloads ran at half a megabyte a second where
+/// the mirror, on Cloudflare's edge, served the same 18 MB archive in under a
+/// second. GitHub when the mirror fails to serve a good copy for any reason —
+/// down, not pushed yet, or a file that does not match its signature — since
+/// GitHub is the source and the mirror only a copy of it.
 ///
-/// The signature is checked whichever served the archive. Over TLS to
-/// github.com a signature adds little, but the mirror is a Worker that anyone
-/// holding its push token can write to, and a file it serves is only as good
-/// as that token — unless it is signed by a key that never leaves the release
-/// workflow. Checking both the same way keeps one path, and it means a GitHub
-/// download is refused for a bad signature too, rather than trusted for its
-/// origin. A failed check is final and does not fall through to the other
-/// source: an archive that does not match its signature is not a network
-/// fault, and is said so.
+/// Which one serves it does not decide whether it is trusted: the signature
+/// does, checked the same way for both. The mirror is a Worker that anyone
+/// holding its push token can write to, so a mirror file that fails the check
+/// is passed over for GitHub's, and said so; GitHub's failing it is final, as
+/// there is nowhere left to ask and an archive that does not match its
+/// signature is not a network fault.
 ///
-/// Without a key (the placeholder [`RELEASE_KEYS`], during rollout)
-/// GitHub's archive is installed as it always was, on TLS alone, and the
-/// mirror is not used at all: an unsigned file from it is exactly what the
-/// signature is there to refuse.
+/// Without a key (the placeholder [`RELEASE_KEYS`], during rollout) GitHub's
+/// archive is installed as it always was, on TLS alone, and the mirror is not
+/// used at all: an unsigned file from it is exactly what the signature is
+/// there to refuse.
 fn fetch_archive(
     release: &Release,
     asset: &Asset,
@@ -767,42 +790,35 @@ fn fetch_archive(
     get: &dyn Fn(&str) -> Result<Vec<u8>>,
 ) -> Result<Vec<u8>> {
     let signature_name = format!("{}{SIGNATURE_SUFFIX}", asset.name);
-    let from_github = || -> Result<(Vec<u8>, Option<Vec<u8>>)> {
+    if keys.is_empty() {
+        return get(&asset.browser_download_url);
+    }
+    let mirror = |name: &str| format!("{MIRROR_ASSETS}/{}/{name}", release.tag_name);
+    let from_mirror = || -> Result<Vec<u8>> {
+        let body = get(&mirror(&asset.name))?;
+        let signature = get(&mirror(&signature_name))?;
+        verify(keys, &body, &signature, "the mirror")?;
+        Ok(body)
+    };
+    let mirror_failed = match from_mirror() {
+        Ok(body) => return Ok(body),
+        Err(mirror) => mirror,
+    };
+    eprintln!("The mirror did not serve it ({mirror_failed:#}); trying GitHub…");
+    let from_github = || -> Result<Vec<u8>> {
         let body = get(&asset.browser_download_url)?;
-        if keys.is_empty() {
-            return Ok((body, None));
-        }
         let signature = release
             .assets
             .iter()
             .find(|a| a.name == signature_name)
             .ok_or_else(|| anyhow!("release {} carries no signature", release.tag_name))?;
-        Ok((body, Some(get(&signature.browser_download_url)?)))
+        let signature = get(&signature.browser_download_url)?;
+        verify(keys, &body, &signature, "GitHub")?;
+        Ok(body)
     };
-    let github = match from_github() {
-        Ok((body, signature)) => {
-            if let Some(signature) = signature {
-                verify(keys, &body, &signature, "GitHub")?;
-            }
-            return Ok(body);
-        }
-        Err(github) => github,
-    };
-    if keys.is_empty() {
-        return Err(github);
-    }
-    eprintln!("GitHub did not serve it ({github:#}); trying the mirror…");
-    let mirror = |name: &str| format!("{MIRROR_ASSETS}/{}/{name}", release.tag_name);
-    let from_mirror = || -> Result<(Vec<u8>, Vec<u8>)> {
-        Ok((get(&mirror(&asset.name))?, get(&mirror(&signature_name))?))
-    };
-    let (body, signature) = from_mirror().map_err(|mirror| {
-        anyhow!(
-            "could not download the release archive: {github:#}; the mirror failed too: {mirror:#}"
-        )
-    })?;
-    verify(keys, &body, &signature, "the mirror")?;
-    Ok(body)
+    from_github().map_err(|github| {
+        anyhow!("could not download the release archive: {github:#}; the mirror failed too: {mirror_failed:#}")
+    })
 }
 
 /// Check `body` against `signature`, a line of base64 as the release workflow
@@ -2182,48 +2198,46 @@ mod tests {
         (release, pair.public_key().as_ref().to_vec(), get, asked)
     }
 
-    /// GitHub down, the mirror up: the archive comes from the mirror, at the
-    /// URL derived from the release's tag and the asset's name.
+    /// The mirror up: the archive comes from it, at the URL derived from the
+    /// release's tag and the asset's name, and GitHub is never asked.
     #[test]
-    fn a_github_outage_downloads_from_the_mirror() {
-        let (release, key, get, asked) = signed(b"archive", b"archive", false, true);
-        let asset = archive(&release, "x86_64-unknown-linux-musl").unwrap();
-        let body = fetch_archive(&release, asset, std::slice::from_ref(&key), &get)
-            .expect("mirror serves it");
-        assert_eq!(body, b"archive");
-        let asked = asked.borrow();
-        assert_eq!(
-            asked[0],
-            "http://127.0.0.1:9/cctop-x86_64-unknown-linux-musl.tar.gz"
-        );
-        assert!(asked.contains(&format!(
-            "{MIRROR_ASSETS}/v0.40.0/cctop-x86_64-unknown-linux-musl.tar.gz"
-        )));
-        assert!(asked.contains(&format!(
-            "{MIRROR_ASSETS}/v0.40.0/cctop-x86_64-unknown-linux-musl.tar.gz.sig"
-        )));
+    fn the_mirror_is_asked_first() {
+        for github in [true, false] {
+            let (release, key, get, asked) = signed(b"archive", b"archive", github, true);
+            let asset = archive(&release, "x86_64-unknown-linux-musl").unwrap();
+            let body = fetch_archive(&release, asset, std::slice::from_ref(&key), &get)
+                .expect("mirror serves it");
+            assert_eq!(body, b"archive");
+            assert_eq!(
+                *asked.borrow(),
+                [
+                    format!("{MIRROR_ASSETS}/v0.40.0/cctop-x86_64-unknown-linux-musl.tar.gz"),
+                    format!("{MIRROR_ASSETS}/v0.40.0/cctop-x86_64-unknown-linux-musl.tar.gz.sig"),
+                ]
+            );
+        }
     }
 
-    /// GitHub up: the mirror is never asked, and GitHub's archive is checked
-    /// against its signature the same way.
+    /// The mirror down: GitHub serves it, checked against its signature the
+    /// same way — and refused when it does not match, with nowhere left to ask.
     #[test]
-    fn github_is_asked_first_and_checked_too() {
-        let (release, key, get, asked) = signed(b"archive", b"archive", true, true);
+    fn a_mirror_outage_downloads_from_github_and_checks_it_too() {
+        let (release, key, get, _) = signed(b"archive", b"archive", true, false);
         let asset = archive(&release, "x86_64-unknown-linux-musl").unwrap();
         assert_eq!(
             fetch_archive(&release, asset, std::slice::from_ref(&key), &get).unwrap(),
             b"archive"
         );
-        assert!(asked.borrow().iter().all(|u| !u.starts_with(MIRROR_ASSETS)));
 
-        let (release, key, get, _) = signed(b"swapped", b"archive", true, true);
+        let (release, key, get, _) = signed(b"swapped", b"archive", true, false);
         let asset = archive(&release, "x86_64-unknown-linux-musl").unwrap();
         let error = fetch_archive(&release, asset, std::slice::from_ref(&key), &get).unwrap_err();
         assert!(format!("{error:#}").contains("does not match its signature"));
     }
 
     /// What a leaked push token could put on the mirror: an archive that is
-    /// not the one the key signed, or one with no signature beside it.
+    /// not the one the key signed, or one with no signature beside it. Never
+    /// installed: GitHub's good copy is, when GitHub answers.
     #[test]
     fn the_mirror_is_refused_a_bad_or_missing_signature() {
         let (release, key, get, _) = signed(b"swapped", b"archive", false, true);
@@ -2246,6 +2260,20 @@ mod tests {
             false => Ok(b"archive".to_vec()),
         };
         assert!(fetch_archive(&release, asset, std::slice::from_ref(&key), &missing).is_err());
+
+        // A tampered mirror with GitHub up: GitHub's signed archive wins.
+        let (release, key, good, _) = signed(b"archive", b"archive", true, true);
+        let asset = archive(&release, "x86_64-unknown-linux-musl").unwrap();
+        let tampered = move |url: &str| match url.starts_with(MIRROR_ASSETS)
+            && !url.ends_with(SIGNATURE_SUFFIX)
+        {
+            true => Ok(b"swapped".to_vec()),
+            false => good(url),
+        };
+        assert_eq!(
+            fetch_archive(&release, asset, std::slice::from_ref(&key), &tampered).unwrap(),
+            b"archive"
+        );
     }
 
     /// Before the key exists, GitHub's archive installs on TLS alone, and the
@@ -2531,6 +2559,21 @@ mod tests {
 
     /// A release with no notes at all must not be silently skipped — a version
     /// missing from the list reads as though the jump went around it.
+    /// The comment GitHub's generated notes open with is the page's, not the
+    /// reader's: under a written paragraph it printed as a bullet.
+    #[test]
+    fn the_generated_notes_comment_is_not_a_note() {
+        let body = "Remote tabs grow up.\n\n\
+             <!-- Release notes generated using configuration in .github/release.yml at v0.36.3 -->\n\n\
+             ## What's Changed\n\
+             * Remote tabs reconnect by @flolep2607 in https://github.com/flolep2607/cctop/pull/288\n";
+        assert_eq!(
+            bullets(body),
+            ["Remote tabs grow up.", "Remote tabs reconnect"]
+        );
+        assert_eq!(without_comments("a <!-- b\nc --> d <!-- e"), "a  d ");
+    }
+
     #[test]
     fn a_release_with_no_notes_is_still_a_release() {
         let empty = Release {
