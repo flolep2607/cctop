@@ -403,12 +403,23 @@ in the Cloudflare account *before* that change merges.
 
 Each archive is signed with ed25519 before the release is made public
 (`tools/sign-release.sh`, with the `RELEASE_SIGNING_KEY` secret), and the
-updater checks it against `RELEASE_PUBLIC_KEY` in `crates/core/src/update.rs`
-for every download, GitHub's or the mirror's. That is what keeps the mirror's
-push token from being a way to ship a binary to everyone. `tools/release-key.sh`
-makes the pair once: it stores the private half in the secret without printing
-it and prints the public half to paste. Do not run it again for an existing
-key — a binary refuses releases signed by any key but the one it carries.
+updater checks it for every download, GitHub's or the mirror's. That is what
+keeps the mirror's push token from being a way to ship a binary to everyone.
+`tools/release-key.sh` makes the pair once: it stores the private half in the
+secret without printing it and prints the public half to paste.
+
+A binary refuses releases signed by any key it does not carry, so it carries
+two (`RELEASE_KEYS` in `crates/core/src/update.rs`): that primary, and a
+**backup** whose private half is kept offline by a maintainer
+(`tools/release-key.sh --backup` made it) and never goes near CI. It exists to
+rotate the primary out if it leaks or is lost: release a source that trusts a
+new primary and the backup but not the old primary
+(`tools/release-key.sh --replace`), then re-sign that release's archives with
+the backup and refresh the mirror (`tools/release-key.sh --sign-with-backup
+v<version>`), which every installed binary accepts. The top of
+`tools/release-key.sh` has the steps. Do not run `--replace` outside that
+procedure: without the backup's signature, no installed cctop would accept a
+release again.
 
 ## Refreshing the screenshots
 
