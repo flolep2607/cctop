@@ -67,6 +67,10 @@ const HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 /// same listing, so this also bounds how stale an offline dot can be.
 const REDISCOVER: Duration = Duration::from_secs(120);
 
+/// Why a sibling whose tunnel the account lists with no connector did not
+/// answer.
+const OFFLINE: &str = "offline — its tunnel has no connector";
+
 /// The prefix `cctop tunnel setup` names every machine's tunnel with.
 const TUNNEL_PREFIX: &str = "cctop-";
 
@@ -289,12 +293,21 @@ impl Peer {
         snapshot
     }
 
+    /// Asked even when the account's listing says the tunnel is down: that
+    /// listing is refreshed only every [`REDISCOVER`], and Cloudflare's own
+    /// status trails a connector coming back. Trusting it kept a machine that
+    /// was back shown as offline for minutes. The listing only explains a
+    /// failure — a sibling whose tunnel has no connector answers with the
+    /// edge's error page, which says much less.
     fn read(&self) -> Snapshot {
-        if !self.up {
-            return Snapshot::Failed(
-                "offline — its tunnel has no connector, so cctop is not serving there".into(),
-            );
+        let snapshot = self.ask_sessions();
+        match snapshot {
+            Snapshot::Failed(_) if !self.up => Snapshot::Failed(OFFLINE.into()),
+            snapshot => snapshot,
         }
+    }
+
+    fn ask_sessions(&self) -> Snapshot {
         match self.send("GET", "/api/sessions", "", None) {
             Ok(answer) if answer.status == 200 => match String::from_utf8(answer.body) {
                 Ok(json) => match fleet::parse(&self.machine, &json) {

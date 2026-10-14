@@ -165,38 +165,20 @@ impl App {
         self.open_remote_tab(&argv, &what, name, label);
     }
 
-    /// The footer's note that machines are answering — the down-note's other
-    /// half. One host answers by name; several are counted. `None` when no
-    /// remote answered yet, which is not news.
-    pub fn remotes_up_footer(&self) -> Option<String> {
-        let up: Vec<&str> = self
+    /// Every machine the table reads, by name, and whether it is answering —
+    /// the footer's presence dots. A dot, not a sentence: a footer line that
+    /// spelled out why crowded out everything beside it, and the reason is
+    /// said where it is needed, when one of that machine's rows is opened.
+    pub fn remote_presence(&self) -> Vec<(String, bool)> {
+        let mut hosts: Vec<(String, bool)> = self
             .remotes
             .keys()
-            .filter(|host| !self.remote_errors.contains_key(*host))
-            .map(String::as_str)
+            .chain(self.remote_errors.keys())
+            .map(|host| (host.clone(), !self.remote_errors.contains_key(host)))
             .collect();
-        match up.len() {
-            0 => None,
-            1 => Some(format!("{} up", up[0])),
-            n => Some(format!("{n} remotes up")),
-        }
-    }
-
-    /// The footer's note that a machine is not answering.
-    pub fn remote_footer(&self) -> Option<String> {
-        let mut hosts: Vec<&str> = self.remote_errors.keys().map(String::as_str).collect();
         hosts.sort();
-        let first = hosts.first()?;
-        // One host names its reason, which is nearly always the whole fix
-        // ("Permission denied", "command not found"). Several would not fit, so
-        // they are counted and the panel is where the rest live.
-        Some(match hosts.len() {
-            1 => format!("{first}: {}", self.remote_errors[*first]),
-            n => format!(
-                "{n} hosts unreachable ({first}: {})",
-                self.remote_errors[*first]
-            ),
-        })
+        hosts.dedup();
+        hosts
     }
 
     /// What one session collides with, with its peers named the way the table
@@ -483,41 +465,37 @@ mod tests {
             Some("main")
         );
 
-        // A host that stops answering keeps its rows and says so.
+        // A host that stops answering keeps its rows, and its dot goes red.
         app.remote_errors
             .insert("box".into(), "Permission denied".into());
-        let footer = app.remote_footer().expect("a warning");
-        assert!(footer.contains("box"), "{footer}");
-        assert!(footer.contains("Permission denied"), "{footer}");
-        // And because it is down, it is not also counted as up.
-        assert!(app.remotes_up_footer().is_none());
+        assert_eq!(app.remote_presence(), [("box".to_string(), false)]);
     }
 
-    /// The up-count is the good news that the down-warning is missing.
+    /// One dot per machine: green while it answers, red once it does not.
     #[test]
-    fn the_footer_counts_the_hosts_that_answer() {
+    fn the_footer_has_a_dot_per_machine() {
         let mut app = test_app();
-        assert!(app.remotes_up_footer().is_none());
+        assert!(app.remote_presence().is_empty());
 
-        let mut away = session("away", true, "/srv/work");
-        away.remote = Some(cctop_core::session::Remote {
-            host: "box".into(),
-            ..Default::default()
-        });
-        app.remotes.insert("box".into(), vec![away]);
-        assert_eq!(app.remotes_up_footer().as_deref(), Some("box up"));
-
-        let mut far = session("far", true, "/srv/other");
-        far.remote = Some(cctop_core::session::Remote {
-            host: "bench".into(),
-            ..Default::default()
-        });
-        app.remotes.insert("bench".into(), vec![far]);
-        assert_eq!(app.remotes_up_footer().as_deref(), Some("2 remotes up"));
-
-        // One drops out: the other is still counted, by name no longer.
+        for (host, dir) in [("box", "/srv/work"), ("bench", "/srv/other")] {
+            let mut row = session(host, true, dir);
+            row.remote = Some(cctop_core::session::Remote {
+                host: host.into(),
+                ..Default::default()
+            });
+            app.remotes.insert(host.into(), vec![row]);
+        }
         app.remote_errors.insert("box".into(), "timeout".into());
-        assert_eq!(app.remotes_up_footer().as_deref(), Some("bench up"));
+        // A machine that has never answered is still listed, as down.
+        app.remote_errors.insert("asleep".into(), "offline".into());
+        assert_eq!(
+            app.remote_presence(),
+            [
+                ("asleep".to_string(), false),
+                ("bench".to_string(), true),
+                ("box".to_string(), false),
+            ]
+        );
     }
 
     /// A server left behind the laptop: said once, marked on its rows, and

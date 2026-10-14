@@ -280,27 +280,18 @@ fn footer_badges(app: &App) -> Vec<Span<'static>> {
             ),
         ));
     }
-    // Machines answering, beside the ones that are not: without the count of
-    // the living, a warning is the only reading and the totals still look
-    // complete or empty with no way to tell which.
-    if let Some(up) = app.remotes_up_footer() {
+    // A dot per machine the table reads: green answering, red not. The rows
+    // of a machine that dropped out keep their last reading, so the totals
+    // would look complete without it. Why one is down is said when one of its
+    // rows is opened.
+    for (host, up) in app.remote_presence() {
+        let color = match up {
+            true => theme::colors().cost_low,
+            false => theme::colors().cost_high,
+        };
         badges.push((
             "remote",
-            Span::styled(
-                format!(" {up} "),
-                Style::default().fg(theme::colors().cost_low),
-            ),
-        ));
-    }
-    // A machine that has dropped out has to say so. Its rows are still on
-    // screen, holding their last reading, and the totals still look complete.
-    if let Some(down) = app.remote_footer() {
-        badges.push((
-            "remote",
-            Span::styled(
-                format!(" ⚠ {down} "),
-                Style::default().fg(theme::colors().cost_mid),
-            ),
+            Span::styled(format!(" ● {host} "), Style::default().fg(color)),
         ));
     }
     // Two agents writing one file is the only thing here that is a fault rather
