@@ -36,6 +36,10 @@ alongside it.
   `Alt+b` jumps to whichever agent is waiting on you. Its agent runs in cctop's
   own rmux, built in, so it keeps running after you quit and is back in its tab
   next time.
+- **Every machine, one table.** Each computer that ran `cctop tunnel setup` on
+  one Cloudflare account sees the others' sessions, no ssh route needed. `R`
+  opens a remote session in a tab here, and `t` starts a new agent on any of
+  them. A dropped connection resumes where it left off.
 
 ## Installation
 
@@ -105,8 +109,10 @@ Six keys are worth knowing before anything else:
 ## Beyond the dashboard
 
 `cctop` can answer an agent (`s`), hand a session's context to a different
-harness (`O`), read the sessions on another machine over ssh (`--host`), and
-stream the table to a browser. On a phone that last one earns its place, since
+harness (`O`), read the sessions on another machine over ssh (`--host`) or
+through your Cloudflare tunnel, and stream the table to a browser. The tunnel,
+who may open it (an email, or a whole `@domain`) and its links are rows under
+Settings → `[tunnel]`. On a phone that last one earns its place, since
 the sessions waiting on you can find *you*.
 
 It can also tell you what the money bought.
