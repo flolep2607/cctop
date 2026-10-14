@@ -60,6 +60,13 @@ impl App {
         self.launch_cwd_pristine = remote.is_none();
         self.launch_cwd_known = self.known_dirs();
         self.ssh_hosts = ssh_hosts();
+        self.peer_hosts = location::peer_hosts();
+        // Back to whichever view opened it: the options panel's `c` is a
+        // detour from the options, not a way out of them.
+        self.launch_cwd_from = match self.mode {
+            Mode::LaunchOptions => Mode::LaunchOptions,
+            _ => Mode::Launch,
+        };
         // An offline host is asked again each time the field opens: a key
         // added to the agent, a VPN brought up, is what the person went away
         // to fix.
@@ -242,6 +249,7 @@ impl App {
             false => self.launch_cwd_input.to_string(),
         };
         self.launch_cwd_hits = match location::parse(&text) {
+            Typed::Remote { host, path } if self.is_peer(host) => self.peer_hits(host, path),
             Typed::Remote { host, path } => self.remote_hits(host, path),
             Typed::Local(typed) => {
                 let local: Vec<Hit> = dirs::suggest(typed, &self.launch_cwd_known)
@@ -333,7 +341,7 @@ impl App {
             .cloned()
         {
             self.launch_cwd_input.set(hit.text());
-            if let Hit::Host { .. } = hit {
+            if let Hit::Host { .. } | Hit::Peer { .. } = hit {
                 self.launch_cwd_edited();
                 self.needs_redraw = true;
                 return;
@@ -373,7 +381,7 @@ impl App {
         self.launch_cwd_bad = false;
         self.launch_cwd = taken;
         self.launch_remote = None;
-        self.mode = Mode::Launch;
+        self.mode = self.launch_cwd_from;
     }
 }
 

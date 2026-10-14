@@ -223,6 +223,7 @@ impl App {
             Mode::AddAccount => self.on_key_add_account(key),
             Mode::Connect => self.on_key_connect(key),
             Mode::Launch => self.on_key_launch(key),
+            Mode::LaunchOptions => self.on_key_launch_options(key),
             Mode::RowMenu => self.on_key_menu(key),
             Mode::LaunchCwd => self.on_key_launch_cwd(key),
             Mode::Hooks => self.on_key_hooks(key),
@@ -414,6 +415,10 @@ impl App {
                 if paste_into(&mut self.launch_cwd_input, text, MAX_PATH_INPUT) {
                     self.launch_cwd_edited();
                 }
+            }
+            // A model id or a branch name, copied from somewhere.
+            Mode::LaunchOptions if self.launch_opt_edit.is_some() => {
+                paste_into(&mut self.launch_opt_input, text, BRANCH_MAX);
             }
             Mode::SwitchTab => {
                 if paste_into(&mut self.switch_filter, text, SWITCH_FILTER_MAX) {
@@ -608,6 +613,7 @@ impl App {
             | Mode::RenameAddress
             | Mode::SwitchTab
             | Mode::LaunchCwd => true,
+            Mode::LaunchOptions => self.launch_opt_edit.is_some(),
             Mode::AddAccount => {
                 let flow = &self.add_account;
                 flow.pane.is_none() && flow.outcome.is_none() && !flow.named
@@ -694,6 +700,10 @@ impl App {
             // reattaching: that agent is already somewhere, and the footer says
             // so — a path typed there would be quietly ignored.
             KeyCode::Char('c') if !self.launch_is_reattach() => self.edit_launch_cwd(),
+            // The harness's own options — model, account, permissions,
+            // worktree. Enter does not go through them: it starts at once,
+            // with whatever they say, as it always has.
+            KeyCode::Right | KeyCode::Char('l') => self.open_launch_options(),
             KeyCode::Enter => {
                 // A row that cannot go where the launcher points says why and
                 // leaves the launcher up, to pick another row or another place.
@@ -724,7 +734,7 @@ impl App {
             // lose the setting you were trying to change.
             KeyCode::Esc => {
                 self.launch_cwd_checking = None;
-                self.mode = Mode::Launch;
+                self.mode = self.launch_cwd_from;
             }
             KeyCode::Enter => self.take_launch_cwd(),
             // Tab fills in what the suggestions agree on. The list below the

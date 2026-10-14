@@ -189,7 +189,7 @@ fn locate(dir: &Path) -> Located {
 
 /// The directory a repository is known by: the one holding its `.git`, or the
 /// common directory itself for a bare repository, which has no other.
-fn repo_dir(common: &Path) -> PathBuf {
+pub(super) fn repo_dir(common: &Path) -> PathBuf {
     match common.file_name() {
         Some(name) if name == ".git" => common.parent().unwrap_or(common).to_path_buf(),
         _ => common.to_path_buf(),

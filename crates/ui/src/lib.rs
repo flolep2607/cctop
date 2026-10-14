@@ -22,6 +22,7 @@ mod dirs;
 mod drunk;
 mod effects;
 mod filter;
+mod harness_opts;
 mod high;
 mod hooks;
 mod hyperlink;
@@ -119,6 +120,9 @@ pub enum Mode {
     Launch,
     /// Everything that can be done to the selected row, in one list.
     RowMenu,
+    /// The highlighted harness's options — model, account, permissions,
+    /// worktree — opened with → from [`Mode::Launch`]. See [`harness_opts`].
+    LaunchOptions,
     /// Typing the directory the launcher's pick will start in. Drawn as the
     /// launcher with its `in` line in an editable state, so the list of agents
     /// stays visible while the path is being changed.
@@ -494,6 +498,9 @@ pub struct App {
     /// opens — a snapshot, like the launcher's list, so an edit to the config
     /// mid-pick does not move the cursor.
     pub ssh_hosts: Vec<cctop_core::ssh_config::Host>,
+    /// The siblings on the Cloudflare account the field offers beside the ssh
+    /// hosts, snapshotted when it opens for the same reason.
+    pub peer_hosts: Vec<location::PeerHost>,
     /// What is known about each host put in the field this run: its
     /// connection, its repositories, the directories listed on it.
     pub ssh_states: HashMap<String, location::HostState>,
@@ -503,6 +510,18 @@ pub struct App {
     /// Where the launcher's pick starts when it is not this machine. Set, it
     /// wins over `launch_cwd`.
     pub launch_remote: Option<location::RemoteTarget>,
+    /// Where the directory field goes back to when it closes: the launcher's
+    /// list, or the options panel it was opened from.
+    pub launch_cwd_from: Mode,
+    /// What each harness is started with beyond the directory, by agent
+    /// name, as its options panel last left it. For the run only: a model or
+    /// a permission mode is a choice for the work at hand, and YOLO carried
+    /// silently into tomorrow's launches is not a default anyone chose.
+    pub launch_options: HashMap<String, harness_opts::HarnessOptions>,
+    /// The options panel's cursor, and the line being typed in it if any.
+    pub launch_opt_cursor: usize,
+    pub launch_opt_edit: Option<harness_opts::OptRow>,
+    pub launch_opt_input: line_edit::LineEdit,
     /// Line being typed into the selected session's terminal.
     pub send_input: line_edit::LineEdit,
     /// The branch being named for `F`, the checkout it forks from, and the
@@ -1187,9 +1206,15 @@ impl App {
             launch_cwd_pick: None,
             launch_cwd_pristine: false,
             ssh_hosts: Vec::new(),
+            peer_hosts: Vec::new(),
             ssh_states: HashMap::new(),
             launch_cwd_checking: None,
             launch_remote: None,
+            launch_cwd_from: Mode::Launch,
+            launch_options: HashMap::new(),
+            launch_opt_cursor: 0,
+            launch_opt_edit: None,
+            launch_opt_input: Default::default(),
             serving: None,
             start_server: None,
             add_account: AddAccount::default(),

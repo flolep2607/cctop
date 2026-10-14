@@ -161,7 +161,11 @@ pub(crate) fn draw_help(frame: &mut Frame, area: Rect, app: &mut App) {
         section("Tabs and splits"),
         item(
             "{new_tab} or Alt+n",
-            "New tab: an agent or a shell, here or on an ssh host, or one still running",
+            "New tab: an agent or a shell, here or on another machine, or one still running",
+        ),
+        item(
+            "  →",
+            "In it: the agent's model, account, permissions, worktree",
         ),
         item("Alt+v / Alt+s", "Split the tab right / down"),
         item("Alt+← / →", "Previous / next tab"),

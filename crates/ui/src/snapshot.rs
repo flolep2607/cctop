@@ -561,10 +561,119 @@ fn new_tab_remote() {
         facts: None,
         problem: None,
         unchecked: None,
+        peer: false,
     });
     app.launch_cursor = 1;
     app.mode = Mode::Launch;
     snap("new_tab_remote", &mut app);
+}
+
+/// The new-tab launcher pointed at a project on a sibling cctop: the line
+/// says it goes through the tunnel, the agents are offered with no sandbox
+/// to need, and the shell — which a sibling does not start — is greyed with
+/// why while it is the one picked.
+#[test]
+fn new_tab_peer() {
+    use super::location::RemoteTarget;
+    let mut app = fixture();
+    app.launch_offer = vec![
+        tabs::Choice::Start(vec!["claude".into()]),
+        tabs::Choice::Start(vec!["codex".into()]),
+        tabs::Choice::Start(vec!["/bin/sh".into()]),
+    ];
+    app.launch_into = LaunchInto::Tab;
+    app.launch_remote = Some(RemoteTarget {
+        host: "computer36".into(),
+        path: "/srv/api".into(),
+        resolved: None,
+        facts: None,
+        problem: None,
+        unchecked: Some("computer36 checks it".into()),
+        peer: true,
+    });
+    app.launch_cursor = 2;
+    app.mode = Mode::Launch;
+    snap("new_tab_peer", &mut app);
+}
+
+/// The directory field with a sibling on the Cloudflare account offered
+/// beside the ssh hosts, then that sibling in the field, offering the
+/// projects its rows report.
+#[test]
+fn launch_cwd_peers() {
+    use super::location::{Hit, PeerHost};
+    let mut app = fixture();
+    app.launch_offer = vec![tabs::Choice::Start(vec!["/bin/sh".into()])];
+    app.launch_cursor = 0;
+    app.launch_cwd_input.clear();
+    app.peer_hosts = vec![PeerHost {
+        name: "computer36".into(),
+        offline: None,
+    }];
+    app.launch_cwd_hits = vec![
+        Hit::Dir("/home/me/src/web".into()),
+        Hit::Peer {
+            name: "computer36".into(),
+            offline: None,
+        },
+        Hit::Host {
+            name: "devbox".into(),
+            aliases: vec![],
+        },
+    ];
+    app.launch_cwd_pick = Some(1);
+    app.mode = Mode::LaunchCwd;
+    snap("launch_cwd_peers", &mut app);
+
+    let remote = |path: &str| Hit::Remote {
+        host: "computer36".into(),
+        path: path.into(),
+        problem: None,
+    };
+    app.launch_cwd_input.set("computer36:".to_string());
+    app.launch_cwd_hits = vec![remote("/srv/api"), remote("/home/me/notes")];
+    app.launch_cwd_pick = None;
+    snap("launch_cwd_peer_projects", &mut app);
+}
+
+/// A harness's options: its model, its permission setting — YOLO in the
+/// colour of a warning — and a worktree, which is greyed with why where the
+/// launch is not into a repository; under them, where it starts and the
+/// command Enter runs. Codex, whose account line shows only on a machine
+/// with two accounts, which this snapshot cannot depend on.
+#[test]
+fn launch_options() {
+    use cctop_core::launch_opts::{Options, Permissions};
+    // The account line is the machine's: drawn on one with two Codex
+    // logins, and a snapshot cannot depend on which machine it runs on.
+    if cctop_core::config::launchable_for(Provider::Codex).len() > 1 {
+        return;
+    }
+    let mut app = fixture();
+    app.launch_offer = vec![
+        tabs::Choice::Start(vec!["claude".into()]),
+        tabs::Choice::Start(vec!["codex".into()]),
+    ];
+    app.launch_cursor = 1;
+    app.launch_root = None;
+    app.launch_cwd = Some("/nonexistent/web".into());
+    app.launch_options.insert(
+        "codex".into(),
+        super::harness_opts::HarnessOptions {
+            options: Options {
+                model: Some("gpt-5-codex".into()),
+                permissions: Permissions::Bypass,
+            },
+            branch: None,
+        },
+    );
+    app.mode = Mode::LaunchOptions;
+    app.launch_opt_cursor = 1;
+    snap("launch_options", &mut app);
+
+    // Back in the list, the row says what is set.
+    app.mode = Mode::Launch;
+    snap("launch_options_summary", &mut app);
 }
 
 /// The directory field before anything is typed: the projects, then the ssh
