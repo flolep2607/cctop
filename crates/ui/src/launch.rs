@@ -33,6 +33,8 @@ struct NewTab<'a> {
     /// The account this pane runs as, when it is one cctop chose — so the pane
     /// border reports that account's limits rather than the default's.
     profile: Option<String>,
+    /// How the tab reaches another machine, when it is opened on one.
+    transport: Option<cctop_core::reach::Transport>,
 }
 
 /// How much of a session's name a resumed tab's label carries.
@@ -421,6 +423,7 @@ impl App {
                 resumed: Some(rmux),
                 label: Some(label),
                 profile: profile.map(|p| p.name.clone()),
+                transport: None,
             },
         );
     }
@@ -786,6 +789,8 @@ impl App {
             activity: None,
             state: None,
             profile,
+            // A restart is of a session on this machine.
+            transport: None,
         });
         let color = tab.color;
         tab.recolor(color);
@@ -824,6 +829,7 @@ impl App {
                 resumed: None,
                 label: Some("settings".into()),
                 profile: None,
+                transport: None,
             },
         );
     }
@@ -841,6 +847,7 @@ impl App {
             resumed,
             label,
             profile,
+            transport,
         } = tab;
         let mut pane = match tabs::Pane::launch(argv, cwd.as_deref(), own) {
             Ok(pane) => pane,
@@ -852,6 +859,7 @@ impl App {
         cctop_core::telemetry::record(cctop_core::telemetry::Feature::Workspace);
         pane.resumed = resumed;
         pane.profile = profile;
+        pane.transport = transport;
         if let Some(label) = label {
             pane.label = label;
         }
@@ -876,6 +884,7 @@ impl App {
         what: &str,
         name: String,
         label: String,
+        transport: cctop_core::reach::Transport,
     ) {
         self.open_tab(
             argv,
@@ -888,6 +897,7 @@ impl App {
                 label: Some(label),
                 // The account is the far machine's business.
                 profile: None,
+                transport: Some(transport),
             },
         );
     }
@@ -1325,6 +1335,7 @@ impl App {
                     // Somebody else started it; its account is whatever they
                     // chose, which the rmux session name does not record.
                     profile: None,
+                    transport: None,
                 },
             );
             return;
@@ -1429,6 +1440,7 @@ mod tests {
             tab: None,
             pane: None,
             axis: None,
+            transport: None,
             window: None,
         })
     }

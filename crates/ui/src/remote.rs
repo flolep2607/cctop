@@ -162,7 +162,7 @@ impl App {
             cctop_core::util::truncate(&shown, launch::TAB_LABEL_CHARS)
         );
         let what = format!("{shown} on {host}");
-        self.open_remote_tab(&argv, &what, name, label);
+        self.open_remote_tab(&argv, &what, name, label, reach.transport());
     }
 
     /// Every machine the table reads, by name, and whether it is answering —

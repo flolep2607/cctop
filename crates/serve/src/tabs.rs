@@ -36,6 +36,9 @@ pub struct Tab {
     /// The leading session of the split this is a pane of, when it is one —
     /// the same grouping the TUI rebuilds its splits from.
     pub tab: Option<String>,
+    /// How the tab reaches another machine, when its agent is on one:
+    /// `peer` through a sibling's Cloudflare tunnel, `ssh` over ssh.
+    pub transport: Option<&'static str>,
     /// Whether a terminal client is attached to it somewhere.
     pub attached: bool,
     /// The session the agent is writing, when cctop can tell — for a link to
@@ -61,6 +64,7 @@ pub fn build(running: Vec<Running>, sessions: &[Session], now: u64) -> Vec<Tab> 
                 cwd: r.cwd.as_ref().map(|p| p.to_string_lossy().into_owned()),
                 color: r.color.clone(),
                 tab: r.tab.clone(),
+                transport: r.transport.map(|t| t.as_str()),
                 attached: r.attached,
                 session_id,
                 name: r.name,
@@ -109,6 +113,7 @@ mod tests {
             tab: None,
             pane: None,
             axis: None,
+            transport: None,
             window: None,
         }
     }

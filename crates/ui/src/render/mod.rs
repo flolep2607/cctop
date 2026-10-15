@@ -584,6 +584,20 @@ const DONE: &str = "✓ ";
 /// split whose other panes have vanished says where they went.
 const ZOOM: &str = "⤢ ";
 
+/// The mark before a tab's title when its agent is on another machine, by how
+/// the tab gets there: a sibling through its Cloudflare tunnel, or ssh — the
+/// arrow the table's Host column puts after a sandboxed row's host.
+///
+/// One column each, text presentation in plain fonts: the bar's arithmetic
+/// counts chars, and a glyph a terminal draws two wide would push every tab
+/// after it one column off its click target.
+fn transport_mark(transport: cctop_core::reach::Transport) -> &'static str {
+    match transport {
+        cctop_core::reach::Transport::Peer => "☁",
+        cctop_core::reach::Transport::Ssh => "⇄",
+    }
+}
+
 /// The workspace tab bar: the dashboard first, then a tab per set of terminals.
 fn draw_workspace_bar(frame: &mut Frame, area: Rect, app: &App, layout: &mut Layout) {
     let titles: Vec<String> = (0..=app.tabs.len())
@@ -633,6 +647,16 @@ fn draw_workspace_bar(frame: &mut Frame, area: Rect, app: &App, layout: &mut Lay
             )
         })
         .collect();
+    // The mark and the space after it, before the title: part of the label's
+    // budget, so a remote tab is no wider than a local one when the bar is
+    // crowded.
+    let remote: Vec<Option<&str>> = std::iter::once(None)
+        .chain(
+            app.tabs
+                .iter()
+                .map(|tab| tab.transport().map(transport_mark)),
+        )
+        .collect();
 
     // Only crowded bars pay for the crowding: while every label fits it is
     // drawn whole, and past that each tab gets an equal share. A clipped label
@@ -642,7 +666,8 @@ fn draw_workspace_bar(frame: &mut Frame, area: Rect, app: &App, layout: &mut Lay
     let natural: usize = titles.iter().map(|t| t.chars().count() + 2).sum::<usize>()
         + titles.len()
         + recording.iter().filter(|&&r| r).count() * REC.chars().count()
-        + markers.iter().map(|m| m.chars().count()).sum::<usize>();
+        + markers.iter().map(|m| m.chars().count()).sum::<usize>()
+        + remote.iter().flatten().count() * 2;
     let cap = match natural <= label_room {
         true => usize::MAX,
         false => ((label_room.saturating_sub(titles.len())) / titles.len())
@@ -661,9 +686,29 @@ fn draw_workspace_bar(frame: &mut Frame, area: Rect, app: &App, layout: &mut Lay
             ));
             pos += 1;
         }
-        let text = format!(" {} ", util::truncate(title, cap));
-        let mut width = text.chars().count() as u16;
         let style = tab_style(app, i, hues[i]);
+        spans.push(Span::styled(" ", style));
+        let mut width = 1u16;
+        let room = match remote[i] {
+            // Dim and never bold: it says where, and the label's own colour is
+            // already saying how the agent is. A painted tab keeps its fill's
+            // ink, which dim on that fill would not be legible against.
+            Some(mark) => {
+                let quiet = match hues[i] {
+                    Some(_) => style,
+                    None => style.fg(theme::colors().dim),
+                };
+                spans.push(Span::styled(
+                    format!("{mark} "),
+                    quiet.remove_modifier(Modifier::BOLD),
+                ));
+                width += 2;
+                cap.saturating_sub(2).max(1)
+            }
+            None => cap,
+        };
+        let text = format!("{} ", util::truncate(title, room));
+        width += text.chars().count() as u16;
         spans.push(Span::styled(text, style));
         // In the label's own style, so it reads as part of *that* tab rather
         // than a second one, and bold so it is not lost against the fill.
@@ -1177,6 +1222,19 @@ pub use cctop_core::clipboard::{copy_to_clipboard, over_ssh};
 mod tests {
     use super::*;
 
+    /// The bar counts chars, so each mark has to be one column wherever it is
+    /// drawn — not an emoji a terminal widens to two.
+    #[test]
+    fn a_transport_mark_is_one_column() {
+        use cctop_core::reach::Transport;
+        for transport in [Transport::Peer, Transport::Ssh] {
+            let mark = transport_mark(transport);
+            assert_eq!(mark.chars().count(), 1, "{mark}");
+            assert_eq!(unicode_width::UnicodeWidthStr::width(mark), 1, "{mark}");
+            assert_eq!(Transport::parse(transport.as_str()), Some(transport));
+        }
+    }
+
     fn window(label: &'static str, pct: u32, resets_at: i64) -> cctop_core::quota::Window {
         cctop_core::quota::Window {
             label,
@@ -1212,6 +1270,7 @@ mod tests {
                 tab: None,
                 pane: None,
                 axis: None,
+                transport: None,
                 window: None,
             })
         };
@@ -1327,6 +1386,7 @@ mod tests {
                 tab: None,
                 pane: None,
                 axis: None,
+                transport: None,
                 window: None,
             })
         };

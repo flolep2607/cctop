@@ -998,6 +998,7 @@ mod tests {
                 tab: None,
                 pane: None,
                 axis: None,
+                transport: None,
                 window: None,
             })
         };
@@ -1254,6 +1255,7 @@ mod tests {
                 tab: None,
                 pane: None,
                 axis: None,
+                transport: None,
                 window: None,
             })
         };
@@ -1310,6 +1312,7 @@ mod tests {
                 tab: None,
                 pane: None,
                 axis: None,
+                transport: None,
                 window: None,
             })
         };
@@ -1480,6 +1483,7 @@ mod tests {
                 tab: None,
                 pane: None,
                 axis: None,
+                transport: None,
                 window: None,
             })
         };
@@ -1541,6 +1545,7 @@ mod tests {
                 tab: None,
                 pane: None,
                 axis: None,
+                transport: None,
                 window: None,
             })
         };
@@ -1621,6 +1626,7 @@ mod tests {
                 tab: None,
                 pane: None,
                 axis: None,
+                transport: None,
                 window: None,
             })
         };
@@ -1711,6 +1717,7 @@ mod tests {
                 tab: None,
                 pane: None,
                 axis: None,
+                transport: None,
                 window: None,
             })
         };
@@ -1821,6 +1828,7 @@ mod tests {
                 tab: None,
                 pane: None,
                 axis: None,
+                transport: None,
                 window: None,
             }));
         app.tab = 1;
@@ -1864,6 +1872,7 @@ mod tests {
                 tab: None,
                 pane: None,
                 axis: None,
+                transport: None,
                 window: None,
             })
         };
@@ -1930,6 +1939,7 @@ mod tests {
             tab: None,
             pane: None,
             axis: None,
+            transport: None,
             window: None,
         })
     }
@@ -2034,6 +2044,7 @@ mod tests {
                 tab: None,
                 pane: None,
                 axis: None,
+                transport: None,
                 window: None,
             })
         };
@@ -2072,6 +2083,7 @@ mod tests {
                 tab: None,
                 pane: None,
                 axis: None,
+                transport: None,
                 window: None,
             })
         };
@@ -2143,6 +2155,7 @@ mod tests {
                 tab: None,
                 pane: None,
                 axis: None,
+                transport: None,
                 window: None,
             })
         };

@@ -973,6 +973,26 @@ fn dead_pane() {
     snap("dead_pane", &mut app);
 }
 
+/// Tabs on other machines: a session opened on a sibling through its
+/// Cloudflare tunnel, and an agent launched on an ssh host, each marked before
+/// its label beside a local one.
+#[test]
+fn remote_tabs() {
+    use cctop_core::reach::Transport;
+    let mut app = fixture();
+    let remote = |label: &str, transport| {
+        let mut pane = tabs::Pane::for_test(label);
+        pane.transport = Some(transport);
+        tabs::Tab::new(pane)
+    };
+    app.tabs
+        .push(tabs::Tab::new(tabs::Pane::for_test("claude")));
+    app.tabs
+        .push(remote("desk · Fix the login hint", Transport::Peer));
+    app.tabs.push(remote("codex · procdb", Transport::Ssh));
+    snap("remote_tabs", &mut app);
+}
+
 /// Choosing an address: the share panel with its `Address` line, the field
 /// `e` opens on it, and the dashboard's field with its warning. Every token
 /// and link here is made up, and only hostnames reach the screen.

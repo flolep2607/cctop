@@ -39,6 +39,42 @@ impl fmt::Debug for Reach {
     }
 }
 
+/// Which of the two ways a tab here reaches the machine its agent is on —
+/// the part of a [`Reach`] that outlives it.
+///
+/// A `Reach` holds a live sibling or an ssh spec and is found again from the
+/// machine's name; a tab only needs to say which kind it went through, and has
+/// to say it after a restart too, so this is what is written on the tab's rmux
+/// session ([`rmux::set_transport`](crate::rmux::set_transport)).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Transport {
+    /// A sibling on the Cloudflare account, bridged by `cctop mux reach` or
+    /// `mux launch`.
+    Peer,
+    /// ssh to a `--host`, or a sandbox whose files are on one.
+    Ssh,
+}
+
+impl Transport {
+    /// The word written on the rmux session.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Transport::Peer => "peer",
+            Transport::Ssh => "ssh",
+        }
+    }
+
+    /// Read back what [`as_str`](Self::as_str) wrote. Anything else is no
+    /// transport, which draws as a local tab rather than as a guess.
+    pub fn parse(word: &str) -> Option<Transport> {
+        match word {
+            "peer" => Some(Transport::Peer),
+            "ssh" => Some(Transport::Ssh),
+            _ => None,
+        }
+    }
+}
+
 /// Why a remote row's machine cannot be asked anything.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Unreached {
@@ -93,6 +129,14 @@ impl Reach {
         match self {
             Reach::Ssh(host) => &host.target,
             Reach::Peer(peer) => &peer.machine,
+        }
+    }
+
+    /// Which kind of way this is, for a tab to remember.
+    pub fn transport(&self) -> Transport {
+        match self {
+            Reach::Ssh(_) => Transport::Ssh,
+            Reach::Peer(_) => Transport::Peer,
         }
     }
 
