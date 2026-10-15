@@ -99,10 +99,11 @@ says what is wrong when something looks off.
 
 ### 3. Use it from your phone
 
-Press `B` in the dashboard (or run `cctop serve --tunnel`) to serve the same
-table, and a page per session, to a browser. `t` in that panel adds a public
-link through Cloudflare, and `c` shows it as a QR code to scan. Whoever holds
-the link can drive your agents; a second, read-only link is printed beside it.
+Press `B` in the dashboard for the browser panel, then `t` to serve the same
+table, and a page per session, over a public Cloudflare link (`l` serves it on
+this machine only). `c` shows the link as a QR code to scan. Or run
+`cctop serve --tunnel` directly. Whoever holds the link can drive your agents;
+a second, read-only link is printed beside it.
 
 For a link that stays the same across runs, connect your own free Cloudflare
 account once (it needs a domain whose DNS is on Cloudflare):
@@ -116,7 +117,7 @@ Details, Cloudflare Access logins and invites: [In a browser](docs/serve.md).
 ### 4. Several machines, one table
 
 Run `cctop tunnel setup --browser` on each machine, against the same Cloudflare
-account, and keep each one serving on its tunnel (`B`, or
+account, and keep each one serving on its tunnel (`B` then `t`, or
 `cctop serve --tunnel`). Each then shows the others' sessions in its table,
 with the machine's name on the row. No ssh route is needed. `R` opens a remote
 session in a tab here, and `t` starts a new agent on any of them.
