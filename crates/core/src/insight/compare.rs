@@ -249,7 +249,10 @@ impl Layout {
     /// fixed 28 turned `canopywave/moonshotai/kimi-k2.5` into a model that
     /// does not exist.
     fn new<'a>(rows: impl Iterator<Item = &'a Row>, rate: Option<f64>) -> Self {
-        let longest = rows.map(|r| r.model.chars().count()).max().unwrap_or(0);
+        let longest = rows
+            .map(|r| crate::util::cells(&r.model))
+            .max()
+            .unwrap_or(0);
         Layout {
             model: longest.clamp(12, 44),
             rate,
@@ -280,11 +283,10 @@ impl Layout {
 
     fn line(&self, out: &mut String, r: &Row) {
         use std::fmt::Write as _;
-        let model: String = r.model.chars().take(self.model).collect();
         let _ = write!(
             out,
-            "  {:<w$} {:>8} {:>8} {:>8} {:>8} {:>5} {:>9} {:>9} {:>6}",
-            model,
+            "  {} {:>8} {:>8} {:>8} {:>8} {:>5} {:>9} {:>9} {:>6}",
+            crate::util::pad(&r.model, self.model, false),
             r.sessions,
             match r.files_delegated {
                 0 => r.files_edited.to_string(),
@@ -301,7 +303,6 @@ impl Layout {
                 .map(crate::util::compact_duration)
                 .unwrap_or_else(|| "—".into()),
             pct(r.cache_hit()),
-            w = self.model
         );
         if let Some(rate) = self.rate {
             let all_in = match r.all_in(rate) {

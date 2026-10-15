@@ -692,10 +692,14 @@ fn draw_workspace_bar(frame: &mut Frame, area: Rect, app: &App, layout: &mut Lay
     // you can still count and click beats a bar that runs off the screen.
     // `titles.len()` columns go to the rules between labels — one between
     // every pair of tabs and one before the new-tab button.
-    let natural: usize = titles.iter().map(|t| t.chars().count() + 2).sum::<usize>()
+    //
+    // In cells, as the bar is drawn: a wide title counted in chars made the
+    // bar look as if it fitted when it did not, and moved every click target
+    // after it to the left of the tab it belongs to.
+    let natural: usize = titles.iter().map(|t| util::cells(t) + 2).sum::<usize>()
         + titles.len()
-        + recording.iter().filter(|&&r| r).count() * REC.chars().count()
-        + markers.iter().map(|m| m.chars().count()).sum::<usize>()
+        + recording.iter().filter(|&&r| r).count() * util::cells(REC)
+        + markers.iter().map(|m| util::cells(m)).sum::<usize>()
         + remote.iter().flatten().count() * 2;
     let cap = match natural <= label_room {
         true => usize::MAX,
@@ -737,7 +741,7 @@ fn draw_workspace_bar(frame: &mut Frame, area: Rect, app: &App, layout: &mut Lay
             None => cap,
         };
         let text = format!("{} ", util::truncate(title, room));
-        width += text.chars().count() as u16;
+        width += util::cells(&text) as u16;
         spans.push(Span::styled(text, style));
         // In the label's own style, so it reads as part of *that* tab rather
         // than a second one, and bold so it is not lost against the fill.
@@ -746,7 +750,7 @@ fn draw_workspace_bar(frame: &mut Frame, area: Rect, app: &App, layout: &mut Lay
                 markers[i].clone(),
                 style.add_modifier(Modifier::BOLD),
             ));
-            width += markers[i].chars().count() as u16;
+            width += util::cells(&markers[i]) as u16;
         }
         // After the label rather than inside it, so it is never what the
         // elision cuts, and part of the tab's click target like the label is.
@@ -757,7 +761,7 @@ fn draw_workspace_bar(frame: &mut Frame, area: Rect, app: &App, layout: &mut Lay
                     .fg(theme::colors().cost_high)
                     .add_modifier(Modifier::BOLD),
             ));
-            width += REC.chars().count() as u16;
+            width += util::cells(REC) as u16;
         }
         layout.workspace_spans.push((pos, pos + width, i));
         pos += width;
@@ -1114,7 +1118,7 @@ fn draw_panes(frame: &mut Frame, area: Rect, app: &mut App, layout: &mut Layout)
         // agent this is; the quota is the other thing you want while it runs.
         // Right-aligned so it does not move when the label changes, and only if
         // it fits beside the label rather than pushing it off.
-        let taken = pane.label.chars().count() as u16 + 6;
+        let taken = util::cells(&pane.label) as u16 + 6;
         if let Some(text) = pane_quota(
             &pane.label,
             pane.profile.as_deref(),
@@ -1256,8 +1260,9 @@ pub use cctop_core::clipboard::{copy_to_clipboard, over_ssh};
 mod tests {
     use super::*;
 
-    /// The bar counts chars, so each mark has to be one column wherever it is
-    /// drawn — not an emoji a terminal widens to two.
+    /// The bar books a mark and its space as two columns, so each mark has to
+    /// be one column wherever it is drawn — not an emoji a terminal widens to
+    /// two.
     #[test]
     fn a_transport_mark_is_one_column() {
         use cctop_core::reach::Transport;
@@ -1395,6 +1400,69 @@ mod tests {
             layout.workspace_spans[1], width_busy,
             "the tab changed width"
         );
+    }
+
+    /// A click lands on the tab drawn under it when a title is wider than it
+    /// is long: each tab's target starts where its label is drawn, so the
+    /// tabs after a CJK or emoji title are not shifted onto their neighbours.
+    #[test]
+    fn a_wide_tab_title_keeps_every_click_target_on_its_tab() {
+        use cctop_core::cache::UiPrefs;
+        use cctop_core::pricing::Plan;
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let named = |name: &str| {
+            crate::tabs::Tab::for_agent(&cctop_core::rmux::Running {
+                name: format!("cctop-{name}"),
+                pid: None,
+                cwd: None,
+                attached: false,
+                activity: None,
+                label: Some(name.to_string()),
+                profile: None,
+                order: None,
+                state: None,
+                color: None,
+                tab: None,
+                pane: None,
+                axis: None,
+                transport: None,
+                window: None,
+            })
+        };
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::with_prefs(Plan::Retail, tx, UiPrefs::default());
+        app.tabs = vec![
+            named("日本語プロジェクト"),
+            named("⚠\u{FE0F} 🧑\u{200D}🌾 hotfix"),
+            named("zsh"),
+        ];
+        app.tab = 0;
+
+        let mut terminal = Terminal::new(TestBackend::new(100, 1)).expect("backend");
+        let mut layout = Layout::default();
+        terminal
+            .draw(|frame| draw_workspace_bar(frame, frame.area(), &app, &mut layout))
+            .expect("draw");
+        let buf = terminal.backend().buffer();
+        // The column where `n:` is drawn, by cell rather than by char, since a
+        // wide character's second cell is a cell of its own.
+        let label_at = |n: usize| {
+            let digit = n.to_string();
+            (0..99u16).find(|&x| {
+                buf.cell((x, 0)).unwrap().symbol() == digit
+                    && buf.cell((x + 1, 0)).unwrap().symbol() == ":"
+            })
+        };
+        for i in 1..=3 {
+            let at = label_at(i + 1).unwrap_or_else(|| panic!("tab {i} is not in the bar"));
+            let (left, right, index) = layout.workspace_spans[i];
+            assert_eq!(index, i);
+            // One cell of padding before the label is the tab's too.
+            assert_eq!(left + 1, at, "tab {i}'s click target starts elsewhere");
+            assert!(at < right);
+        }
     }
 
     /// A tab whose agent is asking pulses between its resting fill and its

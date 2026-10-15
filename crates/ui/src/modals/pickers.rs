@@ -141,18 +141,29 @@ pub(crate) fn draw_age_filter(frame: &mut Frame, area: Rect, app: &App) {
     modal(frame, area, "Show sessions active within", lines, 34);
 }
 
-/// The last `width` characters of `s`, elided at the front.
+/// The last `width` cells of `s`, elided at the front.
 ///
 /// For a field being typed into, where the end is the part that is moving.
 /// [`truncate`](cctop_core::util::truncate) keeps the head, which is the right
-/// answer for a label and the wrong one for a cursor.
+/// answer for a label and the wrong one for a cursor. Walked by grapheme and
+/// counted in cells for the same reasons as there.
 pub(super) fn tail(s: &str, width: usize) -> String {
-    let count = s.chars().count();
-    if count <= width {
+    use unicode_segmentation::UnicodeSegmentation;
+    if util::cells(s) <= width {
         return s.to_string();
     }
-    let skip = count - width.saturating_sub(1);
-    format!("…{}", s.chars().skip(skip).collect::<String>())
+    let room = width.saturating_sub(1);
+    let mut used = 0;
+    let start = s
+        .grapheme_indices(true)
+        .rev()
+        .take_while(|(_, g)| {
+            used += util::cells(g);
+            used <= room
+        })
+        .last()
+        .map_or(s.len(), |(i, _)| i);
+    format!("…{}", &s[start..])
 }
 
 /// The most of a refusal the menu will show before eliding it.
@@ -308,7 +319,7 @@ pub(crate) fn draw_hooks(frame: &mut Frame, area: Rect, app: &App) {
         for (project, state) in reporting.iter().take(6) {
             lines.push(Line::from(vec![
                 Span::styled(
-                    format!("   {:<24}", cctop_core::util::truncate(project, 24)),
+                    format!("   {}", cctop_core::util::pad(project, 24, false)),
                     theme::value(),
                 ),
                 Span::styled(*state, theme::dim()),
@@ -565,11 +576,7 @@ pub(crate) fn draw_switch_tab(
             None => spans.push(Span::raw("  ")),
         }
         spans.push(Span::styled(
-            format!(
-                "{:<width$}",
-                util::truncate(&title, TITLE_W),
-                width = TITLE_W
-            ),
+            util::pad(&title, TITLE_W, false),
             theme::value(),
         ));
         if let Some((word, color)) = state {
@@ -631,6 +638,18 @@ pub(crate) fn draw_switch_tab(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The kept end is counted in cells and cut between graphemes, so a
+    /// typed path with wide or emoji names still fits its field.
+    #[test]
+    fn tail_keeps_whole_graphemes_within_the_width() {
+        assert_eq!(tail("abc", 3), "abc");
+        assert_eq!(tail("abcdef", 4), "…def");
+        assert_eq!(tail("~/日本語/プロジェクト", 9), "…ジェクト");
+        let family = "👨\u{200D}👩\u{200D}👧";
+        assert_eq!(tail(&format!("x{family}{family}"), 4), format!("…{family}"));
+        assert_eq!(tail("🇫🇷🇫🇷", 3), "…🇫🇷");
+    }
 
     /// The switcher draws the whole bar — dashboard first — names the pick
     /// with `›`, and says beside each tab what it wants, so the row you land

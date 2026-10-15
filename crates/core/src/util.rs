@@ -2,6 +2,7 @@
 
 use chrono::{DateTime, Datelike, Local, TimeZone, Timelike, Utc};
 use std::path::Path;
+use unicode_segmentation::UnicodeSegmentation;
 
 /// Parse an ISO-8601 timestamp into a UTC instant.
 pub fn parse_ts(value: &str) -> Option<DateTime<Utc>> {
@@ -260,23 +261,50 @@ pub fn truncate(s: &str, width: usize) -> String {
     }
     let mut out = String::new();
     let mut used = 0;
-    let mut utf8 = [0u8; 4];
-    for c in s.chars() {
-        let w = cells(c.encode_utf8(&mut utf8));
+    // By grapheme, not by char: `⚠️` is two cells as a pair and one plus none
+    // apart, so a char walk kept the whole sequence and ran past the column,
+    // and it could stop between the halves of a flag or after a ZWJ.
+    for g in s.graphemes(true) {
+        let w = cells(g);
         // One cell stays free for the ellipsis.
         if used + w >= width {
             break;
         }
         used += w;
-        out.push(c);
+        out.push_str(g);
     }
     out.push('…');
     out
 }
 
-/// Terminal cells `s` occupies, by the same measure ratatui lays text out with.
+/// `text` cut to `width` cells by [`truncate`], then padded with spaces to
+/// exactly `width` — on the left when `right` aligns it.
+///
+/// `format!("{:<w$}")` pads by chars, so after a cell-counting truncate it
+/// added one space too many for every wide character and pushed the next
+/// column over.
+pub fn pad(text: &str, width: usize, right: bool) -> String {
+    let t = truncate(text, width);
+    let fill = " ".repeat(width.saturating_sub(cells(&t)));
+    if right {
+        format!("{fill}{t}")
+    } else {
+        format!("{t}{fill}")
+    }
+}
+
+/// Terminal cells `s` occupies, by the same measure ratatui's buffer draws it
+/// with.
+///
+/// `Span::width` alone counts the halfwidth sound marks `ﾞ` and `ﾟ` as nothing,
+/// while the buffer gives each a cell; they are added back so a cut made here
+/// is the one the screen shows. Not `CellWidth` itself: it asserts it is never
+/// handed a control character, and this is handed raw text.
 pub fn cells(s: &str) -> usize {
     ratatui::text::Span::raw(s).width()
+        + s.chars()
+            .filter(|c| matches!(c, '\u{FF9E}' | '\u{FF9F}'))
+            .count()
 }
 
 /// Strip a leading `$HOME` and replace it with `~`.
@@ -431,11 +459,6 @@ pub fn plural(n: usize, noun: &str) -> String {
     }
 }
 
-/// Cells one character occupies, by the same measure as [`cells`].
-fn char_cells(c: char) -> usize {
-    cells(c.encode_utf8(&mut [0u8; 4]))
-}
-
 /// At most `max` cells of `text`, then `…` when something was cut.
 ///
 /// The counterpart of [`truncate`], whose ellipsis fits *inside* the width:
@@ -452,9 +475,9 @@ pub fn clip(text: &str, max: usize) -> String {
     }
     let mut used = 0;
     let end = text
-        .char_indices()
-        .find(|&(_, c)| {
-            used += char_cells(c);
+        .grapheme_indices(true)
+        .find(|&(_, g)| {
+            used += cells(g);
             used > max
         })
         .map_or(text.len(), |(i, _)| i);
@@ -481,11 +504,11 @@ pub fn wrap(text: &str, width: usize) -> Vec<String> {
             let mut used = 0;
             let mut full = line.len();
             let mut space = None;
-            for (i, c) in line.char_indices() {
-                if c == ' ' {
+            for (i, g) in line.grapheme_indices(true) {
+                if g == " " {
                     space = Some(i);
                 }
-                used += char_cells(c);
+                used += cells(g);
                 if used > width {
                     full = i;
                     break;
@@ -497,7 +520,7 @@ pub fn wrap(text: &str, width: usize) -> Vec<String> {
                 // A wide character alone on a row narrower than itself still
                 // has to go somewhere, or this would never end.
                 Some(0) | None => match full {
-                    0 => line.chars().next().map_or(line.len(), char::len_utf8),
+                    0 => line.graphemes(true).next().map_or(line.len(), str::len),
                     at => at,
                 },
                 Some(at) => at,
@@ -664,6 +687,92 @@ mod shared_tests {
         assert_eq!(wrap("abcdefgh", 3), ["abc", "def", "gh"]);
         assert_eq!(wrap("a\n\nb", 5), ["a", "", "b"]);
         assert_eq!(wrap("日本", 1), ["日", "本"]);
+    }
+
+    /// Emoji sequences are cut whole and measured the way the buffer draws
+    /// them: a char walk kept `⚠️` at one cell and split a flag or a ZWJ family
+    /// down the middle.
+    #[test]
+    fn cutting_keeps_grapheme_clusters_whole() {
+        use ratatui::buffer::Buffer;
+        use ratatui::layout::Rect;
+        use ratatui::style::Style;
+
+        // What the buffer itself spends on `s`: the measure to agree with.
+        let drawn = |s: &str| {
+            let mut buf = Buffer::empty(Rect::new(0, 0, 40, 1));
+            buf.set_stringn(0, 0, s, 40, Style::default()).0 as usize
+        };
+        let warn = "⚠\u{FE0F}";
+        let farmer = "🧑\u{200D}🌾";
+        let family = "👨\u{200D}👩\u{200D}👧";
+        let flag = "🇫🇷";
+        let thumb = "👍🏽";
+        let watch = "⌚\u{FE0E}";
+        let kana = "ｶﾞ";
+        for s in [warn, farmer, family, flag, thumb, watch, kana, "日本", "ab"] {
+            assert_eq!(cells(s), drawn(s), "{s:?}");
+        }
+        assert_eq!(cells(warn), 2);
+        assert_eq!(cells(watch), 1, "VS15 asks for text presentation");
+        assert_eq!(cells("ｶﾞｶﾞｶﾞ"), 6);
+
+        assert_eq!(truncate("⚠️⚠️⚠️", 4), "⚠️…");
+        assert_eq!(cells(&truncate("⚠️ prod hotfix", 8)), 8);
+        assert_eq!(
+            truncate(&format!("{farmer} farmer"), 3),
+            format!("{farmer}…")
+        );
+        assert_eq!(
+            truncate(&format!("{family}{family}"), 3),
+            format!("{family}…")
+        );
+        assert_eq!(
+            truncate(&format!("{flag}{flag}"), 2),
+            "…",
+            "half a flag is none"
+        );
+        assert_eq!(truncate(&format!("{thumb}{thumb}"), 3), format!("{thumb}…"));
+        assert_eq!(
+            truncate(&format!("{watch}{watch}{watch}"), 2),
+            format!("{watch}…")
+        );
+        assert_eq!(truncate("ｶﾞｶﾞｶﾞ", 3), "ｶﾞ…");
+
+        assert_eq!(clip(&format!("{flag}{flag}"), 3), format!("{flag}…"));
+        assert_eq!(clip(&format!("{family} x"), 1), "…");
+
+        assert_eq!(wrap(&format!("{family}{family}"), 3), [family, family]);
+        assert_eq!(
+            wrap(&format!("{flag}{flag}{flag}"), 5),
+            [format!("{flag}{flag}"), flag.into()]
+        );
+        assert_eq!(
+            wrap(thumb, 1),
+            [thumb],
+            "a cluster wider than the row still goes whole"
+        );
+        for row in wrap(&format!("{warn} careful {warn}{warn}{warn}"), 4) {
+            assert!(cells(&row) <= 4, "{row:?} is {} cells", cells(&row));
+        }
+
+        // Padding counts cells too, so a column of wide text ends where an
+        // ASCII one does.
+        assert_eq!(pad("abc", 5, false), "abc  ");
+        assert_eq!(pad("abc", 5, true), "  abc");
+        assert_eq!(pad("日本語のプロジェクト", 12, false), "日本語のプ… ");
+        for s in [
+            "日本語のプロジェクト",
+            "⚠️⚠️⚠️⚠️",
+            family,
+            flag,
+            "ｶﾞｶﾞｶﾞｶﾞ",
+            watch,
+        ] {
+            for right in [false, true] {
+                assert_eq!(drawn(&pad(s, 7, right)), 7, "{s:?}");
+            }
+        }
     }
 
     #[test]

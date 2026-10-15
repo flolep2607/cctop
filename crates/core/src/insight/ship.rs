@@ -1007,8 +1007,8 @@ pub fn report(r: &Report) -> String {
     let models = r.by_model();
     let width = models
         .iter()
-        .map(|(m, _)| m.chars().count())
-        .chain(r.repos.iter().map(|p| tilde(&p.path).chars().count()))
+        .map(|(m, _)| crate::util::cells(m))
+        .chain(r.repos.iter().map(|p| crate::util::cells(&tilde(&p.path))))
         .max()
         .unwrap_or(0)
         .clamp(12, 44);
@@ -1020,11 +1020,10 @@ pub fn report(r: &Report) -> String {
         out.push('\n');
     };
     let line = |out: &mut String, name: &str, t: &Tally| {
-        let name: String = name.chars().take(width).collect();
         let _ = write!(
             out,
-            "  {:<width$} {:>8} {:>10}",
-            name,
+            "  {} {:>8} {:>10}",
+            crate::util::pad(name, width, false),
             t.sessions,
             money(t.usd, t.unpriced > 0)
         );

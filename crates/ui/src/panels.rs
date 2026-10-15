@@ -785,10 +785,7 @@ pub fn tool_activity(
         // could only be litter.
         let text = util::tildify(&super::ansi::strip(&d.d));
         let detail_w = width.saturating_sub(used + trailing_w).max(8);
-        spans.push(value(format!(
-            "{:<detail_w$}",
-            util::truncate(&text, detail_w)
-        )));
+        spans.push(value(util::pad(&text, detail_w, false)));
         spans.extend(trailing);
         let row_style = if d.failed {
             theme::failed()
@@ -1044,7 +1041,7 @@ pub fn subagents(
             Span::styled(icon.to_string(), Style::default().fg(icon_color)),
             Span::raw(" "),
             Span::styled(
-                format!("{:<12}", util::truncate(&sa.agent_type, 12)),
+                util::pad(&sa.agent_type, 12, false),
                 // A ghost's kind is metadata that outlived its transcript;
                 // like its other cells it stays dim rather than wearing a hue
                 // that would read as measured.
@@ -1056,7 +1053,7 @@ pub fn subagents(
             ),
             Span::raw(" "),
             Span::styled(
-                format!("{:<12}", util::truncate(&util::short_model(&sa.model), 12)),
+                util::pad(&util::short_model(&sa.model), 12, false),
                 if sa.ghost {
                     row_style
                 } else {
@@ -1064,10 +1061,7 @@ pub fn subagents(
                 },
             ),
             Span::raw(" "),
-            Span::styled(
-                format!("{:<desc_w$}", util::truncate(&sa.description, desc_w)),
-                row_style,
-            ),
+            Span::styled(util::pad(&sa.description, desc_w, false), row_style),
             Span::raw(" "),
             Span::styled(
                 format!("{cost:>8}"),

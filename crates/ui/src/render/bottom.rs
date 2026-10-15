@@ -261,7 +261,7 @@ fn draw_tool_sidebar(
             let name_w = (TOOL_SIDEBAR_W as usize).saturating_sub(count_str.len() + 2);
             Line::from(vec![
                 Span::styled(
-                    format!("{:<name_w$}", util::truncate(&display, name_w)),
+                    util::pad(&display, name_w, false),
                     if selected {
                         Style::default()
                             .fg(theme::colors().value)

@@ -257,8 +257,10 @@ tokenizers = { version = "0.21", default-features = false, features = ["fancy-re
 tachyonfx = { version = "0.25.2", default-features = false, features = ["std"] }
 tui-term = "0.3.4"
 # The input boxes' editor (`ui::line_edit`) steps its cursor by grapheme and
-# measures its columns the way the terminal will draw them. Both crates are
-# already in the tree under ratatui, at these versions, so this adds nothing.
+# measures its columns the way the terminal will draw them, and core's
+# `util::truncate`, `clip` and `wrap` cut by grapheme for the same reason. Both
+# crates are already in the tree under ratatui, at these versions, so this adds
+# nothing.
 unicode-segmentation = "1.13"
 unicode-width = "0.2"
 # A QR code of a link meant for a phone, drawn in half-blocks inside the panel
