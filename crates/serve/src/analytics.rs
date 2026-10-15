@@ -352,11 +352,11 @@ mod tests {
     }
 
     /// `tool_errors` is a number only where the transcript can record a
-    /// failure at all: Pi writes calls but never their outcomes.
+    /// failure at all: Cursor writes calls but never their outcomes.
     #[test]
     fn tool_errors_is_null_only_where_the_harness_cannot_say() {
-        let pi = row_of(Session::new(Provider::Pi, "p".into()), Plan::Retail);
-        assert_eq!(pi.tool_errors, None);
+        let cursor = row_of(Session::new(Provider::Cursor, "c".into()), Plan::Retail);
+        assert_eq!(cursor.tool_errors, None);
 
         let mut claude = Session::new(Provider::Claude, "c".into());
         claude.tool_errors = 3;

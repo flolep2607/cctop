@@ -615,7 +615,8 @@ fn read_tail(s: &Session, want_context: bool) -> TailRead {
                 Provider::Codex => session::codex::extract_context(s),
                 Provider::Devin => session::devin::extract_context(s),
                 Provider::OpenCode => session::opencode::extract_context(s),
-                Provider::Cursor | Provider::Gemini | Provider::Pi | Provider::Windsurf => None,
+                Provider::Pi => session::pi::extract_context(s),
+                Provider::Cursor | Provider::Gemini | Provider::Windsurf => None,
             }
         })
         .flatten();

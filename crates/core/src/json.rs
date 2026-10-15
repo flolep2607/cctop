@@ -100,7 +100,8 @@ pub struct JsonActivity {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional = nullable))]
     tool_errors: Option<u64>,
-    /// Compactions the session has been through. Claude Code only.
+    /// Compactions the session has been through, where the transcript says:
+    /// Claude Code, Pi and OpenCode.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional = nullable))]
     compactions: Option<u32>,
@@ -373,7 +374,11 @@ pub fn sessions(sessions: &[Session], plan: Plan, store: &crate::cache::Store) -
                 activity: JsonActivity {
                     tool_count: m.tool_count,
                     tool_errors: s.provider.records_tool_outcomes().then_some(m.tool_errors),
-                    compactions: (s.provider == Provider::Claude).then_some(data.compactions),
+                    compactions: matches!(
+                        s.provider,
+                        Provider::Claude | Provider::Pi | Provider::OpenCode
+                    )
+                    .then_some(data.compactions),
                     tools: m.tools.clone(),
                     skill_count: m.skill_count,
                     skills: m.skills.clone(),
