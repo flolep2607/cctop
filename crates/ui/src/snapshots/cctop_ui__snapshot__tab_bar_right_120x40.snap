@@ -1,0 +1,44 @@
+---
+source: crates/ui/src/snapshot.rs
+expression: screen
+---
+╭ Overview ────────────────────────────────────────────────────────────────────────────────╮ 1:Dashboard
+│Live rate         $0.04                               ⡀  Models    claude-opus-4-1 68%    │ 2:claude +1 ⤢
+│Today             $8.97                               ⡀  Sessions  4 · 2 live · 3 in 24h  │ 3:日 本 語 プ ロ ジ ェ ク ト の 長 …
+│This month        $0.00                               ⡀  Agent CPU   3.2%                 │ ☁︎ 4:desk · Fix the login …
+│All time         $28.51 $0.00/day this month             Agent mem 592 MB                 │ 5:⚠️  🧑‍🌾  hotfix
+╰──────────────────────────────────────────────────────────────────────────────────────────╯ + Tab (Alt+n)
+╭ 日 本 語 プ ロ ジ ェ ク ト の 長 い タ イ ト ル  ────────────────────────────────────────────────────────╮
+│█                                                                                         │
+│                                                                                          │
+│                                                                                          │
+│                                                                                          │
+│                                                                                          │
+│                                                                                          │
+│                                                                                          │
+│                                                                                          │
+│                                                                                          │
+│                                                                                          │
+│                                                                                          │
+│                                                                                          │
+│                                                                                          │
+│                                                                                          │
+│                                                                                          │
+│                                                                                          │
+│                                                                                          │
+│                                                                                          │
+│                                                                                          │
+│                                                                                          │
+│                                                                                          │
+│                                                                                          │
+│                                                                                          │
+│                                                                                          │
+│                                                                                          │
+│                                                                                          │
+│                                                                                          │
+│                                                                                          │
+│                                                                                          │
+│                                                                                          │
+│                                                                                          │
+╰ F12 back · Alt+w close ──────────────────────────────────────────────────────────────────╯
+F12 Dashboard Alt+←→ Tabs Alt+n New Alt+w Close Alt+o Focus F1 Help F9 Image        ⧉ share  Settings

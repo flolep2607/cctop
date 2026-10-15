@@ -18,7 +18,7 @@ use std::path::Path;
 
 /// Every `[settings]` key: its name, its default as the file would spell it,
 /// and what it does.
-pub const SETTINGS: [(&str, &str, &str); 21] = [
+pub const SETTINGS: [(&str, &str, &str); 22] = [
     (
         "theme",
         "\"auto\"",
@@ -28,6 +28,11 @@ pub const SETTINGS: [(&str, &str, &str); 21] = [
         "graph_glyphs",
         "\"braille\"",
         "braille/octant/sextant: what charts are drawn in",
+    ),
+    (
+        "tab_bar",
+        "\"top\"",
+        "top/bottom/left/right: where the tab bar sits",
     ),
     (
         "notify",
@@ -128,6 +133,9 @@ pub fn choices(name: &str) -> Option<&'static [&'static str]> {
         // Braille first: every font cctop has met draws it, and the block
         // sets need one with the Legacy Computing characters.
         "graph_glyphs" => Some(&["braille", "octant", "sextant"]),
+        // Top first: it is where the bar has always been, so nobody's screen
+        // moves on an upgrade.
+        "tab_bar" => Some(&["top", "bottom", "left", "right"]),
         "predictive_echo" => Some(&crate::predict::Mode::NAMES),
         _ => None,
     }
@@ -229,6 +237,8 @@ pub struct Settings {
     /// One of [`choices`]`("graph_glyphs")`. Anything else is refused by the
     /// parser, so a typo shows as a problem on the page, not as blank charts.
     pub graph_glyphs: Option<String>,
+    /// One of [`choices`]`("tab_bar")`, refused otherwise like `graph_glyphs`.
+    pub tab_bar: Option<String>,
     pub notify: Option<bool>,
     pub auto_update: Option<bool>,
     /// Whether the daily usage report is sent — see [`crate::telemetry`].
@@ -309,6 +319,11 @@ impl Settings {
                         .as_str()
                         .filter(|v| choices(name).is_some_and(|c| c.contains(v)))
                         .map(|v| out.graph_glyphs = Some(v.into()))
+                        .is_none(),
+                    "tab_bar" => item
+                        .as_str()
+                        .filter(|v| choices(name).is_some_and(|c| c.contains(v)))
+                        .map(|v| out.tab_bar = Some(v.into()))
                         .is_none(),
                     "notify" => item.as_bool().map(|v| out.notify = Some(v)).is_none(),
                     "auto_update" => item.as_bool().map(|v| out.auto_update = Some(v)).is_none(),
@@ -408,6 +423,7 @@ impl Settings {
         let set = match name {
             "theme" => self.theme.as_ref().map(|v| format!("{v:?}")),
             "graph_glyphs" => self.graph_glyphs.as_ref().map(|v| format!("{v:?}")),
+            "tab_bar" => self.tab_bar.as_ref().map(|v| format!("{v:?}")),
             "notify" => self.notify.map(|v| v.to_string()),
             "auto_update" => self.auto_update.map(|v| v.to_string()),
             "telemetry" => self.telemetry.map(|v| v.to_string()),
@@ -905,6 +921,36 @@ mod tests {
         assert_eq!(bad.graph_glyphs, None);
         assert_eq!(bad.problems.len(), 1, "{:?}", bad.problems);
         assert_eq!(Settings::default().value_of("graph_glyphs").0, default);
+    }
+
+    /// `tab_bar` takes the four sides and nothing else, top by default, and a
+    /// side saved the way the settings page saves it reads back as that side.
+    #[test]
+    fn tab_bar_parses_and_saves_each_side() {
+        let offered = choices("tab_bar").unwrap();
+        assert_eq!(offered, ["top", "bottom", "left", "right"]);
+        let default = SETTINGS.iter().find(|s| s.0 == "tab_bar").unwrap().1;
+        assert_eq!(default, "\"top\"");
+        assert_eq!(
+            Settings::default().value_of("tab_bar"),
+            (default.into(), false)
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        for side in offered {
+            write(&path, "settings", "tab_bar", Some((*side).into())).unwrap();
+            let s = Settings::load_from(&path);
+            assert!(s.problems.is_empty(), "{side}: {:?}", s.problems);
+            assert_eq!(s.tab_bar.as_deref(), Some(*side));
+            assert_eq!(s.value_of("tab_bar"), (format!("{side:?}"), true));
+        }
+        write(&path, "settings", "tab_bar", None).unwrap();
+        assert_eq!(Settings::load_from(&path).tab_bar, None);
+
+        let bad = Settings::parse("[settings]\ntab_bar = \"middle\"\n");
+        assert_eq!(bad.tab_bar, None);
+        assert_eq!(bad.problems.len(), 1, "{:?}", bad.problems);
     }
 
     #[test]

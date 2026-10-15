@@ -47,10 +47,15 @@ pub struct Layout {
     pub(super) column_spans: Vec<(u16, u16, ColumnId)>,
     /// `(start_col, end_col, tab_index)` spans in the bottom tab bar.
     pub(super) tab_spans: Vec<(u16, u16, usize)>,
-    /// `(start_col, end_col, workspace_index)` spans in the top tab bar.
+    /// `(start, end, workspace_index)` spans in the workspace bar: columns of
+    /// its row, or rows of its column when it is down a side.
     pub(super) workspace_spans: Vec<(u16, u16, usize)>,
-    /// `(start_col, end_col)` of the bar's new-tab button.
+    /// `(start, end)` of the bar's new-tab button, along the bar as above.
     pub(super) workspace_new: Option<(u16, u16)>,
+    /// Where the workspace bar was drawn, and whether as a column. The spans
+    /// above are positions along it, so a hit test needs its other axis.
+    pub(super) workspace_bar: Rect,
+    pub(super) workspace_column: bool,
     /// `(row, start_col, end_col)` of the footer's share corner, while it is
     /// drawn. Recorded because cctop holds the terminal's mouse capture: the
     /// click that would follow the link has to be answered here or nowhere.
@@ -203,21 +208,39 @@ impl Layout {
             .map(|(_, _, i)| *i)
     }
 
-    /// Index of the workspace tab under the cursor. The bar is always the top
-    /// row when it is drawn at all.
-    pub fn workspace_at(&self, col: u16, row: u16) -> Option<usize> {
-        if row != 0 {
-            return None;
+    /// Where the cursor is along the workspace bar, if it is on the bar: its
+    /// column on a bar across, its row on a bar down a side.
+    fn along_bar(&self, col: u16, row: u16) -> Option<u16> {
+        let bar = self.workspace_bar;
+        match self.workspace_column {
+            false => (row == bar.y).then_some(col),
+            true => (col >= bar.x && col < bar.right()).then_some(row),
         }
+    }
+
+    /// The cells of the bar between `start` and `end` along it.
+    fn workspace_rect(&self, start: u16, end: u16) -> Rect {
+        let bar = self.workspace_bar;
+        let length = end.saturating_sub(start);
+        match self.workspace_column {
+            false => Rect::new(start, bar.y, length, 1),
+            true => Rect::new(bar.x, start, bar.width, length),
+        }
+    }
+
+    /// Index of the workspace tab under the cursor.
+    pub fn workspace_at(&self, col: u16, row: u16) -> Option<usize> {
+        let at = self.along_bar(col, row)?;
         self.workspace_spans
             .iter()
-            .find(|(a, b, _)| col >= *a && col < *b)
+            .find(|(a, b, _)| at >= *a && at < *b)
             .map(|(_, _, i)| *i)
     }
 
     /// Whether the cursor is on the bar's new-tab button.
     pub fn workspace_new_at(&self, col: u16, row: u16) -> bool {
-        matches!(self.workspace_new, Some((a, b)) if row == 0 && col >= a && col < b)
+        let at = self.along_bar(col, row);
+        matches!((self.workspace_new, at), (Some((a, b)), Some(at)) if at >= a && at < b)
     }
 
     /// Whether the cursor is on the footer's share link.
@@ -327,10 +350,131 @@ fn tab_chunks(area: Rect) -> std::rc::Rc<[Rect]> {
 /// of lines, every switch.
 pub fn pane_size() -> (u16, u16) {
     let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
-    // Less the workspace bar, as `draw` takes it.
-    let body = tab_chunks(Rect::new(0, 1, cols, rows.saturating_sub(1)))[1];
-    let inner = Block::bordered().inner(body);
+    pane_size_in(Rect::new(0, 0, cols, rows))
+}
+
+/// [`pane_size`] for a frame of `frame`, apart so a test can ask it of a
+/// frame other than the terminal it runs in.
+fn pane_size_in(frame: Rect) -> (u16, u16) {
+    // Less the workspace bar, as `draw` takes it — with the side bar at the
+    // width it was last drawn, since the titles that decide it are the App's.
+    let (_, _, body) = split_bar(frame, SIDE_WIDTH.get());
+    let inner = Block::bordered().inner(tab_chunks(body)[1]);
     (inner.width.max(1), inner.height.max(1))
+}
+
+/// Where the workspace bar is drawn: `tab_bar` in the settings file.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TabBar {
+    #[default]
+    Top,
+    Bottom,
+    Left,
+    Right,
+}
+
+impl TabBar {
+    /// The side the file names; anything else is the top, which the parser
+    /// has already reported as a problem.
+    pub fn from_name(name: Option<&str>) -> TabBar {
+        match name {
+            Some("bottom") => TabBar::Bottom,
+            Some("left") => TabBar::Left,
+            Some("right") => TabBar::Right,
+            _ => TabBar::Top,
+        }
+    }
+}
+
+/// Below this many columns a side bar is drawn on top instead: a body under
+/// sixty columns less sixteen is too narrow for an agent to be worth reading.
+const SIDE_MIN_FRAME: u16 = 60;
+/// How wide a side bar may be. Enough for `1:` and a name an agent picks, and
+/// no more than a long title is worth out of the agents' width.
+const SIDE_WIDTH_MIN: u16 = 16;
+const SIDE_WIDTH_MAX: u16 = 28;
+
+// Per-thread, for `spark::GLYPHS`'s reason: a test that draws a side bar must
+// not move the bar under the next test. The draw thread sets them — the side
+// from the settings file, the width from the frame it last drew — and
+// `pane_size` reads them on that same thread.
+thread_local! {
+    static TAB_BAR: std::cell::Cell<TabBar> = const { std::cell::Cell::new(TabBar::Top) };
+    static SIDE_WIDTH: std::cell::Cell<u16> = const { std::cell::Cell::new(SIDE_WIDTH_MIN) };
+}
+
+pub fn set_tab_bar(at: TabBar) {
+    TAB_BAR.set(at);
+}
+
+/// The bar and the body in `frame`, and the side the bar actually took —
+/// which is the top for a side bar the frame is too narrow to spare.
+///
+/// For the bottom the body is everything but the last row, as for the top it
+/// is everything but the first, so every page lays out exactly as it does
+/// under a top bar; the bar is the body's last row, and `draw` moves the
+/// footer that page put there down to the frame's last. See [`under_bar`].
+fn split_bar(frame: Rect, side_width: u16) -> (TabBar, Rect, Rect) {
+    let at = match TAB_BAR.get() {
+        TabBar::Left | TabBar::Right if frame.width < SIDE_MIN_FRAME => TabBar::Top,
+        at => at,
+    };
+    let rest = frame.height.saturating_sub(1);
+    let width = side_width.min(frame.width);
+    let (bar, body) = match at {
+        TabBar::Top => (
+            Rect { height: 1, ..frame },
+            Rect {
+                y: frame.y + 1,
+                height: rest,
+                ..frame
+            },
+        ),
+        TabBar::Bottom => (
+            Rect {
+                y: (frame.y + rest).saturating_sub(1),
+                height: rest.min(1),
+                ..frame
+            },
+            Rect {
+                height: rest,
+                ..frame
+            },
+        ),
+        TabBar::Left => (
+            Rect { width, ..frame },
+            Rect {
+                x: frame.x + width,
+                width: frame.width - width,
+                ..frame
+            },
+        ),
+        TabBar::Right => (
+            Rect {
+                x: frame.right() - width,
+                width,
+                ..frame
+            },
+            Rect {
+                width: frame.width - width,
+                ..frame
+            },
+        ),
+    };
+    (at, bar, body)
+}
+
+/// Where a page's footer goes: where the page put it, except under a bottom
+/// bar, where that row is the bar's and the footer is the row below it — the
+/// key hints stay on the frame's last row wherever the tabs are.
+fn under_bar(at: TabBar, footer: Rect) -> Rect {
+    match at {
+        TabBar::Bottom => Rect {
+            y: footer.y + 1,
+            ..footer
+        },
+        _ => footer,
+    }
 }
 
 pub fn draw(frame: &mut Frame, app: &mut App) -> Layout {
@@ -344,15 +488,15 @@ pub fn draw(frame: &mut Frame, app: &mut App) -> Layout {
     // The bar is always there, even with only the dashboard in it: the way to
     // open an agent has to be visible before you have opened one, or nobody
     // finds it. One row is a cheap price for that.
-    {
-        let bar = Rect { height: 1, ..area };
-        draw_workspace_bar(frame, bar, app, &mut layout);
-        area = Rect {
-            y: area.y + 1,
-            height: area.height.saturating_sub(1),
-            ..area
-        };
+    let (at, bar, body) = split_bar(area, side_width(app));
+    match at {
+        TabBar::Top | TabBar::Bottom => draw_workspace_bar(frame, bar, app, &mut layout),
+        TabBar::Left | TabBar::Right => {
+            SIDE_WIDTH.set(bar.width);
+            draw_side_bar(frame, bar, app, &mut layout);
+        }
     }
+    area = body;
 
     // The settings tab gets the same frame an agent tab does — the Overview
     // stays put, so the money and the alerts that several of its rows tune are
@@ -364,7 +508,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) -> Layout {
         draw_overview(frame, chunks[0], app);
         modals::draw_settings(frame, chunks[1], app, &mut layout);
         modals::draw_settings_qr(frame, chunks[0].union(chunks[1]), app);
-        draw_footer(frame, chunks[2], app, &mut layout);
+        draw_footer(frame, under_bar(at, chunks[2]), app, &mut layout);
         // A modal raised from the settings tab belongs to the tab, exactly as
         // one raised from the dashboard belongs to the dashboard.
         match app.mode {
@@ -387,9 +531,10 @@ pub fn draw(frame: &mut Frame, app: &mut App) -> Layout {
     // these rows costs nothing but the rows.
     if app.tab > 0 {
         let chunks = tab_chunks(area);
+        let footer = under_bar(at, chunks[2]);
         draw_overview(frame, chunks[0], app);
         draw_panes(frame, chunks[1], app, &mut layout);
-        draw_footer(frame, chunks[2], app, &mut layout);
+        draw_footer(frame, footer, app, &mut layout);
         match app.mode {
             Mode::Launch | Mode::LaunchCwd | Mode::LaunchOptions => {
                 modals::draw_launch(frame, area, app, &mut layout)
@@ -416,20 +561,20 @@ pub fn draw(frame: &mut Frame, app: &mut App) -> Layout {
         if let Some(t) = app.high.elapsed() {
             high::paint(
                 frame.buffer_mut(),
-                chunks[2],
+                footer,
                 t,
                 theme::truecolor(),
                 !app.raving(),
             );
         }
         if let Some(t) = app.rave.elapsed().filter(|_| app.raving()) {
-            rave::paint(frame.buffer_mut(), chunks[2], t, theme::truecolor());
+            rave::paint(frame.buffer_mut(), footer, t, theme::truecolor());
         }
         if let Some(t) = app.drunk.elapsed() {
             let colour = (!theme::no_color()).then(theme::truecolor);
             drunk::paint(
                 frame.buffer_mut(),
-                chunks[2],
+                footer,
                 t,
                 colour,
                 !app.raving() && !app.tripping(),
@@ -465,12 +610,13 @@ pub fn draw(frame: &mut Frame, app: &mut App) -> Layout {
         Constraint::Length(1),
     ])
     .split(area);
+    let footer = under_bar(at, chunks[4]);
 
     draw_overview(frame, chunks[0], app);
     table::draw_table(frame, chunks[1], app, &mut layout);
     draw_bottom(frame, chunks[2], app, &mut layout);
     draw_limits(frame, chunks[3], app, &mut layout);
-    draw_footer(frame, chunks[4], app, &mut layout);
+    draw_footer(frame, footer, app, &mut layout);
 
     match app.mode {
         Mode::Help => modals::draw_help(frame, area, app),
@@ -519,20 +665,20 @@ pub fn draw(frame: &mut Frame, app: &mut App) -> Layout {
     if let Some(t) = app.high.elapsed() {
         high::paint(
             frame.buffer_mut(),
-            chunks[4],
+            footer,
             t,
             theme::truecolor(),
             !app.raving(),
         );
     }
     if let Some(t) = app.rave.elapsed().filter(|_| app.raving()) {
-        rave::paint(frame.buffer_mut(), chunks[4], t, theme::truecolor());
+        rave::paint(frame.buffer_mut(), footer, t, theme::truecolor());
     }
     if let Some(t) = app.drunk.elapsed() {
         let colour = (!theme::no_color()).then(theme::truecolor);
         drunk::paint(
             frame.buffer_mut(),
-            chunks[4],
+            footer,
             t,
             colour,
             !app.raving() && !app.tripping(),
@@ -627,8 +773,19 @@ fn transport_mark(transport: cctop_core::reach::Transport) -> &'static str {
     }
 }
 
-/// The workspace tab bar: the dashboard first, then a tab per set of terminals.
-fn draw_workspace_bar(frame: &mut Frame, area: Rect, app: &App, layout: &mut Layout) {
+/// What the bar says about each tab, dashboard first: shared by the bar along
+/// the top or bottom and the one down a side, so a tab carries the same marks
+/// wherever it is drawn.
+struct BarParts {
+    titles: Vec<String>,
+    hues: Vec<Option<theme::Hue>>,
+    recording: Vec<bool>,
+    markers: Vec<String>,
+    remote: Vec<Option<&'static str>>,
+    new_tab: &'static str,
+}
+
+fn bar_parts(app: &App) -> BarParts {
     let titles: Vec<String> = (0..=app.tabs.len())
         .map(|i| {
             // The number is the Alt- key that jumps to the tab, not an ordinal
@@ -639,24 +796,12 @@ fn draw_workspace_bar(frame: &mut Frame, area: Rect, app: &App, layout: &mut Lay
             }
         })
         .collect();
-    let mut spans = Vec::new();
-    let mut pos = area.x;
-    // The new-tab button is the one thing the bar exists for, so its room is
-    // reserved before the labels get any: nothing else here is reachable by
-    // mouse if it falls off the end. The settings tab is reserved beside it and
-    // from the other end for the same reason — it is a tab like any other, and a
-    // bar that pushed it off the right edge would be a bar that could not be
-    // clicked its way to.
     let new_tab = match app.tab {
         // Which key to name depends on where the keyboard is: inside a pane it
         // belongs to the agent, so only the Alt- form gets through.
         0 => " + Tab (t) ",
         _ => " + Tab (Alt+n) ",
     };
-    let settings = format!(" {} ", super::panes::SETTINGS_TITLE);
-    let reserved = new_tab.chars().count() + settings.chars().count() + 2;
-    let label_room = area.width.saturating_sub(reserved as u16) as usize;
-
     let hues: Vec<Option<theme::Hue>> = (0..titles.len()).map(|i| tab_hue(app, i)).collect();
     // A tab being recorded says so on the bar, where it is seen from every
     // other tab: a recording left running is a file growing for as long as the
@@ -686,6 +831,37 @@ fn draw_workspace_bar(frame: &mut Frame, area: Rect, app: &App, layout: &mut Lay
                 .map(|tab| tab.transport().map(transport_mark)),
         )
         .collect();
+    BarParts {
+        titles,
+        hues,
+        recording,
+        markers,
+        remote,
+        new_tab,
+    }
+}
+
+/// The workspace tab bar: the dashboard first, then a tab per set of terminals.
+fn draw_workspace_bar(frame: &mut Frame, area: Rect, app: &App, layout: &mut Layout) {
+    let BarParts {
+        titles,
+        hues,
+        recording,
+        markers,
+        remote,
+        new_tab,
+    } = bar_parts(app);
+    let mut spans = Vec::new();
+    let mut pos = area.x;
+    // The new-tab button is the one thing the bar exists for, so its room is
+    // reserved before the labels get any: nothing else here is reachable by
+    // mouse if it falls off the end. The settings tab is reserved beside it and
+    // from the other end for the same reason — it is a tab like any other, and a
+    // bar that pushed it off the right edge would be a bar that could not be
+    // clicked its way to.
+    let settings = format!(" {} ", super::panes::SETTINGS_TITLE);
+    let reserved = new_tab.chars().count() + settings.chars().count() + 2;
+    let label_room = area.width.saturating_sub(reserved as u16) as usize;
 
     // Only crowded bars pay for the crowding: while every label fits it is
     // drawn whole, and past that each tab gets an equal share. A clipped label
@@ -723,18 +899,8 @@ fn draw_workspace_bar(frame: &mut Frame, area: Rect, app: &App, layout: &mut Lay
         spans.push(Span::styled(" ", style));
         let mut width = 1u16;
         let room = match remote[i] {
-            // Dim and never bold: it says where, and the label's own colour is
-            // already saying how the agent is. A painted tab keeps its fill's
-            // ink, which dim on that fill would not be legible against.
             Some(mark) => {
-                let quiet = match hues[i] {
-                    Some(_) => style,
-                    None => style.fg(theme::colors().dim),
-                };
-                spans.push(Span::styled(
-                    format!("{mark} "),
-                    quiet.remove_modifier(Modifier::BOLD),
-                ));
+                spans.push(remote_span(mark, style, hues[i]));
                 width += 2;
                 cap.saturating_sub(2).max(1)
             }
@@ -813,12 +979,30 @@ fn draw_workspace_bar(frame: &mut Frame, area: Rect, app: &App, layout: &mut Lay
     }
 
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
+    layout.workspace_bar = area;
+    layout.workspace_column = false;
+    sweep_restarts(frame, app, layout, &hues);
+}
 
-    // A restart is confirmed on the tab that took it, drawn over the label
-    // once the bar is down so the sweep eases into what the tab really is.
-    // Painted tabs sweep in from their own full hue, so the tab is still
-    // *that* tab while it says so; a plain one from the accent.
-    for &(left, right, i) in &layout.workspace_spans {
+/// The transport mark and the space after it, before a remote tab's title.
+///
+/// Dim and never bold: it says where, and the label's own colour is already
+/// saying how the agent is. A painted tab keeps its fill's ink, which dim on
+/// that fill would not be legible against.
+fn remote_span(mark: &str, style: Style, hue: Option<theme::Hue>) -> Span<'static> {
+    let quiet = match hue {
+        Some(_) => style,
+        None => style.fg(theme::colors().dim),
+    };
+    Span::styled(format!("{mark} "), quiet.remove_modifier(Modifier::BOLD))
+}
+
+/// A restart is confirmed on the tab that took it, drawn over the label once
+/// the bar is down so the sweep eases into what the tab really is. Painted
+/// tabs sweep in from their own full hue, so the tab is still *that* tab while
+/// it says so; a plain one from the accent.
+fn sweep_restarts(frame: &mut Frame, app: &App, layout: &Layout, hues: &[Option<theme::Hue>]) {
+    for &(start, end, i) in &layout.workspace_spans {
         let Some(since) = app.restart_flash(i) else {
             continue;
         };
@@ -826,7 +1010,7 @@ fn draw_workspace_bar(frame: &mut Frame, area: Rect, app: &App, layout: &mut Lay
             Some(hue) => hue.fill(theme::Fill::Alert),
             None => theme::colors().accent,
         };
-        let rect = Rect::new(left, area.y, right.saturating_sub(left), 1);
+        let rect = layout.workspace_rect(start, end);
         effects::restart_sweep(
             frame.buffer_mut(),
             rect,
@@ -836,6 +1020,134 @@ fn draw_workspace_bar(frame: &mut Frame, area: Rect, app: &App, layout: &mut Lay
             theme::truecolor(),
         );
     }
+}
+
+/// How wide a side bar is for `app`'s tabs: its widest row drawn whole,
+/// within [`SIDE_WIDTH_MIN`] and [`SIDE_WIDTH_MAX`].
+///
+// ponytail: fitted to the titles, so a tab with a longer title widens the bar
+// and every agent beside it takes a resize; a fixed width if that bites.
+fn side_width(app: &App) -> u16 {
+    let parts = bar_parts(app);
+    let settings = util::cells(super::panes::SETTINGS_TITLE) + 2;
+    let widest = (0..parts.titles.len())
+        .map(|i| side_cells(&parts, i, &parts.titles[i]))
+        .chain([util::cells(parts.new_tab), settings])
+        .max()
+        .unwrap_or(0);
+    (widest as u16).clamp(SIDE_WIDTH_MIN, SIDE_WIDTH_MAX)
+}
+
+/// The cells tab `i`'s row takes with its title cut to `title`: a space each
+/// side of the title, the transport mark before it, the marks after.
+fn side_cells(parts: &BarParts, i: usize, title: &str) -> usize {
+    let mark = if parts.remote[i].is_some() { 2 } else { 0 };
+    let rec = if parts.recording[i] {
+        util::cells(REC)
+    } else {
+        0
+    };
+    1 + mark + util::cells(title) + 1 + util::cells(&parts.markers[i]) + rec
+}
+
+/// The workspace bar down a side, for `tab_bar = "left"` or `"right"`.
+///
+/// A row per tab carrying what its label carries on the bar across — the
+/// Alt- number, the title, the marks — then the new-tab button under the
+/// last, and the settings tab on the bottom row: the fixed end the bar across
+/// keeps at its right edge, for the same reason.
+fn draw_side_bar(frame: &mut Frame, area: Rect, app: &App, layout: &mut Layout) {
+    let parts = bar_parts(app);
+    layout.workspace_bar = area;
+    layout.workspace_column = true;
+    let width = area.width as usize;
+    let n = parts.titles.len();
+    // Every row but the new-tab button's and the settings tab's.
+    let room = (area.height as usize).saturating_sub(2);
+    // More tabs than rows: a run of them that holds the one on screen, and a
+    // `+N` row saying how many are not shown, rather than a column that runs
+    // off the bottom and takes the new-tab button with it.
+    let (first, shown) = match n <= room {
+        true => (0, n),
+        false => {
+            let shown = room.saturating_sub(1);
+            let at = app.position();
+            let first = match at < n {
+                true => (at + 1).saturating_sub(shown),
+                false => 0,
+            };
+            (first, shown)
+        }
+    };
+
+    let mut lines: Vec<Line> = Vec::new();
+    for i in first..first + shown {
+        let y = area.y + lines.len() as u16;
+        lines.push(side_row(app, &parts, i, width));
+        layout.workspace_spans.push((y, y + 1, i));
+    }
+    if shown < n {
+        lines.push(Line::styled(
+            format!(" +{} ", n - shown),
+            Style::default().fg(theme::colors().dim),
+        ));
+    }
+    let y = area.y + lines.len() as u16;
+    lines.push(Line::styled(
+        parts.new_tab,
+        Style::default()
+            .fg(theme::colors().accent)
+            .add_modifier(Modifier::BOLD),
+    ));
+    layout.workspace_new = Some((y, y + 1));
+
+    let index = app.settings_tab();
+    if (lines.len() as u16) < area.height {
+        lines.resize(area.height as usize - 1, Line::default());
+        let settings = format!(" {} ", super::panes::SETTINGS_TITLE);
+        lines.push(Line::styled(
+            util::pad(&settings, width, false),
+            tab_style(app, index, None),
+        ));
+        layout
+            .workspace_spans
+            .push((area.bottom() - 1, area.bottom(), index));
+    }
+
+    frame.render_widget(Paragraph::new(lines), area);
+    sweep_restarts(frame, app, layout, &parts.hues);
+}
+
+/// Tab `i`'s row on a side bar, `width` cells wide. The title takes what the
+/// marks leave, so it is what is cut and never a mark.
+fn side_row(app: &App, parts: &BarParts, i: usize, width: usize) -> Line<'static> {
+    let style = tab_style(app, i, parts.hues[i]);
+    let mut spans = vec![Span::styled(" ", style)];
+    if let Some(mark) = parts.remote[i] {
+        spans.push(remote_span(mark, style, parts.hues[i]));
+    }
+    let room = width.saturating_sub(side_cells(parts, i, "")).max(1);
+    let title = util::truncate(&parts.titles[i], room);
+    let used = side_cells(parts, i, &title);
+    spans.push(Span::styled(format!("{title} "), style));
+    if !parts.markers[i].is_empty() {
+        spans.push(Span::styled(
+            parts.markers[i].clone(),
+            style.add_modifier(Modifier::BOLD),
+        ));
+    }
+    if parts.recording[i] {
+        spans.push(Span::styled(
+            REC,
+            Style::default()
+                .fg(theme::colors().cost_high)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+    // The rest of the row is the tab's too, so a fill or the selection reads
+    // as a row rather than as a word, and a click anywhere on it is that tab.
+    spans.push(Span::styled(" ".repeat(width.saturating_sub(used)), style));
+    Line::from(spans)
 }
 
 /// Tab `i`'s painted hue, in [`App::tab`]'s numbering. A hue that resolves to
@@ -1402,6 +1714,143 @@ mod tests {
         );
     }
 
+    /// An app with `n` agent tabs, watching `watching`, drawn whole at
+    /// `cols`×`rows` with the bar on `side`.
+    fn draw_with_bar(side: TabBar, n: usize, watching: usize, cols: u16, rows: u16) -> Layout {
+        draw_bar_frame(side, n, watching, cols, rows).0
+    }
+
+    /// [`draw_with_bar`], and the frame it drew.
+    fn draw_bar_frame(
+        side: TabBar,
+        n: usize,
+        watching: usize,
+        cols: u16,
+        rows: u16,
+    ) -> (Layout, ratatui::buffer::Buffer) {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let mut app = crate::tests::test_app();
+        app.tabs = (0..n)
+            .map(|i| tabs::Tab::new(tabs::Pane::for_test(&format!("agent-{i}"))))
+            .collect();
+        app.tab = watching;
+        set_tab_bar(side);
+        let mut terminal = Terminal::new(TestBackend::new(cols, rows)).expect("backend");
+        let mut layout = Layout::default();
+        terminal
+            .draw(|frame| layout = draw(frame, &mut app))
+            .expect("draw");
+        (layout, terminal.backend().buffer().clone())
+    }
+
+    /// Whether the pane drawn in `buffer` has its border around a screen of
+    /// `size` whose top-left cell is the agent's, as the layout recorded it.
+    fn pane_drawn_at(layout: &Layout, buffer: &ratatui::buffer::Buffer, size: (u16, u16)) -> bool {
+        let screen = layout.pane_rects[0];
+        let (w, h) = size;
+        buffer[(screen.x - 1, screen.y - 1)].symbol() == "╭"
+            && buffer[(screen.x + w, screen.y + h)].symbol() == "╯"
+    }
+
+    /// The size an agent is started at is the size its tab draws it at,
+    /// wherever the bar is: the bottom costs the body the row the top does, a
+    /// side costs it columns and gives the row back.
+    #[test]
+    fn pane_size_follows_the_bar() {
+        let frame = Rect::new(0, 0, 120, 40);
+        let sized = |side| {
+            set_tab_bar(side);
+            pane_size_in(frame)
+        };
+        // 40 rows less the bar, the Overview's 6 and the footer, less the
+        // pane's border; 120 columns less the border.
+        assert_eq!(sized(TabBar::Top), (118, 30));
+        assert_eq!(sized(TabBar::Bottom), (118, 30));
+        assert_eq!(sized(TabBar::Left), (120 - 16 - 2, 31));
+        assert_eq!(sized(TabBar::Right), (120 - 16 - 2, 31));
+
+        // And it is the size the pane is then drawn at: the side bar's width
+        // as drawn is what the next agent is sized for.
+        for side in [TabBar::Top, TabBar::Bottom, TabBar::Left, TabBar::Right] {
+            let (layout, buffer) = draw_bar_frame(side, 1, 1, 120, 40);
+            assert!(
+                pane_drawn_at(&layout, &buffer, pane_size_in(frame)),
+                "{side:?}"
+            );
+        }
+    }
+
+    /// A side bar's targets are rows: each tab's row, the new-tab button under
+    /// the last, the settings tab on the bottom row — across the bar's whole
+    /// width and nowhere else.
+    #[test]
+    fn a_side_bar_maps_clicks_to_rows() {
+        for side in [TabBar::Left, TabBar::Right] {
+            let layout = draw_with_bar(side, 3, 1, 120, 40);
+            let bar = layout.workspace_bar;
+            assert!(layout.workspace_column);
+            assert_eq!((bar.y, bar.height, bar.width), (0, 40, 16));
+            let x = match side {
+                TabBar::Left => 0,
+                _ => 120 - 16,
+            };
+            assert_eq!(bar.x, x, "{side:?}");
+            for (row, tab) in (0..4).enumerate() {
+                assert_eq!(layout.workspace_at(x, row as u16), Some(tab));
+                assert_eq!(layout.workspace_at(x + 15, row as u16), Some(tab));
+            }
+            assert!(layout.workspace_new_at(x + 3, 4));
+            assert!(!layout.workspace_new_at(x + 3, 3));
+            assert_eq!(layout.workspace_at(x + 3, 39), Some(4), "settings");
+            assert_eq!(layout.workspace_at(x + 3, 20), None, "the gap");
+            // Beside the bar is the body, not the tab on that row.
+            let beside = match side {
+                TabBar::Left => 16,
+                _ => x - 1,
+            };
+            assert_eq!(layout.workspace_at(beside, 1), None);
+            assert!(!layout.workspace_new_at(beside, 4));
+        }
+
+        // Along the bottom it is the bar across, one row above the footer.
+        let layout = draw_with_bar(TabBar::Bottom, 3, 1, 120, 40);
+        assert!(!layout.workspace_column);
+        assert_eq!(layout.workspace_bar.y, 38);
+        assert_eq!(layout.workspace_at(2, 38), Some(0));
+        assert_eq!(layout.workspace_at(2, 0), None);
+    }
+
+    /// More tabs than a side bar has rows: the one on screen stays drawn and
+    /// clickable, a `+N` row stands for the rest, and the new-tab button and
+    /// the settings tab keep their rows.
+    #[test]
+    fn a_crowded_side_bar_keeps_the_tab_on_screen() {
+        // 12 rows: ten for tabs, of which nine are drawn and one says `+N`.
+        let layout = draw_with_bar(TabBar::Left, 20, 15, 80, 12);
+        let tabs: Vec<usize> = layout.workspace_spans.iter().map(|s| s.2).collect();
+        assert_eq!(tabs, [7, 8, 9, 10, 11, 12, 13, 14, 15, 21]);
+        assert_eq!(layout.workspace_at(3, 8), Some(15));
+        assert_eq!(layout.workspace_at(3, 9), None, "the +N row");
+        assert!(layout.workspace_new_at(3, 10));
+        assert_eq!(layout.workspace_at(3, 11), Some(21));
+    }
+
+    /// Under sixty columns a side bar is drawn across the top instead, so the
+    /// agents keep a width worth reading — and the panes are sized to match.
+    #[test]
+    fn a_side_bar_falls_back_to_the_top_on_a_narrow_frame() {
+        let (layout, buffer) = draw_bar_frame(TabBar::Right, 2, 1, 59, 30);
+        assert!(!layout.workspace_column);
+        assert_eq!(layout.workspace_bar, Rect::new(0, 0, 59, 1));
+        assert_eq!(layout.workspace_at(2, 0), Some(0));
+        let size = pane_size_in(Rect::new(0, 0, 59, 30));
+        assert_eq!(size.0, 57, "the body lost columns to a bar it did not draw");
+        assert!(pane_drawn_at(&layout, &buffer, size));
+        let layout = draw_with_bar(TabBar::Right, 2, 1, 60, 30);
+        assert!(layout.workspace_column);
+    }
+
     /// A click lands on the tab drawn under it when a title is wider than it
     /// is long: each tab's target starts where its label is drawn, so the
     /// tabs after a CJK or emoji title are not shifted onto their neighbours.
@@ -1816,6 +2265,8 @@ mod tests {
         let layout = Layout {
             workspace_spans: vec![(0, 12, 0)],
             workspace_new: Some((12, 23)),
+            workspace_bar: Rect::new(0, 0, 80, 1),
+            workspace_column: false,
             share_corner: Some((24, 50, 78)),
             share_local: None,
             header_row: 6,

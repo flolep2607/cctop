@@ -2013,6 +2013,39 @@ mod tests {
         assert!(text.contains("graph_glyphs = \"braille\""), "{text}");
     }
 
+    /// The tab bar row moves the bar on the keypress that saves it, through
+    /// every side and back to the top.
+    #[test]
+    fn the_tab_bar_row_moves_the_bar_at_once() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        use ratatui::layout::Rect;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("config.toml");
+        let mut app = test_app();
+        app.settings_file = Some(file.clone());
+        app.goto_settings();
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).expect("backend");
+        let mut press = |app: &mut App| {
+            app.settings_cursor = item_of(app, "tab_bar");
+            app.on_key(key(KeyCode::Enter));
+            app.settings_stamp = 0;
+            app.reload_settings();
+            let mut layout = render::Layout::default();
+            terminal
+                .draw(|frame| layout = render::draw(frame, app))
+                .expect("draw");
+            (layout.workspace_bar, layout.workspace_column)
+        };
+        assert_eq!(press(&mut app), (Rect::new(0, 28, 100, 1), false));
+        assert_eq!(press(&mut app), (Rect::new(0, 0, 16, 30), true));
+        assert_eq!(press(&mut app), (Rect::new(84, 0, 16, 30), true));
+        assert_eq!(press(&mut app), (Rect::new(0, 0, 100, 1), false));
+        let text = std::fs::read_to_string(&file).expect("written");
+        assert!(text.contains("tab_bar = \"top\""), "{text}");
+    }
+
     /// Rebinding from the settings page: Enter on a keybind, then the new key,
     /// lands in the file and works on the dashboard at once — and the page
     /// draws what it wrote.
@@ -2070,7 +2103,7 @@ mod tests {
 
         // A toggle flips in place.
         app.settings_cursor = item_of(&app, "notify");
-        assert_eq!(cctop_core::settings::SETTINGS[2].0, "notify");
+        assert_eq!(cctop_core::settings::SETTINGS[3].0, "notify");
         app.on_key(key(KeyCode::Enter));
         assert_eq!(app.settings.notify, Some(true));
         assert!(

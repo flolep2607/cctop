@@ -615,6 +615,7 @@ tokens, and only what you changed is written:
 [settings]
 theme = "light"          # auto / light / dark / mono
 graph_glyphs = "octant"  # braille / octant / sextant: what the charts are drawn in
+tab_bar = "left"         # top / bottom / left / right: where the tab bar sits
 notify = true
 compact_threshold = 90   # context % the agent compacts at
 idle_after = 12          # hours quiet before `I` counts a live session idle
@@ -628,6 +629,12 @@ Octants (Unicode 16) and sextants draw the charts as solid blocks rather than
 braille dots, but only in a font that has them. The `graph_glyphs` row draws a
 sample in each set, so a font without them shows its boxes there, before you
 choose.
+
+`tab_bar` moves the tab bar. `bottom` puts it on the row above the key hints;
+`left` and `right` make it a column, one tab to a row, as wide as the longest
+label within 16 to 28 columns. A column with more tabs than rows keeps the tab
+you are on and counts the rest as `+N`, and a window under 60 columns wide
+draws it on top, so the agents keep their width.
 
 Only the session table's keys move. A modal's keys are the letters on its own
 buttons, and inside a pane the keyboard is the agent's.
