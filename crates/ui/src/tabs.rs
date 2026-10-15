@@ -270,6 +270,11 @@ const FIT_VERIFY: std::time::Duration = std::time::Duration::from_millis(1000);
 /// resizes its own client one column narrower and back. rmux takes the resize
 /// as this client being the latest and fits the window to it. Only on a real
 /// mismatch — a nudge on every keystroke would make the agent redraw on each.
+///
+/// A tab on another machine has no pane here to do this for it, so its client
+/// (`cctop mux open`) does the same from rmux's record of its input; and while
+/// a pane does not hold the window, its client draws the window letterboxed
+/// rather than as rmux sends it. Both are `cctop_core::letterbox`.
 #[derive(Default)]
 pub struct Fit {
     /// The window's size as rmux last reported it, from the tab sweep or from

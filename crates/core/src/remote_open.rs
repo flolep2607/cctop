@@ -630,8 +630,12 @@ pub fn held(result: Result<(), String>) -> Result<(), String> {
     }
 }
 
+/// Become the client of `name` for a tab on another machine — following
+/// input, since that tab has no cctop of this machine's to take the window
+/// for it when it is typed into (see [`crate::letterbox`]).
 fn attach(name: &str) -> Result<(), String> {
-    match crate::mux::main(&["attach".to_string(), name.to_string()]) {
+    let args = ["attach", "--follow", name].map(String::from);
+    match crate::mux::main(&args) {
         0 => Ok(()),
         // `mux::main` has already said why on stderr.
         _ => Err(format!("could not attach to {name}")),
