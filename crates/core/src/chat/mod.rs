@@ -1065,6 +1065,35 @@ mod tests {
         assert!(chat.note.unwrap().contains("gone"));
     }
 
+    /// A Cursor subagent's file is in Cursor's shape, keyed by `role`, which
+    /// Claude's reader would pass over as nothing.
+    #[test]
+    fn a_cursor_agent_is_read_as_cursor() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let id = "11111111-1111-4111-8111-111111111111";
+        let agent = "22222222-2222-4222-8222-222222222222";
+        let main = dir.path().join(id).join(format!("{id}.jsonl"));
+        let sub = dir.path().join(id).join("subagents");
+        std::fs::create_dir_all(&sub).expect("subagents dir");
+        std::fs::write(&main, "").expect("main");
+        std::fs::write(
+            sub.join(format!("{agent}.jsonl")),
+            concat!(
+                r#"{"role":"user","message":{"content":[{"type":"text","text":"dummy brief"}]}}"#,
+                "\n",
+                r#"{"role":"assistant","message":{"content":[{"type":"text","text":"dummy answer"}]}}"#,
+                "\n",
+            ),
+        )
+        .expect("agent");
+        let mut session = Session::new(Provider::Cursor, id.into());
+        session.subagents = crate::session::cursor::extract(&main).subagents;
+        session.data_file = Some(main);
+        let chat = build_agent(&session, agent, None).expect("listed");
+        let texts: Vec<&str> = chat.turns.iter().map(|t| t.text.as_str()).collect();
+        assert_eq!(texts, ["dummy brief", "dummy answer"]);
+    }
+
     #[test]
     fn a_provider_with_no_reader_says_so_instead_of_looking_empty() {
         let mut session = Session::new(Provider::Windsurf, "s1".into());

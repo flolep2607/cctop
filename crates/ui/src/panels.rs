@@ -1918,10 +1918,12 @@ pub fn config(session: &Session) -> Vec<Line<'static>> {
             )));
             // What this session actually has, since the database is found or
             // not, and a chat is in it or not.
-            lines.push(Line::from(dim(if session.model.is_empty() {
-                "No model or context: no matching chat in Cursor's state.vscdb."
-            } else {
+            lines.push(Line::from(dim(if !session.model.is_empty() {
                 "Model and context come from Cursor's state.vscdb."
+            } else if cctop_core::config::cursor_global_dbs().is_empty() {
+                "No model or context: Cursor's state.vscdb was not found (set $CURSOR_USER_DIR)."
+            } else {
+                "No model or context: no matching chat in Cursor's state.vscdb."
             })));
             lines.push(Line::from(dim(
                 "Cursor records no tokens or cost for its agent, anywhere.",

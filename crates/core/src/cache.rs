@@ -525,6 +525,10 @@ impl Store {
         if let Ok(mem) = self.mem.lock()
             && let Some(entry) = mem.get(&mem_key)
             && entry.pricing_epoch == epoch
+            && entry
+                .data
+                .recheck_at_ms
+                .is_none_or(|at| crate::util::now_ms() < at)
         {
             // A copy that came off disk carries no tool history and no context
             // series, so it answers a row but not a panel.
@@ -632,9 +636,11 @@ impl Store {
                 },
             );
         }
-        // Never persist a failed parse; it would stick until the file changes.
+        // Never persist a failed parse, or one that is due a second look; it
+        // would stick until the file changes.
         if let Some(id) = disk_id
             && data.error.is_none()
+            && data.recheck_at_ms.is_none()
         {
             self.disk.put(id, file, &session.session_id, &data);
         }
@@ -1263,6 +1269,39 @@ mod tests {
         assert!(serves(&restored, true), "a row may be served from cache");
         assert!(!serves(&restored, false), "a panel may not");
         assert!(serves(&fresh, false), "a real parse serves anything");
+    }
+
+    /// An extraction that is due a second look — a Cursor subagent still
+    /// within its quiet window, here — never reaches the disk, and memory
+    /// stops serving it once its time comes, though no file has changed.
+    #[test]
+    fn an_extraction_due_a_recheck_is_kept_off_disk_and_redone_when_due() {
+        let dir = crate::session::temp_path("cache-recheck");
+        let id = "11111111-1111-4111-8111-111111111111";
+        let main = dir.join(id).join(format!("{id}.jsonl"));
+        let sub = dir.join(id).join("subagents");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(&main, "").unwrap();
+        std::fs::write(sub.join("22222222-2222-4222-8222-222222222222.jsonl"), "").unwrap();
+
+        let store = Store::new();
+        let mut s = Session::new(Provider::Cursor, id.into());
+        s.data_file = Some(main.clone());
+        let first = store.session_data(&s);
+        assert!(first.recheck_at_ms.is_some());
+        assert!(store.disk.get(&disk_id(&s, &main).unwrap()).is_none());
+
+        // Due now: a marked copy left in memory is not what comes back.
+        if let Ok(mut mem) = store.mem.lock()
+            && let Some(entry) = mem.get_mut(&s.key())
+        {
+            let mut due = (*entry.data).clone();
+            due.title = Some("served past its time".into());
+            due.recheck_at_ms = Some(0);
+            entry.data = std::sync::Arc::new(due);
+        }
+        assert_eq!(store.session_data(&s).title, None);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// The bug this replaced: `to_writer` reports success once the bytes reach

@@ -2337,6 +2337,12 @@ pub struct SessionData {
     pub rates: Option<CodexRates>,
     /// Set when extraction failed; the row still renders with zeroed figures.
     pub error: Option<String>,
+    /// Set when what was read depends on more than the transcripts' stamps —
+    /// the clock, or a database that did not answer. Such an extraction is
+    /// never written to disk, where nothing would ever replace it, and memory
+    /// serves it only until this time (Unix ms).
+    #[serde(skip)]
+    pub recheck_at_ms: Option<i64>,
 }
 
 /// Keep the newest `MAX_SESSION_TOOL_DETAILS` details across all tools, and

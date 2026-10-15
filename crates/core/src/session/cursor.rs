@@ -192,9 +192,21 @@ fn immutable_uri(path: &Path) -> String {
 /// Opened per call and never pooled: an immutable connection is promised the
 /// file never changes, so one kept open would never see anything new.
 fn open(db: &Path) -> rusqlite::Result<Connection> {
-    if !on_windows_drive(db, &MOUNTS) {
-        return readonly(db);
+    match on_windows_drive_really(db, &MOUNTS) {
+        Some(real) => open_immutable(&real),
+        None => readonly(db),
     }
+}
+
+/// The file behind `db` when that is on a Windows drive. Asked of the resolved
+/// path, since `~/.config/Cursor` linked into `/mnt/c` sits on the root mount
+/// as written and on 9P in fact.
+fn on_windows_drive_really(db: &Path, mounts: &[Mount]) -> Option<PathBuf> {
+    let real = std::fs::canonicalize(db).unwrap_or_else(|_| db.to_path_buf());
+    on_windows_drive(&real, mounts).then_some(real)
+}
+
+fn open_immutable(db: &Path) -> rusqlite::Result<Connection> {
     Connection::open_with_flags(
         immutable_uri(db),
         OpenFlags::SQLITE_OPEN_READ_ONLY
@@ -240,7 +252,8 @@ impl Header {
 fn workspace_dir(path: Option<String>, authority: Option<String>) -> Option<PathBuf> {
     let path = path?;
     let path = match authority.as_deref() {
-        Some("wsl$") => path
+        // `\\wsl.localhost\` is the spelling Windows 11 gives the same folder.
+        Some("wsl$" | "wsl.localhost") => path
             .trim_start_matches('/')
             .split_once('/')
             .map(|(_distro, rest)| format!("/{rest}"))?,
@@ -303,8 +316,8 @@ struct Composer {
 /// One point lookup on the key's index. Only named fields are extracted: the
 /// value also holds the chat's encryption keys, which have no business
 /// leaving the database.
-fn composer(conn: &Connection, id: &str) -> Option<Composer> {
-    let (model, title, params) = conn
+fn composer(conn: &Connection, id: &str) -> rusqlite::Result<Option<Composer>> {
+    let Some((model, title, params)) = conn
         .query_row(
             "SELECT json_extract(value, '$.modelConfig.modelName'), \
              json_extract(value, '$.name'), \
@@ -319,10 +332,11 @@ fn composer(conn: &Connection, id: &str) -> Option<Composer> {
                 ))
             },
         )
-        .optional()
-        .ok()
-        .flatten()?;
-    Some(Composer {
+        .optional()?
+    else {
+        return Ok(None);
+    };
+    Ok(Some(Composer {
         // "default" is Cursor's Auto router, not a model. Shown as what it is,
         // and never handed to pricing, where it would substring-match some
         // provider's `…@default` model.
@@ -331,7 +345,7 @@ fn composer(conn: &Connection, id: &str) -> Option<Composer> {
             .map(|m| if m == "default" { "auto".into() } else { m }),
         title: title.filter(|t| !t.is_empty()),
         effort: params.as_deref().and_then(effort),
-    })
+    }))
 }
 
 /// The `effort` parameter of a model's settings, found by id: it is first for
@@ -349,16 +363,17 @@ fn effort(params: &str) -> Option<String> {
 /// A subagent's type — `explore`, `generalPurpose`, `shell` — which only the
 /// database records; its transcript and its parent's call carry nothing that
 /// links the two.
-fn subagent_type(conn: &Connection, id: &str) -> Option<String> {
-    conn.query_row(
-        "SELECT json_extract(value, '$.subagentInfo.subagentTypeName') \
-         FROM composerHeaders WHERE composerId = ?1",
-        [id],
-        |row| row.get::<_, Option<String>>(0),
-    )
-    .ok()
-    .flatten()
-    .filter(|t| !t.is_empty())
+fn subagent_type(conn: &Connection, id: &str) -> rusqlite::Result<Option<String>> {
+    Ok(conn
+        .query_row(
+            "SELECT json_extract(value, '$.subagentInfo.subagentTypeName') \
+             FROM composerHeaders WHERE composerId = ?1",
+            [id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()?
+        .flatten()
+        .filter(|t| !t.is_empty()))
 }
 
 /// How full the chat's context window is, by Cursor's own count of the prompt
@@ -423,6 +438,7 @@ fn extract_with(path: &Path, dbs: &[PathBuf]) -> SessionData {
         ));
     }
     let now = util::now_ms();
+    let quiet = super::claude::SUBAGENT_QUIET_MS;
     for file in &super::transcript_files(path)[1..] {
         let Some(id) = file.file_stem().map(|s| s.to_string_lossy().into_owned()) else {
             continue;
@@ -447,10 +463,13 @@ fn extract_with(path: &Path, dbs: &[PathBuf]) -> SessionData {
             last_active: Some(util::ms_to_rfc3339(touched)),
             duration_ms: (touched - started).max(0),
             // No tool result marks a Cursor subagent finished, so going
-            // quiet is all there is, as it is for a Claude one without hooks.
-            status: if now - touched >= super::claude::SUBAGENT_QUIET_MS {
+            // quiet is all there is, as it is for a Claude one without hooks
+            // — and since quiet is a matter of the clock, a running one has
+            // this extraction looked at again once it would have gone quiet.
+            status: if now - touched >= quiet {
                 SubagentStatus::Done
             } else {
+                recheck(&mut data.recheck_at_ms, touched + quiet);
                 SubagentStatus::Running
             },
             cost: 0.0,
@@ -466,22 +485,43 @@ fn extract_with(path: &Path, dbs: &[PathBuf]) -> SessionData {
     let Some(id) = path.file_stem().map(|s| s.to_string_lossy().into_owned()) else {
         return data;
     };
+    // A database that is there but does not answer — it will not open, a read
+    // tears on a checkpoint, or the chat is not in it yet because an immutable
+    // read sees only what Cursor has checkpointed — is asked again later.
+    //
+    // ponytail: a chat that is never in any database (Cursor's agent CLI, beside
+    // a desktop Cursor) is re-read every few minutes and never cached on disk.
+    let mut answered = dbs.is_empty();
     for db in dbs {
         let Ok(conn) = open(db) else { continue };
-        let Some(c) = composer(&conn, &id) else {
+        let Ok(Some(c)) = composer(&conn, &id) else {
             continue;
         };
         data.last_model = c.model.unwrap_or_default();
         data.title = c.title;
         data.reasoning_effort = c.effort;
+        answered = true;
         for sa in &mut data.subagents {
-            if let Some(kind) = subagent_type(&conn, &sa.agent_id) {
-                sa.agent_type = kind;
+            match subagent_type(&conn, &sa.agent_id) {
+                Ok(Some(kind)) => sa.agent_type = kind,
+                Ok(None) => {}
+                Err(_) => answered = false,
             }
         }
         break;
     }
+    if !answered {
+        recheck(&mut data.recheck_at_ms, now + DB_RECHECK_MS);
+    }
     data
+}
+
+/// How long an extraction the database did not answer is served before the
+/// database is asked again.
+const DB_RECHECK_MS: i64 = 5 * 60 * 1000;
+
+fn recheck(at: &mut Option<i64>, when: i64) {
+    *at = Some(at.map_or(when, |t| t.min(when)));
 }
 
 /// URLs and queries already counted, across a session and its subagents.
@@ -563,15 +603,40 @@ fn count_calls(
 
 /// The transcript, and the subagents' beside it: they are this session's,
 /// and no row of their own would ever offer to remove them.
+///
+/// That includes the top-level copy Cursor sometimes keeps of a subagent,
+/// `<sid>/<sid>.jsonl`, which only the parent's `subagents/` marks as one: left
+/// behind, it would come back as a row of its own on the next walk.
 pub fn delete(session: &Session) -> std::io::Result<()> {
-    if let Some(path) = &session.data_file {
-        std::fs::remove_file(path)?;
-        match std::fs::remove_dir_all(super::subagents_dir(path)) {
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            result => result?,
+    let Some(path) = &session.data_file else {
+        return Ok(());
+    };
+    std::fs::remove_file(path)?;
+    let subagents = super::subagents_dir(path);
+    if let Some(chats) = subagents.parent().and_then(Path::parent) {
+        for name in config::list_dir(&subagents) {
+            let Some(sid) = name.strip_suffix(".jsonl") else {
+                continue;
+            };
+            if !config::is_full_uuid(sid) {
+                continue;
+            }
+            let copy = chats.join(sid);
+            gone(std::fs::remove_file(copy.join(&name)))?;
+            gone(std::fs::remove_dir_all(copy.join("subagents")))?;
+            // Only once empty: whatever else is in it is not known to be ours.
+            let _ = std::fs::remove_dir(&copy);
         }
     }
-    Ok(())
+    gone(std::fs::remove_dir_all(subagents))
+}
+
+/// Already gone is what a removal wanted.
+fn gone(result: std::io::Result<()>) -> std::io::Result<()> {
+    match result {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        result => result,
+    }
 }
 
 #[cfg(test)]
@@ -655,6 +720,17 @@ mod tests {
         std::fs::write(path, text).unwrap();
     }
 
+    /// Set a file's mtime to `ms` (Unix ms).
+    fn touch(path: &Path, ms: i64) {
+        let t = std::time::UNIX_EPOCH + std::time::Duration::from_millis(ms as u64);
+        std::fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(t)
+            .unwrap();
+    }
+
     fn calls(n: usize) -> String {
         let call = r#"{"role":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{"path":"a"}}]}}"#;
         format!("{}\n", vec![call; n].join("\n"))
@@ -707,6 +783,13 @@ mod tests {
         );
         write(&chats.join(S).join(format!("{S}.jsonl")), &calls(1));
         write(&chats.join(Q).join(format!("{Q}.jsonl")), &calls(1));
+        // The subagent wrote last, and that is what keeps its parent live.
+        touch(&chats.join(P).join(format!("{P}.jsonl")), 1_767_225_600_000);
+        let sub_written = 1_767_225_700_000;
+        touch(
+            &chats.join(P).join("subagents").join(format!("{S}.jsonl")),
+            sub_written,
+        );
         // Would pass every check on the path, so only the narrowed walk keeps
         // it out.
         write(
@@ -724,6 +807,9 @@ mod tests {
         };
         let bare = list_sessions_in(std::slice::from_ref(&root), &[]);
         assert_eq!(ids(&bare), [P, Q]);
+        let p = bare.iter().find(|s| s.session_id == P).unwrap();
+        assert_eq!(p.touched_at, util::ms_to_rfc3339(sub_written));
+        assert_eq!(super::super::effective_mtime_ms(p), sub_written as u64);
         assert!(
             bare.iter()
                 .all(|s| s.label_source == "home-x-work" && s.title.is_none())
@@ -752,13 +838,16 @@ mod tests {
             (q.title.as_deref(), q.label_source.as_str()),
             (None, "home-x-work")
         );
-        assert_eq!(
-            workspace_dir(
-                Some(format!("/Ubuntu{}", work.display())),
-                Some("wsl$".into())
-            ),
-            Some(work.clone())
-        );
+        for authority in ["wsl$", "wsl.localhost"] {
+            assert_eq!(
+                workspace_dir(
+                    Some(format!("/Ubuntu{}", work.display())),
+                    Some(authority.into())
+                ),
+                Some(work.clone()),
+                "{authority}"
+            );
+        }
 
         // An older Cursor without the table changes nothing.
         let old = tmp.join("old.vscdb");
@@ -770,6 +859,16 @@ mod tests {
         assert!(
             rows.iter()
                 .all(|s| s.label_source == "home-x-work" && s.title.is_none())
+        );
+
+        // Deleting the parent takes the subagent's top-level copy with it,
+        // which would otherwise come back as a row of its own.
+        let p = rows.into_iter().find(|s| s.session_id == P).unwrap();
+        delete(&p).unwrap();
+        assert!(!chats.join(S).exists());
+        assert_eq!(
+            ids(&list_sessions_in(std::slice::from_ref(&root), &[])),
+            [Q]
         );
 
         let _ = std::fs::remove_dir_all(tmp);
@@ -795,8 +894,37 @@ mod tests {
             &[(P, Some(composer)), (Q, None)],
         );
 
+        // A subagent written just now is running, and only the clock says
+        // when it stops: such an extraction is looked at again then, and
+        // never cached on disk meanwhile.
+        let fresh = extract_with(&main, std::slice::from_ref(&db));
+        let written =
+            config::file_mtime_ms(&tmp.join(P).join("subagents").join(format!("{S}.jsonl")));
+        assert!(
+            fresh
+                .subagents
+                .iter()
+                .all(|s| s.status == SubagentStatus::Running)
+        );
+        assert!(fresh.recheck_at_ms.is_some_and(|at| at
+            <= written as i64 + super::super::claude::SUBAGENT_QUIET_MS
+            && at > util::now_ms()));
+        let old = util::now_ms() - 60_000;
+        for f in super::super::transcript_files(&main) {
+            touch(&f, old);
+        }
+
         let data = extract_with(&main, std::slice::from_ref(&db));
         assert_eq!(data.error, None);
+        assert_eq!(
+            data.recheck_at_ms, None,
+            "settled, and the database answered"
+        );
+        assert!(
+            data.subagents
+                .iter()
+                .all(|s| s.status == SubagentStatus::Done)
+        );
         assert_eq!(
             data.last_model, "auto",
             "Cursor's Auto router is not a model"
@@ -824,18 +952,33 @@ mod tests {
         assert_eq!(data.tokens.total, 0);
         assert_eq!(data.costs.total, 0.0);
 
-        // No database, or no usable row, is today's transcript-only answer.
-        for dbs in [vec![], vec![tmp.join("missing.vscdb")]] {
+        // No database, or no usable row, is today's transcript-only answer —
+        // final when there is no database, asked again when one did not
+        // answer.
+        for (dbs, recheck) in [(vec![], false), (vec![tmp.join("missing.vscdb")], true)] {
             let bare = extract_with(&main, &dbs);
             assert_eq!((bare.last_model.as_str(), bare.error), ("", None));
             assert_eq!(bare.subagents.len(), 2);
+            assert_eq!(bare.recheck_at_ms.is_some(), recheck, "{dbs:?}");
         }
+        let unknown = tmp.join(T).join(format!("{T}.jsonl"));
+        write(&unknown, &calls(1));
+        let unknown = extract_with(&unknown, std::slice::from_ref(&db));
+        assert!(
+            unknown.recheck_at_ms.is_some(),
+            "not in the database yet may be not checkpointed yet"
+        );
         let q = tmp.join(Q).join(format!("{Q}.jsonl"));
         write(&q, &calls(1));
         let null = extract_with(&q, std::slice::from_ref(&db));
         assert_eq!(
-            (null.last_model.as_str(), null.title, null.error),
-            ("", None, None)
+            (
+                null.last_model.as_str(),
+                null.title,
+                null.error,
+                null.recheck_at_ms
+            ),
+            ("", None, None, None)
         );
 
         // Deleting the session takes its subagents with it.
@@ -908,5 +1051,50 @@ mod tests {
         );
         // And the suite never reaches for the developer's own database.
         assert!(config::cursor_global_dbs().is_empty());
+    }
+
+    /// The immutable open reads a WAL database through a path that needs
+    /// escaping, and leaves nothing beside it — the promise made to the
+    /// Cursor on the other side of 9P. A link into the drive is judged by
+    /// where it leads.
+    #[test]
+    fn an_immutable_open_reads_and_writes_nothing() {
+        let tmp = temp_path("cursor-immutable");
+        let dir = tmp.join("John Doe#1?");
+        let db = fixture_db(&dir, &[(P, r#"{"name":"Plan it"}"#)], &[]);
+        Connection::open(&db)
+            .unwrap()
+            .pragma_update(None, "journal_mode", "WAL")
+            .unwrap();
+        let beside = |ext: &str| dir.join(format!("state.vscdb-{ext}"));
+        assert!(!beside("wal").exists() && !beside("shm").exists());
+
+        let headers = open_immutable(&db)
+            .unwrap()
+            .query_row("SELECT count(*) FROM composerHeaders", [], |r| {
+                r.get::<_, i64>(0)
+            })
+            .unwrap();
+        assert_eq!(headers, 1);
+        assert!(!beside("wal").exists() && !beside("shm").exists());
+
+        let link = tmp.join("link");
+        std::os::unix::fs::symlink(&dir, &link).unwrap();
+        let real = std::fs::canonicalize(&db).unwrap();
+        let mounts = [
+            Mount {
+                point: "/".into(),
+                fstype: "ext4".into(),
+            },
+            Mount {
+                point: real.parent().unwrap().to_path_buf(),
+                fstype: "9p".into(),
+            },
+        ];
+        assert_eq!(
+            on_windows_drive_really(&link.join("state.vscdb"), &mounts),
+            Some(real)
+        );
+        let _ = std::fs::remove_dir_all(tmp);
     }
 }

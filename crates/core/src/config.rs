@@ -1220,41 +1220,51 @@ pub fn cursor_projects_roots() -> Vec<PathBuf> {
 /// under WSL the Windows profiles' — where a Cursor whose agent runs in WSL
 /// keeps it, the transcripts being on the Linux side and the database not.
 ///
-/// Read once per process: the Windows half is a directory listing over 9P,
-/// and the walk asks on every pass. Empty under test, so no test ever opens
-/// the developer's own database; tests hand theirs in.
+/// Kept once found: the Windows half is a directory listing over 9P, and the
+/// walk asks on every pass. Not finding one is kept for a minute only, so a
+/// drive that was not mounted yet when cctop started is still seen. Empty
+/// under test, so no test ever opens the developer's own database; tests hand
+/// theirs in.
 ///
 /// ponytail: only `/mnt/c/Users/*` is looked at, and every profile there, so a
 /// Windows drive mounted elsewhere needs `$CURSOR_USER_DIR`, and a second
-/// Windows user's Cursor is read too (harmless: rows join on chat id).
-/// Computed once, so a Cursor installed after cctop started is seen on the
-/// next start.
+/// Windows user's Cursor is read too (harmless: rows join on chat id). Once one
+/// is found the list is fixed, so a second Cursor installed after cctop
+/// started is seen on the next start.
 pub fn cursor_global_dbs() -> Vec<PathBuf> {
-    static DBS: LazyLock<Vec<PathBuf>> = LazyLock::new(|| {
-        let windows = Path::new("/mnt/c/Users");
-        let mut dirs = roots_across_homes(&CURSOR_USER_DIR, |h| {
-            config_dir_in(h).join("Cursor").join("User")
-        });
-        dirs.extend(list_dir(windows).into_iter().map(|user| {
-            windows
-                .join(user)
-                .join("AppData")
-                .join("Roaming")
-                .join("Cursor")
-                .join("User")
-        }));
-        let mut dbs: Vec<PathBuf> = dirs
-            .into_iter()
-            .map(|dir| dir.join("globalStorage").join("state.vscdb"))
-            .filter(|db| db.is_file())
-            .collect();
-        dbs.dedup();
-        dbs
-    });
+    static DBS: std::sync::Mutex<Option<(std::time::Instant, Vec<PathBuf>)>> =
+        std::sync::Mutex::new(None);
     if crate::under_test() {
         return Vec::new();
     }
-    DBS.clone()
+    let Ok(mut memo) = DBS.lock() else {
+        return Vec::new();
+    };
+    if let Some((at, dbs)) = &*memo
+        && (!dbs.is_empty() || at.elapsed() < std::time::Duration::from_secs(60))
+    {
+        return dbs.clone();
+    }
+    let windows = Path::new("/mnt/c/Users");
+    let mut dirs = roots_across_homes(&CURSOR_USER_DIR, |h| {
+        config_dir_in(h).join("Cursor").join("User")
+    });
+    dirs.extend(list_dir(windows).into_iter().map(|user| {
+        windows
+            .join(user)
+            .join("AppData")
+            .join("Roaming")
+            .join("Cursor")
+            .join("User")
+    }));
+    let mut dbs: Vec<PathBuf> = dirs
+        .into_iter()
+        .map(|dir| dir.join("globalStorage").join("state.vscdb"))
+        .filter(|db| db.is_file())
+        .collect();
+    dbs.dedup();
+    *memo = Some((std::time::Instant::now(), dbs.clone()));
+    dbs
 }
 
 pub fn pi_sessions_roots() -> Vec<PathBuf> {
