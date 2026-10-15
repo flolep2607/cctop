@@ -960,6 +960,7 @@ pub fn subagent_header_spans(width: usize) -> Vec<(usize, usize, SubagentSort)> 
 
 pub fn subagents(
     data: Option<&SessionData>,
+    cost_available: bool,
     sort: SubagentSort,
     asc: bool,
     width: usize,
@@ -1030,7 +1031,12 @@ pub fn subagents(
             .map(|t| util::relative_age(t, &now))
             .unwrap_or_else(|| "—".into());
         let unknown = |s: String| if sa.ghost { "—".to_string() } else { s };
-        let cost = unknown(util::compact_usd(sa.cost));
+        // A harness that records no cost gives its subagents none either, and
+        // their 0.0 is that absence, not a free run.
+        let cost = match cost_available {
+            true => unknown(util::compact_usd(sa.cost)),
+            false => "—".to_string(),
+        };
         let tools = unknown(sa.tool_count.to_string());
         let time = unknown(util::compact_duration(sa.duration_ms));
         let ctx = match (sa.ghost, sa.context) {
@@ -1092,6 +1098,16 @@ pub fn subagents(
 // Cost
 // ---------------------------------------------------------------------------
 
+/// Why a row has no cost, in its own harness's terms: Devin records tokens and
+/// shows them elsewhere, so only the dollars are missing there.
+fn no_cost_note(provider: Provider) -> String {
+    let what = match provider.records_token_usage() {
+        true => "cost",
+        false => "cost or token usage",
+    };
+    format!("{} records no {what}.", provider.display_name())
+}
+
 pub fn cost(session: &Session, data: Option<&SessionData>, plan: Plan) -> Vec<Line<'static>> {
     let Some(data) = data else {
         return note("Loading…");
@@ -1100,7 +1116,7 @@ pub fn cost(session: &Session, data: Option<&SessionData>, plan: Plan) -> Vec<Li
     let mut lines = Vec::new();
 
     if !session.cost_available {
-        return note("Cost and token usage are not present in Cursor transcripts.");
+        return note(&no_cost_note(session.provider));
     }
 
     if included && !session.cost_is_free {
@@ -1900,8 +1916,15 @@ pub fn config(session: &Session) -> Vec<Line<'static>> {
                 "── Cursor ──".to_string(),
                 theme::title(),
             )));
+            // What this session actually has, since the database is found or
+            // not, and a chat is in it or not.
+            lines.push(Line::from(dim(if session.model.is_empty() {
+                "No model or context: no matching chat in Cursor's state.vscdb."
+            } else {
+                "Model and context come from Cursor's state.vscdb."
+            })));
             lines.push(Line::from(dim(
-                "Native agent transcripts do not expose model, token, context, or cost data.",
+                "Cursor records no tokens or cost for its agent, anywhere.",
             )));
             lines.push(Line::from(dim(format!(
                 "Transcript: {}",
@@ -2387,7 +2410,7 @@ mod tests {
             ..Default::default()
         };
         let costs = |asc| -> Vec<String> {
-            subagents(Some(&data), SubagentSort::Cost, asc, 120)
+            subagents(Some(&data), true, SubagentSort::Cost, asc, 120)
                 .into_iter()
                 .skip(1)
                 .map(|line| line.spans.iter().map(|s| s.content.as_ref()).collect())
@@ -2416,7 +2439,7 @@ mod tests {
             ..Default::default()
         };
         let first = |sort, asc| -> String {
-            subagents(Some(&data), sort, asc, 120)[1]
+            subagents(Some(&data), true, sort, asc, 120)[1]
                 .spans
                 .iter()
                 .map(|s| s.content.as_ref())
@@ -2442,7 +2465,7 @@ mod tests {
             ..Default::default()
         };
         let first = |asc| -> String {
-            subagents(Some(&data), SubagentSort::Cost, asc, 120)[1]
+            subagents(Some(&data), true, SubagentSort::Cost, asc, 120)[1]
                 .spans
                 .iter()
                 .map(|s| s.content.as_ref())
@@ -2467,7 +2490,7 @@ mod tests {
             ..Default::default()
         };
         let head = |sort, asc| -> String {
-            subagents(Some(&data), sort, asc, 120)[0]
+            subagents(Some(&data), true, sort, asc, 120)[0]
                 .spans
                 .iter()
                 .map(|s| s.content.as_ref())
@@ -2492,7 +2515,7 @@ mod tests {
             ..Default::default()
         };
         let width = 120;
-        let head: String = subagents(Some(&data), SubagentSort::Last, true, width)[0]
+        let head: String = subagents(Some(&data), true, SubagentSort::Last, true, width)[0]
             .spans
             .iter()
             .map(|s| s.content.as_ref())
@@ -2528,7 +2551,7 @@ mod tests {
             subagents: vec![subagent("g", 0.0, true)],
             ..Default::default()
         };
-        let lines = subagents(Some(&data), SubagentSort::Last, false, 120);
+        let lines = subagents(Some(&data), true, SubagentSort::Last, false, 120);
         let row: String = lines[1].spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(row.contains('◌'), "ghost needs its own marker: {row}");
         assert!(
@@ -2536,6 +2559,33 @@ mod tests {
             "purged transcript must not report $0.00 as if measured: {row}"
         );
         assert!(row.contains('—'));
+    }
+
+    /// A harness that records no cost gives its subagents a 0.0, which is
+    /// that absence and must not read as a measured `$0.00`; and the note
+    /// names the row's own harness, in what it does record.
+    #[test]
+    fn an_unpriced_harness_says_so_in_its_own_terms() {
+        let data = SessionData {
+            subagents: vec![subagent("a", 0.0, false)],
+            ..SessionData::default()
+        };
+        let row: String = subagents(Some(&data), false, SubagentSort::Last, true, 120)[1]
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(!row.contains("$0.00") && row.contains('—'), "{row}");
+
+        assert_eq!(
+            no_cost_note(Provider::Cursor),
+            "Cursor records no cost or token usage."
+        );
+        assert_eq!(
+            no_cost_note(Provider::Windsurf),
+            "Windsurf records no cost or token usage."
+        );
+        assert_eq!(no_cost_note(Provider::Devin), "Devin records no cost.");
     }
 
     #[test]

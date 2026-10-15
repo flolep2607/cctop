@@ -170,7 +170,13 @@ pub(super) fn draw_bottom(frame: &mut Frame, area: Rect, app: &mut App, layout: 
                 }
             }
             4 => (
-                panels::subagents(data, app.subagent_sort.0, app.subagent_sort.1, width),
+                panels::subagents(
+                    data,
+                    session.cost_available,
+                    app.subagent_sort.0,
+                    app.subagent_sort.1,
+                    width,
+                ),
                 app.subagent_scroll,
             ),
             5 => (panels::cost(session, data, app.plan), app.cost_scroll),
