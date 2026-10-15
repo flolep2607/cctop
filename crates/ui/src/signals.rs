@@ -760,6 +760,7 @@ mod tests {
             tab: None,
             pane: None,
             axis: None,
+            transport: None,
             window: None,
         };
         let now = 1_700_000_000;

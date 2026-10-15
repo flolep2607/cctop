@@ -26,6 +26,11 @@ color: string | null,
  */
 tab: string | null, 
 /**
+ * How the tab reaches another machine, when its agent is on one:
+ * `peer` through a sibling's Cloudflare tunnel, `ssh` over ssh.
+ */
+transport: string | null, 
+/**
  * Whether a terminal client is attached to it somewhere.
  */
 attached: boolean, 

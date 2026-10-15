@@ -290,7 +290,7 @@ fn unbox(row: &str) -> String {
 pub fn harness_of(name: &str) -> &str {
     name.strip_prefix("cctop-")
         .unwrap_or(name)
-        .split(['-', ' ', '·'])
+        .split(['-', ' ', '·', '@'])
         .next()
         .unwrap_or_default()
 }

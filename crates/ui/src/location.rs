@@ -288,12 +288,15 @@ pub(super) fn peer_projects(sessions: &[Session], machine: &str, typed: &str) ->
 
 /// What a remote tab is called: the agent, then where it works.
 ///
-/// The arrow is the one the table's Host column puts after a sandboxed row's
-/// host, so a tab and its row read as the same thing. The agent first, because
-/// a tab's harness is read off the front of its name and that is what picks
-/// which screen phrases mean "working" and "asking".
+/// How it gets there is the bar's mark before the label (see
+/// [`Pane::transport`](tabs::Pane::transport)), not part of the name, so a
+/// rename keeps it. The agent first, because a tab's harness is read off the
+/// front of its name and that is what picks which screen phrases mean
+/// "working" and "asking". `@` rather than the ` · ` a session opened on a
+/// sibling puts after its host, so which side is the machine reads the same
+/// way in both.
 pub(super) fn remote_label(agent: &str, host: &str) -> String {
-    format!("{agent} ⇄ {host}")
+    format!("{agent}@{host}")
 }
 
 /// Hosts offered beside the local directories before one is in the field, at
@@ -742,6 +745,8 @@ impl App {
         };
         let label = remote_label(&agent, &host);
         pane.label = label.clone();
+        // A shell is ssh, and a sandbox's files are on the host over ssh.
+        pane.transport = Some(cctop_core::reach::Transport::Ssh);
         if let Some(provider) = Self::profile_provider(std::slice::from_ref(&agent)) {
             pane.profile = self.chosen_profile(provider).map(|p| p.name.clone());
         }
@@ -811,6 +816,7 @@ impl App {
         };
         let label = remote_label(&agent, host);
         pane.label = label.clone();
+        pane.transport = Some(cctop_core::reach::Transport::Peer);
         match self.launch_into {
             LaunchInto::Split { stacked } => {
                 let Some(tab) = self.active_tab() else { return };

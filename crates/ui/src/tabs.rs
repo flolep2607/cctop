@@ -194,6 +194,11 @@ pub struct Pane {
     ///
     /// Filled in by the caller that chose it, like `resumed` below.
     pub profile: Option<String>,
+    /// How this pane reaches the machine its agent is on, when that is not
+    /// this one: the tab bar marks it, and the mark has to survive a rename
+    /// that drops the host from the label. Filled in by the caller that opened
+    /// it, and written onto the session with the label.
+    pub transport: Option<cctop_core::reach::Transport>,
     /// The pid cctop hosts. A second request to view the same agent finds this
     /// pane rather than opening a duplicate onto one terminal.
     pub pid: u32,
@@ -318,6 +323,7 @@ impl Pane {
             rmux: None,
             resumed: None,
             profile: None,
+            transport: None,
             pid: 4321,
             agent: None,
             asked_at: None,
@@ -579,6 +585,9 @@ impl Pane {
             if let Some(profile) = &self.profile {
                 cctop_core::rmux::set_profile(name, profile);
             }
+            if let Some(transport) = self.transport {
+                cctop_core::rmux::set_transport(name, transport);
+            }
         }
     }
 
@@ -706,6 +715,7 @@ impl Pane {
             // most launches are not any session in particular.
             resumed: None,
             profile: None,
+            transport: None,
             agent: None,
             asked_at: None,
             asked: None,
@@ -727,6 +737,7 @@ impl Pane {
             resumed: None,
             // Nothing was launched here, so there is no choice to record.
             profile: None,
+            transport: None,
             pid,
             // Nothing stands between this pane and the agent: the pid asked for
             // is the agent's, which is what makes this the answer already.
@@ -842,6 +853,9 @@ pub struct Shared {
     /// pane this becomes again reports the same limits it did before. See
     /// [`Pane::profile`].
     pub profile: Option<String>,
+    /// How the tab reaches another machine, carried across the trade like the
+    /// profile. See [`Pane::transport`].
+    pub transport: Option<cctop_core::reach::Transport>,
     /// What the agent last reported about itself, as recorded on the rmux
     /// session — see [`rmux::State`](cctop_core::rmux::State).
     ///
@@ -871,6 +885,7 @@ impl Shared {
             pid: agent.pid,
             activity: agent.activity,
             profile: agent.profile.clone(),
+            transport: agent.transport,
             state: agent.state,
         }
     }
@@ -1084,6 +1099,7 @@ impl Tab {
         // this is the one the session was started under, read back off rmux by
         // the sweep that found it or kept from the pane this tab last had.
         pane.profile = shared.profile.clone();
+        pane.transport = shared.transport;
         Ok(pane)
     }
 
@@ -1137,6 +1153,7 @@ impl Tab {
                 // fills it.
                 activity: None,
                 profile: pane.profile.clone(),
+                transport: pane.transport,
                 state: None,
             });
         }
@@ -1198,6 +1215,15 @@ impl Tab {
                 .or_else(|| self.shared.as_ref().map(|s| s.label.clone()))
                 .unwrap_or_default(),
             n => format!("{} +{}", self.panes[0].label, n - 1),
+        }
+    }
+
+    /// How this tab reaches another machine, if it is on one — the bar's mark
+    /// before the title. The first pane's, since the title is the first pane's.
+    pub fn transport(&self) -> Option<cctop_core::reach::Transport> {
+        match self.panes.first() {
+            Some(pane) => pane.transport,
+            None => self.shared.as_ref().and_then(|s| s.transport),
         }
     }
 
@@ -2021,6 +2047,7 @@ Enter to select · ↑/↓ to navigate · Esc to cancel";
             tab: None,
             pane: None,
             axis: None,
+            transport: None,
             window: None,
         }
     }
@@ -2086,6 +2113,7 @@ Enter to select · ↑/↓ to navigate · Esc to cancel";
             rmux: None,
             resumed: None,
             profile: None,
+            transport: None,
             pid: 4321,
             agent: None,
             asked_at: None,

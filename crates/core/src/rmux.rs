@@ -815,6 +815,16 @@ pub fn set_profile(name: &str, profile: &str) {
     record(name, "@cctop_profile", profile);
 }
 
+/// Record that the tab in `name` is a transport to another machine, and which.
+///
+/// The same trick as [`set_label`]: the label names the machine, but a rename
+/// can take that away, and nothing in it ever said how the tab gets there.
+/// Written once, when the tab is opened; a local tab writes nothing, and unset
+/// is what local means.
+pub fn set_transport(name: &str, transport: crate::reach::Transport) {
+    record(name, "@cctop_transport", transport.as_str());
+}
+
 /// What the agent in a session last reported about itself, recorded on the
 /// session by whichever cctop heard it say so.
 ///
@@ -1106,6 +1116,9 @@ pub struct Running {
     /// [`Axis`] writes it. Read back with the tab, since it is a property of the
     /// tab and every pane records the same answer.
     pub axis: Option<String>,
+    /// How the tab reaches another machine, when it is a transport to one —
+    /// written by [`set_transport`], and drawn as a mark before its label.
+    pub transport: Option<crate::reach::Transport>,
     /// The size rmux has fitted the session's window to, columns by rows.
     ///
     /// The window is fitted to one attached client at a time, so a client that
@@ -1141,6 +1154,7 @@ impl Running {
             tab: None,
             pane: None,
             axis: None,
+            transport: None,
             window: None,
         }
     }
@@ -1245,7 +1259,7 @@ pub fn running() -> Vec<Running> {
     // One call for all of it. Every field below resolves in a pane's context —
     // rmux looks up the session a pane belongs to — so asking per session would
     // be a request each for the same answer.
-    const FORMAT: &str = "#{session_name}\t#{pane_pid}\t#{pane_current_path}\t#{session_attached}\t#{session_created}\t#{window_activity}\t#{@cctop_label}\t#{@cctop_profile}\t#{@cctop_order}\t#{@cctop_state}\t#{@cctop_color}\t#{@cctop_tab}\t#{@cctop_pane}\t#{@cctop_axis}\t#{window_width}\t#{window_height}\t#{pane_dead}";
+    const FORMAT: &str = "#{session_name}\t#{pane_pid}\t#{pane_current_path}\t#{session_attached}\t#{session_created}\t#{window_activity}\t#{@cctop_label}\t#{@cctop_profile}\t#{@cctop_order}\t#{@cctop_state}\t#{@cctop_color}\t#{@cctop_tab}\t#{@cctop_pane}\t#{@cctop_axis}\t#{@cctop_transport}\t#{window_width}\t#{window_height}\t#{pane_dead}";
     // No daemon running: no sessions, not an error.
     let listing = crate::mux::list_all_panes(FORMAT).unwrap_or_default();
 
@@ -1301,6 +1315,7 @@ pub fn running() -> Vec<Running> {
         let tab = option();
         let pane = option().and_then(|v| v.parse::<u64>().ok());
         let axis = option();
+        let transport = option().as_deref().and_then(crate::reach::Transport::parse);
         let width = option().and_then(|v| v.parse::<u16>().ok());
         let height = option().and_then(|v| v.parse::<u16>().ok());
         let window = width.zip(height);
@@ -1326,6 +1341,7 @@ pub fn running() -> Vec<Running> {
                 tab,
                 pane,
                 axis,
+                transport,
                 window,
             },
         ));

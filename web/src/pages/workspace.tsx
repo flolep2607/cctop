@@ -1,6 +1,6 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "wouter";
-import { ExternalLink, GripVertical, Maximize2, MessageSquareText, Minimize2, Plus, X } from "lucide-react";
+import { ArrowLeftRight, Cloud, ExternalLink, GripVertical, Maximize2, MessageSquareText, Minimize2, Plus, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { CAN_ACT } from "@/lib/config";
 import { money, shortModel, shortPath } from "@/lib/format";
@@ -28,6 +28,20 @@ import type { Session, Tab } from "@/lib/types";
 // would look right and reload every terminal on each drag.
 
 type Cols = "auto" | "1" | "2" | "3" | "4";
+
+// The TUI's mark for a tab whose agent is on another machine, by how the tab
+// gets there: a sibling's Cloudflare tunnel, or ssh.
+function TransportMark({ transport }: { transport: string | null | undefined }) {
+  const Icon = transport === "peer" ? Cloud : transport === "ssh" ? ArrowLeftRight : null;
+  if (!Icon) return null;
+  const via = transport === "peer" ? "Cloudflare" : "ssh";
+  return (
+    <span role="img" className="text-muted-foreground shrink-0" title={"Remote · " + via} aria-label={"Remote, " + via}>
+      <Icon className="size-3.5" />
+    </span>
+  );
+}
+
 const autoCols = (n: number) => (n <= 1 ? 1 : n <= 4 ? 2 : n <= 9 ? 3 : 4);
 
 // Opening a terminal asks rmux for a share, so it happens once per tile per
@@ -147,6 +161,7 @@ const Tile = memo(function Tile({
       >
         <GripVertical className="text-muted-foreground size-3.5 shrink-0 @max-[440px]:hidden" />
         <StateDot state={state} />
+        <TransportMark transport={tab?.transport} />
         <span className="shrink-0 font-semibold">{label}</span>
         {position < 9 && <Kbd className="@max-[440px]:hidden">{position + 1}</Kbd>}
         <span className="text-muted-foreground min-w-0 truncate text-xs @max-[360px]:hidden">{shortPath(tab?.cwd)}</span>
@@ -288,6 +303,7 @@ export function WorkspacePage() {
             closed.map((t) => (
               <Button key={t.name} variant="outline" size="sm" className="max-w-60 rounded-full" onClick={() => add(t.name)} title={"Add to the workspace · " + shortPath(t.cwd)}>
                 <StateDot state={dotOfTab(t.state)} />
+                <TransportMark transport={t.transport} />
                 <span className="truncate">{t.label}</span>
                 <Plus className="text-muted-foreground" />
               </Button>

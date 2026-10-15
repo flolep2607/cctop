@@ -371,6 +371,7 @@ mod tests {
             tab: None,
             pane: None,
             axis: None,
+            transport: None,
             window: None,
         }
     }

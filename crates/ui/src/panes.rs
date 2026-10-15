@@ -572,6 +572,10 @@ impl App {
                     && let Some(agent) = running.iter().find(|a| a.name == name)
                 {
                     pane.fit.window = agent.window;
+                    // Late like the label: the owning cctop writes it once its
+                    // agent has answered, after a sweep here may have taken
+                    // the session up without it.
+                    pane.transport = agent.transport.or(pane.transport);
                 }
             }
             let Some(shared) = tab.shared.as_mut() else {
@@ -589,6 +593,8 @@ impl App {
             // launched this agent knew its account before the option landed on
             // the session, and a sweep in that window must not forget it.
             shared.profile = agent.profile.clone().or_else(|| shared.profile.take());
+            // Late for the same reason, and kept for the same one.
+            shared.transport = agent.transport.or(shared.transport);
             if let Some(label) = &agent.label {
                 shared.label = label.clone();
             }
@@ -998,6 +1004,7 @@ mod tests {
                 tab: None,
                 pane: None,
                 axis: None,
+                transport: None,
                 window: None,
             })
         };
@@ -1254,6 +1261,7 @@ mod tests {
                 tab: None,
                 pane: None,
                 axis: None,
+                transport: None,
                 window: None,
             })
         };
@@ -1310,6 +1318,7 @@ mod tests {
                 tab: None,
                 pane: None,
                 axis: None,
+                transport: None,
                 window: None,
             })
         };
@@ -1480,6 +1489,7 @@ mod tests {
                 tab: None,
                 pane: None,
                 axis: None,
+                transport: None,
                 window: None,
             })
         };
@@ -1541,6 +1551,7 @@ mod tests {
                 tab: None,
                 pane: None,
                 axis: None,
+                transport: None,
                 window: None,
             })
         };
@@ -1621,6 +1632,7 @@ mod tests {
                 tab: None,
                 pane: None,
                 axis: None,
+                transport: None,
                 window: None,
             })
         };
@@ -1711,6 +1723,7 @@ mod tests {
                 tab: None,
                 pane: None,
                 axis: None,
+                transport: None,
                 window: None,
             })
         };
@@ -1821,6 +1834,7 @@ mod tests {
                 tab: None,
                 pane: None,
                 axis: None,
+                transport: None,
                 window: None,
             }));
         app.tab = 1;
@@ -1864,6 +1878,7 @@ mod tests {
                 tab: None,
                 pane: None,
                 axis: None,
+                transport: None,
                 window: None,
             })
         };
@@ -1930,6 +1945,7 @@ mod tests {
             tab: None,
             pane: None,
             axis: None,
+            transport: None,
             window: None,
         })
     }
@@ -2034,6 +2050,7 @@ mod tests {
                 tab: None,
                 pane: None,
                 axis: None,
+                transport: None,
                 window: None,
             })
         };
@@ -2072,6 +2089,7 @@ mod tests {
                 tab: None,
                 pane: None,
                 axis: None,
+                transport: None,
                 window: None,
             })
         };
@@ -2143,6 +2161,7 @@ mod tests {
                 tab: None,
                 pane: None,
                 axis: None,
+                transport: None,
                 window: None,
             })
         };
