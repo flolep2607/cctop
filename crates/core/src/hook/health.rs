@@ -478,6 +478,52 @@ pub fn repair(cwd: Option<&Path>) -> Repair {
 /// config: repair *writes*, and a test that swept [`Scope::User`] would edit the
 /// settings of whoever ran `cargo test`.
 pub(super) fn repair_in(scopes: &[Scope]) -> Repair {
+    repair_with(scopes, &|scope| {
+        matches!(scope, Scope::User) && !crate::under_test() && !opted_out()
+    })
+}
+
+/// Where `cctop --remove-hooks user` leaves word that hooks are not wanted, so
+/// the first-run install in [`repair`] does not put them straight back.
+fn opt_out_marker() -> std::path::PathBuf {
+    crate::config::CONFIG_FILE
+        .parent()
+        .map(|dir| dir.join("hooks-removed"))
+        .unwrap_or_else(|| std::path::PathBuf::from("hooks-removed"))
+}
+
+fn opted_out() -> bool {
+    opt_out_marker().exists()
+}
+
+/// Remember, or forget, that the user removed cctop's hooks by hand.
+pub fn set_opted_out(out: bool) {
+    if crate::under_test() {
+        return;
+    }
+    let marker = opt_out_marker();
+    match out {
+        true => {
+            if let Some(dir) = marker.parent() {
+                let _ = std::fs::create_dir_all(dir);
+            }
+            let _ = std::fs::write(&marker, "cctop --install-hooks user brings them back\n");
+        }
+        false => {
+            let _ = std::fs::remove_file(&marker);
+        }
+    }
+}
+
+/// [`repair_in`], with whether a scope may be installed into from nothing.
+///
+/// `fresh` is the first-run install: a harness that is on this machine — its
+/// config directory exists — but has never had cctop's hooks gets them, at
+/// user scope, unless they were removed on purpose. Without it `cctop
+/// --install-hooks` was a step every new user had to know about, and a cctop
+/// that never heard from its agents read their state off disk, later and
+/// worse.
+fn repair_with(scopes: &[Scope], fresh: &dyn Fn(&Scope) -> bool) -> Repair {
     let Ok(own) = own_exe() else {
         return Repair::default();
     };
@@ -491,6 +537,15 @@ pub(super) fn repair_in(scopes: &[Scope]) -> Repair {
                 // refreshing an old one and repointing a dead one are the same
                 // write with a different path.
                 let (exe, what) = match &health {
+                    // The skill follows the hooks on the next start, once the
+                    // settings file it is judged against has them.
+                    Health::Absent
+                        if fresh(scope)
+                            && !matches!(config, Config::Skill { .. })
+                            && config.path().parent().is_some_and(std::path::Path::is_dir) =>
+                    {
+                        (own.clone(), "installed".to_string())
+                    }
                     Health::Broken(_) => (own.clone(), "repointed at this cctop".to_string()),
                     Health::Outdated { exe } => (
                         exe.clone().unwrap_or_else(|| own.clone()),
@@ -533,6 +588,45 @@ pub(super) fn repair_in(scopes: &[Scope]) -> Repair {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A harness on this machine with no hooks gets them on first run, at a
+    /// scope that allows it; one whose config directory is missing — not
+    /// installed here — and one that was opted out are left alone.
+    #[test]
+    fn a_first_run_installs_where_the_harness_lives_and_was_not_opted_out() {
+        let dir = std::env::temp_dir().join(format!("cctop-fresh-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(".claude")).unwrap();
+        let scope = Scope::Project(dir.clone());
+        assert_eq!(Harness::Claude.health(&scope).unwrap(), Health::Absent);
+
+        assert!(
+            repair_with(std::slice::from_ref(&scope), &|_| false)
+                .fixed
+                .is_empty()
+        );
+        assert_eq!(Harness::Claude.health(&scope).unwrap(), Health::Absent);
+
+        let repair = repair_with(std::slice::from_ref(&scope), &|_| true);
+        assert!(
+            repair.fixed.iter().any(|line| line.contains("installed")),
+            "{:?}",
+            repair.fixed
+        );
+        assert_eq!(Harness::Claude.health(&scope).unwrap(), Health::Installed);
+
+        let elsewhere = dir.join("no-harness-here");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        let bare = Scope::Project(elsewhere);
+        assert!(
+            repair_with(std::slice::from_ref(&bare), &|_| true)
+                .fixed
+                .iter()
+                .all(|line| !line.starts_with("Claude")),
+            "installed into a harness that is not there"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn a_spaced_path_an_older_cctop_left_bare_counts_as_missing() {

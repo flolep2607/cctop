@@ -463,7 +463,8 @@ over MCP with `wait_for_session` — see
 
 A Claude Code transcript cannot say that a turn is over — answering you and
 still thinking look the same on disk — so for Claude that answer comes from its
-hooks. Install them (`cctop --install-hooks`), or a Claude session that went
+hooks — which cctop installs itself on start, unless they were removed by
+hand. Without them a Claude session that went
 quiet before the wait started reads as working until its next event, unless the
 agent is in a cctop tab and a running cctop recorded its state there.
 

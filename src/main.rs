@@ -369,6 +369,11 @@ fn main() -> anyhow::Result<()> {
         // One line per harness, including the ones that could not be done:
         // they are separate files, and a `notify` slot that already belongs to
         // somebody else must not undo the four installs that succeeded.
+        // Removed by hand at user scope is a choice the first-run install
+        // must respect; installing by hand takes that choice back.
+        if matches!(scope, hook::Scope::User) {
+            hook::set_opted_out(!installing);
+        }
         for line in match installing {
             true => hook::install(&scope),
             false => hook::remove(&scope),
