@@ -993,6 +993,36 @@ fn remote_tabs() {
     snap("remote_tabs", &mut app);
 }
 
+/// Inside a sibling's tab, its link in the bottom-right corner: the round trip,
+/// the reconnects so far and how well the output compresses, beside the share
+/// button.
+#[test]
+fn remote_tab_link() {
+    use cctop_core::link_health::{State, Stats};
+    use cctop_core::reach::Transport;
+    let mut app = fixture();
+    let mut pane = tabs::Pane::for_test("desk · Fix the login hint");
+    pane.transport = Some(Transport::Peer);
+    app.tabs.push(tabs::Tab::new(pane));
+    app.tab = 1;
+    app.link = Some(super::link::Seen::fixed(
+        "cctop-claude-on-desk-a",
+        Transport::Peer,
+        Some(Stats {
+            state: State::Connected,
+            rtt_ms: Some(118),
+            reconnects: 2,
+            raw_in: 41_000,
+            wire_in: 10_000,
+            raw_out: 0,
+            wire_out: 0,
+            since: 0,
+            at: 0,
+        }),
+    ));
+    snap("remote_tab_link", &mut app);
+}
+
 /// Choosing an address: the share panel with its `Address` line, the field
 /// `e` opens on it, and the dashboard's field with its warning. Every token
 /// and link here is made up, and only hostnames reach the screen.

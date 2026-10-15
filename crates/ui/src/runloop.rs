@@ -852,6 +852,9 @@ fn event_loop(
         app.needs_redraw |= app.tick_share();
         app.needs_redraw |= app.tick_address();
         app.needs_redraw |= app.tick_tunnel();
+        // A remote tab's link is written by its bridge, another process, so
+        // the corner only learns of it by reading — at most once a second.
+        app.needs_redraw |= app.tick_link();
         // The footer's own line refreshes on its own clock, and its command
         // answers on a channel nothing polls but this.
         app.needs_redraw |= app.footer_extra.tick();

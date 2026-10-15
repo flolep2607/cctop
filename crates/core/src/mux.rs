@@ -339,10 +339,14 @@ pub fn has_session(name: &str) -> bool {
 pub fn new_session(
     name: &str,
     cwd: Option<&Path>,
-    environment: Vec<String>,
+    mut environment: Vec<String>,
     argv: &[String],
 ) -> Result<(), String> {
     start()?;
+    // Every session says its own name to what runs in it: a remote tab's
+    // bridge keys its link stats by it (see `link_health`), and has no other
+    // way to learn which session it is in short of a client of its own.
+    environment.push(format!("{}={name}", crate::link_health::TAB_ENV));
     // Also set here, and not only in [`defaults`], because a daemon started by
     // an older cctop read a config without them and runs until its last session
     // ends. Before the session is made: an agent that fails does so at once,
