@@ -378,10 +378,17 @@ pub fn launch_new(
 /// of the directory's repository — the web launcher's options, which are the
 /// terminal launcher's.
 ///
-/// Everything is checked before the worktree is made, so a refused flag or an
-/// unknown account leaves no branch behind for a launch that never happened.
+/// The agent, the directory, the flags and the account are checked before the
+/// worktree is made, so a refused setting leaves no branch behind for a
+/// launch that never happened; the branch name is git's to check as it makes
+/// it.
+///
 /// The account is one [`launchable_named`](crate::config::launchable_named)
 /// lists for the agent: a name, never a directory or a token from the request.
+///
+// ponytail: a launch that fails after the worktree is made (rmux missing, a
+// name taken) leaves the checkout and its branch in place — removing a branch
+// git may have checked out, not created, is not this function's call.
 pub fn launch_here(
     agent: &str,
     cwd: Option<&str>,

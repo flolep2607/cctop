@@ -1626,7 +1626,10 @@ fn serve_connection(shared: &Shared, stream: &mut TcpStream) {
                     .map(str::trim)
                     .filter(|v| !v.is_empty())
             };
-            let options = match launch_options(field("model"), field("permissions")) {
+            let options = match cctop_core::launch_opts::Options::from_words(
+                field("model"),
+                field("permissions"),
+            ) {
                 Ok(options) => options,
                 Err(why) => return http::respond_error(stream, Some(&request), 400, &why),
             };
@@ -1809,26 +1812,6 @@ fn launch_offer(sessions: &[Session], agents: &[String]) -> serde_json::Value {
         (agent.clone(), entry)
     });
     serde_json::Value::Object(offer.collect())
-}
-
-/// A launch's model and permission setting, as the request named them.
-/// Whether the agent takes them is [`Options::flags`]'s to say, at launch.
-///
-/// [`Options::flags`]: cctop_core::launch_opts::Options::flags
-fn launch_options(
-    model: Option<&str>,
-    permissions: Option<&str>,
-) -> Result<cctop_core::launch_opts::Options, String> {
-    use cctop_core::launch_opts::{Options, Permissions};
-    let permissions = match permissions {
-        Some(word) => Permissions::parse(word)
-            .ok_or_else(|| format!("{word:?} is not a permission setting"))?,
-        None => Permissions::Ask,
-    };
-    Ok(Options {
-        model: model.map(str::to_string),
-        permissions,
-    })
 }
 
 /// The table document with this machine's own rows only.
@@ -3612,6 +3595,16 @@ mod tests {
         );
         let relayed = response_of(&hub, "GET", "/api/peer/box/api/agents?t=full", "");
         assert!(relayed.contains("\"options\""), "{relayed}");
+        // The sibling answers the relay as a full link; the hub cuts that
+        // back to what a view link sees of its own machine.
+        let relayed = response_of(&hub, "GET", "/api/peer/box/api/agents?t=view", "");
+        assert!(relayed.starts_with("HTTP/1.1 200"), "{relayed}");
+        assert!(
+            !relayed.contains("\"options\"")
+                && !relayed.contains("\"machines\"")
+                && relayed.contains("\"actions\":false"),
+            "{relayed}"
+        );
     }
 
     /// The launcher's settings are refused when they are not settings, and a
@@ -3620,12 +3613,24 @@ mod tests {
     #[test]
     fn a_launch_with_options_it_cannot_honour_is_refused() {
         let guarded = shared("full", "view");
-        for body in [
-            r#"{"agent":"claude","permissions":"root"}"#,
-            r#"{"agent":"claude","cwd":"devbox:~","branch":"try"}"#,
+        for (body, why) in [
+            (
+                r#"{"agent":"claude","permissions":"root"}"#,
+                "is not a permission setting",
+            ),
+            (
+                r#"{"agent":"claude","cwd":"devbox:~","branch":"try"}"#,
+                "worktree is made on this machine only",
+            ),
         ] {
             let launch = post_json(&guarded, "/api/launch", "full", body);
             assert!(launch.starts_with("HTTP/1.1 400 "), "{body}: {launch}");
+            // The status alone would pass without these guards: where claude
+            // is not installed the launch is refused for that instead.
+            assert!(
+                launch.contains(why),
+                "{body}: refused, but not for {why:?}: {launch}"
+            );
         }
     }
 }

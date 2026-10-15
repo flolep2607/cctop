@@ -168,6 +168,24 @@ pub struct Options {
 }
 
 impl Options {
+    /// Settings as a request names them, in words: a model, and a
+    /// permission setting by [`Permissions::parse`]'s word, `None` for ask.
+    /// One parse for every door a launch comes through — the web's
+    /// `/api/launch` and the `cctop://` route alike.
+    ///
+    /// Whether the agent takes them is [`Options::flags`]'s to say, at launch.
+    pub fn from_words(model: Option<&str>, permissions: Option<&str>) -> Result<Options, String> {
+        let permissions = match permissions {
+            Some(word) => Permissions::parse(word)
+                .ok_or_else(|| format!("{word:?} is not a permission setting"))?,
+            None => Permissions::Ask,
+        };
+        Ok(Options {
+            model: model.map(str::to_string),
+            permissions,
+        })
+    }
+
     pub fn is_default(&self) -> bool {
         self.model.is_none() && self.permissions == Permissions::Ask
     }

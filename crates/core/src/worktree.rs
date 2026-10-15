@@ -97,7 +97,7 @@ pub fn git_in(dir: &std::path::Path) -> std::process::Command {
 /// `.claude/worktrees/` because it is where Claude Code's own `--worktree`
 /// puts them, so the two never disagree about where a repository's parallel
 /// checkouts live. A branch that already exists is checked out; any other is
-/// created from `base`'s HEAD — the checkout `F` was pressed on, not the main
+/// created from `base`'s HEAD — the checkout the launch is into, not the main
 /// one, so forking from a worktree continues that worktree's work.
 ///
 /// The name is checked by git before it is joined onto a path: `../x` is a

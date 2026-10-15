@@ -1,10 +1,25 @@
 import { toast } from "sonner";
+import { ask } from "@/lib/api";
 import { withToken } from "@/lib/config";
 
 // The terminal that is not drawn inside the page: what a share is, and the
 // window a terminal pops out into. `components/terminal.tsx` draws the frame.
 
 export type Terminal = { url: string; tunnelled: boolean; name?: string };
+
+/**
+ * A share of an rmux tab's terminal, for this page's origin. `base` is a
+ * sibling's relay prefix (`/api/peer/<machine>`), empty for this machine;
+ * `fresh` asks for a new share rather than the one the page may hold, which
+ * is what a pop-out and a retry need.
+ */
+export function mintTab(name: string, { base = "", fresh = false }: { base?: string; fresh?: boolean } = {}): Promise<Terminal> {
+  return ask(base + "/api/tab/" + encodeURIComponent(name) + "/terminal", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ origin: location.origin, fresh }),
+  }).then((r) => r.json());
+}
 
 /**
  * Open a terminal in a window of its own, handing it over from the page.

@@ -5,7 +5,7 @@ import { cn } from "@/lib/utils";
 import { ask, getJson } from "@/lib/api";
 import { CAN_ACT } from "@/lib/config";
 import { shortModel } from "@/lib/format";
-import { popOut, type Terminal } from "@/lib/terminal";
+import { mintTab, popOut } from "@/lib/terminal";
 import type { Session } from "@/lib/types";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -302,7 +302,7 @@ export function Launcher({ sessions }: { sessions: Session[] }) {
                   key: (machine ? machine + "-" : "") + tab,
                   title: title + " — cctop",
                   release: () => {},
-                  mint: () => post<Terminal>(base + "/api/tab/" + encodeURIComponent(tab) + "/terminal", { origin: location.origin }),
+                  mint: () => mintTab(tab, { base, fresh: true }),
                   onClosed: () => {},
                 }),
             }
@@ -375,10 +375,10 @@ export function Launcher({ sessions }: { sessions: Session[] }) {
                       this machine
                     </SelectItem>
                     {machines.map((m) => (
-                      <SelectItem key={m.name} value={m.name} disabled={!!m.offline} title={m.offline ?? undefined}>
+                      <SelectItem key={m.name} value={m.name} disabled={!!m.offline}>
                         <span className={cn("size-2 shrink-0 rounded-full", m.offline ? "bg-muted-foreground/40" : "bg-emerald-500")} />
                         {m.name}
-                        {m.offline && <span className="text-muted-foreground text-xs">offline</span>}
+                        {m.offline && <span className="text-muted-foreground min-w-0 truncate text-xs">offline · {m.offline}</span>}
                       </SelectItem>
                     ))}
                   </SelectContent>
@@ -531,7 +531,7 @@ export function Launcher({ sessions }: { sessions: Session[] }) {
                           id="launch-branch"
                           value={opts.branch}
                           onChange={(e) => setOpt({ branch: e.target.value })}
-                          placeholder="new branch"
+                          placeholder="branch"
                           spellCheck={false}
                           autoComplete="off"
                           autoCapitalize="off"
