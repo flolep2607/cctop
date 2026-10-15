@@ -267,12 +267,7 @@ pub fn sessions() -> Vec<u32> {
     let mut found: Vec<(std::time::SystemTime, u32)> = Vec::new();
     for entry in entries.flatten() {
         let path = entry.path();
-        let Some(pid) = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .and_then(|n| n.strip_suffix(".sock"))
-            .and_then(|n| n.parse::<u32>().ok())
-        else {
+        let Some(pid) = socket_pid(&path) else {
             continue;
         };
         if let Err(e) = UnixStream::connect(&path) {
@@ -291,6 +286,15 @@ pub fn sessions() -> Vec<u32> {
     }
     found.sort_unstable();
     found.into_iter().map(|(_, pid)| pid).collect()
+}
+
+/// The agent pid a shim socket is named after: `<pid>.sock`, nothing else.
+fn socket_pid(path: &std::path::Path) -> Option<u32> {
+    path.file_name()?
+        .to_str()?
+        .strip_suffix(".sock")?
+        .parse::<u32>()
+        .ok()
 }
 
 /// Whether a connect failed because nothing is listening on the socket.
@@ -321,7 +325,11 @@ fn pid_alive(pid: u32) -> bool {
 /// process is kept. Telling it apart would mean trusting the connect alone,
 /// which is what [`sessions`] does for the runtime directory it lists; this
 /// sweep also reaches the cache directory, so it takes the stricter answer.
-pub fn stale_sockets(dir: &std::path::Path) -> Vec<PathBuf> {
+///
+/// Each path comes with the [`Stamp`] it had when it was judged, taken before
+/// either test ran, so [`sweep`] can tell the file it judged from one a new
+/// shim bound under the same name since.
+pub fn stale_sockets(dir: &std::path::Path) -> Vec<(PathBuf, Stamp)> {
     use std::os::unix::fs::FileTypeExt;
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
@@ -331,14 +339,10 @@ pub fn stale_sockets(dir: &std::path::Path) -> Vec<PathBuf> {
         .filter(|entry| entry.file_type().is_ok_and(|t| t.is_socket()))
         .filter_map(|entry| {
             let path = entry.path();
-            let pid = path
-                .file_name()?
-                .to_str()?
-                .strip_suffix(".sock")?
-                .parse::<u32>()
-                .ok()?;
+            let pid = socket_pid(&path)?;
+            let stamp = Stamp::of(&path)?;
             let dead = !pid_alive(pid) && UnixStream::connect(&path).is_err_and(|e| refused(&e));
-            dead.then_some(path)
+            dead.then_some((path, stamp))
         })
         .collect()
 }
@@ -350,14 +354,52 @@ pub fn stale_sockets(dir: &std::path::Path) -> Vec<PathBuf> {
 /// whichever [`config::runtime_base`](crate::config::runtime_base) answered at
 /// the time — and the cache one is where they pile up, since the runtime one is
 /// emptied at logout and the cache one never is.
+///
+/// Between the judging and the unlink, the dead pid can be reused by a new
+/// agent whose shim's `listen` replaces the file with a live socket of the same
+/// name. Unlinking by path would then take the live one, and that shim would
+/// vanish from [`sessions`]; so the [`Stamp`] is compared again just before.
+///
+/// ponytail: the re-check and the unlink are still two calls, since there is no
+/// unlink-if-inode; the window left is a stat's width, not a directory scan's.
 pub fn sweep() -> usize {
-    let mut dirs = vec![crate::config::runtime_base().join("cctop")];
-    dirs.push(crate::config::CACHE_DIR.clone());
+    let mut dirs = vec![
+        crate::config::runtime_base().join("cctop"),
+        crate::config::CACHE_DIR.clone(),
+    ];
     dirs.dedup();
     dirs.iter()
         .flat_map(|dir| stale_sockets(dir))
-        .filter(|path| std::fs::remove_file(path).is_ok())
+        .filter(|(path, stamp)| unlink_unchanged(path, *stamp))
         .count()
+}
+
+/// Which file a path named at one moment: its inode and its change time.
+///
+/// The inode alone is not enough, because a filesystem may hand a freed inode
+/// number straight to the next file created — which is exactly what `listen`'s
+/// unlink-then-bind does. The change time, to the nanosecond, tells those two
+/// apart.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Stamp {
+    ino: u64,
+    ctime: (i64, i64),
+}
+
+impl Stamp {
+    fn of(path: &std::path::Path) -> Option<Self> {
+        use std::os::unix::fs::MetadataExt;
+        let m = std::fs::symlink_metadata(path).ok()?;
+        Some(Self {
+            ino: m.ino(),
+            ctime: (m.ctime(), m.ctime_nsec()),
+        })
+    }
+}
+
+/// Unlink `path` if it is still the file `stamp` was taken of; whether it went.
+fn unlink_unchanged(path: &std::path::Path, stamp: Stamp) -> bool {
+    Stamp::of(path) == Some(stamp) && std::fs::remove_file(path).is_ok()
 }
 
 fn listen(pid: u32) -> anyhow::Result<std::os::unix::net::UnixListener> {
@@ -1131,12 +1173,38 @@ mod tests {
         let plain = dir.path().join(format!("{}.sock", dead_pid()));
         std::fs::write(&plain, "").expect("plain file");
 
-        assert_eq!(stale_sockets(dir.path()), vec![dead]);
+        let stale: Vec<PathBuf> = stale_sockets(dir.path())
+            .into_iter()
+            .map(|(path, _)| path)
+            .collect();
+        assert_eq!(stale, vec![dead]);
         assert!(live.exists() && reused.exists() && named.exists() && plain.exists());
     }
 
-    /// Every way out of [`run`] after the bind unlinks the socket, not only
-    /// the one where the agent exits.
+    /// A socket judged dead, then rebound under its name by a new shim before
+    /// the sweep reached it, is the new shim's: the sweep leaves it.
+    #[test]
+    fn the_sweep_spares_a_socket_rebound_since_it_was_judged() {
+        use std::os::unix::net::UnixListener;
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join(format!("{}.sock", dead_pid()));
+        drop(UnixListener::bind(&path).expect("bind dead"));
+        let [(judged, stamp)] = <[_; 1]>::try_from(stale_sockets(dir.path())).expect("one stale");
+
+        // A new shim's socket in its place. Bound beside it and renamed over,
+        // rather than `listen`'s unlink-then-bind, so the two cannot share an
+        // inode and a coarse clock tick and make this a coin toss.
+        let fresh = dir.path().join("fresh");
+        let _listener = UnixListener::bind(&fresh).expect("bind live");
+        std::fs::rename(&fresh, &path).expect("rename over");
+
+        assert!(!unlink_unchanged(&judged, stamp));
+        assert!(path.exists());
+    }
+
+    /// Dropping a [`Bound`] unlinks its path. That `run_in` and [`host`] hold
+    /// the guard for the shim's whole life is their bindings' business, not
+    /// something this checks.
     #[test]
     fn a_bound_socket_goes_when_its_guard_does() {
         let dir = tempfile::tempdir().expect("temp dir");
