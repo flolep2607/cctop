@@ -433,7 +433,7 @@ dependencies = [
 
 [[package]]
 name = "cctop"
-version = "0.36.4"
+version = "0.37.0"
 dependencies = [
  "anyhow",
  "cctop-core",
@@ -451,7 +451,7 @@ dependencies = [
 
 [[package]]
 name = "cctop-core"
-version = "0.36.3"
+version = "0.37.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -650,7 +650,7 @@ dependencies = [
 
 [[package]]
 name = "cctop-serve"
-version = "0.32.7"
+version = "0.32.8"
 dependencies = [
  "anyhow",
  "brotli",
@@ -699,7 +699,7 @@ dependencies = [
 
 [[package]]
 name = "cctop-ui"
-version = "0.37.0"
+version = "0.37.1"
 dependencies = [
  "anyhow",
  "cctop-core",
