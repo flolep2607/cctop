@@ -25,6 +25,12 @@ pub(crate) struct Message<'a> {
     /// model has such a setting and the turn chose one.
     #[serde(borrow)]
     pub variant: Str<'a>,
+    /// Set on the turn that wrote a compaction's summary: the summariser's
+    /// request, not the conversation's (see [`Message::is_summary`]).
+    pub summary: Lenient<bool>,
+    /// The agent mode the turn ran in; `compaction` for that same summary.
+    #[serde(borrow)]
+    pub mode: Str<'a>,
     /// What OpenCode priced the turn at; zero for a provider it has no rates
     /// for, which is not the same as free.
     pub cost: Lenient<f64>,
@@ -124,6 +130,14 @@ impl Message<'_> {
             total: input + output + read + write,
             ..Default::default()
         }
+    }
+
+    /// Whether this is the turn a compaction ran to write its summary. It is
+    /// billed like any turn, but its input is the whole old window handed to
+    /// the summariser and it carries no `variant`, so it says nothing about
+    /// the window or the effort the conversation goes on with.
+    pub(crate) fn is_summary(&self) -> bool {
+        self.summary.value() == Some(true) || self.mode.is("compaction")
     }
 
     /// What the next turn has to resend: everything the model was given,

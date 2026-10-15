@@ -324,12 +324,19 @@ pub fn list_sessions() -> Vec<Session> {
 /// Read through the two indexes OpenCode keeps — a session's messages by time,
 /// a message's parts — so it is two index probes per session, not a scan.
 ///
+/// Not the newest message alone: a prompt queued while a reply is still
+/// streaming is created at once, so it is the newest row while the reply
+/// before it keeps writing. The newest few are read, and the latest stamp
+/// among them wins.
+///
 /// ponytail: a subagent is a session of its own, so its work moves the
-/// parent's stamp only when the `task` call that started it returns.
-const LAST_ENTRY: &str = "(SELECT max(m.time_updated, coalesce(\
-     (SELECT max(p.time_updated) FROM part p WHERE p.message_id = m.id), 0)) \
+/// parent's stamp only when the `task` call that started it returns. And a
+/// reply still streaming behind three or more queued prompts is not seen
+/// until one of them starts.
+const LAST_ENTRY: &str = "(SELECT max(x) FROM (SELECT max(m.time_updated, coalesce(\
+     (SELECT max(p.time_updated) FROM part p WHERE p.message_id = m.id), 0)) AS x \
      FROM message m WHERE m.session_id = session.id \
-     ORDER BY m.time_created DESC, m.id DESC LIMIT 1)";
+     ORDER BY m.time_created DESC, m.id DESC LIMIT 3))";
 
 fn sessions_in(db: &Connection, path: &Path) -> Vec<Session> {
     let mut sessions = Vec::new();
@@ -491,21 +498,18 @@ fn record_tool(
     };
     match name {
         "webfetch" => {
-            if let Some(url) = arg("url")
-                && seen_urls.len() < 50
-                && seen_urls.insert(url.to_string())
-            {
-                m.web_fetches.push(url.to_string());
-                m.web_fetch_count += 1;
+            if let Some(url) = arg("url") {
+                extract::note_web(&mut m.web_fetches, &mut m.web_fetch_count, seen_urls, url);
             }
         }
         "websearch" | "codesearch" => {
-            if let Some(q) = arg("query")
-                && seen_queries.len() < 50
-                && seen_queries.insert(q.to_string())
-            {
-                m.web_searches.push(q.to_string());
-                m.web_search_count += 1;
+            if let Some(q) = arg("query") {
+                extract::note_web(
+                    &mut m.web_searches,
+                    &mut m.web_search_count,
+                    seen_queries,
+                    q,
+                );
             }
         }
         "skill" => {
@@ -577,10 +581,14 @@ fn extract_of(db: &Connection, session_id: &str) -> SessionData {
             }
             let (model, ts, tokens, costs) = assistant_usage(&message, &mut rates);
             saw_usage = true;
-            data.last_model = model.clone();
             // The newest turn's, as Codex's is: a session that was switched
-            // from `high` to the default shows the default.
-            data.reasoning_effort = message.variant.get().map(str::to_string);
+            // from `high` to the default shows the default. A compaction's
+            // summary turn is the summariser's, not a switch, so it leaves
+            // both as the conversation set them.
+            if !message.is_summary() {
+                data.last_model = model.clone();
+                data.reasoning_effort = message.variant.get().map(str::to_string);
+            }
             data.metrics.api_duration_ms += message.duration_ms().unwrap_or(0);
             add_usage(&mut data, &tokens, &costs);
             let (mt, mc) = breakdown.entry(model.clone()).or_default();
@@ -856,8 +864,11 @@ fn context_of(db: &Connection, session: &Session) -> Option<ContextUsage> {
         let Some(message) = opencode_line::parse::<Message>(&raw) else {
             continue;
         };
+        // A compaction's summary turn measured the window being thrown away;
+        // past it, the compaction part is newer than the measured turn and
+        // the row says the window is stale until a real turn measures it.
         let used = message.window();
-        if used == 0 {
+        if used == 0 || message.is_summary() {
             continue;
         }
         let model = message
@@ -1605,7 +1616,9 @@ mod tests {
                 ('ses_t', '/w', 't', 1000, 1500),
                 ('ses_empty', '/w', 'e', 1000, 1200);
              INSERT INTO message VALUES ('m1', 'ses_t', 2000, 2500, '{}');
-             INSERT INTO message VALUES ('m2', 'ses_t', 3000, 3100, '{}');",
+             INSERT INTO message VALUES ('m2', 'ses_t', 3000, 3100, '{}');
+             -- A prompt queued while m2's reply was still streaming.
+             INSERT INTO message VALUES ('m3', 'ses_t', 4000, 4000, '{}');",
         )
         .unwrap();
         part(&db, "p1", "m2", 3000, "{}");
@@ -1665,6 +1678,17 @@ mod tests {
             r#"{"type":"compaction","auto":false}"#,
         );
         assert!(context_of(&db, &session).unwrap().compacted);
+
+        // The summariser's turn, written just after the compaction part with
+        // the old window as its input, is not the window the session goes on
+        // with: the measure stays the last real turn's, marked stale.
+        db.execute(
+            "INSERT INTO message VALUES ('m2', 'ses_t', 2567, 2567, ?1)",
+            params![r#"{"role":"assistant","modelID":"m","summary":true,"mode":"compaction","tokens":{"input":90}}"#],
+        )
+        .unwrap();
+        let ctx = context_of(&db, &session).unwrap();
+        assert_eq!((ctx.used, ctx.compacted), (55, true));
         drop(db);
         std::fs::remove_file(path).unwrap();
     }

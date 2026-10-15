@@ -40,9 +40,6 @@ pub(crate) struct Entry<'a> {
     /// `thinking_level_change`: how hard the model is now asked to think.
     #[serde(rename = "thinkingLevel", borrow)]
     pub thinking_level: Str<'a>,
-    /// `model_change`: the model switched to, before any turn has used it.
-    #[serde(rename = "modelId", borrow)]
-    pub model_id: Str<'a>,
     #[serde(borrow)]
     pub message: Object<Message<'a>>,
 }
@@ -56,8 +53,6 @@ pub(crate) struct Message<'a> {
     pub role: Str<'a>,
     #[serde(borrow)]
     pub model: Str<'a>,
-    #[serde(borrow)]
-    pub provider: Str<'a>,
     /// Milliseconds, stamped as the message was sealed. See
     /// [`super::pi::message_ts`].
     pub timestamp: Lenient<i64>,
@@ -66,9 +61,6 @@ pub(crate) struct Message<'a> {
     /// as [`Shape::Text`] and is never looked at.
     #[serde(borrow)]
     pub content: Shape<'a, Block<'a>>,
-    /// `stop`, `length`, `toolUse`, `error` or `aborted`.
-    #[serde(rename = "stopReason", borrow)]
-    pub stop_reason: Str<'a>,
     /// `toolResult`: the call this answers, and whether it failed.
     #[serde(rename = "toolCallId", borrow)]
     pub tool_call_id: Str<'a>,
@@ -206,7 +198,6 @@ mod tests {
         assert_eq!(usage.cost.get().unwrap().total.value(), Some(0.5));
         let calls: Vec<_> = m.calls().map(|c| c.name.or_empty()).collect();
         assert_eq!(calls, ["read"]);
-        assert!(m.stop_reason.is("toolUse"));
         assert!(e.ts().starts_with("2026-08-05"));
     }
 

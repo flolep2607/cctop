@@ -7,7 +7,7 @@
 //! changed, the pages and searches — is read through [`super::cursor_line`].
 
 use super::cursor_line;
-use super::extract::{edit_delta, push_tool_detail, tool_detail};
+use super::extract::{edit_delta, note_web, push_tool_detail, tool_detail};
 use super::{Session, SessionData, Surface};
 use crate::config;
 use crate::pricing::Provider;
@@ -137,21 +137,23 @@ pub fn extract(path: &Path) -> SessionData {
             };
             match name.to_ascii_lowercase().replace('_', "").as_str() {
                 "webfetch" => {
-                    if let Some(url) = arg("url")
-                        && seen_urls.len() < 50
-                        && seen_urls.insert(url.to_string())
-                    {
-                        m.web_fetches.push(url.to_string());
-                        m.web_fetch_count += 1;
+                    if let Some(url) = arg("url") {
+                        note_web(
+                            &mut m.web_fetches,
+                            &mut m.web_fetch_count,
+                            &mut seen_urls,
+                            url,
+                        );
                     }
                 }
                 "websearch" => {
-                    if let Some(q) = arg("query").or_else(|| arg("search_term"))
-                        && seen_queries.len() < 50
-                        && seen_queries.insert(q.to_string())
-                    {
-                        m.web_searches.push(q.to_string());
-                        m.web_search_count += 1;
+                    if let Some(q) = arg("query").or_else(|| arg("search_term")) {
+                        note_web(
+                            &mut m.web_searches,
+                            &mut m.web_search_count,
+                            &mut seen_queries,
+                            q,
+                        );
                     }
                 }
                 _ => {}
