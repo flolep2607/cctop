@@ -1412,6 +1412,13 @@ fn pump(
     if let Some(end) = deliver(decoder, up, predictor, &mut pinged)? {
         return Ok(end);
     }
+    // A ping straight away, so the corner has a round trip as soon as the
+    // link is up rather than at the first key typed or the first keepalive
+    // thirty seconds on — until then it can only say `—`.
+    if let Err(e) = up.write_all(&frame(Op::Ping, b"", true)) {
+        return Ok(dropped(e));
+    }
+    pinged = Some(std::time::Instant::now());
     loop {
         let mut fds = [
             libc::pollfd {
