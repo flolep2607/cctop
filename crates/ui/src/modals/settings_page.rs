@@ -96,21 +96,26 @@ pub(crate) fn draw_settings(
         inner.height as usize,
         scroll as usize,
     );
-    if let Some(of) = app.cf.qr
-        && let Some(link) = app.qr_link(of)
-    {
-        draw_settings_qr(frame, area, of, link);
-    }
 }
 
-/// A link as a QR code over the whole settings pane, until any key.
+/// The settings page's QR code, when one is up and its link still is, over
+/// `area` until any key.
 ///
-/// Over the pane rather than in a row: a code is twenty-odd rows and a row is
-/// one. The pane's own frame, so the page is plainly still underneath and any
-/// key is plainly the way back. Never cropped — [`qr::Qr::fits`] — so a pane
-/// too short for it says so instead.
-fn draw_settings_qr(frame: &mut Frame, area: Rect, of: crate::connect::QrOf, link: &str) {
+/// Over the page rather than in a row: a code is twenty-odd rows and a row is
+/// one. And over the Overview as well as the pane — the caller passes both —
+/// because a link with its token is 21 rows and a login's 27, four more with
+/// the border and the warning, and the Overview's six are what let a 27-row
+/// terminal show the first and a 33-row one the second. The bar and
+/// the footer stay, so the tab is plainly still underneath.
+///
+/// ponytail: a default 80×24 still says it is too small for either. Fitting
+/// one there means dropping the border and the warning, and a code with no
+/// word on what it hands over is worse than a taller terminal.
+/// Never cropped — [`qr::Qr::fits`] — so a frame too short for it says so.
+pub(crate) fn draw_settings_qr(frame: &mut Frame, area: Rect, app: &App) {
     use crate::connect::QrOf;
+    let Some(of) = app.cf.qr else { return };
+    let Some(link) = app.qr_link(of) else { return };
     let (title, warn) = match of {
         QrOf::Dashboard => (" dashboard link ", "full access · keep it private"),
         QrOf::Login => (" Cloudflare login ", "logs in as you"),

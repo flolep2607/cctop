@@ -1253,8 +1253,15 @@ impl App {
     ///
     /// `q` and not the page's quit only there, where the login is the one
     /// thing on screen to scan and a quit would give it up besides.
+    ///
+    /// A code whose link has gone is dropped and the key goes on to the page:
+    /// nothing was on screen for it to close. That is the login's own happy
+    /// path — scanned, finished on the phone, and the next key is the one
+    /// that accepts the suggested hostname.
     pub(super) fn tunnel_qr_key(&mut self, key: KeyEvent) -> bool {
-        if self.cf.qr.take().is_some() {
+        if let Some(of) = self.cf.qr.take()
+            && self.qr_link(of).is_some()
+        {
             self.needs_redraw = true;
             return true;
         }
@@ -1854,5 +1861,49 @@ mod tests {
             Some(Item::Tunnel(Row::Login)),
             "the key that closed it moved nothing"
         );
+    }
+
+    /// The login finished on the phone takes its code with it, and the next
+    /// key — the first letter of the address it now asks for — is typed
+    /// rather than spent closing a code no longer on screen.
+    #[test]
+    fn a_login_finished_under_its_code_lets_the_next_key_through() {
+        let mut app = test_app();
+        on(&mut app, Row::Login);
+        app.cf.setup = Some(Setup::LoggingIn {
+            url: "https://dash.cloudflare.com/argotunnel?aud=&callback=made-up".into(),
+        });
+        key(&mut app, KeyCode::Char('q'));
+        assert_eq!(app.cf.qr, Some(QrOf::Login));
+        let nameless = Zone {
+            name: String::new(),
+            ..zone("x")
+        };
+        app.tunnel_answer(
+            Row::Login,
+            Answer::LoggedIn(Ok((Auth::Login("made-up".into()), nameless))),
+        );
+        assert_eq!(app.cf.typing, Some(Typing::SetupHostname));
+        key(&mut app, KeyCode::Char('c'));
+        assert_eq!(app.cf.qr, None);
+        assert_eq!(
+            app.settings_input.as_ref().map(|f| f.to_string()),
+            Some("c".to_string()),
+            "the key reached the field"
+        );
+    }
+
+    /// A serve stopped under the dashboard's code: the key moves the cursor.
+    #[test]
+    fn a_serve_stopped_under_its_code_lets_the_next_key_through() {
+        let (mut app, _) = access_app();
+        serve(&mut app);
+        on(&mut app, Row::Qr);
+        key(&mut app, KeyCode::Enter);
+        assert_eq!(app.cf.qr, Some(QrOf::Dashboard));
+        app.serving = None;
+        key(&mut app, KeyCode::Down);
+        assert_eq!(app.cf.qr, None);
+        assert_eq!(app.settings_item(), Some(Item::Tunnel(Row::Zone)));
     }
 }

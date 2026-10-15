@@ -336,6 +336,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) -> Layout {
         let chunks = tab_chunks(area);
         draw_overview(frame, chunks[0], app);
         modals::draw_settings(frame, chunks[1], app, &mut layout);
+        modals::draw_settings_qr(frame, chunks[0].union(chunks[1]), app);
         draw_footer(frame, chunks[2], app, &mut layout);
         // A modal raised from the settings tab belongs to the tab, exactly as
         // one raised from the dashboard belongs to the dashboard.

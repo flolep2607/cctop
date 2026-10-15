@@ -456,8 +456,8 @@ fn settings_page() {
     snap("settings_tunnel_connected", &mut app);
 
     // The same account served over it, its link drawn as a QR code over the
-    // pane: whole where the pane has the rows, said not to fit where it has
-    // not. The token in the link is made up.
+    // Overview and the pane: whole where they have the rows, said not to fit
+    // where they have not. The token in the link is made up.
     app.cf.confirm = None;
     app.serving = Some(super::share::Served {
         local: "http://127.0.0.1:7777/?t=f3a9c2e17b4d0a6658e1c3b7d92f4e05".into(),
@@ -469,6 +469,27 @@ fn settings_page() {
     });
     app.cf.qr = Some(super::connect::QrOf::Dashboard);
     snap("settings_tunnel_qr", &mut app);
+
+    // A login being waited for, drawn with `q`. Its link is the real shape —
+    // the store and a 32-byte key, escaped — because that length, not the
+    // dashboard's, is what decides whether a terminal can show it. The key is
+    // made up.
+    let mut app = fixture();
+    app.settings_open = true;
+    app.settings_filter = "tunnel".into();
+    app.cf.setup = Some(Setup::LoggingIn {
+        url: "https://dash.cloudflare.com/argotunnel?aud=&callback=\
+              https%3A%2F%2Flogin.cloudflareaccess.org%2F\
+              q7Lx0bVd2mKp9RfT3wYc8NhJ5sGa1ZeU4oIi6EyQnWk%3D"
+            .into(),
+    });
+    app.settings_cursor = app
+        .settings_shown()
+        .iter()
+        .position(|i| *i == Item::Tunnel(Row::Login))
+        .expect("a login row");
+    app.cf.qr = Some(super::connect::QrOf::Login);
+    snap("settings_tunnel_login_qr", &mut app);
 
     // A setup half done: two domains to cycle, and the name open to create.
     let mut app = fixture();
