@@ -576,7 +576,7 @@ impl App {
         }
     }
 
-    /// Change one `[settings]` entry: a boolean flips, the theme turns to the
+    /// Change one `[settings]` entry: a boolean flips, a choice turns to the
     /// next one, and anything else opens a field.
     fn setting_activate(&mut self, name: &str) {
         let (current, _) = self.settings.value_of(name);
@@ -591,17 +591,14 @@ impl App {
                     self.save_prefs();
                 }
             }
-            // Reached only because a theme is a choice and not a boolean, so
-            // the guard above does not take it.
-            "theme" => {
-                const THEMES: [&str; 4] = ["auto", "light", "dark", "mono"];
-                let at = THEMES.iter().position(|t| current.trim_matches('"') == *t);
-                let next = THEMES[at.map_or(0, |i| (i + 1) % THEMES.len())];
+            // Reached only because a choice is not a boolean, so the guard
+            // above does not take it. A theme is repainted by `write_setting`
+            // → `reload_settings` → the reload's own `apply_theme`; see
+            // [`App::apply_theme`] for why the repaint lives there.
+            _ if let Some(options) = cctop_core::settings::choices(name) => {
+                let at = options.iter().position(|t| current.trim_matches('"') == *t);
+                let next = options[at.map_or(0, |i| (i + 1) % options.len())];
                 self.write_setting("settings", name, Some(next.into()));
-                // Repainted by `write_setting` → `reload_settings` → the
-                // reload's own `apply_theme`, so this is a no-op and is left
-                // out rather than written twice. See [`App::apply_theme`] for
-                // why the repaint lives there and not only here.
             }
             _ => self.settings_input = Some(current.trim_matches('"').to_string().into()),
         }

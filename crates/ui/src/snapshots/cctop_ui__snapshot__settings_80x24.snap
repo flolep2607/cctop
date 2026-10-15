@@ -24,5 +24,5 @@ expression: screen
 │  alert_today       0                Alert when today's spend passes $X       │
 │  alert_errors      0                Alert when X% of 10m of tool calls fail …│
 │  alert_error_calls 10               …counting only once there are this many …│
-╰ 83   ↑↓ scroll   / filter   Esc back ────────────────────────────────────────╯
+╰ 84   ↑↓ scroll   / filter   Esc back ────────────────────────────────────────╯
 / Filter ↵ Change ⌫ Reset e Edit file , Back Alt+←→ Tabs F1 Help        ⧉ share
