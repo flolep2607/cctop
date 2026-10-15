@@ -490,12 +490,90 @@ pub const RESUME_NEW: &str = "new";
 /// The text frame a resumed tab sends to have the far program draw its
 /// screen again — after the tab wrote over it to say it was reconnecting.
 /// A server older than resume never sees it: only a resumed socket sends it.
+///
+/// Tabs no longer send it — they paint back the one row they wrote over from
+/// their own shadow of the screen, since a same-size SIGWINCH reached the far
+/// rmux client only sometimes — but a server still answers it, for the tabs
+/// of cctops that do.
 pub const REDRAW: &str = r#"{"redraw":true}"#;
 
 /// Whether a text frame is [`REDRAW`].
 pub fn is_redraw(text: &[u8]) -> bool {
     serde_json::from_slice::<serde_json::Value>(text)
         .is_ok_and(|v| v.get("redraw") == Some(&serde_json::Value::Bool(true)))
+}
+
+/// The environment variable that turns on [`trace`].
+pub const TRACE_ENV: &str = "CCTOP_TRACE_WS";
+
+/// Past this size the trace starts again, the old one kept beside it as
+/// `.old`: enough for days of drops, never a disk filled by one forgotten
+/// variable.
+const TRACE_CAP: u64 = 1024 * 1024;
+
+/// Where [`trace`] writes: `cctop/ws-trace.log` in the runtime directory.
+pub fn trace_path() -> std::path::PathBuf {
+    crate::config::runtime_base()
+        .join("cctop")
+        .join("ws-trace.log")
+}
+
+/// With `CCTOP_TRACE_WS=1`, one line about a terminal socket — a drop, its
+/// reason and timing, how getting back went — appended to [`trace_path`].
+///
+/// Both ends write it, the tab's bridge and the server's terminal, each line
+/// marked with its `side` and process, so the next "it keeps dropping" can be
+/// read off the file on either machine rather than guessed from a screen.
+/// The file existing turns it on too: a tab's bridge is started by the mux
+/// daemon, whose environment is whatever it was started with, and `touch` on
+/// the path reaches every process at once. Failing to write is never the
+/// terminal's problem.
+pub fn trace(side: &str, what: std::fmt::Arguments) {
+    static ON: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
+        std::env::var(TRACE_ENV).is_ok_and(|v| !v.is_empty() && v != "0")
+    });
+    // Tests drop and resume sockets by the dozen, into the real runtime
+    // directory's trace when the machine running them has one.
+    if crate::under_test() {
+        return;
+    }
+    let path = trace_path();
+    if *ON || path.exists() {
+        trace_to(&path, side, what);
+    }
+}
+
+/// Private, both the file and the directory made for it: the runtime
+/// directory falls back to `~/.cache` where there is no `$XDG_RUNTIME_DIR`
+/// (ssh, `sudo -u`), and a trace names every sibling and terminal route.
+fn trace_to(path: &std::path::Path, side: &str, what: std::fmt::Arguments) {
+    use std::io::Write;
+    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(dir);
+    }
+    if std::fs::metadata(path).is_ok_and(|m| m.len() > TRACE_CAP) {
+        let _ = std::fs::rename(path, path.with_extension("log.old"));
+    }
+    let line = format!(
+        "{} {side}[{}] {what}\n",
+        chrono::Local::now().format("%Y-%m-%dT%H:%M:%S%.3f%:z"),
+        std::process::id(),
+    );
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(0o600)
+        .open(path)
+    {
+        // `mode` reaches only a file this call made, and the docs have
+        // people make it with `touch`.
+        let _ = file.set_permissions(std::fs::Permissions::from_mode(0o600));
+        let _ = file.write_all(line.as_bytes());
+    }
 }
 
 /// A resize, as the text frame carries it: `{"cols":N,"rows":M}`.
@@ -519,6 +597,47 @@ pub fn parse_resize(text: &[u8]) -> Option<(u16, u16)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Each trace is one line, stamped and marked with its side, appended;
+    /// past the cap the file starts again with the old one kept beside it.
+    #[test]
+    fn a_trace_is_one_marked_line_and_never_grows_without_bound() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cctop").join("ws-trace.log");
+        trace_to(&path, "bridge", format_args!("drop: the connection ended"));
+        trace_to(&path, "serve", format_args!("parked"));
+        let text = std::fs::read_to_string(&path).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 2, "{text}");
+        assert!(
+            lines[0].contains(" bridge[") && lines[0].ends_with("] drop: the connection ended")
+        );
+        assert!(lines[1].contains(" serve[") && lines[1].ends_with("] parked"));
+        std::fs::write(&path, vec![b'x'; TRACE_CAP as usize + 1]).unwrap();
+        trace_to(&path, "bridge", format_args!("after"));
+        assert!(
+            std::fs::read_to_string(&path)
+                .unwrap()
+                .ends_with("] after\n")
+        );
+        assert!(path.with_extension("log.old").exists());
+        let mode = |p: &std::path::Path| {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::metadata(p).unwrap().permissions().mode() & 0o777
+        };
+        assert_eq!(mode(&path), 0o600, "after rotation");
+        assert_eq!(mode(path.parent().unwrap()), 0o700);
+        // One made world-readable by hand is made private on the next line.
+        let touched = dir.path().join("touched.log");
+        std::fs::write(&touched, b"").unwrap();
+        std::fs::set_permissions(
+            &touched,
+            std::os::unix::fs::PermissionsExt::from_mode(0o644),
+        )
+        .unwrap();
+        trace_to(&touched, "bridge", format_args!("x"));
+        assert_eq!(mode(&touched), 0o600);
+    }
 
     /// The worked example from RFC 6455 section 1.3.
     #[test]

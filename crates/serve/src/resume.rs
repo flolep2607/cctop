@@ -78,9 +78,9 @@ pub(crate) const RING: usize = if cfg!(test) {
 };
 
 /// How long a resume waits for the terminal's current thread to hand it over.
-/// That thread answers within one `poll` — unless it is stuck writing to a
-/// socket nobody reads, which its write timeout (`open::WRITE_TIMEOUT`) ends
-/// sooner than this.
+/// That thread answers within one `poll`, waiting to write included (a claim
+/// interrupts `open::send`) — unless it is writing the Close that ends the
+/// terminal, which `open::WRITE_TIMEOUT` ends sooner than this.
 const CLAIM_WAIT: Duration = Duration::from_secs(15);
 
 /// The last [`RING`] bytes a terminal wrote, and how many it has written.
