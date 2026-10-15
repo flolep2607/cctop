@@ -62,7 +62,8 @@ pub fn run_in(
 
     // Bind before entering raw mode: a failure here should print normally.
     let listener = listen(pid)?;
-    let socket = socket_path(pid);
+    // Held to the end of the function, so every `?` below unlinks it too.
+    let _socket = Bound(socket_path(pid));
 
     let raw = crossterm::terminal::enable_raw_mode().is_ok();
     // Backgrounded (`setsid cctop claude </dev/null >/dev/null &`), there is no
@@ -101,9 +102,6 @@ pub fn run_in(
     if raw {
         let _ = crossterm::terminal::disable_raw_mode();
     }
-    if let Some(socket) = socket {
-        let _ = std::fs::remove_file(socket);
-    }
     Ok(status?.code().unwrap_or(1))
 }
 
@@ -119,7 +117,9 @@ pub struct Hosted {
     /// What to call it on screen until its own session row shows up.
     pub label: String,
     child: std::process::Child,
-    socket: Option<PathBuf>,
+    /// Dropped after [`Hosted::drop`] has reaped the agent, so the socket goes
+    /// once nothing can be typed through it.
+    _socket: Bound,
 }
 
 impl Hosted {
@@ -146,8 +146,24 @@ impl Drop for Hosted {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
-        if let Some(socket) = &self.socket {
-            let _ = std::fs::remove_file(socket);
+    }
+}
+
+/// A shim's control socket, unlinked when this goes out of scope.
+///
+/// A guard rather than a `remove_file` at the end of the happy path, because the
+/// happy path is not the only way out: `run` returns early through a dozen `?`s
+/// after binding, and each one left a `<pid>.sock` behind for good.
+///
+/// ponytail: a process killed by a signal it does not handle (SIGHUP from a
+/// closed terminal, SIGKILL) runs no destructor at all. Those leftovers are
+/// [`sweep`]'s, at the next cctop start.
+struct Bound(Option<PathBuf>);
+
+impl Drop for Bound {
+    fn drop(&mut self) {
+        if let Some(path) = &self.0 {
+            let _ = std::fs::remove_file(path);
         }
     }
 }
@@ -179,7 +195,7 @@ pub fn host(
         serde_json::json!({ "mode": "host", "pid": pid, "cmd": argv.join(" ") }),
     );
     let listener = listen(pid)?;
-    let socket = socket_path(pid);
+    let socket = Bound(socket_path(pid));
 
     // No window here at all, so the panel that attaches sets the size alone.
     let fan = Arc::new(Mutex::new(Fanout::new(master.try_clone()?, (0, 0))));
@@ -198,7 +214,7 @@ pub fn host(
         pid,
         label,
         child,
-        socket,
+        _socket: socket,
     })
 }
 
@@ -259,8 +275,12 @@ pub fn sessions() -> Vec<u32> {
         else {
             continue;
         };
-        if UnixStream::connect(&path).is_err() {
-            let _ = std::fs::remove_file(&path);
+        if let Err(e) = UnixStream::connect(&path) {
+            // Refused is the one answer that means nobody is listening; any
+            // other failure says nothing about the listener, so the file stays.
+            if refused(&e) {
+                let _ = std::fs::remove_file(&path);
+            }
             continue;
         }
         let created = entry
@@ -271,6 +291,73 @@ pub fn sessions() -> Vec<u32> {
     }
     found.sort_unstable();
     found.into_iter().map(|(_, pid)| pid).collect()
+}
+
+/// Whether a connect failed because nothing is listening on the socket.
+fn refused(e: &std::io::Error) -> bool {
+    e.raw_os_error() == Some(libc::ECONNREFUSED)
+}
+
+/// Whether a process with this pid exists. EPERM is somebody else's process,
+/// which is still a process.
+fn pid_alive(pid: u32) -> bool {
+    let Ok(pid) = libc::pid_t::try_from(pid) else {
+        return false;
+    };
+    // SAFETY: signal 0 checks for existence and delivers nothing.
+    let sent = unsafe { libc::kill(pid, 0) } == 0;
+    sent || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+}
+
+/// The shim sockets in `dir` that nothing will ever answer on again.
+///
+/// Two tests, both required. The pid in the name is the agent's, and it being
+/// gone says the session is over — but the shim unlinks its socket a moment
+/// *after* the agent exits, and a socket in that moment is still being
+/// listened on. So the connect has to be refused as well, which only a socket
+/// with no listener does.
+///
+/// ponytail: a dead socket whose pid has since been reused by an unrelated
+/// process is kept. Telling it apart would mean trusting the connect alone,
+/// which is what [`sessions`] does for the runtime directory it lists; this
+/// sweep also reaches the cache directory, so it takes the stricter answer.
+pub fn stale_sockets(dir: &std::path::Path) -> Vec<PathBuf> {
+    use std::os::unix::fs::FileTypeExt;
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter(|entry| entry.file_type().is_ok_and(|t| t.is_socket()))
+        .filter_map(|entry| {
+            let path = entry.path();
+            let pid = path
+                .file_name()?
+                .to_str()?
+                .strip_suffix(".sock")?
+                .parse::<u32>()
+                .ok()?;
+            let dead = !pid_alive(pid) && UnixStream::connect(&path).is_err_and(|e| refused(&e));
+            dead.then_some(path)
+        })
+        .collect()
+}
+
+/// Remove [`stale_sockets`] from every directory a shim may have bound in,
+/// returning how many went.
+///
+/// Both the runtime directory and the cache directory, because a shim binds in
+/// whichever [`config::runtime_base`](crate::config::runtime_base) answered at
+/// the time — and the cache one is where they pile up, since the runtime one is
+/// emptied at logout and the cache one never is.
+pub fn sweep() -> usize {
+    let mut dirs = vec![crate::config::runtime_base().join("cctop")];
+    dirs.push(crate::config::CACHE_DIR.clone());
+    dirs.dedup();
+    dirs.iter()
+        .flat_map(|dir| stale_sockets(dir))
+        .filter(|path| std::fs::remove_file(path).is_ok())
+        .count()
 }
 
 fn listen(pid: u32) -> anyhow::Result<std::os::unix::net::UnixListener> {
@@ -1004,6 +1091,60 @@ fn winsize(cols: u16, rows: u16) -> libc::winsize {
 mod tests {
     use super::*;
     use crate::test_wait::{PATIENCE, wait_until, waits_for};
+
+    /// A pid nothing runs as: a child that has been reaped.
+    fn dead_pid() -> u32 {
+        let mut child = Command::new("true").spawn().expect("spawn true");
+        let pid = child.id();
+        child.wait().expect("reap");
+        assert!(
+            !pid_alive(pid),
+            "{pid} was reused before the test could use it"
+        );
+        pid
+    }
+
+    /// The sweep's three cases side by side: only a socket whose agent is gone
+    /// *and* that refuses connections goes. A live listener stays whatever its
+    /// name says, and so does a dead one whose pid now belongs to someone else.
+    #[test]
+    fn the_sweep_takes_only_dead_sockets_of_dead_agents() {
+        use std::os::unix::net::UnixListener;
+        let dir = tempfile::tempdir().expect("temp dir");
+
+        // Listening, though the agent it is named after has exited: the shim
+        // between its agent's exit and its own cleanup.
+        let live = dir.path().join(format!("{}.sock", dead_pid()));
+        let _listener = UnixListener::bind(&live).expect("bind live");
+
+        // Nobody listening and nobody by that pid: what a SIGHUP leaves.
+        let dead = dir.path().join(format!("{}.sock", dead_pid()));
+        drop(UnixListener::bind(&dead).expect("bind dead"));
+
+        // Nobody listening, but the pid is taken — here by this test.
+        let reused = dir.path().join(format!("{}.sock", std::process::id()));
+        drop(UnixListener::bind(&reused).expect("bind reused"));
+
+        // Not a shim's: no pid in the name, or not a socket at all.
+        let named = dir.path().join("default.sock");
+        drop(UnixListener::bind(&named).expect("bind named"));
+        let plain = dir.path().join(format!("{}.sock", dead_pid()));
+        std::fs::write(&plain, "").expect("plain file");
+
+        assert_eq!(stale_sockets(dir.path()), vec![dead]);
+        assert!(live.exists() && reused.exists() && named.exists() && plain.exists());
+    }
+
+    /// Every way out of [`run`] after the bind unlinks the socket, not only
+    /// the one where the agent exits.
+    #[test]
+    fn a_bound_socket_goes_when_its_guard_does() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("1.sock");
+        let _listener = std::os::unix::net::UnixListener::bind(&path).expect("bind");
+        drop(Bound(Some(path.clone())));
+        assert!(!path.exists());
+    }
 
     /// A cctop running inside a multiplexer must not hand its own pane to the
     /// agent it launches. rmux sets five variables — its own pair, tmux's pair

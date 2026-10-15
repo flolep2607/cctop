@@ -170,6 +170,9 @@ pub(crate) fn spawn_refresher(
         // directory, so a standalone serve sees a permission prompt the moment
         // it goes up whether or not a dashboard process is running.
         let listener = cctop_core::hook::Listener::start();
+        // Shim sockets left by a cctop that died on a signal; the TUI does
+        // the same at its start, and a machine may only ever run this one.
+        cctop_core::shim::sweep();
         let mut reports = cctop_core::hook::Reports::new();
         // Reading an agent's screen needs somewhere to read it from — a shim
         // socket or an rmux pane — which [`Peek`] finds once and reuses. The
