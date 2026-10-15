@@ -898,6 +898,8 @@ pub struct App {
     /// The focused remote tab's link, as its bridge last wrote it. See
     /// [`link`].
     pub link: Option<link::Seen>,
+    /// Every remote tab whose link is down, for the bar. See [`link`].
+    pub down: link::Down,
     /// Whether the footer's share button has been armed by a first click.
     ///
     /// The second click is what opens the tunnel. Not persisted and not carried
@@ -1235,6 +1237,7 @@ impl App {
             serve_error: None,
             share_opening: None,
             link: None,
+            down: link::Down::default(),
             share_arm: false,
             serve_qr: false,
             share_qr: None,

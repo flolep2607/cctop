@@ -1057,6 +1057,47 @@ fn remote_tab_link() {
     snap("remote_tab_link", &mut app);
 }
 
+/// Three tabs on siblings, as the bar shows them when one machine is being
+/// dialled again and another has stopped answering: `↻` and `✕` after the
+/// label, on top of the cloud's amber and red, so a dead machine's tab is
+/// seen without opening it.
+#[test]
+fn remote_tabs_down() {
+    use cctop_core::link_health::State;
+    use cctop_core::reach::Transport;
+    let mut app = fixture();
+    for (title, session, state) in [
+        ("desk · web", "cctop-claude-on-desk-a", None),
+        (
+            "desk · issue 325",
+            "cctop-claude-on-desk-b",
+            Some(State::Reconnecting),
+        ),
+        (
+            "laptop · backfill",
+            "cctop-claude-on-laptop-c",
+            Some(State::Lost),
+        ),
+    ] {
+        let mut pane = tabs::Pane::for_test(title);
+        pane.transport = Some(Transport::Peer);
+        pane.rmux = Some(session.to_string());
+        app.tabs.push(tabs::Tab::new(pane));
+        if let Some(state) = state {
+            app.down.states.insert(session.to_string(), state);
+        }
+    }
+    let screen = text(&draw(&mut app, LARGE));
+    let bar = screen.lines().next().unwrap_or_default();
+    assert!(bar.contains("desk · issue 325 ↻"), "{bar}");
+    assert!(bar.contains("laptop · backfill ✕"), "{bar}");
+    assert!(
+        !bar.contains("desk · web ↻") && !bar.contains("desk · web ✕"),
+        "{bar}"
+    );
+    insta::assert_snapshot!("remote_tabs_down_120x40", screen);
+}
+
 /// Choosing an address: the share panel with its `Address` line, the field
 /// `e` opens on it, and the dashboard's field with its warning. Every token
 /// and link here is made up, and only hostnames reach the screen.

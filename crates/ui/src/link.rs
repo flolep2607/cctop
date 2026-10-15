@@ -1,10 +1,14 @@
-//! The focused remote tab's link health, read from the file its bridge keeps
-//! (see [`cctop_core::link_health`]) for the footer's corner.
+//! Remote tabs' link health, read from the file each bridge keeps (see
+//! [`cctop_core::link_health`]): the focused tab's in full for the footer's
+//! corner, and every remote tab's state for the tab bar, which marks one whose
+//! machine is not answering.
 //!
-//! Only the focused tab's, and only on the loop's tick, at most once per
+//! Only on the loop's tick, at most once per
 //! [`EVERY`](cctop_core::link_health::EVERY): the bridge writes no faster than
-//! that, and a dashboard with a dozen remote tabs open is looking at one.
+//! that. The bar's pass reads one small file per remote pane, which is what a
+//! tab whose machine has died would otherwise only say once opened.
 
+use std::collections::HashMap;
 use std::time::Instant;
 
 use cctop_core::link_health::{self, Stats};
@@ -38,6 +42,14 @@ impl Seen {
     }
 }
 
+/// Every remote pane whose link is not up, by its rmux session, as the bar
+/// last read them.
+#[derive(Debug, Default)]
+pub struct Down {
+    pub states: HashMap<String, link_health::State>,
+    read: Option<Instant>,
+}
+
 impl App {
     /// The focused pane's rmux session and transport, when the focused tab is
     /// one on another machine.
@@ -50,9 +62,59 @@ impl App {
         Some((pane.rmux.as_deref()?, pane.transport?))
     }
 
+    /// Read the remote tabs' links again where due. Returns whether what the
+    /// corner or the bar shows has changed.
+    pub(super) fn tick_link(&mut self) -> bool {
+        let bar = self.tick_down();
+        self.tick_corner() || bar
+    }
+
+    /// Every sibling's pane, read again for the bar. A file that is missing
+    /// or stale says nothing, as it does for the corner: a bridge that has
+    /// not written yet, or one from a cctop before the bar marked tabs.
+    fn tick_down(&mut self) -> bool {
+        if self
+            .down
+            .read
+            .is_some_and(|read| read.elapsed() < link_health::EVERY)
+        {
+            return false;
+        }
+        let states: HashMap<String, link_health::State> = self
+            .tabs
+            .iter()
+            .flat_map(|tab| &tab.panes)
+            .filter(|pane| pane.transport == Some(Transport::Peer))
+            .filter_map(|pane| {
+                let session = pane.rmux.as_deref()?;
+                let state = link_health::read(session)?.state;
+                (state != link_health::State::Connected).then(|| (session.to_string(), state))
+            })
+            .collect();
+        let changed = states != self.down.states;
+        self.down = Down {
+            states,
+            read: Some(Instant::now()),
+        };
+        changed
+    }
+
+    /// Whether tab `t` (counted from the first after the dashboard) has a
+    /// link that is not up, and how: lost wins over reconnecting, since it is
+    /// the one that will not mend itself.
+    pub fn tab_down(&self, t: usize) -> Option<link_health::State> {
+        self.tabs
+            .get(t)?
+            .panes
+            .iter()
+            .filter_map(|pane| self.down.states.get(pane.rmux.as_deref()?))
+            .copied()
+            .max_by_key(|state| *state == link_health::State::Lost)
+    }
+
     /// Read the focused remote tab's link again if it is due. Returns whether
     /// what the corner shows has changed.
-    pub(super) fn tick_link(&mut self) -> bool {
+    fn tick_corner(&mut self) -> bool {
         let Some((session, transport)) = self.focused_remote() else {
             return self.link.take().is_some();
         };
@@ -122,6 +184,10 @@ pub fn label(seen: &Seen) -> Option<(String, Tone)> {
             parts.push("reconnecting".to_string());
             Tone::Bad
         }
+        link_health::State::Lost => {
+            parts.push("unreachable".to_string());
+            Tone::Bad
+        }
         link_health::State::Connected => match stats.rtt_ms {
             Some(ms) => {
                 parts.push(format!("{ms}ms"));
@@ -188,6 +254,14 @@ mod tests {
         let (text, tone) = peer(stats(State::Reconnecting, Some(20), 3)).unwrap();
         assert_eq!(tone, Tone::Bad);
         assert_eq!(text, "☁\u{FE0E} reconnecting · 3↻ · ×4.1");
+    }
+
+    /// Given up on: the corner says the machine is unreachable, in red.
+    #[test]
+    fn a_lost_link_says_unreachable() {
+        let (text, tone) = peer(stats(State::Lost, Some(20), 3)).unwrap();
+        assert_eq!(text, "☁\u{FE0E} unreachable · 3↻ · ×4.1");
+        assert_eq!(tone, Tone::Bad);
     }
 
     #[test]
