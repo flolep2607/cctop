@@ -347,10 +347,10 @@ impl From<&Account> for Connected {
 fn short(error: &cloudflare::Error) -> String {
     match error {
         cloudflare::Error::MissingPermission(permission) => {
-            format!("token lacks \"{permission}\" · Ctrl+O on token: link")
+            format!("token lacks \"{permission}\" · Ctrl+O make a new one")
         }
         cloudflare::Error::LoginRefused(permission) => {
-            format!("login can't \"{permission}\" · use token")
+            format!("browser login can't \"{permission}\" · needs API token")
         }
         other => other.to_string(),
     }
@@ -674,9 +674,18 @@ impl App {
                 (Some(_), _) => self.cf.confirm = Some(Row::Access),
                 // A browser login's token cannot manage Access; an API token
                 // can, and keeps the tunnel as it is.
+                // No login of Cloudflare's grants Access — the browser login is
+                // cloudflared's, scoped by Cloudflare to tunnels and DNS — so the
+                // page that makes the token opens at once, with the permissions
+                // ticked, rather than after a second key the row has to explain.
                 (None, true) => {
                     self.tunnel_type(Typing::ApiToken, "");
-                    self.tunnel_note(row, "login can't: paste API token · Ctrl+O link", false);
+                    self.copy_token_link();
+                    self.tunnel_note(
+                        row,
+                        "needs API token · Create it, paste here · Esc skip",
+                        false,
+                    );
                 }
                 (None, false) => {
                     self.tunnel_type(Typing::Owner, "");
