@@ -222,7 +222,7 @@ export function DashboardPage() {
               <SelectItem value="context">Context</SelectItem>
             </SelectContent>
           </Select>
-          <Launcher />
+          <Launcher sessions={all} />
         </div>
       </div>
 

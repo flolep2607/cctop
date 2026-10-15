@@ -99,8 +99,10 @@ pub(crate) fn forward(
         };
         // A terminal is minted for the sibling's own copy of the frame app
         // and its own relay; the link that comes back is pointed at this
-        // page's relay below.
-        if path.starts_with("/api/act/terminal/") {
+        // page's relay below. A tab's terminal too — what the launcher opens
+        // after starting an agent there, which has no session yet to name.
+        let tab_terminal = path.starts_with("/api/tab/") && path.ends_with("/terminal");
+        if path.starts_with("/api/act/terminal/") || tab_terminal {
             page_origin = json
                 .get("origin")
                 .and_then(serde_json::Value::as_str)

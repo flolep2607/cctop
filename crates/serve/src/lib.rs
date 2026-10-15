@@ -1588,11 +1588,24 @@ fn serve_connection(shared: &Shared, stream: &mut TcpStream) {
                 .filter(|a| cctop_core::sandbox::reach(a) == cctop_core::sandbox::Reach::Local)
                 .map(|a| (a.clone(), cctop_core::sandbox::local_only(a).into()))
                 .collect();
-            let body = serde_json::json!({
-                "actions": shared.actions && access == Access::Full,
+            let actions_on = shared.actions && access == Access::Full;
+            let mut body = serde_json::json!({
+                "actions": actions_on,
                 "agents": agents,
                 "local_only": local_only,
             });
+            // What the launcher's options offer, and where else it can start
+            // one. Only for a link that could launch at all. A page reads the
+            // presence of `options` as "this cctop takes them", so a sibling
+            // too old to would get a bare launch rather than settings it
+            // drops without a word.
+            if actions_on {
+                body["options"] = launch_offer(&current(shared).sessions, &agents);
+                body["machines"] = cctop_core::peer::known()
+                    .into_iter()
+                    .map(|(name, offline)| serde_json::json!({ "name": name, "offline": offline }))
+                    .collect();
+            }
             json(stream, &request, &body);
         }
         // Not under /api/act/<id>/ — a launch names no session because there is
@@ -1607,15 +1620,33 @@ fn serve_connection(shared: &Shared, stream: &mut TcpStream) {
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or_default();
             let cwd = body.get("cwd").and_then(serde_json::Value::as_str);
+            let field = |name: &str| {
+                body.get(name)
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::trim)
+                    .filter(|v| !v.is_empty())
+            };
+            let options = match launch_options(field("model"), field("permissions")) {
+                Ok(options) => options,
+                Err(why) => return http::respond_error(stream, Some(&request), 400, &why),
+            };
+            let account = field("account");
+            let branch = field("branch");
             // `host:path` is a folder on an ssh host, read as the terminal's
             // field reads it.
             let launched = match cwd.map(cctop_core::remote_launch::parse) {
+                // Said rather than dropped, as the terminal's launcher says it:
+                // an agent started outside the worktree asked for would be the
+                // surprise.
+                Some(cctop_core::remote_launch::Typed::Remote { .. }) if branch.is_some() => {
+                    Err((400, "a worktree is made on this machine only".to_string()))
+                }
                 Some(cctop_core::remote_launch::Typed::Remote { host, path }) => {
-                    actions::launch_remote(agent, host, path, || {
+                    actions::launch_remote(agent, host, path, &options, account, || {
                         ssh::launch_problem(&shared.ssh, host, path)
                     })
                 }
-                _ => actions::launch_agent(agent, cwd),
+                _ => actions::launch_here(agent, cwd, &options, account, branch),
             };
             match launched {
                 Ok(done) => json(stream, &request, &done),
@@ -1749,6 +1780,55 @@ fn serve_connection(shared: &Shared, stream: &mut TcpStream) {
         }
         _ => http::respond_error(stream, Some(&request), 404, "no such page"),
     }
+}
+
+/// Per agent, what the web launcher's options offer it: the models (after the
+/// harness's default), the permission settings (its default first), and this
+/// machine's accounts for it. The same tables the terminal's launcher reads,
+/// so the two never offer different things.
+fn launch_offer(sessions: &[Session], agents: &[String]) -> serde_json::Value {
+    use cctop_core::launch_opts;
+    let offer = agents.iter().map(|agent| {
+        let models =
+            launch_opts::takes_model(agent).then(|| launch_opts::models_offered(agent, sessions));
+        let permissions: Vec<serde_json::Value> = launch_opts::permissions_for(agent)
+            .iter()
+            .map(|p| serde_json::json!({ "word": p.word(), "label": p.label() }))
+            .collect();
+        let accounts: Vec<&str> = cctop_core::pricing::Provider::parse(agent)
+            .map(cctop_core::config::launchable_for)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|p| p.name.as_str())
+            .collect();
+        let entry = serde_json::json!({
+            "models": models,
+            "permissions": permissions,
+            "accounts": accounts,
+        });
+        (agent.clone(), entry)
+    });
+    serde_json::Value::Object(offer.collect())
+}
+
+/// A launch's model and permission setting, as the request named them.
+/// Whether the agent takes them is [`Options::flags`]'s to say, at launch.
+///
+/// [`Options::flags`]: cctop_core::launch_opts::Options::flags
+fn launch_options(
+    model: Option<&str>,
+    permissions: Option<&str>,
+) -> Result<cctop_core::launch_opts::Options, String> {
+    use cctop_core::launch_opts::{Options, Permissions};
+    let permissions = match permissions {
+        Some(word) => Permissions::parse(word)
+            .ok_or_else(|| format!("{word:?} is not a permission setting"))?,
+        None => Permissions::Ask,
+    };
+    Ok(Options {
+        model: model.map(str::to_string),
+        permissions,
+    })
 }
 
 /// The table document with this machine's own rows only.
@@ -3513,5 +3593,39 @@ mod tests {
         }
         let nobody = response_of(&hub, "GET", "/api/peer/nobody/api/sessions?t=full", "");
         assert!(nobody.starts_with("HTTP/1.1 404"), "{nobody}");
+
+        // The launcher's machines: the sibling, for the link that can launch
+        // on it, and nothing for one that cannot. Its own options come
+        // through the relay, which is how the page knows it takes them.
+        let agents = |token: &str| {
+            let raw = response_of(&hub, "GET", &format!("/api/agents?t={token}"), "");
+            let body = raw.split_once("\r\n\r\n").expect("body").1.to_string();
+            serde_json::from_str::<serde_json::Value>(&body).expect("json")
+        };
+        let full = agents("full");
+        assert_eq!(full["machines"][0]["name"], "box", "{full}");
+        assert!(full["options"].is_object(), "{full}");
+        let view = agents("view");
+        assert!(
+            view.get("machines").is_none() && view.get("options").is_none(),
+            "{view}"
+        );
+        let relayed = response_of(&hub, "GET", "/api/peer/box/api/agents?t=full", "");
+        assert!(relayed.contains("\"options\""), "{relayed}");
+    }
+
+    /// The launcher's settings are refused when they are not settings, and a
+    /// worktree for an ssh host is refused rather than quietly dropped —
+    /// both before anything is started or connected to.
+    #[test]
+    fn a_launch_with_options_it_cannot_honour_is_refused() {
+        let guarded = shared("full", "view");
+        for body in [
+            r#"{"agent":"claude","permissions":"root"}"#,
+            r#"{"agent":"claude","cwd":"devbox:~","branch":"try"}"#,
+        ] {
+            let launch = post_json(&guarded, "/api/launch", "full", body);
+            assert!(launch.starts_with("HTTP/1.1 400 "), "{body}: {launch}");
+        }
     }
 }

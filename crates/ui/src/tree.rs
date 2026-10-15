@@ -121,7 +121,7 @@ struct Place {
 /// cache in [`columns`], since a checkout moves about as often as a branch.
 const PLACE_TTL: Duration = Duration::from_secs(60);
 
-type Located = Option<(PathBuf, PathBuf)>;
+use cctop_core::worktree::Located;
 
 static PLACES: LazyLock<Mutex<HashMap<String, (Located, Instant)>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -146,55 +146,8 @@ pub(super) fn locate_cached(dir: &str) -> Located {
     found
 }
 
-/// Resolve `dir` to `(common git dir, checkout root)`.
-///
-/// The common directory is what every worktree of a repository shares, which
-/// is why it and not the checkout root is the repository's identity: two
-/// worktrees have two roots and one common directory. A linked worktree's `.git`
-/// is a file naming its private git dir, and that dir's `commondir` names the
-/// shared one. A submodule's git dir has no `commondir` — it is a repository of
-/// its own, and is grouped as one.
-///
-/// Relative paths are refused: they would resolve against cctop's own working
-/// directory, and group a session under whatever repository cctop was started
-/// in.
-fn locate(dir: &Path) -> Located {
-    if !dir.is_absolute() {
-        return None;
-    }
-    let root = dir.ancestors().find(|d| d.join(".git").exists())?;
-    let git = root.join(".git");
-    if git.is_dir() {
-        return Some((git, root.to_path_buf()));
-    }
-    let pointer = std::fs::read_to_string(&git).ok()?;
-    let target = PathBuf::from(pointer.trim().strip_prefix("gitdir:")?.trim());
-    let target = if target.is_absolute() {
-        target
-    } else {
-        root.join(target)
-    };
-    let common = match std::fs::read_to_string(target.join("commondir")) {
-        Ok(rel) => {
-            let joined = target.join(rel.trim());
-            PathBuf::from(cctop_core::collide::normalise(
-                &joined.to_string_lossy(),
-                "/",
-            ))
-        }
-        Err(_) => target,
-    };
-    Some((common, root.to_path_buf()))
-}
-
-/// The directory a repository is known by: the one holding its `.git`, or the
-/// common directory itself for a bare repository, which has no other.
-pub(super) fn repo_dir(common: &Path) -> PathBuf {
-    match common.file_name() {
-        Some(name) if name == ".git" => common.parent().unwrap_or(common).to_path_buf(),
-        _ => common.to_path_buf(),
-    }
-}
+use cctop_core::worktree::locate;
+pub(super) use cctop_core::worktree::repo_dir;
 
 fn place(s: &Session) -> Place {
     let dir = s.label_source.as_str();
