@@ -174,6 +174,11 @@ fn place(s: &Session) -> Place {
     }
 }
 
+/// The fold key of a heading that holds several clones of one origin.
+fn origin_key(ident: &str) -> String {
+    format!("origin:{ident}")
+}
+
 fn file_name(p: &Path) -> String {
     p.file_name()
         .map(|n| n.to_string_lossy().into_owned())
@@ -388,13 +393,12 @@ fn repos(
         let (heading, checkouts) = &mut repos[at];
         if heading.repo != p.repo {
             merged.insert(p.ident.clone());
-            // Separate clones of one origin share a heading. It is keyed by
-            // the least of their directories, so its fold and `F` stay put
-            // whichever clone sorts first this refresh.
-            if p.repo < heading.repo {
-                heading.repo = p.repo.clone();
-            }
-            heading.repo_label = p.ident.clone();
+            // Separate clones of one origin share a heading, keyed and named
+            // by the origin rather than by any one clone, so its fold stays put
+            // whichever clones are on screen. A repository seen through one
+            // clone keeps the key it always had.
+            heading.repo = origin_key(&p.ident);
+            heading.repo_label = cctop_core::util::tildify(&p.ident);
         }
         match checkouts.iter_mut().find(|(c, _)| *c == p.checkout) {
             Some((_, members)) => members.push(i),
@@ -531,6 +535,16 @@ impl App {
                     repo_dir(Path::new(common))
                 } else if let Some(root) = key.strip_prefix("wt:") {
                     PathBuf::from(root)
+                } else if let Some(ident) = key.strip_prefix("origin:") {
+                    // A heading over several clones forks from one of them:
+                    // the least by directory, so the same one every time.
+                    self.sessions
+                        .iter()
+                        .filter_map(cctop_core::worktree::repo_of)
+                        .filter(|r| r.key == ident)
+                        .map(|r| repo_dir(&r.common))
+                        .min()
+                        .ok_or("Not in a git repository")?
                 } else if key.starts_with("host:") {
                     return Err("That repository is on another machine");
                 } else {
@@ -594,6 +608,10 @@ impl App {
         let user = user_key(s);
         let mut changed = self.collapsed.remove(&user);
         let mut keys = vec![p.repo];
+        // The heading it shares with other clones, if any are on screen.
+        if !p.ident.is_empty() {
+            keys.push(origin_key(&p.ident));
+        }
         keys.extend(p.checkout.map(|(checkout, _)| checkout));
         for key in keys {
             changed |= self.collapsed.remove(&scoped(&user, key.clone()));
@@ -786,6 +804,15 @@ mod tests {
         app.refilter();
         let found: Vec<usize> = app.visible.iter().filter_map(|r| r.session()).collect();
         assert_eq!(found.len(), 2, "both clones match: {found:?}");
+
+        // The host is not the repository: `github` is every repository there.
+        app.search = "github".into();
+        app.refilter();
+        assert!(
+            !app.visible.iter().any(|r| r.session().is_some()),
+            "{:?}",
+            app.visible
+        );
     }
 
     /// The heading adds up exactly the rows beneath it.
@@ -1117,6 +1144,46 @@ mod tests {
         let key = app.sessions[0].key();
         app.reveal(&key);
         assert_eq!(app.visible.len(), 2);
+    }
+
+    /// A heading shared by two clones is folded under the origin, not under
+    /// either clone, so revealing a session in either one must unfold it —
+    /// and the fold must outlive the clone that happened to sort first.
+    #[test]
+    fn revealing_a_session_unfolds_a_heading_shared_by_clones() {
+        let fx = Scratch::new("reveal-clones");
+        let (a, b) = (fx.repo("a/proj"), fx.repo("b/proj"));
+        for dir in [&a, &b] {
+            std::fs::write(
+                Path::new(dir).join(".git/config"),
+                "[remote \"origin\"]\n\turl = git@github.com:o/shared.git\n",
+            )
+            .expect("config");
+        }
+        let mut app = test_app();
+        app.tree = true;
+        app.sessions = vec![session("a", true, &a), session("b", true, &b)];
+        app.refilter();
+        app.selected = 0;
+        assert_eq!(
+            app.selected_group().map(|g| g.key.as_str()),
+            Some("origin:github.com/o/shared")
+        );
+        app.toggle_group();
+        assert_eq!(app.visible.len(), 1, "folded");
+
+        let key = app.sessions[1].key();
+        app.reveal(&key);
+        assert!(
+            app.visible.contains(&Row::Session(1)),
+            "unfolded: {:?}",
+            app.visible
+        );
+        assert!(
+            app.fork_point()
+                .is_ok_and(|(_, home)| home == Path::new(&a)),
+            "the heading forks from the least clone"
+        );
     }
 
     /// With a second user on screen, each user heads their own subtree and the

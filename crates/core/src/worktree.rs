@@ -77,6 +77,18 @@ pub struct Repo {
     pub key: String,
 }
 
+impl Repo {
+    /// The key without its host — `o/r` for `github.com/o/r` — which is what
+    /// a search for the repository means. Matching the host would make
+    /// `github` find every repository hosted there. A local path is all path.
+    pub fn path(&self) -> &str {
+        match self.key.starts_with('/') {
+            true => &self.key,
+            false => self.key.split_once('/').map_or(&*self.key, |(_, p)| p),
+        }
+    }
+}
+
 /// How long a directory's repository is trusted. A checkout moves about as
 /// often as a branch, and this is asked per row per refresh.
 const REPO_TTL: Duration = Duration::from_secs(60);
@@ -105,7 +117,7 @@ pub fn repo_cached(dir: &str) -> Option<Repo> {
     // Read with the lock off, for the reason `branch::branch` gives.
     let found = locate(Path::new(dir)).map(|(common, root)| {
         let key = origin_url(&common)
-            .map(|u| normalise_url(&u))
+            .map(|u| normalise_url(&u, &repo_dir(&common)))
             .unwrap_or_else(|| repo_dir(&common).to_string_lossy().into_owned());
         Repo { common, root, key }
     });
@@ -163,35 +175,42 @@ fn origin_url(common: &Path) -> Option<String> {
 
 /// One spelling for the ways a URL names a repository: `git@host:o/r.git`,
 /// `ssh://git@host:22/o/r` and `https://host/o/r/` are all `host/o/r`.
-fn normalise_url(url: &str) -> String {
+///
+/// A local path — `/srv/up`, `file:///srv/up`, `../up` — is the directory it
+/// names, resolved against `base` (the repository's own directory, which is
+/// where git resolves a relative remote) and lexically normalised: so a clone
+/// of `/srv/up` has the key `/srv/up` itself has, and two unrelated repos that
+/// both spell their origin `../up` do not share one.
+fn normalise_url(url: &str, base: &Path) -> String {
     let (rest, scheme) = match url.split_once("://") {
-        Some((_, rest)) => (rest, true),
-        None => (url, false),
+        Some((scheme, rest)) => (rest, Some(scheme)),
+        None => (url, None),
     };
+    // Git's rule: without a scheme, a colon before any slash is `host:path`,
+    // and anything else is a path.
+    let scp = scheme.is_none() && rest.find(':').is_some_and(|c| !rest[..c].contains('/'));
+    if scheme.is_some_and(|s| s.eq_ignore_ascii_case("file")) || (scheme.is_none() && !scp) {
+        let path = rest.trim_end_matches('/');
+        let path = path.strip_suffix("/.git").unwrap_or(path);
+        let base = base.to_string_lossy();
+        return crate::collide::normalise(path, &base);
+    }
     // Credentials and the ssh user say who is fetching, not what.
     let rest = match rest.split_once('@') {
         Some((user, after)) if !user.contains('/') => after,
         _ => rest,
     };
-    let (host, path) = match (scheme, rest.split_once(if scheme { '/' } else { ':' })) {
-        // A local path has no host to split off.
-        (false, _) if rest.starts_with('/') || rest.starts_with('.') => ("", rest),
-        (_, Some((host, path))) => (host, path),
-        (_, None) => ("", rest),
-    };
+    let (host, path) = rest
+        .split_once(if scp { ':' } else { '/' })
+        .unwrap_or((rest, ""));
     // A port is how to reach the host, which `git@host:` never spells.
     let host = host.split(':').next().unwrap_or(host).to_ascii_lowercase();
-    let path = path.trim_end_matches('/');
+    let path = path.trim_matches('/');
     let path = path
         .strip_suffix(".git")
         .unwrap_or(path)
         .trim_end_matches('/');
-    match host.is_empty() {
-        // `file:///srv/r` lost its leading slash to the split above.
-        true if scheme => format!("/{path}"),
-        true => path.to_string(),
-        false => format!("{host}/{}", path.trim_start_matches('/')),
-    }
+    format!("{host}/{path}")
 }
 
 /// `git -C dir`, and nothing else deciding which repository that is.
@@ -332,13 +351,29 @@ mod tests {
             "https://user:tok@github.com/o/r.git",
             "ssh://git@github.com:22/o/r.git",
         ] {
-            assert_eq!(normalise_url(url), "github.com/o/r", "{url}");
+            assert_eq!(
+                normalise_url(url, Path::new("/g/repo")),
+                "github.com/o/r",
+                "{url}"
+            );
         }
-        assert_eq!(normalise_url("/srv/git/r.git"), "/srv/git/r");
-        assert_eq!(normalise_url("file:///srv/git/r"), "/srv/git/r");
+        let base = Path::new("/g/repo");
+        assert_eq!(normalise_url("/srv/git/r.git", base), "/srv/git/r.git");
+        assert_eq!(normalise_url("/srv/git/r/.git", base), "/srv/git/r");
+        assert_eq!(normalise_url("file:///srv/git/r/", base), "/srv/git/r");
+        // `git clone ./up b` stores the path as typed, `.` and all.
+        assert_eq!(normalise_url("/g/./up", base), "/g/up");
+        // Relative to the repository, so the same spelling in two places is
+        // two repositories.
+        assert_eq!(normalise_url("../upstream", base), "/g/upstream");
+        assert_eq!(normalise_url("up", base), "/g/repo/up");
         assert_ne!(
-            normalise_url("git@github.com:o/r"),
-            normalise_url("git@gitlab.com:o/r")
+            normalise_url("../up", base),
+            normalise_url("../up", Path::new("/elsewhere/repo"))
+        );
+        assert_ne!(
+            normalise_url("git@github.com:o/r", base),
+            normalise_url("git@gitlab.com:o/r", base)
         );
     }
 
@@ -376,6 +411,9 @@ mod tests {
         let lone = at("lone");
         git(&lone, &["init", "-q"]);
         let outside = at("outside");
+        // A clone of a local path: git stores the path as given, `./` and all.
+        git(tmp.path(), &["clone", "-q", "./lone", "lone-clone"]);
+        let lone_clone = tmp.path().join("lone-clone");
 
         let key = |d: &Path| repo_cached(&d.to_string_lossy()).map(|r| r.key);
         assert_eq!(key(&a).as_deref(), Some("github.com/o/r"));
@@ -383,6 +421,7 @@ mod tests {
         assert_eq!(key(&b), key(&a), "a clone of the same origin");
         assert_eq!(key(&lone).as_deref(), Some(&*lone.to_string_lossy()));
         assert_eq!(key(&outside), None);
+        assert_eq!(key(&lone_clone), key(&lone), "a clone of a local path");
         let root = |d: &Path| repo_cached(&d.to_string_lossy()).map(|r| r.root);
         assert_eq!(root(&wt), Some(wt.clone()), "each its own checkout");
     }

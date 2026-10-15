@@ -266,8 +266,9 @@ impl App {
             return true;
         }
         // So is the repository, which is what finds a session in a worktree or
-        // clone whose path does not say the repository's name.
-        if cctop_core::worktree::repo_of(s).is_some_and(|r| contains_ascii_ci(&r.key, query)) {
+        // clone whose path does not say the repository's name. Its path, not
+        // its host: `github` is not a search for every repository there.
+        if cctop_core::worktree::repo_of(s).is_some_and(|r| contains_ascii_ci(r.path(), query)) {
             return true;
         }
         self.search_content && self.scan_query == query && self.scan_hits.contains_key(&s.key())
