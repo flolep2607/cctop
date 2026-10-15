@@ -1024,6 +1024,10 @@ impl App {
             (false, KeyCode::Down) => self.settings_step(1),
             (false, KeyCode::PageUp) => self.settings_step(-(PAGE as i32)),
             (false, KeyCode::PageDown) => self.settings_step(PAGE as i32),
+            // Both ways through a choice, so the one before is a press away
+            // rather than a lap of the list.
+            (false, KeyCode::Left) => self.settings_turn(-1),
+            (false, KeyCode::Right) => self.settings_turn(1),
             (false, KeyCode::Home) => self.settings_to(0),
             (false, KeyCode::End) => self.settings_to(usize::MAX),
             (false, KeyCode::Enter | KeyCode::Char(' ')) => self.settings_activate(),
