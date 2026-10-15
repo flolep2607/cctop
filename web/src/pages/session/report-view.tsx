@@ -295,7 +295,7 @@ function Subagents({ r }: { r: Report }) {
         <DataTable
           head={[["Type"], ["Description"], ["Tools", "num"], ["Cost", "num"]]}
           rows={r.subagents.map((a: { type: string; description: string; tool_count: number; cost: number }) => [
-            <span key="type" className="font-mono text-xs">{a.type}</span>, a.description, a.tool_count, costLabel({ total: a.cost, included: r.cost.included }),
+            <span key="type" className="font-mono text-xs">{a.type}</span>, a.description, a.tool_count, costLabel({ total: a.cost, included: r.cost.included, available: r.cost.available }),
           ])}
         />
       </Panel>

@@ -247,7 +247,7 @@ package is left to whatever installed it.
 | Pi | reported | ✓ | ─ | ✓ | ✓ |
 | Gemini CLI | estimated | ✓ | ─ | ✓ | ─ |
 | Devin | ─ | ✓ | ✓ | ✓ | ✓ |
-| Cursor | ─ | ─ | ─ | ✓ | inferred |
+| Cursor | ─ | ─ | ✓ | ✓ | inferred |
 | Windsurf | ─ | ─ | ─ | ✓ | ─ |
 
 A `─` marks something the harness does not record. Each

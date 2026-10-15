@@ -962,6 +962,9 @@ fn activity_of(
     provider: crate::pricing::Provider,
     item: &serde_json::Value,
 ) -> Option<ActivityState> {
+    if let Some(state) = turn_ended(item) {
+        return Some(state);
+    }
     if is_api_error_event(item) {
         return Some(ActivityState::ApiError);
     }
@@ -996,6 +999,34 @@ fn is_passive_event(item: &serde_json::Value) -> bool {
             == Some("token_count")
 }
 
+/// Cursor's `{"type":"turn_ended","status":…}` line, the one transcript record
+/// that says outright a turn is over — so unlike the other harnesses, a
+/// finished Cursor turn is visible on disk without a hook.
+///
+/// Cursor files a user's own Stop under `status: "error"` too ("User aborted
+/// request", "Canceled"), and on real transcripts that is 41 of every 42
+/// errors. Read as an API error, nearly every interrupted turn would draw red,
+/// so an error whose text says it was aborted or cancelled is the user's move
+/// like any other ended turn, and only the rest is an API error.
+fn turn_ended(item: &serde_json::Value) -> Option<ActivityState> {
+    if item.get("type").and_then(serde_json::Value::as_str) != Some("turn_ended") {
+        return None;
+    }
+    if item.get("status").and_then(serde_json::Value::as_str) != Some("error") {
+        return Some(ActivityState::WaitingForInput);
+    }
+    let error = item
+        .get("error")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    Some(if error.contains("abort") || error.contains("cancel") {
+        ActivityState::WaitingForInput
+    } else {
+        ActivityState::ApiError
+    })
+}
+
 fn is_api_error_event(item: &serde_json::Value) -> bool {
     let kind = item
         .get("type")
@@ -1021,7 +1052,14 @@ fn is_waiting_for_input_event(
 ) -> bool {
     match provider {
         crate::pricing::Provider::Claude | crate::pricing::Provider::Cursor => {
-            if item.get("type").and_then(serde_json::Value::as_str) != Some("assistant") {
+            // The same message shape, except that Claude Code says whose turn
+            // it is in `type` and Cursor in `role`.
+            let speaker = if provider == crate::pricing::Provider::Cursor {
+                "role"
+            } else {
+                "type"
+            };
+            if item.get(speaker).and_then(serde_json::Value::as_str) != Some("assistant") {
                 return false;
             }
             let Some(blocks) = item
@@ -1096,6 +1134,7 @@ fn is_input_request_tool(name: &str) -> bool {
             | "ask_user_question"
             | "ask_user"
             | "askuser"
+            | "askquestion"
             | "question"
             | "request_user_input"
     )
@@ -1483,6 +1522,61 @@ mod tests {
         session.data_file = Some(path.clone());
         assert_eq!(live_state(&session).0, ActivityState::WaitingForInput);
         let _ = std::fs::remove_file(path);
+    }
+
+    /// Cursor's lines are keyed on `role`, and its `turn_ended` is the only
+    /// record that says a turn is over. A user's Stop is filed as an error too,
+    /// and must not draw red.
+    #[test]
+    fn a_cursor_turn_is_read_off_its_own_lines() {
+        let assistant =
+            r#"{"role":"assistant","message":{"content":[{"type":"text","text":"done"}]}}"#;
+        let state = |last: &str| {
+            let path = temp_path("cursor-tail");
+            std::fs::write(&path, format!("{assistant}\n{last}\n")).expect("write transcript");
+            let mut session = Session::new(Provider::Cursor, "test".into());
+            session.data_file = Some(path.clone());
+            let state = live_state(&session).0;
+            let _ = std::fs::remove_file(path);
+            state
+        };
+        use ActivityState::*;
+        for (last, want) in [
+            (
+                r#"{"type":"turn_ended","status":"success"}"#,
+                WaitingForInput,
+            ),
+            (
+                r#"{"type":"turn_ended","status":"aborted","error":"User aborted/interrupted manually."}"#,
+                WaitingForInput,
+            ),
+            (
+                r#"{"type":"turn_ended","status":"error","error":"User aborted request"}"#,
+                WaitingForInput,
+            ),
+            (
+                r#"{"type":"turn_ended","status":"error","error":"Canceled"}"#,
+                WaitingForInput,
+            ),
+            (
+                r#"{"type":"turn_ended","status":"error","error":"Provider Error We're having trouble"}"#,
+                ApiError,
+            ),
+            (
+                r#"{"role":"user","message":{"content":[{"type":"text","text":"go"}]}}"#,
+                Working,
+            ),
+            (
+                r#"{"role":"assistant","message":{"content":[{"type":"tool_use","name":"AskQuestion","input":{}}]}}"#,
+                WaitingForInput,
+            ),
+            (
+                r#"{"role":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{}}]}}"#,
+                Working,
+            ),
+        ] {
+            assert_eq!(state(last), want, "{last}");
+        }
     }
 
     fn detail(ts: &str, full: &str) -> ToolDetail {
@@ -2243,6 +2337,12 @@ pub struct SessionData {
     pub rates: Option<CodexRates>,
     /// Set when extraction failed; the row still renders with zeroed figures.
     pub error: Option<String>,
+    /// Set when what was read depends on more than the transcripts' stamps —
+    /// the clock, or a database that did not answer. Such an extraction is
+    /// never written to disk, where nothing would ever replace it, and memory
+    /// serves it only until this time (Unix ms).
+    #[serde(skip)]
+    pub recheck_at_ms: Option<i64>,
 }
 
 /// Keep the newest `MAX_SESSION_TOOL_DETAILS` details across all tools, and
@@ -2595,7 +2695,7 @@ fn supersedes(a: &Session, b: &Session) -> bool {
 /// spend, its subagent list, and the mtime that says it is still working.
 pub fn transcript_files(main: &Path) -> Vec<PathBuf> {
     let mut files = vec![main.to_path_buf()];
-    let subagents_dir = main.with_extension("").join("subagents");
+    let subagents_dir = subagents_dir(main);
     for entry in crate::config::list_dir(&subagents_dir) {
         if entry.ends_with(".jsonl") {
             files.push(subagents_dir.join(entry));
@@ -2609,6 +2709,22 @@ pub fn transcript_files(main: &Path) -> Vec<PathBuf> {
         }
     }
     files
+}
+
+/// Where a session's subagents keep their transcripts.
+///
+/// Claude Code puts them in a directory named after the transcript,
+/// `<id>.jsonl` beside `<id>/subagents/`. Cursor already keeps each transcript
+/// in a directory of its own, `<id>/<id>.jsonl`, and its subagents in
+/// `<id>/subagents/` beside it. A Claude Code transcript's directory is its
+/// project, never its own id, so the two cannot be mistaken for each other.
+pub fn subagents_dir(main: &Path) -> PathBuf {
+    match main.parent() {
+        Some(dir) if dir.file_name().is_some() && dir.file_name() == main.file_stem() => {
+            dir.join("subagents")
+        }
+        _ => main.with_extension("").join("subagents"),
+    }
 }
 
 /// Each workflow run's directory under a session's `subagents/`.
@@ -2630,12 +2746,12 @@ pub fn effective_mtime_ms(session: &Session) -> u64 {
         return 0;
     };
     match session.provider {
-        Provider::Claude => transcript_files(f)
+        Provider::Claude | Provider::Cursor => transcript_files(f)
             .iter()
             .map(|p| crate::config::file_mtime_ms(p))
             .max()
             .unwrap_or(0),
-        Provider::Codex | Provider::Cursor | Provider::Devin | Provider::Gemini | Provider::Pi => {
+        Provider::Codex | Provider::Devin | Provider::Gemini | Provider::Pi => {
             crate::config::file_mtime_ms(f)
         }
         // Every OpenCode session shares one WAL-backed database, as every

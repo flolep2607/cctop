@@ -16,7 +16,7 @@ should be traceable to a function you can open.
 |---|---|---|
 | [Claude Code](claude.md) | `crates/core/src/session/claude.rs` | `~/.claude/projects/<slug>/<uuid>.jsonl` |
 | [Codex](codex.md) | `crates/core/src/session/codex.rs` | `~/.codex/sessions/**/rollout-*.jsonl` |
-| [Cursor](cursor.md) | `crates/core/src/session/cursor.rs` | `~/.cursor/projects/*/agent-transcripts/**/*.jsonl` |
+| [Cursor](cursor.md) | `crates/core/src/session/cursor.rs` | `~/.cursor/projects/*/agent-transcripts/<id>/<id>.jsonl` |
 | [Devin](devin.md) | `crates/core/src/session/devin.rs` | `~/.local/share/devin/cli/{sessions.db,transcripts/}` |
 | [Gemini CLI](gemini-cli.md) | `crates/core/src/session/gemini.rs` | `~/.gemini/tmp/<project>/chats/session-*.json{,l}` |
 | [OpenCode](opencode.md) | `crates/core/src/session/opencode.rs` | `~/.local/share/opencode/opencode*.db` |
@@ -54,7 +54,7 @@ record. That table is deliberately terse; the reason lives here.
 | Pi | reported | ✓ | ─ | ✓ | ✓ |
 | Gemini CLI | estimated | ✓ | ─ | ✓ | ─ |
 | Devin | ─ | ✓ | ✓ | ✓ | ✓ |
-| Cursor | ─ | ─ | ─ | ✓ | inferred |
+| Cursor | ─ | ─ | ✓ | ✓ | inferred |
 | Windsurf | ─ | ─ | ─ | ✓ | ─ |
 
 Devin is the odd one out in the other direction: it records everything except

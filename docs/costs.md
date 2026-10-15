@@ -19,9 +19,12 @@ that says which tier it ran on, and the figure is honest about what the tokens
 would cost at retail.
 
 Cursor native-agent transcripts expose projects, conversation activity, and
-tool calls, but not model names, tokens, context usage, costs, or a dedicated
-per-session process. Those fields display as unavailable; live status means the
-transcript has changed within the last 90 seconds.
+tool calls. The model, the title, the real folder and the context occupancy come
+from Cursor's own `state.vscdb` when cctop finds it. Tokens and cost are
+recorded nowhere — not in the transcript, not in the database — so they display
+as unavailable rather than as free, and there is no dedicated per-session
+process: live status is read off the transcript's last turn and how recently it
+changed.
 
 Windsurf goes further: its workspace state records the conversation and its tool
 calls but no model, tokens, or cost at all — the credit accounting lives on

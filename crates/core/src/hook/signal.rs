@@ -64,7 +64,8 @@ impl Signal {
     /// perfectly well — it is being written to — and it is the only one of the
     /// two that can see an API error. What it cannot see is either way of
     /// having stopped, because a held permission prompt and a finished turn are
-    /// both, on disk, just an agent that stopped writing.
+    /// both, on disk, just an agent that stopped writing. (Cursor is the
+    /// exception for the finished turn: it writes a `turn_ended` line.)
     pub fn activity(self) -> Option<crate::session::ActivityState> {
         match self {
             Signal::NeedsInput => Some(crate::session::ActivityState::Asking),
