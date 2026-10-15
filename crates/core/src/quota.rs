@@ -766,7 +766,9 @@ fn run_on_screen(
         .enumerate()
         .find_map(|(i, row)| row.find(prefix).map(|at| (i, at)))?;
     let mut out: String = rows[first][at..].chars().take_while(|c| ok(*c)).collect();
-    let mut end = rows[first][..at].chars().count() + out.chars().count();
+    // Columns, not chars: a wide character before the run takes two of them,
+    // and counting it as one ended the run a row early.
+    let mut end = util::cells(&rows[first][..at]) + util::cells(&out);
     for row in &rows[first + 1..] {
         if end + 1 < width as usize {
             break;
@@ -776,7 +778,8 @@ fn run_on_screen(
         if more.is_empty() {
             break;
         }
-        end = row.len() - trimmed.len() + more.chars().count();
+        // The indent is spaces, so its bytes are its columns.
+        end = row.len() - trimmed.len() + util::cells(&more);
         out.push_str(&more);
     }
     Some(out)

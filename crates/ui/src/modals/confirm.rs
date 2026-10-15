@@ -413,7 +413,7 @@ fn draw_reclaim_confirm(frame: &mut Frame, area: Rect, app: &App, layout: &mut L
     for s in plan.stop.iter().take(SHOWN) {
         lines.push(Line::from(vec![
             Span::styled(
-                format!("    · {:<36}", util::truncate(s.display_label(), 36)),
+                format!("    · {}", util::pad(s.display_label(), 36, false)),
                 theme::dim(),
             ),
             Span::styled(

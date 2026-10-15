@@ -617,7 +617,7 @@ fn draw_footer_keys(frame: &mut Frame, area: Rect, app: &App, layout: &mut Layou
         })
         .collect();
 
-    let badge_w: usize = badges.iter().map(|s| s.content.chars().count()).sum();
+    let badge_w: usize = badges.iter().map(|s| s.width()).sum();
     // The badges never squeeze the hints below the first few: a footer that is
     // all state and no keys is what the terminal is for. Past that the badges
     // win, and the tail hints are the ones that go.

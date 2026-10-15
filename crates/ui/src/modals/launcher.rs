@@ -471,9 +471,12 @@ pub(crate) fn draw_launch(
                     .unwrap_or_default(),
             ),
         };
-        let room_for = (WIDTH as usize - 8).saturating_sub(aside.chars().count().min(34));
+        let room_for = (WIDTH as usize - 8).saturating_sub(cctop_core::util::cells(&aside).min(34));
         let shown = tail(&text, room_for);
-        let aside = cctop_core::util::truncate(&aside, WIDTH as usize - 8 - shown.chars().count());
+        let aside = cctop_core::util::truncate(
+            &aside,
+            WIDTH as usize - 8 - cctop_core::util::cells(&shown),
+        );
         let unusable = matches!(
             hit,
             super::location::Hit::Remote {

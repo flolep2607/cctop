@@ -17,6 +17,7 @@ use ratatui::buffer::CellWidth;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use std::ops::Range;
+use unicode_segmentation::UnicodeSegmentation;
 
 /// A run of text in one style, optionally the label of a link — an index into
 /// whatever list of URLs the caller keeps.
@@ -44,16 +45,15 @@ pub(super) struct Row {
     pub links: Vec<(Range<u16>, usize)>,
 }
 
+/// One grapheme, not one char: the buffer draws `⚠️` as two cells and a ZWJ
+/// family as one emoji, where their chars one at a time would measure one and
+/// six, and a cut between them would split the emoji across two rows.
 #[derive(Clone, Copy)]
-struct Cell {
-    ch: char,
+struct Cell<'a> {
+    g: &'a str,
     width: u16,
     style: Style,
     link: Option<usize>,
-}
-
-fn char_width(c: char) -> u16 {
-    c.encode_utf8(&mut [0; 4]).cell_width()
 }
 
 fn spans_width(spans: &[Span<'static>]) -> usize {
@@ -73,13 +73,19 @@ pub(super) fn wrap(
 ) -> Vec<Row> {
     // Control characters are dropped here rather than trusted to the buffer:
     // ratatui filters them out when it draws, but a width counted with them in
-    // would put every column after them one out.
+    // would put every column after them one out. Gone before `cell_width`
+    // too, which is only ever meant to see what the buffer would draw.
+    let texts: Vec<String> = pieces
+        .iter()
+        .map(|p| p.text.chars().filter(|c| !c.is_control()).collect())
+        .collect();
     let cells: Vec<Cell> = pieces
         .iter()
-        .flat_map(|p| {
-            p.text.chars().filter(|c| !c.is_control()).map(|ch| Cell {
-                ch,
-                width: char_width(ch),
+        .zip(&texts)
+        .flat_map(|(p, text)| {
+            text.graphemes(true).map(|g| Cell {
+                g,
+                width: g.cell_width(),
                 style: p.style,
                 link: p.link,
             })
@@ -102,14 +108,14 @@ pub(super) fn wrap(
             true => fit,
             // A space just past the edge is as good a break as one inside it:
             // the row is exactly full.
-            false => match (1..=fit).rev().find(|&i| left[i].ch == ' ') {
+            false => match (1..=fit).rev().find(|&i| left[i].g == " ") {
                 Some(i) => i,
                 None => fit.max(1),
             },
         };
         out.push(row(prefix, &left[..cut], indent));
         left = &left[cut..];
-        while left.first().is_some_and(|c| c.ch == ' ') {
+        while left.first().is_some_and(|c| c.g == " ") {
             left = &left[1..];
         }
         if left.is_empty() {
@@ -144,7 +150,7 @@ fn row(prefix: &[Span<'static>], cells: &[Cell], indent: usize) -> Row {
         let mut text = String::new();
         let start = col;
         while i < cells.len() && cells[i].style == style && cells[i].link == link {
-            text.push(cells[i].ch);
+            text.push_str(cells[i].g);
             col += cells[i].width;
             i += 1;
         }
@@ -221,5 +227,42 @@ mod tests {
         let rows = wrap(&[Piece::new("日本語です", Style::default())], 6, &[], &[]);
         let texts: Vec<String> = rows.iter().map(text).collect();
         assert_eq!(texts, ["日本語", "です"]);
+    }
+
+    /// An emoji sequence is one grapheme, measured as the buffer draws it and
+    /// never split across rows — and a link after it is reported at the
+    /// columns it lands in.
+    #[test]
+    fn emoji_sequences_wrap_whole() {
+        let texts = |s: &str, width| -> Vec<String> {
+            wrap(&[Piece::new(s, Style::default())], width, &[], &[])
+                .iter()
+                .map(text)
+                .collect()
+        };
+        let family = "👨\u{200D}👩\u{200D}👧";
+        assert_eq!(texts(&format!("{family}{family}"), 4), [family.repeat(2)]);
+        assert_eq!(texts(&format!("{family}{family}"), 3), [family, family]);
+        assert_eq!(texts("🇫🇷🇫🇷🇫🇷", 5), ["🇫🇷🇫🇷", "🇫🇷"]);
+        assert_eq!(texts("👍🏽👍🏽", 3), ["👍🏽", "👍🏽"]);
+        assert_eq!(texts("❤️❤️ab", 4), ["❤️❤️", "ab"], "VS16 is two cells");
+        assert_eq!(
+            texts("⌚\u{FE0E}⌚\u{FE0E}ab", 4),
+            ["⌚\u{FE0E}⌚\u{FE0E}ab"],
+            "VS15 is one"
+        );
+
+        let link = Piece {
+            text: "docs".into(),
+            style: Style::default(),
+            link: Some(0),
+        };
+        let rows = wrap(
+            &[Piece::new("⚠️ see ", Style::default()), link],
+            20,
+            &[],
+            &[],
+        );
+        assert_eq!(rows[0].links, vec![(7..11, 0)]);
     }
 }

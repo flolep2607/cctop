@@ -61,21 +61,11 @@ fn spark_spans(
 /// than the amount — the amount is why the row is on the list.
 fn ranked_row(name: &str, amount: f64, width: usize) -> Vec<Span<'static>> {
     let money = util::adaptive_usd(amount);
-    let name_w = width.saturating_sub(money.chars().count() + 1);
-    // A cut name that still looks like a whole one names the wrong project.
-    let mut shown: String = match name.chars().count() > name_w && name_w > 0 {
-        true => name
-            .chars()
-            .take(name_w - 1)
-            .chain(std::iter::once('…'))
-            .collect(),
-        false => name.chars().take(name_w).collect(),
-    };
-    while shown.chars().count() < name_w {
-        shown.push(' ');
-    }
+    let name_w = width.saturating_sub(util::cells(&money) + 1);
     vec![
-        Span::styled(shown, theme::dim()),
+        // Cut with an ellipsis: a cut name that still looks like a whole one
+        // names the wrong project.
+        Span::styled(util::pad(name, name_w, false), theme::dim()),
         Span::raw(" "),
         Span::styled(money, Style::default().fg(theme::colors().cost_mid)),
     ]
