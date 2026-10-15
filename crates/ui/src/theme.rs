@@ -27,6 +27,8 @@
 //!   only sixteen gets them folded down by [`sixteen`], and one that can show
 //!   none gets Mono. See [`Depth`].
 
+use ratatui::buffer::{Buffer, Cell};
+use ratatui::layout::{Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
@@ -43,8 +45,13 @@ pub enum Variant {
 /// How much colour the terminal can show, as far as cctop is concerned.
 ///
 /// Coarser than termprofile's [`TermProfile`] on purpose: every palette here is
-/// indexed, so truecolor draws exactly what 256 colours does, and the only
-/// lines that change what reaches the screen are "sixteen" and "none".
+/// written as indices, so the only lines that change which colours the
+/// palettes *choose* are "sixteen" and "none". Truecolor does not change the
+/// choice, only how it is written: on a terminal that says it takes 24-bit
+/// colour, an index from 16 up goes out as the RGB xterm gives it
+/// ([`pin_indexed`]), because some terminals regenerate those 240 entries from
+/// their sixteen-colour scheme and turn the palettes' pale blue into a navy
+/// that black ink on it cannot be read against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Depth {
     /// 256 colours or more: the palettes as written.
@@ -702,6 +709,134 @@ pub fn truecolor() -> bool {
     *TRUECOLOR.get_or_init(|| truecolor_from(std::env::var("COLORTERM").ok().as_deref()))
 }
 
+/// Whether a palette index from 16 up is written as the RGB xterm's table
+/// gives it rather than as the index: on a truecolor terminal, unless
+/// `CCTOP_INDEXED` is set.
+///
+/// The index is a request for whatever the terminal keeps in that slot, and
+/// the palettes were chosen against xterm's values for them. Most terminals
+/// keep exactly those; some do not. Tabby's `paletteGenerate` (and the like
+/// elsewhere) rebuilds the cube and the grey ramp from the sixteen colours of
+/// the scheme, so under Campbell, whose blue is `#0037DA`, the accent 75
+/// (`#5fafff`) comes out a dark blue and the settings page's cursor — black on
+/// the accent — is unreadable. Writing the RGB says the colour itself, which a
+/// terminal that takes 24-bit colour has no table to reinterpret.
+///
+/// The sixteen are left as indices whatever this says: those are the scheme's
+/// on purpose, and the folded palettes ([`sixteen`]) are written in them.
+///
+/// `CCTOP_INDEXED` is for whoever has themed their 256-colour table on purpose
+/// and wants cctop to follow it: any non-empty value keeps the indices. An
+/// environment variable rather than a setting because it is a fact about the
+/// terminal, read once at start like `$COLORTERM` beside it, and nearly nobody
+/// needs it.
+pub fn exact_indexed() -> bool {
+    static EXACT: OnceLock<bool> = OnceLock::new();
+    *EXACT.get_or_init(|| {
+        exact_indexed_from(truecolor(), std::env::var("CCTOP_INDEXED").ok().as_deref())
+    })
+}
+
+fn exact_indexed_from(truecolor: bool, keep_indices: Option<&str>) -> bool {
+    truecolor && !keep_indices.is_some_and(|v| !v.is_empty())
+}
+
+/// `color` as [`exact_indexed`] writes it: an index from 16 up as its xterm
+/// RGB, and everything else — the sixteen, named colours, `Reset`, RGB already
+/// — as it is.
+pub fn exact(color: Color) -> Color {
+    match color {
+        Color::Indexed(16..=255) => {
+            crate::effects::to_rgb(color).map_or(color, |(r, g, b)| Color::Rgb(r, g, b))
+        }
+        other => other,
+    }
+}
+
+/// Every cell of a finished frame with its indices from 16 up written as RGB,
+/// when [`pinning`] says so — except the cells that are still an agent's.
+///
+/// At the frame rather than at each colour because a colour reaches the
+/// buffer by more ways than the palette: [`gray`] and the tab hues build
+/// theirs, the effects ease and snap to indices, the QR code and the parties
+/// name theirs outright, and a tool's own output carries whatever indices it
+/// was written with. One pass over the buffer, between drawing and flushing,
+/// cannot miss any of those or the next one added, where a conversion at each
+/// would have to be remembered at every new site. It is a few thousand cells
+/// a frame, and ratatui's diff still writes only the ones that changed.
+///
+/// A terminal cctop draws — an agent's pane, the preview of one, the login
+/// pane — is the exception, given as `agents`. What an agent prints is the
+/// agent's, and an index there has to mean what the same program run outside
+/// cctop would get from this terminal: the user may have themed that table on
+/// purpose. A cell is left alone only while it is still what the terminal
+/// widget wrote; anything cctop drew over it afterwards — a modal, the dead
+/// banner — is cctop's and pinned like the rest of the frame.
+pub fn pin_indexed(buf: &mut Buffer, agents: &[Passthrough]) {
+    if pinning() {
+        pin_cells(buf, agents);
+    }
+}
+
+/// Whether [`pin_indexed`] does anything this run: the 256-colour palette, on
+/// a terminal [`exact_indexed`] says to write RGB to.
+pub fn pinning() -> bool {
+    colors().depth == Depth::Indexed && exact_indexed()
+}
+
+/// A rectangle of the frame as a terminal widget left it, so [`pin_indexed`]
+/// can tell the agent's cells from whatever was drawn over them later.
+///
+/// The cells themselves rather than just the rectangle, because cctop does
+/// draw over a pane — a modal, a menu, the banner of a dead agent — and a
+/// rectangle alone would leave those in the terminal's table, the very
+/// colours the pass is there to pin. A cell that is still what was recorded
+/// is the agent's; one that differs was drawn over.
+#[derive(Debug, Clone)]
+pub struct Passthrough {
+    area: Rect,
+    cells: Vec<Cell>,
+}
+
+impl Passthrough {
+    /// What `area` of `buf` holds now. Clipped to the buffer, so a rectangle
+    /// reaching past it records only what is there.
+    pub fn record(buf: &Buffer, area: Rect) -> Self {
+        let area = area.intersection(buf.area);
+        let cells = area.positions().map(|p| buf[p].clone()).collect();
+        Self { area, cells }
+    }
+
+    /// Whether the cell at `pos` is still the one recorded there.
+    fn untouched(&self, pos: Position, cell: &Cell) -> bool {
+        self.area.contains(pos) && {
+            let i = (pos.y - self.area.y) as usize * self.area.width as usize
+                + (pos.x - self.area.x) as usize;
+            self.cells.get(i) == Some(cell)
+        }
+    }
+}
+
+/// [`Passthrough::record`], when the pass that would read it is going to run;
+/// nothing otherwise, so a frame that pins nothing copies nothing.
+pub fn passthrough(buf: &Buffer, area: Rect) -> Option<Passthrough> {
+    pinning().then(|| Passthrough::record(buf, area))
+}
+
+fn pin_cells(buf: &mut Buffer, agents: &[Passthrough]) {
+    let width = buf.area.width.max(1) as usize;
+    let (x0, y0) = (buf.area.x, buf.area.y);
+    for (i, cell) in buf.content.iter_mut().enumerate() {
+        let pos = Position::new(x0 + (i % width) as u16, y0 + (i / width) as u16);
+        if agents.iter().any(|a| a.untouched(pos, cell)) {
+            continue;
+        }
+        cell.fg = exact(cell.fg);
+        cell.bg = exact(cell.bg);
+        cell.underline_color = exact(cell.underline_color);
+    }
+}
+
 fn truecolor_from(colorterm: Option<&str>) -> bool {
     matches!(
         colorterm
@@ -814,8 +949,8 @@ impl termprofile::EnvVarSource for VarSource<'_> {
 ///
 /// termprofile's tmux lookup is switched off: it runs `tmux info` to tell 256
 /// colours from truecolor, which is a process spawned at every start to answer
-/// a question whose answer cctop draws identically either way — and under rmux
-/// `tmux` is a shim for a different multiplexer.
+/// a question this does not ask — whether to write RGB is [`truecolor`]'s, from
+/// `$COLORTERM` — and under rmux `tmux` is a shim for a different multiplexer.
 ///
 /// Sixteen colours only for a terminal *known* to be limited to them. termprofile
 /// also reads a bare `TERM=xterm`, and `CI` being set, as sixteen — and PuTTY
@@ -1890,6 +2025,92 @@ pub(super) mod tests {
         assert!(!truecolor_from(None));
         assert!(!truecolor_from(Some("")));
         assert!(!truecolor_from(Some("256color")));
+    }
+
+    /// The cube and the grey ramp as xterm's table has them; the sixteen, and
+    /// anything that is not an index, untouched.
+    #[test]
+    fn exact_writes_xterms_rgb_for_the_cube_and_greys() {
+        assert_eq!(exact(Color::Indexed(16)), Color::Rgb(0, 0, 0));
+        assert_eq!(exact(Color::Indexed(75)), Color::Rgb(0x5f, 0xaf, 0xff));
+        assert_eq!(exact(Color::Indexed(231)), Color::Rgb(255, 255, 255));
+        assert_eq!(exact(Color::Indexed(232)), Color::Rgb(8, 8, 8));
+        assert_eq!(exact(Color::Indexed(255)), Color::Rgb(238, 238, 238));
+        for kept in [
+            Color::Indexed(0),
+            Color::Indexed(4),
+            Color::Indexed(15),
+            Color::Blue,
+            Color::Black,
+            Color::Reset,
+            Color::Rgb(1, 2, 3),
+        ] {
+            assert_eq!(exact(kept), kept);
+        }
+    }
+
+    /// Only a truecolor terminal gets RGB, and `CCTOP_INDEXED` takes it back;
+    /// set but empty is not set.
+    #[test]
+    fn exact_indexed_is_truecolor_unless_overridden() {
+        assert!(exact_indexed_from(true, None));
+        assert!(exact_indexed_from(true, Some("")));
+        assert!(!exact_indexed_from(true, Some("1")));
+        assert!(!exact_indexed_from(false, None));
+        assert!(!exact_indexed_from(false, Some("1")));
+    }
+
+    /// The settings page's cursor — black on the accent, 75 — is the cell that
+    /// went unreadable; after the pass it names the colour, not the slot.
+    #[test]
+    fn a_frame_is_pinned_cell_by_cell() {
+        let mut buf = Buffer::empty(Rect::new(0, 0, 3, 1));
+        buf[(0, 0)].set_fg(Color::Black).set_bg(Color::Indexed(75));
+        buf[(1, 0)]
+            .set_fg(Color::Indexed(245))
+            .set_bg(Color::Indexed(4));
+        buf[(2, 0)].underline_color = Color::Indexed(203);
+        pin_cells(&mut buf, &[]);
+        assert_eq!(buf[(0, 0)].fg, Color::Black);
+        assert_eq!(buf[(0, 0)].bg, Color::Rgb(0x5f, 0xaf, 0xff));
+        assert_eq!(buf[(1, 0)].fg, Color::Rgb(138, 138, 138));
+        assert_eq!(buf[(1, 0)].bg, Color::Indexed(4));
+        assert_eq!(buf[(2, 0)].underline_color, Color::Rgb(255, 95, 95));
+    }
+
+    /// An agent's 75 is the agent's: it reaches the terminal as the index,
+    /// where the same 75 drawn by cctop beside it, or over the pane after the
+    /// agent's screen was, goes out as xterm's RGB.
+    #[test]
+    fn an_agents_cells_keep_their_indices() {
+        let mut buf = Buffer::empty(Rect::new(0, 0, 6, 2));
+        for x in 0..6 {
+            buf[(x, 0)].set_bg(Color::Indexed(75));
+            buf[(x, 1)].set_bg(Color::Indexed(75));
+        }
+        // The pane: columns 1..4 of the top row, as the terminal widget left them.
+        let pane = Passthrough::record(&buf, Rect::new(1, 0, 3, 1));
+        // A modal drawn over the pane's last cell afterwards.
+        buf[(3, 0)].set_symbol("x");
+        pin_cells(&mut buf, &[pane]);
+        let rgb = Color::Rgb(0x5f, 0xaf, 0xff);
+        assert_eq!(buf[(0, 0)].bg, rgb, "cctop's, left of the pane");
+        assert_eq!(buf[(1, 0)].bg, Color::Indexed(75), "the agent's");
+        assert_eq!(buf[(2, 0)].bg, Color::Indexed(75), "the agent's");
+        assert_eq!(buf[(3, 0)].bg, rgb, "drawn over the pane");
+        assert_eq!(buf[(4, 0)].bg, rgb, "cctop's, right of the pane");
+        assert_eq!(buf[(1, 1)].bg, rgb, "below the pane");
+    }
+
+    /// A rectangle reaching past the frame records what is inside it.
+    #[test]
+    fn a_passthrough_is_clipped_to_the_frame() {
+        let mut buf = Buffer::empty(Rect::new(0, 0, 2, 2));
+        buf[(1, 1)].set_bg(Color::Indexed(75));
+        let pane = Passthrough::record(&buf, Rect::new(1, 1, 10, 10));
+        assert_eq!(pane.area, Rect::new(1, 1, 1, 1));
+        pin_cells(&mut buf, &[pane]);
+        assert_eq!(buf[(1, 1)].bg, Color::Indexed(75));
     }
 
     #[test]

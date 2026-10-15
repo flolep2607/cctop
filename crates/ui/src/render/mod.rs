@@ -105,6 +105,10 @@ pub struct Layout {
     /// have granted less room than the pane has, so this is the rectangle a
     /// mouse position can be turned into a cell of.
     pub(super) pane_rects: Vec<Rect>,
+    /// Every terminal drawn this frame — the panes, the preview, the login
+    /// pane — as the terminal widget left it, so the colours an agent printed
+    /// reach the screen as it printed them; see [`theme::pin_indexed`].
+    pub(super) passthrough: Vec<theme::Passthrough>,
     /// `(row, start_col, end_col)` of an address a right-click renames: the
     /// share panel's `Address` line, or the serve panel's internet origin —
     /// recorded only while renaming it is on offer.
@@ -1119,6 +1123,11 @@ fn draw_panes(frame: &mut Frame, area: Rect, app: &mut App, layout: &mut Layout)
                 }
             }
         }
+        // After the blanking, which is cctop's but only ever `Reset`, and
+        // before the banner, which is cctop's and drawn in its palette.
+        layout
+            .passthrough
+            .extend(theme::passthrough(frame.buffer_mut(), screen));
         if let Some(death) = &pane.dead {
             dead_banner(frame, inner, &death.banner(&pane.label));
         }
@@ -1670,6 +1679,7 @@ mod tests {
                 event::KeyEvent::new(event::KeyCode::Enter, event::KeyModifiers::NONE),
             )],
             pane_rects: vec![Rect::new(1, 7, 40, 10)],
+            passthrough: Vec::new(),
             address_row: Some((15, 11, 29)),
             subagent_header: vec![
                 (19, 0, 9, panels::SubagentSort::Last),
