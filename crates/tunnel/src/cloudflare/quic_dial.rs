@@ -45,7 +45,11 @@ pub const DEFAULT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Dial a single edge. Caller owns the `Endpoint` so its UDP
 /// socket stays alive across multiple dials.
-pub async fn dial(endpoint: &Endpoint, edge: &EdgeAddr) -> Result<quinn::Connection, Error> {
+pub async fn dial(
+    endpoint: &Endpoint,
+    edge: &EdgeAddr,
+    handshake: Duration,
+) -> Result<quinn::Connection, Error> {
     let addr: SocketAddr = edge.socket();
     debug!(%addr, "QUIC connect");
     let connecting = endpoint
@@ -54,7 +58,7 @@ pub async fn dial(endpoint: &Endpoint, edge: &EdgeAddr) -> Result<quinn::Connect
             attempts: 1,
             last: format!("connect builder: {e}"),
         })?;
-    match timeout(DEFAULT_HANDSHAKE_TIMEOUT, connecting).await {
+    match timeout(handshake, connecting).await {
         Ok(Ok(conn)) => Ok(conn),
         Ok(Err(e)) => Err(Error::QuicDial {
             attempts: 1,
@@ -68,7 +72,11 @@ pub async fn dial(endpoint: &Endpoint, edge: &EdgeAddr) -> Result<quinn::Connect
 }
 
 /// Try a list of edges in order; stop on first successful handshake.
-pub async fn dial_any(endpoint: &Endpoint, edges: &[EdgeAddr]) -> Result<quinn::Connection, Error> {
+pub async fn dial_any(
+    endpoint: &Endpoint,
+    edges: &[EdgeAddr],
+    handshake: Duration,
+) -> Result<quinn::Connection, Error> {
     if edges.is_empty() {
         return Err(Error::QuicDial {
             attempts: 0,
@@ -77,7 +85,7 @@ pub async fn dial_any(endpoint: &Endpoint, edges: &[EdgeAddr]) -> Result<quinn::
     }
     let mut last_err = String::new();
     for (i, edge) in edges.iter().enumerate() {
-        match dial(endpoint, edge).await {
+        match dial(endpoint, edge, handshake).await {
             Ok(c) => {
                 info!(attempt = i, addr = %edge.socket(), "QUIC handshake OK");
                 return Ok(c);
@@ -99,12 +107,7 @@ pub async fn dial_any(endpoint: &Endpoint, edges: &[EdgeAddr]) -> Result<quinn::
 /// dial many edges concurrently, so callers typically build it
 /// once at supervisor start.
 pub(crate) fn build_endpoint(edge: &EdgeSource) -> Result<Endpoint, Error> {
-    install_crypto_provider();
-    let config = match edge {
-        EdgeSource::Discover => build_client_config(None)?,
-        #[cfg(test)]
-        EdgeSource::Fixed(seam) => build_client_config(Some(seam.root()))?,
-    };
+    let config = finish_client_config(edge_roots(edge)?)?;
     let local: SocketAddr = "0.0.0.0:0".parse().unwrap();
     let mut endpoint = Endpoint::client(local)
         .map_err(|e| Error::Internal(format!("Endpoint::client bind: {e}")))?;
@@ -115,23 +118,29 @@ pub(crate) fn build_endpoint(edge: &EdgeSource) -> Result<Endpoint, Error> {
 /// Install rustls's ring-backed crypto provider exactly once
 /// per-process. Other rustls users in the same binary (hickory's DoT)
 /// share it.
-fn install_crypto_provider() {
+pub(crate) fn install_crypto_provider() {
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
         let _ = rustls::crypto::ring::default_provider().install_default();
     });
 }
 
-/// The client configuration, trusting the system's roots and Cloudflare's
-/// edge CAs — or, given `only`, that one certificate and nothing else, which
-/// is how a test's fake edge is reached without being trusted anywhere else.
-fn build_client_config(only: Option<CertificateDer<'static>>) -> Result<ClientConfig, Error> {
+/// What the edge's certificate is checked against, over either transport:
+/// the system's roots and Cloudflare's edge CAs — or, for a test's fake edge,
+/// its one certificate and nothing else, so that it is trusted nowhere else.
+pub(crate) fn edge_roots(edge: &EdgeSource) -> Result<RootCertStore, Error> {
+    install_crypto_provider();
+    let only: Option<CertificateDer<'static>> = match edge {
+        EdgeSource::Discover => None,
+        #[cfg(test)]
+        EdgeSource::Fixed(seam) => Some(seam.root()),
+    };
     let mut roots = RootCertStore::empty();
     if let Some(cert) = only {
         roots
             .add(cert)
             .map_err(|e| Error::Internal(format!("test root: {e}")))?;
-        return finish_client_config(roots);
+        return Ok(roots);
     }
 
     match rustls_native_certs::load_native_certs() {
@@ -159,7 +168,7 @@ fn build_client_config(only: Option<CertificateDer<'static>>) -> Result<ClientCo
         total = roots.len(),
         "trust anchors built"
     );
-    finish_client_config(roots)
+    Ok(roots)
 }
 
 fn finish_client_config(roots: RootCertStore) -> Result<ClientConfig, Error> {
@@ -196,7 +205,9 @@ mod tests {
     #[tokio::test]
     async fn dial_any_empty_short_circuits() {
         let endpoint = build_endpoint(&EdgeSource::Discover).unwrap();
-        let err = dial_any(&endpoint, &[]).await.unwrap_err();
+        let err = dial_any(&endpoint, &[], DEFAULT_HANDSHAKE_TIMEOUT)
+            .await
+            .unwrap_err();
         match err {
             Error::QuicDial { attempts, .. } => assert_eq!(attempts, 0),
             other => panic!("unexpected: {other:?}"),

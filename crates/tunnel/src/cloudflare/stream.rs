@@ -199,6 +199,32 @@ where
     Ok(())
 }
 
+// ── The response, whichever transport carries it ────────────────────────────
+
+/// The edge-bound half of one request: where the response head goes, then the
+/// body as bytes.
+///
+/// Over QUIC the head is a `ConnectResponse` written into the stream ahead of
+/// the body ([`write_connect_response`]). Over HTTP/2 it is the stream's
+/// response HEADERS frame, built from the same metadata (`http2::H2Out`). The
+/// proxy writes `HttpStatus` and `HttpHeader:<Name>` entries either way and
+/// does not know which it is talking to.
+pub(crate) trait EdgeWrite: futures::io::AsyncWrite + Unpin + Send {
+    /// Send the response head. `error` non-empty says the origin could not be
+    /// reached, and the edge answers the browser with an error page of its own.
+    fn write_head(
+        &mut self,
+        error: &str,
+        metadata: &[MetaPair<'_>],
+    ) -> impl std::future::Future<Output = Result<(), Error>> + Send;
+}
+
+impl EdgeWrite for Compat<quinn::SendStream> {
+    async fn write_head(&mut self, error: &str, metadata: &[MetaPair<'_>]) -> Result<(), Error> {
+        write_connect_response(self, error, metadata).await
+    }
+}
+
 // ── Quinn stream → futures-io bridge ─────────────────────────────────────────
 
 /// Wrap a quinn pair into the futures-io halves capnp + our framing

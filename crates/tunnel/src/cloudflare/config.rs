@@ -79,24 +79,34 @@ impl configuration_manager::Server for ConfigServer {
         let version = params.get_version();
         let config = pry!(params.get_config());
         let mut result = results.get().init_result();
-        let applied = self.ingress.borrow().version;
-        if version <= applied {
-            result.set_latest_applied_version(applied);
-            return Promise::ok(());
-        }
-        match hostnames(config) {
-            Ok(hostnames) => {
-                info!(version, count = hostnames.len(), "applied pushed ingress");
-                self.ingress.send_replace(Ingress { version, hostnames });
-                result.set_latest_applied_version(version);
-            }
-            Err(why) => {
-                warn!(version, %why, "pushed configuration not applied");
-                result.set_latest_applied_version(applied);
-                result.set_err(why.as_str());
-            }
+        let (applied, err) = apply(&self.ingress, version, config);
+        result.set_latest_applied_version(applied);
+        if let Some(why) = err {
+            result.set_err(why.as_str());
         }
         Promise::ok(())
+    }
+}
+
+/// Apply a pushed configuration of `version` unless one as new is in force:
+/// the version in force afterwards, and why `config` was not applied when it
+/// was new and still not applied. The same answer over either transport —
+/// an RPC call over QUIC, a JSON request over HTTP/2.
+pub(crate) fn apply(ingress: &IngressTx, version: i32, config: &[u8]) -> (i32, Option<String>) {
+    let applied = ingress.borrow().version;
+    if version <= applied {
+        return (applied, None);
+    }
+    match hostnames(config) {
+        Ok(hostnames) => {
+            info!(version, count = hostnames.len(), "applied pushed ingress");
+            ingress.send_replace(Ingress { version, hostnames });
+            (version, None)
+        }
+        Err(why) => {
+            warn!(version, %why, "pushed configuration not applied");
+            (applied, Some(why))
+        }
     }
 }
 

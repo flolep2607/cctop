@@ -1,4 +1,5 @@
-//! The accept loop of one registered QUIC connection.
+//! The accept loop of one registered QUIC connection. (HTTP/2's is in
+//! `http2`, and ends in the same [`SupervisorExit`].)
 //!
 //! After registration the edge opens a bidirectional stream for everything it
 //! wants of us, and the first six bytes say which kind:
@@ -37,7 +38,7 @@ pub struct SupervisorMetrics {
 }
 
 impl SupervisorMetrics {
-    fn stream_counters(&self) -> StreamCounters {
+    pub(crate) fn stream_counters(&self) -> StreamCounters {
         StreamCounters {
             bytes_in: self.bytes_in.clone(),
             bytes_out: self.bytes_out.clone(),
@@ -52,6 +53,10 @@ pub enum SupervisorExit {
     Shutdown,
     /// The edge or the local stack closed the connection. Reconnect.
     ConnectionLost,
+    /// The connection went silent until its idle timeout (QUIC) or its pings
+    /// went unanswered (HTTP/2): the path to the edge dropped packets. Reconnect,
+    /// and under `auto`, count it against QUIC (`protocol`).
+    TimedOut,
 }
 
 pub async fn run(
@@ -90,6 +95,10 @@ pub async fn run(
                         warn!(error = %e, "stream failed");
                     }
                 });
+            }
+            Err(quinn::ConnectionError::TimedOut) => {
+                warn!("QUIC connection to the edge timed out");
+                break SupervisorExit::TimedOut;
             }
             Err(e) => {
                 debug!(error = %e, "accept_bi ended; connection lost");

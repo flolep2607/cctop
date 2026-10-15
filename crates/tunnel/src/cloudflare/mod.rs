@@ -3,7 +3,8 @@
 //! They are one protocol. A quick tunnel *is* a named tunnel, on Cloudflare's
 //! account instead of yours: `api.trycloudflare.com` hands back an account
 //! tag, a tunnel id, a secret and a hostname, and from there the client
-//! discovers the edge, dials it over QUIC and registers with exactly the
+//! discovers the edge, dials it over QUIC — or HTTP/2 over TCP where QUIC
+//! does not get through ([`Protocol`]) — and registers with exactly the
 //! credentials a dashboard tunnel token carries. So the two providers differ
 //! only in where the credentials and the hostname come from:
 //!
@@ -27,7 +28,9 @@ mod api;
 mod config;
 mod connector;
 mod edge;
+mod http2;
 mod pool;
+mod protocol;
 mod proxy;
 mod quic_dial;
 mod rpc;
@@ -44,6 +47,7 @@ use std::time::Duration;
 use uuid::Uuid;
 
 use crate::{BoxFuture, Error, Live, Provider, Routes, Tunnel};
+pub use protocol::Protocol;
 pub use token::{TokenError, looks_like_tunnel_token};
 
 /// Budget for everything up to the first registration: asking for a quick
@@ -55,7 +59,7 @@ pub const DEFAULT_START_TIMEOUT: Duration = Duration::from_secs(30);
 /// registration of a dashboard-managed tunnel, so this is generous.
 pub const DEFAULT_CONFIG_WAIT: Duration = Duration::from_secs(10);
 
-/// How many QUIC connections to keep registered, each on its own connection
+/// How many connections to keep registered, each on its own connection
 /// index. cloudflared uses four for named tunnels; two masks a single-POP
 /// reconnect without doubling the traffic.
 pub const DEFAULT_HA_CONNECTIONS: u8 = 2;
@@ -108,6 +112,7 @@ pub struct Quick {
     timeout: Duration,
     ha_connections: u8,
     edge: EdgeSource,
+    protocol: Protocol,
 }
 
 impl Default for Quick {
@@ -117,6 +122,7 @@ impl Default for Quick {
             timeout: DEFAULT_START_TIMEOUT,
             ha_connections: DEFAULT_HA_CONNECTIONS,
             edge: EdgeSource::Discover,
+            protocol: Protocol::Auto,
         }
     }
 }
@@ -124,6 +130,12 @@ impl Default for Quick {
 impl Quick {
     pub fn new() -> Quick {
         Quick::default()
+    }
+
+    /// Carry the tunnel over `protocol` rather than the default, `auto`.
+    pub fn with_protocol(mut self, protocol: Protocol) -> Quick {
+        self.protocol = protocol;
+        self
     }
 }
 
@@ -155,6 +167,7 @@ impl Provider for Quick {
                     routes.clone(),
                     self.ha_connections,
                     &self.edge,
+                    self.protocol,
                 )
                 .await?;
                 Ok(Tunnel::new(url, routes, Box::new(connected.live)))
@@ -173,6 +186,7 @@ pub struct Named {
     config_wait: Duration,
     ha_connections: u8,
     edge: EdgeSource,
+    protocol: Protocol,
 }
 
 impl Named {
@@ -189,7 +203,14 @@ impl Named {
             config_wait: DEFAULT_CONFIG_WAIT,
             ha_connections: DEFAULT_HA_CONNECTIONS,
             edge: EdgeSource::Discover,
+            protocol: Protocol::Auto,
         }
+    }
+
+    /// Carry the tunnel over `protocol` rather than the default, `auto`.
+    pub fn with_protocol(mut self, protocol: Protocol) -> Named {
+        self.protocol = protocol;
+        self
     }
 
     /// The tunnel's id, which is not a secret: it is in the DNS record.
@@ -212,6 +233,7 @@ impl Provider for Named {
                     routes.clone(),
                     self.ha_connections,
                     &self.edge,
+                    self.protocol,
                 ),
             )
             .await
@@ -255,6 +277,7 @@ impl Quick {
             timeout: Duration::from_secs(10),
             ha_connections: 1,
             edge: EdgeSource::Fixed(seam),
+            protocol: Protocol::Auto,
         }
     }
 }

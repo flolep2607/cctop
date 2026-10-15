@@ -1,11 +1,13 @@
 //! A fake argotunnel edge, for tests that must not reach Cloudflare.
 //!
 //! A QUIC server on loopback presenting a self-signed certificate for the
-//! edge's SNI (`cert.pem`/`key.pem` here: made for these tests, trusted by
-//! nothing else, valid for a century). The client under test is pointed at it
-//! through [`Seam`], which replaces edge discovery and the trust roots — and
-//! exists only under `cfg(test)`, so no build of cctop can be pointed at an
-//! "edge" that would be handed the tunnel's secret.
+//! edge's SNIs (`cert.pem`/`key.pem` here: made for these tests, trusted by
+//! nothing else, valid for a century, for `quic.cftunnel.com` and
+//! `h2.cftunnel.com`). Its HTTP/2 twin, over TLS on TCP, is in [`http2`].
+//! The client under test is pointed at it through [`Seam`], which replaces
+//! edge discovery and the trust roots — and exists only under `cfg(test)`,
+//! so no build of cctop can be pointed at an "edge" that would be handed the
+//! tunnel's secret.
 //!
 //! It plays the edge's side of what the client speaks: answers
 //! `registerConnection` (recording what it was sent), and from the test's
@@ -32,13 +34,17 @@ use super::stream::{DATA_STREAM_SIGNATURE, PROTOCOL_V1, RPC_STREAM_SIGNATURE};
 use crate::quic_metadata_protocol_capnp::{ConnectionType, connect_request, connect_response};
 use crate::tunnelrpc_capnp::{configuration_manager, registration_server};
 
+pub(crate) mod http2;
+
 const CERT: &[u8] = include_bytes!("cert.pem");
 const KEY: &[u8] = include_bytes!("key.pem");
 
-/// Where the client under test finds the edge, and the one root it trusts.
+/// Where the client under test finds the edge — over UDP for QUIC, over TCP
+/// for HTTP/2 — and the one root it trusts.
 #[derive(Clone)]
 pub(crate) struct Seam {
     addr: SocketAddr,
+    tcp: SocketAddr,
 }
 
 impl Seam {
@@ -49,9 +55,38 @@ impl Seam {
         }]
     }
 
+    pub(crate) fn tcp_edges(&self) -> Vec<EdgeAddr> {
+        vec![EdgeAddr {
+            ip: self.tcp.ip(),
+            port: self.tcp.port(),
+        }]
+    }
+
     pub(crate) fn root(&self) -> CertificateDer<'static> {
         certificate()
     }
+}
+
+/// A loopback TCP port nothing listens on: connecting is refused at once.
+pub(crate) fn closed_tcp_port() -> SocketAddr {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.local_addr().unwrap()
+}
+
+/// The fake edge's server-side TLS configuration, for either transport.
+pub(crate) fn server_tls(alpn: &[u8]) -> rustls::ServerConfig {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let key = rustls_pemfile::private_key(&mut &KEY[..])
+        .expect("key.pem parses")
+        .expect("a key in key.pem");
+    let mut tls = rustls::ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(vec![certificate()], key)
+        .expect("a usable test certificate");
+    if !alpn.is_empty() {
+        tls.alpn_protocols = vec![alpn.to_vec()];
+    }
+    tls
 }
 
 fn certificate() -> CertificateDer<'static> {
@@ -87,15 +122,7 @@ pub(crate) struct FakeEdge {
 
 impl FakeEdge {
     pub(crate) fn start(answer: Answer) -> FakeEdge {
-        let _ = rustls::crypto::ring::default_provider().install_default();
-        let key = rustls_pemfile::private_key(&mut &KEY[..])
-            .expect("key.pem parses")
-            .expect("a key in key.pem");
-        let mut tls = rustls::ServerConfig::builder()
-            .with_no_client_auth()
-            .with_single_cert(vec![certificate()], key)
-            .expect("a usable test certificate");
-        tls.alpn_protocols = vec![super::quic_dial::ALPN.to_vec()];
+        let tls = server_tls(super::quic_dial::ALPN);
         let crypto = quinn::crypto::rustls::QuicServerConfig::try_from(tls).unwrap();
         let config = quinn::ServerConfig::with_crypto(Arc::new(crypto));
         let endpoint =
@@ -117,7 +144,13 @@ impl FakeEdge {
                 let recorded = recorded.clone();
                 let (registered_tx, registered_rx) = tokio::sync::oneshot::channel();
                 std::thread::spawn(move || {
-                    serve_control(send, recv, recorded, answer, registered_tx)
+                    serve_control(
+                        recv.compat(),
+                        send.compat_write(),
+                        recorded,
+                        answer,
+                        registered_tx,
+                    )
                 });
                 if registered_rx.await.is_ok() {
                     let _ = tx.send(conn);
@@ -125,7 +158,10 @@ impl FakeEdge {
             }
         });
         FakeEdge {
-            seam: Seam { addr },
+            seam: Seam {
+                addr,
+                tcp: closed_tcp_port(),
+            },
             registrations,
             connections: rx,
             _endpoint: endpoint,
@@ -194,13 +230,18 @@ impl registration_server::Server for Registrar {
     }
 }
 
-fn serve_control(
-    send: quinn::SendStream,
-    recv: quinn::RecvStream,
+/// Answer `registerConnection` on a control stream, whichever transport
+/// carries it. On a thread of its own: the RPC system is `!Send`.
+pub(crate) fn serve_control<R, W>(
+    reader: R,
+    writer: W,
     recorded: Arc<Mutex<Vec<Registration>>>,
     answer: Answer,
     registered: tokio::sync::oneshot::Sender<()>,
-) {
+) where
+    R: futures::io::AsyncRead + Unpin + 'static,
+    W: futures::io::AsyncWrite + Unpin + 'static,
+{
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -208,8 +249,8 @@ fn serve_control(
     let local = tokio::task::LocalSet::new();
     local.block_on(&rt, async move {
         let network = Box::new(twoparty::VatNetwork::new(
-            recv.compat(),
-            send.compat_write(),
+            reader,
+            writer,
             rpc_twoparty_capnp::Side::Server,
             Default::default(),
         ));

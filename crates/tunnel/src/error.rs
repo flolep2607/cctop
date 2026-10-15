@@ -32,6 +32,10 @@ pub enum Error {
     #[error("QUIC dial failed after {attempts} attempt(s); last: {last}")]
     QuicDial { attempts: usize, last: String },
 
+    /// TCP or TLS to the edge's HTTP/2 port failed, on every address tried.
+    #[error("HTTP/2 dial to the edge failed: {0}")]
+    Http2Dial(String),
+
     #[error("capnp-RPC RegisterConnection failed: {0}")]
     Register(String),
 
