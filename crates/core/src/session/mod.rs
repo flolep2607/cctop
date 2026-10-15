@@ -962,6 +962,9 @@ fn activity_of(
     provider: crate::pricing::Provider,
     item: &serde_json::Value,
 ) -> Option<ActivityState> {
+    if let Some(state) = turn_ended(item) {
+        return Some(state);
+    }
     if is_api_error_event(item) {
         return Some(ActivityState::ApiError);
     }
@@ -996,6 +999,34 @@ fn is_passive_event(item: &serde_json::Value) -> bool {
             == Some("token_count")
 }
 
+/// Cursor's `{"type":"turn_ended","status":…}` line, the one transcript record
+/// that says outright a turn is over — so unlike the other harnesses, a
+/// finished Cursor turn is visible on disk without a hook.
+///
+/// Cursor files a user's own Stop under `status: "error"` too ("User aborted
+/// request", "Canceled"), and on real transcripts that is 41 of every 42
+/// errors. Read as an API error, nearly every interrupted turn would draw red,
+/// so an error whose text says it was aborted or cancelled is the user's move
+/// like any other ended turn, and only the rest is an API error.
+fn turn_ended(item: &serde_json::Value) -> Option<ActivityState> {
+    if item.get("type").and_then(serde_json::Value::as_str) != Some("turn_ended") {
+        return None;
+    }
+    if item.get("status").and_then(serde_json::Value::as_str) != Some("error") {
+        return Some(ActivityState::WaitingForInput);
+    }
+    let error = item
+        .get("error")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    Some(if error.contains("abort") || error.contains("cancel") {
+        ActivityState::WaitingForInput
+    } else {
+        ActivityState::ApiError
+    })
+}
+
 fn is_api_error_event(item: &serde_json::Value) -> bool {
     let kind = item
         .get("type")
@@ -1021,7 +1052,14 @@ fn is_waiting_for_input_event(
 ) -> bool {
     match provider {
         crate::pricing::Provider::Claude | crate::pricing::Provider::Cursor => {
-            if item.get("type").and_then(serde_json::Value::as_str) != Some("assistant") {
+            // The same message shape, except that Claude Code says whose turn
+            // it is in `type` and Cursor in `role`.
+            let speaker = if provider == crate::pricing::Provider::Cursor {
+                "role"
+            } else {
+                "type"
+            };
+            if item.get(speaker).and_then(serde_json::Value::as_str) != Some("assistant") {
                 return false;
             }
             let Some(blocks) = item
@@ -1096,6 +1134,7 @@ fn is_input_request_tool(name: &str) -> bool {
             | "ask_user_question"
             | "ask_user"
             | "askuser"
+            | "askquestion"
             | "question"
             | "request_user_input"
     )
@@ -1483,6 +1522,61 @@ mod tests {
         session.data_file = Some(path.clone());
         assert_eq!(live_state(&session).0, ActivityState::WaitingForInput);
         let _ = std::fs::remove_file(path);
+    }
+
+    /// Cursor's lines are keyed on `role`, and its `turn_ended` is the only
+    /// record that says a turn is over. A user's Stop is filed as an error too,
+    /// and must not draw red.
+    #[test]
+    fn a_cursor_turn_is_read_off_its_own_lines() {
+        let assistant =
+            r#"{"role":"assistant","message":{"content":[{"type":"text","text":"done"}]}}"#;
+        let state = |last: &str| {
+            let path = temp_path("cursor-tail");
+            std::fs::write(&path, format!("{assistant}\n{last}\n")).expect("write transcript");
+            let mut session = Session::new(Provider::Cursor, "test".into());
+            session.data_file = Some(path.clone());
+            let state = live_state(&session).0;
+            let _ = std::fs::remove_file(path);
+            state
+        };
+        use ActivityState::*;
+        for (last, want) in [
+            (
+                r#"{"type":"turn_ended","status":"success"}"#,
+                WaitingForInput,
+            ),
+            (
+                r#"{"type":"turn_ended","status":"aborted","error":"User aborted/interrupted manually."}"#,
+                WaitingForInput,
+            ),
+            (
+                r#"{"type":"turn_ended","status":"error","error":"User aborted request"}"#,
+                WaitingForInput,
+            ),
+            (
+                r#"{"type":"turn_ended","status":"error","error":"Canceled"}"#,
+                WaitingForInput,
+            ),
+            (
+                r#"{"type":"turn_ended","status":"error","error":"Provider Error We're having trouble"}"#,
+                ApiError,
+            ),
+            (
+                r#"{"role":"user","message":{"content":[{"type":"text","text":"go"}]}}"#,
+                Working,
+            ),
+            (
+                r#"{"role":"assistant","message":{"content":[{"type":"tool_use","name":"AskQuestion","input":{}}]}}"#,
+                WaitingForInput,
+            ),
+            (
+                r#"{"role":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{}}]}}"#,
+                Working,
+            ),
+        ] {
+            assert_eq!(state(last), want, "{last}");
+        }
     }
 
     fn detail(ts: &str, full: &str) -> ToolDetail {
