@@ -133,11 +133,7 @@ fn access_is_set_up_with_the_tunnel_invites_reach_the_policy_and_remove_deletes_
     assert!(list.contains("boss@company.test: full"), "{list}");
 
     let out = cctop(&dir, &api, &["status"], "");
-    assert!(
-        said(&out).contains("access     on"),
-        "{}",
-        said(&out)
-    );
+    assert!(said(&out).contains("access     on"), "{}", said(&out));
 
     let out = cctop(&dir, &api, &["invite", "add", "not an email"], "");
     assert!(!out.status.success());
@@ -199,11 +195,7 @@ fn access_off_deletes_what_was_made_and_keeps_the_tunnel() {
     assert_eq!(gone.len(), 5, "{gone:?}");
     let out = cctop(&dir, &api, &["status"], "");
     assert!(said(&out).contains("dashboard  https://"), "{}", said(&out));
-    assert!(
-        said(&out).contains("access     off"),
-        "{}",
-        said(&out)
-    );
+    assert!(said(&out).contains("access     off"), "{}", said(&out));
     let _ = std::fs::remove_dir_all(&dir);
 }
 
