@@ -308,6 +308,15 @@ pub fn move_page(old: &str, new: &str) {
     SHARES.move_page(old, new);
 }
 
+/// Send shares without a name of their own to `new` from now on, and stop
+/// answering `old`: a renamed default share hostname, without
+/// re-registering the tunnel. `old`'s DNS record is already gone, so its
+/// route would only answer a request nothing can send any more. Nothing when
+/// the tunnel held is not sharing on `old`.
+pub fn move_share_default(old: &str, new: &str) {
+    SHARES.move_share(old, new);
+}
+
 /// The rmux listener port the share front relays the socket to, while this
 /// process lends a tunnel and a share has been routed on it.
 pub fn share_upstream() -> Option<u16> {
@@ -529,6 +538,32 @@ impl Shares {
         lease.routes.insert(new, lease.routes.primary());
         lease.routes.remove(old);
         lease.page = new.to_string();
+    }
+
+    fn move_share(&self, old: &str, new: &str) {
+        let mut lent = self.locked();
+        let Some(lease) = lent.as_mut() else {
+            return;
+        };
+        let Some((default, front)) = lease.share.as_mut() else {
+            return;
+        };
+        // Never onto anything that reaches the page, whatever was saved:
+        // the same refusal [`Shares::route`] makes.
+        if !same_host(default, old)
+            || same_host(new, &lease.page)
+            || lease.routes.port_for(new) == Some(lease.routes.primary())
+        {
+            return;
+        }
+        // Moved only if a share had been minted on it: the front is handed a
+        // hostname on demand ([`Shares::route`]), and a new default nobody
+        // shares on yet is no road to open early.
+        if lease.routes.port_for(old) == Some(*front) {
+            lease.routes.insert(new, *front);
+            lease.routes.remove(old);
+        }
+        *default = new.to_string();
     }
 
     fn generation(&self) -> u64 {
@@ -1213,6 +1248,20 @@ mod tests {
             None,
             "not on old"
         );
+
+        // A renamed default share hostname moves its route and the default
+        // a nameless share is minted on; never onto the page.
+        LOCAL.move_share("cctop-share.example.test", "home.example.test");
+        assert_eq!(routes.port_for("home.example.test"), Some(7777));
+        LOCAL.move_share("cctop-share.example.test", "w.example.test");
+        assert_eq!(routes.port_for("w.example.test"), Some(FRONT));
+        assert_eq!(routes.port_for("cctop-share.example.test"), None);
+        assert_eq!(
+            LOCAL.route(4100, None).as_deref(),
+            Some("https://w.example.test")
+        );
+        LOCAL.move_share("cctop-share.example.test", "x.example.test");
+        assert_eq!(routes.port_for("x.example.test"), None, "not on old");
 
         let held = LOCAL.generation();
         drop(lent);

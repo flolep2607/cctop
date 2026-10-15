@@ -15,8 +15,9 @@ expression: screen
 │config.toml · [tunnel]                                                                                                │
 │  status            connected                   Cloudflare tunnel                                                     │
 │  hostname          cctop.example.com         * dashboard address                                                     │
+│  qr                —                           nothing served · t                                                    │
 │  zone              example.com               * domain · fixed                                                        │
-│  share_hostname    cctop-share.example.com   * W shares · fixed                                                      │
+│  share_hostname    cctop-share.example.com   * W shares · rename breaks links                                        │
 │  access            [x]                       * Cloudflare Access login                                               │
 │  owner             owner@example.com         * Access owner, full                                                    │
 │  public_links      [x]                         token links · cctop-link.example.com                                  │
@@ -26,7 +27,6 @@ expression: screen
 │  remove            y / n                       delete tunnel + DNS?                                                  │
 │                                                                                                                      │
 │  ↵ change   ⌫ reset   e open the file in an editor   Esc back to the table                                           │
-│                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │

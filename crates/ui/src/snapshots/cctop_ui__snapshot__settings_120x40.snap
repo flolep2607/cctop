@@ -30,6 +30,7 @@ expression: screen
 │  idle_after        6                Hours quiet before a live session counts as idle (I)                             │
 │  read_screen       [ ]              Read each agent's screen in a tab for its state, over hooks                      │
 │  paste_debounce_ms 250              Drop a paste repeated within this many ms; 0 = off                               │
+│  predictive_echo   auto         ↻   auto/always/off; auto above 60ms RTT                                             │
 │  footer_hide       ""               Footer items to hide, e.g. "sort,follow" or "share"                              │
 │  footer_note       ""               A note always shown on the footer, e.g. "on-call shift"                          │
 │  footer_command    ""               A command whose first line is shown on the footer, refreshed every 30s           │
@@ -39,6 +40,5 @@ expression: screen
 │  live_only         [ ]              Only sessions that are running                                                   │
 │  age               default      ↻   Hide sessions quiet for longer than                                              │
 │  cost_floor        $0               Only sessions costing at least $X (0 for all)                                    │
-│  bottom_panel      Processes    ↻ * Which panel opens under the table                                                │
-╰ 84   ↑↓ scroll   / filter   Esc back ────────────────────────────────────────────────────────────────────────────────╯
+╰ 85   ↑↓ scroll   / filter   Esc back ────────────────────────────────────────────────────────────────────────────────╯
 / Filter ↵ Change ⌫ Reset e Edit file , Back Alt+←→ Tabs F1 Help F10 Quit                                       ⧉ share

@@ -654,6 +654,25 @@ is logged as `duplicate-kept`: many of those say the window is too short for
 your machine. Only a bracketed paste is caught. A copy that arrives as plain
 keystrokes goes through.
 
+### Typing on a slow remote tab
+
+A tab on a sibling machine goes through Cloudflare, and each key waits a round
+trip — around 120 ms — before its letter appears. So cctop draws the letter
+first, underlined, and lets the far side's echo replace it, as mosh does. A
+guess the far side contradicts, or does not answer in time, is painted back.
+
+It guesses only plain letters typed one at a time at a visible cursor, or at
+Claude Code's own inverse-cell cursor, and only at the end of the text: typing
+into the middle of a line is left to the far side. Enter, Tab, Esc, arrows, control keys,
+pastes, and `/` or `@` on an empty prompt stop the guessing until the far side
+has caught up, and after each of them nothing is drawn until one guess has
+come back right. An app that switches on the kitty keyboard protocol is not
+guessed for at all.
+
+`predictive_echo` sets it: `auto` (the default) draws only once the round trip
+is over 60 ms, and stops below 30; `always` draws whatever it is; `off` never
+guesses. Nothing extra is sent to the other machine either way.
+
 ### Pasting an image
 
 A terminal cannot carry one. A bracketed paste is text, so a screenshot copied

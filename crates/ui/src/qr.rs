@@ -1,7 +1,9 @@
 //! A link drawn as a QR code, for the panels that hand one to another device.
 //!
 //! Two links in cctop are meant to be opened somewhere else: the served table's
-//! tunnel (`B`, then `c`) and a shared terminal's operator link (`W`). Typing a
+//! tunnel (`B`, then `c`, or the `qr` row of Settings' `[tunnel]`) and a shared
+//! terminal's operator link (`W`). A Cloudflare login being waited for is a
+//! third, for a phone that is where the browser is (`q` on its row). Typing a
 //! token off a screen into a phone is nobody's idea of a feature; pointing the
 //! phone at the screen is.
 //!

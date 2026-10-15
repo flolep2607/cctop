@@ -958,6 +958,12 @@ impl App {
         if self.cf.confirm.is_some() {
             return self.tunnel_answer_key(key);
         }
+        // A QR code over the page takes the next key to put it away; with
+        // the filter or a field open, `q` is a letter and not a code.
+        let typing = self.settings_typing || self.settings_input.is_some();
+        if (self.cf.qr.is_some() || !typing) && self.tunnel_qr_key(key) {
+            return;
+        }
         // A value being typed is readline, not navigation: every key that is
         // not Enter or Esc belongs to the field.
         let cap = self.cf.max().unwrap_or(SETTING_MAX);
@@ -1074,6 +1080,7 @@ impl App {
     fn settings_click(&mut self, at: usize) {
         self.settings_capture = false;
         self.cf.confirm = None;
+        self.cf.qr = None;
         if self.settings_input.is_some() {
             self.settings_commit_input();
         }
@@ -1127,6 +1134,7 @@ impl App {
         self.settings_capture = false;
         self.settings_drop_input();
         self.settings_typing = false;
+        self.cf.qr = None;
         self.settings_open = true;
         // A page reached from a bar that has changed under it — a tab closed
         // from another cctop — should not open scrolled to a row that is gone.

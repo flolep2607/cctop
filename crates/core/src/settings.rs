@@ -18,7 +18,7 @@ use std::path::Path;
 
 /// Every `[settings]` key: its name, its default as the file would spell it,
 /// and what it does.
-pub const SETTINGS: [(&str, &str, &str); 20] = [
+pub const SETTINGS: [(&str, &str, &str); 21] = [
     (
         "theme",
         "\"auto\"",
@@ -97,6 +97,11 @@ pub const SETTINGS: [(&str, &str, &str); 20] = [
         "250",
         "Drop a paste repeated within this many ms; 0 = off",
     ),
+    (
+        "predictive_echo",
+        "\"auto\"",
+        "auto/always/off; auto above 60ms RTT",
+    ),
     // The footer.
     (
         "footer_hide",
@@ -123,6 +128,7 @@ pub fn choices(name: &str) -> Option<&'static [&'static str]> {
         // Braille first: every font cctop has met draws it, and the block
         // sets need one with the Legacy Computing characters.
         "graph_glyphs" => Some(&["braille", "octant", "sextant"]),
+        "predictive_echo" => Some(&crate::predict::Mode::NAMES),
         _ => None,
     }
 }
@@ -258,6 +264,9 @@ pub struct Settings {
     /// How close an identical paste must follow the last to be dropped — see
     /// [`Settings::paste_debounce`].
     pub paste_debounce_ms: Option<u64>,
+    /// Whether a remote tab draws typed letters before the far side echoes
+    /// them — see [`crate::predict`]. One of [`crate::predict::Mode::NAMES`].
+    pub predictive_echo: Option<String>,
     /// Names of footer items to leave off — badges, hints and the share corner.
     pub footer_hide: Option<String>,
     /// A static line for the footer.
@@ -326,6 +335,11 @@ impl Settings {
                     "idle_after" => amount(item)
                         .filter(|h| *h > 0.0)
                         .map(|v| out.idle_after = Some(v))
+                        .is_none(),
+                    "predictive_echo" => item
+                        .as_str()
+                        .filter(|v| crate::predict::Mode::parse(v).is_some())
+                        .map(|v| out.predictive_echo = Some(v.into()))
                         .is_none(),
                     "footer_hide" => item
                         .as_str()
@@ -409,6 +423,7 @@ impl Settings {
             "alert_stall" => self.alert_stall.map(|v| v.to_string()),
             "idle_after" => self.idle_after.map(|v| v.to_string()),
             "paste_debounce_ms" => self.paste_debounce_ms.map(|v| v.to_string()),
+            "predictive_echo" => self.predictive_echo.as_ref().map(|v| format!("{v:?}")),
             "footer_hide" => self.footer_hide.as_ref().map(|v| format!("{v:?}")),
             "footer_note" => self.footer_note.as_ref().map(|v| format!("{v:?}")),
             "footer_command" => self.footer_command.as_ref().map(|v| format!("{v:?}")),
@@ -852,6 +867,25 @@ mod tests {
             assert_eq!(is_toggle(name), expected, "{name} and the parser disagree");
         }
         assert!(!is_toggle("no_such_setting"));
+    }
+
+    /// A choice the page steps through starts at the default the template
+    /// writes, and every step is a value the parser keeps — a step it refused
+    /// would land in the panel's problems on the next load.
+    #[test]
+    fn a_choice_starts_at_its_default_and_every_step_parses() {
+        for (name, default, _) in SETTINGS {
+            let Some(options) = choices(name) else {
+                continue;
+            };
+            assert_eq!(format!("{:?}", options[0]), default, "{name}");
+            for option in options {
+                let s = Settings::parse(&format!("[settings]\n{name} = {option:?}"));
+                assert!(s.problems.is_empty(), "{name} = {option}: {:?}", s.problems);
+            }
+        }
+        let s = Settings::parse("[settings]\npredictive_echo = \"on\"");
+        assert_eq!(s.problems.len(), 1, "not one of the three");
     }
 
     /// Every name a choice offers reads back as itself, the default is the

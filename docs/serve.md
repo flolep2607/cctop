@@ -304,10 +304,15 @@ pre-filled; Enter creates the tunnel. Backspace on any of them gives up.
 
 With an account connected, every part of it is a row: `status`, `hostname`
 (Enter renames the dashboard's address, as `e` on it in the serve panel does),
-`zone` and `share_hostname` (fixed at setup), `access`, and `remove`, which asks
-`y / n` and deletes what setup made, as `cctop tunnel remove` does. A call to
-Cloudflare spins in its row, and what it came to — a refusal above all — is that
-row's description until the next change.
+`qr` (Enter draws the served link, token and all, as a QR code over the page
+until any key), `zone` (fixed at setup), `share_hostname` (Enter renames the
+default share hostname — every share link already handed out on the old one
+stops working, which the row says; agents with a name of their own keep it),
+`access`, and `remove`, which asks `y / n` and deletes what setup made, as
+`cctop tunnel remove` does. While a browser login is waited for, `q` on `login`
+draws its address as a QR code. A call to Cloudflare spins in its row, and what
+it came to — a refusal above all — is that row's description until the next
+change.
 
 While that serve runs, terminal shares (`W` in the dashboard) ride the same
 tunnel on the `-share` hostname instead of opening a quick tunnel of their own —

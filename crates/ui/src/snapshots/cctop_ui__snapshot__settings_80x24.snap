@@ -24,5 +24,5 @@ expression: screen
 │  alert_burn        0                Alert when a session burns over $X an ho…│
 │  alert_today       0                Alert when today's spend passes $X       │
 │  alert_errors      0                Alert when X% of 10m of tool calls fail …│
-╰ 84   ↑↓ scroll   / filter   Esc back ────────────────────────────────────────╯
+╰ 85   ↑↓ scroll   / filter   Esc back ────────────────────────────────────────╯
 / Filter ↵ Change ⌫ Reset e Edit file , Back Alt+←→ Tabs F1 Help        ⧉ share

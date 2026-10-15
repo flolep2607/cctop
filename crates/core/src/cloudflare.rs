@@ -1167,6 +1167,82 @@ pub fn name_dashboard_with(api: &Api, account: &Account, input: &str) -> Result<
     })
 }
 
+/// Move the default share hostname — where an agent with no name of its own
+/// shares — to `input`, the way [`name_dashboard_with`] moves the page:
+/// refusals first, then the new record, the ingress list, and the old record
+/// last. Its record is the second of `dns_record_ids`, after the page's,
+/// which is the order [`create`] stores them in.
+///
+/// ponytail: the old hostname is not kept as an alias. A share link carries
+/// the hostname it was minted on, so every link already handed out on the
+/// old default stops answering; keeping it would mean a third kind of record
+/// for `remove` to track, for links that rmux's own token expires anyway. The
+/// row that renames it says so instead. Agents with a name of their own are
+/// not touched.
+pub fn name_default_share_with(
+    api: &Api,
+    account: &Account,
+    input: &str,
+) -> Result<Renamed, Error> {
+    let (zone, tunnel_id) = writable_zone(account)?;
+    if input.trim().is_empty() {
+        return Err(Error::Hostname(
+            "Shares need an address; type one, or Esc to keep this one".to_string(),
+        ));
+    }
+    let label = label_for(input, &zone.name)?;
+    let host = format!("{label}.{}", zone.name);
+    let old = account.share_hostname.clone();
+    if old.as_deref() == Some(host.as_str()) {
+        return Ok(Renamed {
+            account: account.clone(),
+            old: None,
+            new: old,
+            changed: false,
+            note: None,
+        });
+    }
+    // `taken_by` lets the page's own name through when nothing owns the
+    // rename, since that is the dashboard renaming itself; this is not.
+    if account.hostname.as_deref() == Some(host.as_str()) {
+        return Err(Error::Hostname(format!(
+            "{host} is already used by the dashboard"
+        )));
+    }
+    check_free(api, &zone, account, &host, None, &|_| {
+        "another agent's shares".to_string()
+    })?;
+
+    let record = api.add_cname(&zone, &host, &tunnel_id)?;
+    let mut next = account.clone();
+    next.share_hostname = Some(host.clone());
+    let previous = match next.dns_record_ids.get_mut(1) {
+        Some(second) => Some(std::mem::replace(second, record.clone())),
+        None => {
+            next.dns_record_ids.push(record.clone());
+            None
+        }
+    };
+    let names = hostnames(&next);
+    let names: Vec<&str> = names.iter().map(String::as_str).collect();
+    if let Err(e) = api.configure(&zone.account_id, &tunnel_id, &names) {
+        let _ = api.delete_record(&zone.id, &record, &tunnel_id);
+        return Err(e);
+    }
+    let note = previous.as_ref().and_then(|id| {
+        api.delete_record(&zone.id, id, &tunnel_id)
+            .err()
+            .map(|e| left_behind(old.as_deref().unwrap_or_default(), id, &e))
+    });
+    Ok(Renamed {
+        account: next,
+        old,
+        new: Some(host),
+        changed: true,
+        note,
+    })
+}
+
 /// [`name_share_with`] on the connected account, then everything after it:
 /// the account saved, and the given-up name no longer routed. The new name
 /// is routed by the share minted on it. An error is a sentence for the user.
@@ -1201,6 +1277,21 @@ pub fn name_dashboard(input: &str) -> Result<Renamed, String> {
         saved(&renamed)?;
         if let (Some(old), Some(new)) = (&renamed.old, &renamed.new) {
             crate::tunnel::move_page(old, new);
+        }
+    }
+    Ok(renamed)
+}
+
+/// [`name_default_share_with`] on the connected account, then the account
+/// saved and the share front moved to the new hostname while the tunnel is
+/// up, so the next `W` mints its link there without a restart.
+pub fn name_default_share(input: &str) -> Result<Renamed, String> {
+    let (account, api) = connected()?;
+    let renamed = name_default_share_with(&api, &account, input).map_err(|e| e.to_string())?;
+    if renamed.changed {
+        saved(&renamed)?;
+        if let (Some(old), Some(new)) = (&renamed.old, &renamed.new) {
+            crate::tunnel::move_share_default(old, new);
         }
     }
     Ok(renamed)
@@ -1978,6 +2069,61 @@ mod tests {
         );
         let same = name_dashboard_with(&api, &renamed.account, "home.example.test").unwrap();
         assert!(!same.changed);
+    }
+
+    #[test]
+    fn renaming_the_default_share_swaps_its_record_and_leaves_the_page() {
+        let (base, seen) = fake_api(cloudflare(None));
+        let api = Api::at(&base, "made-up-api-token");
+        let account = named_account();
+        let renamed = name_default_share_with(&api, &account, "W.example.test.").unwrap();
+        assert_eq!(renamed.old.as_deref(), Some("cctop-share.example.test"));
+        assert_eq!(renamed.new.as_deref(), Some("w.example.test"));
+        assert_eq!(renamed.note, None);
+        assert_eq!(
+            renamed.account.share_hostname.as_deref(),
+            Some("w.example.test")
+        );
+        assert_eq!(renamed.account.hostname, account.hostname);
+        assert_eq!(renamed.account.share_names, account.share_names);
+        let ids = &renamed.account.dns_record_ids;
+        assert_eq!(ids[0], "rec-page");
+        assert!(
+            ids[1].starts_with("rec-") && ids[1] != "rec-share",
+            "{ids:?}"
+        );
+        assert_eq!(
+            writes(&seen),
+            [
+                "POST /zones/zone1/dns_records",
+                &format!("PUT /accounts/acct1/cfd_tunnel/{TUNNEL_ID}/configurations"),
+                "DELETE /zones/zone1/dns_records/rec-share",
+            ]
+        );
+        // The ingress lists the new default and not the old.
+        let bodies = seen.lock().unwrap().clone();
+        let ingress = &bodies
+            .iter()
+            .rev()
+            .find(|(_, p, _)| p.ends_with("/configurations"))
+            .unwrap()
+            .2;
+        assert!(ingress.contains("w.example.test"), "{ingress}");
+        assert!(!ingress.contains("cctop-share.example.test"), "{ingress}");
+
+        let same = name_default_share_with(&api, &renamed.account, "w").unwrap();
+        assert!(!same.changed);
+
+        // Every refusal comes before a write: the page, an agent's name, a
+        // blank.
+        seen.lock().unwrap().clear();
+        for taken in ["cctop", "taken", " "] {
+            assert!(
+                name_default_share_with(&api, &account, taken).is_err(),
+                "{taken}"
+            );
+        }
+        assert!(writes(&seen).is_empty(), "{:?}", writes(&seen));
     }
 
     #[test]

@@ -784,8 +784,22 @@ fn terminal(machine: &str, path: &str, old: Old, reopen: bool) -> Result<(), Str
     // How much of the far terminal's output this one has been handed since
     // it was opened: where a resume picks up.
     let mut received = 0u64;
+    // One across reconnects: a resume carries on the same byte stream, so
+    // the shadow screen it keeps is still the far side's; a fresh open
+    // redraws over it.
+    let mut predictor = crate::predict::Predictor::new(
+        crate::predict::Mode::configured(),
+        conn.size.1,
+        conn.size.0,
+    );
     loop {
-        let why = match pump(&mut conn.up, &mut conn.decoder, conn.size, &mut received)? {
+        let why = match pump(
+            &mut conn.up,
+            &mut conn.decoder,
+            conn.size,
+            &mut received,
+            &mut predictor,
+        )? {
             End::Closed(None) => return Ok(()),
             End::Closed(Some(why)) => return Err(format!("{machine} closed the terminal: {why}")),
             End::Dropped(why) => why,
@@ -802,6 +816,14 @@ fn terminal(machine: &str, path: &str, old: Old, reopen: bool) -> Result<(), Str
         conn = again;
         if !resumed {
             received = 0;
+        }
+        // Guesses whose keys went down with the old socket are painted back.
+        let back = predictor.reconnected(resumed);
+        if !back.is_empty() {
+            use std::io::Write;
+            let mut stdout = std::io::stdout();
+            let _ = stdout.write_all(&back);
+            let _ = stdout.flush();
         }
     }
 }
@@ -1076,6 +1098,7 @@ fn pump(
     decoder: &mut crate::ws::Decoder,
     mut size: (u16, u16),
     received: &mut u64,
+    predictor: &mut crate::predict::Predictor,
 ) -> Result<End, String> {
     use crate::ws::{Op, frame};
     use std::io::{Read, Write};
@@ -1085,14 +1108,24 @@ fn pump(
     let _raw = Raw(crossterm::terminal::enable_raw_mode().is_ok());
     let mut stdin = std::io::stdin();
     let mut stdout = std::io::stdout();
+    // A second handle on it for the loop, which `deliver` holds the first:
+    // guesses drawn as keys are typed, and taken back when late.
+    let mut screen = std::io::stdout();
     let mut said = std::time::Instant::now();
     let mut heard = std::time::Instant::now();
     let mut buf = [0u8; 16 * 1024];
     let mut incoming = Vec::new();
     let dropped = |e: std::io::Error| End::Dropped(e.to_string());
+    // Sized to this terminal, which may have changed while it was away.
+    let back = predictor.resize(size.1, size.0);
+    screen.write_all(&back).map_err(|e| e.to_string())?;
+    // When the keepalive in flight went out: its pong is a round trip.
+    let mut pinged: Option<std::time::Instant> = None;
     // Every frame decoded so far; `Some` once one of them ends the socket.
     let mut deliver = |decoder: &mut crate::ws::Decoder,
-                       up: &mut crate::peer::Upstream|
+                       up: &mut crate::peer::Upstream,
+                       predictor: &mut crate::predict::Predictor,
+                       pinged: &mut Option<std::time::Instant>|
      -> Result<Option<End>, String> {
         loop {
             let (op, payload) = match decoder.frame() {
@@ -1109,15 +1142,24 @@ fn pump(
                         return Ok(Some(dropped(e)));
                     }
                 }
-                Op::Pong => {}
+                Op::Pong => {
+                    if let Some(at) = pinged.take() {
+                        predictor.rtt_sample(at.elapsed());
+                    }
+                }
                 // Output, counted once it is on this terminal: what a resume
-                // asks the rest from.
+                // asks the rest from. Each is followed by whatever guesses
+                // are still out, drawn again over it.
                 Op::Binary => {
                     stdout.write_all(&payload).map_err(|e| e.to_string())?;
                     *received += payload.len() as u64;
+                    let over = predictor.on_output(&payload, std::time::Instant::now());
+                    stdout.write_all(&over).map_err(|e| e.to_string())?;
                 }
                 Op::Text | Op::Other(_) => {
                     stdout.write_all(&payload).map_err(|e| e.to_string())?;
+                    let over = predictor.on_output(&payload, std::time::Instant::now());
+                    stdout.write_all(&over).map_err(|e| e.to_string())?;
                 }
             }
         }
@@ -1125,7 +1167,7 @@ fn pump(
         Ok(None)
     };
     // Anything that arrived with the handshake's answer.
-    if let Some(end) = deliver(decoder, up)? {
+    if let Some(end) = deliver(decoder, up, predictor, &mut pinged)? {
         return Ok(end);
     }
     loop {
@@ -1141,8 +1183,11 @@ fn pump(
                 revents: 0,
             },
         ];
+        // Woken often while a guess is out, so one nothing answers is taken
+        // back in time.
+        let timeout = if predictor.waiting() { 50 } else { 1000 };
         // SAFETY: two valid pollfds on fds that outlive the call.
-        let ready = unsafe { libc::poll(fds.as_mut_ptr(), 2, 1000) };
+        let ready = unsafe { libc::poll(fds.as_mut_ptr(), 2, timeout) };
         if ready < 0 {
             if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
                 continue;
@@ -1155,6 +1200,8 @@ fn pump(
             && now != size
         {
             size = now;
+            let back = predictor.resize(now.1, now.0);
+            screen.write_all(&back).map_err(|e| e.to_string())?;
             let resize = crate::ws::resize_message(now.0, now.1);
             if let Err(e) = up.write_all(&frame(Op::Text, resize.as_bytes(), true)) {
                 return Ok(dropped(e));
@@ -1166,6 +1213,12 @@ fn pump(
                 return Ok(dropped(e));
             }
             said = std::time::Instant::now();
+            pinged = Some(said);
+        }
+        let late = predictor.tick(std::time::Instant::now());
+        if !late.is_empty() {
+            screen.write_all(&late).map_err(|e| e.to_string())?;
+            screen.flush().map_err(|e| e.to_string())?;
         }
         if heard.elapsed() >= SILENCE {
             return Ok(End::Dropped(format!(
@@ -1176,10 +1229,15 @@ fn pump(
         if fds[0].revents != 0 {
             match stdin.read(&mut buf) {
                 Ok(n) if n > 0 => {
+                    let guess = predictor.on_key(&buf[..n], std::time::Instant::now());
                     if let Err(e) = up.write_all(&frame(Op::Binary, &buf[..n], true)) {
                         return Ok(dropped(e));
                     }
                     said = std::time::Instant::now();
+                    if !guess.is_empty() {
+                        screen.write_all(&guess).map_err(|e| e.to_string())?;
+                        screen.flush().map_err(|e| e.to_string())?;
+                    }
                 }
                 // This terminal went away: the far side's attach is detached
                 // by the socket closing, and the agent there carries on.
@@ -1199,7 +1257,7 @@ fn pump(
                 heard = std::time::Instant::now();
             }
             decoder.push(&incoming);
-            if let Some(end) = deliver(decoder, up)? {
+            if let Some(end) = deliver(decoder, up, predictor, &mut pinged)? {
                 return Ok(end);
             }
             // The socket ended with no close frame: nobody said goodbye, so

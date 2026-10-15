@@ -98,6 +98,67 @@ pub(crate) fn draw_settings(
     );
 }
 
+/// The settings page's QR code, when one is up and its link still is, over
+/// `area` until any key.
+///
+/// Over the page rather than in a row: a code is twenty-odd rows and a row is
+/// one. And over the Overview as well as the pane — the caller passes both —
+/// because a link with its token is 21 rows and a login's 27, four more with
+/// the border and the warning, and the Overview's six are what let a 27-row
+/// terminal show the first and a 33-row one the second. The bar and
+/// the footer stay, so the tab is plainly still underneath.
+///
+/// ponytail: a default 80×24 still says it is too small for either. Fitting
+/// one there means dropping the border and the warning, and a code with no
+/// word on what it hands over is worse than a taller terminal.
+/// Never cropped — [`qr::Qr::fits`] — so a frame too short for it says so.
+pub(crate) fn draw_settings_qr(frame: &mut Frame, area: Rect, app: &App) {
+    use crate::connect::QrOf;
+    let Some(of) = app.cf.qr else { return };
+    let Some(link) = app.qr_link(of) else { return };
+    let (title, warn) = match of {
+        QrOf::Dashboard => (" dashboard link ", "full access · keep it private"),
+        QrOf::Login => (" Cloudflare login ", "logs in as you"),
+    };
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(theme::colors().border_hi))
+        .style(theme::canvas())
+        .title(Line::from(Span::styled(title, theme::title())))
+        .title_bottom(Line::from(Span::styled(" any key closes ", theme::dim())));
+    let inner = block.inner(area);
+    frame.render_widget(Clear, area);
+    frame.render_widget(block, area);
+    // The code, a blank row, and the warning under it, read together.
+    let (text, style, y) = match qr::encode(link) {
+        Some(code) if code.fits(inner.width, inner.height.saturating_sub(2)) => {
+            let top = inner.y + (inner.height - code.height - 2) / 2;
+            let at = Rect {
+                y: top,
+                height: code.height,
+                ..inner
+            };
+            code.draw(at, frame.buffer_mut());
+            let warning = Style::default().fg(theme::colors().cost_mid);
+            (warn, warning, top + code.height + 1)
+        }
+        _ => (
+            "too small for QR · taller terminal",
+            theme::dim(),
+            inner.y + inner.height / 2,
+        ),
+    };
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(text, style)).centered()),
+        Rect {
+            y,
+            height: 1,
+            ..inner
+        }
+        .intersection(inner),
+    );
+}
+
 /// The offset that keeps the cursor's line on screen, moving as little as it
 /// can from where the page already is.
 ///
