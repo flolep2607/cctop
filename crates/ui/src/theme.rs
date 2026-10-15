@@ -43,8 +43,13 @@ pub enum Variant {
 /// How much colour the terminal can show, as far as cctop is concerned.
 ///
 /// Coarser than termprofile's [`TermProfile`] on purpose: every palette here is
-/// indexed, so truecolor draws exactly what 256 colours does, and the only
-/// lines that change what reaches the screen are "sixteen" and "none".
+/// written as indices, so the only lines that change which colours the
+/// palettes *choose* are "sixteen" and "none". Truecolor does not change the
+/// choice, only how it is written: on a terminal that says it takes 24-bit
+/// colour, an index from 16 up goes out as the RGB xterm gives it
+/// ([`pin_indexed`]), because some terminals regenerate those 240 entries from
+/// their sixteen-colour scheme and turn the palettes' pale blue into a navy
+/// that black ink on it cannot be read against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Depth {
     /// 256 colours or more: the palettes as written.
@@ -702,6 +707,81 @@ pub fn truecolor() -> bool {
     *TRUECOLOR.get_or_init(|| truecolor_from(std::env::var("COLORTERM").ok().as_deref()))
 }
 
+/// Whether a palette index from 16 up is written as the RGB xterm's table
+/// gives it rather than as the index: on a truecolor terminal, unless
+/// `CCTOP_INDEXED` is set.
+///
+/// The index is a request for whatever the terminal keeps in that slot, and
+/// the palettes were chosen against xterm's values for them. Most terminals
+/// keep exactly those; some do not. Tabby's `paletteGenerate` (and the like
+/// elsewhere) rebuilds the cube and the grey ramp from the sixteen colours of
+/// the scheme, so under Campbell, whose blue is `#0037DA`, the accent 75
+/// (`#5fafff`) comes out a dark blue and the settings page's cursor — black on
+/// the accent — is unreadable. Writing the RGB says the colour itself, which a
+/// terminal that takes 24-bit colour has no table to reinterpret.
+///
+/// The sixteen are left as indices whatever this says: those are the scheme's
+/// on purpose, and the folded palettes ([`sixteen`]) are written in them.
+///
+/// `CCTOP_INDEXED` is for whoever has themed their 256-colour table on purpose
+/// and wants cctop to follow it: any non-empty value keeps the indices. An
+/// environment variable rather than a setting because it is a fact about the
+/// terminal, read once at start like `$COLORTERM` beside it, and nearly nobody
+/// needs it.
+pub fn exact_indexed() -> bool {
+    static EXACT: OnceLock<bool> = OnceLock::new();
+    *EXACT.get_or_init(|| {
+        exact_indexed_from(truecolor(), std::env::var("CCTOP_INDEXED").ok().as_deref())
+    })
+}
+
+fn exact_indexed_from(truecolor: bool, keep_indices: Option<&str>) -> bool {
+    truecolor && !keep_indices.is_some_and(|v| !v.is_empty())
+}
+
+/// `color` as [`exact_indexed`] writes it: an index from 16 up as its xterm
+/// RGB, and everything else — the sixteen, named colours, `Reset`, RGB already
+/// — as it is.
+pub fn exact(color: Color) -> Color {
+    match color {
+        Color::Indexed(16..=255) => {
+            crate::effects::to_rgb(color).map_or(color, |(r, g, b)| Color::Rgb(r, g, b))
+        }
+        other => other,
+    }
+}
+
+/// Every cell of a finished frame with its indices from 16 up written as RGB,
+/// when [`exact_indexed`] says so and the palette is the 256-colour one.
+///
+/// At the frame rather than at each colour because a colour reaches the
+/// buffer by more ways than the palette: [`gray`] and the tab hues build
+/// theirs, the effects ease and snap to indices, the QR code and the parties
+/// name theirs outright, and a tool's own output and an agent's pane carry
+/// whatever indices they were written with. One pass over the buffer, between
+/// drawing and flushing, cannot miss any of those or the next one added,
+/// where a conversion at each would have to be remembered at every new site.
+/// It is a few thousand cells a frame, and ratatui's diff still writes only
+/// the ones that changed.
+///
+/// ponytail: an agent's pane gets the same treatment, so a program inside
+/// cctop shows a 256-colour index as xterm's value even on a terminal that
+/// would have regenerated it — the value the program was written against —
+/// and `CCTOP_INDEXED` gives the terminal's table back to anyone who wants it.
+pub fn pin_indexed(buf: &mut ratatui::buffer::Buffer) {
+    if colors().depth == Depth::Indexed && exact_indexed() {
+        pin_cells(buf);
+    }
+}
+
+fn pin_cells(buf: &mut ratatui::buffer::Buffer) {
+    for cell in &mut buf.content {
+        cell.fg = exact(cell.fg);
+        cell.bg = exact(cell.bg);
+        cell.underline_color = exact(cell.underline_color);
+    }
+}
+
 fn truecolor_from(colorterm: Option<&str>) -> bool {
     matches!(
         colorterm
@@ -814,8 +894,8 @@ impl termprofile::EnvVarSource for VarSource<'_> {
 ///
 /// termprofile's tmux lookup is switched off: it runs `tmux info` to tell 256
 /// colours from truecolor, which is a process spawned at every start to answer
-/// a question whose answer cctop draws identically either way — and under rmux
-/// `tmux` is a shim for a different multiplexer.
+/// a question this does not ask — whether to write RGB is [`truecolor`]'s, from
+/// `$COLORTERM` — and under rmux `tmux` is a shim for a different multiplexer.
 ///
 /// Sixteen colours only for a terminal *known* to be limited to them. termprofile
 /// also reads a bare `TERM=xterm`, and `CI` being set, as sixteen — and PuTTY
@@ -1890,6 +1970,59 @@ pub(super) mod tests {
         assert!(!truecolor_from(None));
         assert!(!truecolor_from(Some("")));
         assert!(!truecolor_from(Some("256color")));
+    }
+
+    /// The cube and the grey ramp as xterm's table has them; the sixteen, and
+    /// anything that is not an index, untouched.
+    #[test]
+    fn exact_writes_xterms_rgb_for_the_cube_and_greys() {
+        assert_eq!(exact(Color::Indexed(16)), Color::Rgb(0, 0, 0));
+        assert_eq!(exact(Color::Indexed(75)), Color::Rgb(0x5f, 0xaf, 0xff));
+        assert_eq!(exact(Color::Indexed(231)), Color::Rgb(255, 255, 255));
+        assert_eq!(exact(Color::Indexed(232)), Color::Rgb(8, 8, 8));
+        assert_eq!(exact(Color::Indexed(255)), Color::Rgb(238, 238, 238));
+        for kept in [
+            Color::Indexed(0),
+            Color::Indexed(4),
+            Color::Indexed(15),
+            Color::Blue,
+            Color::Black,
+            Color::Reset,
+            Color::Rgb(1, 2, 3),
+        ] {
+            assert_eq!(exact(kept), kept);
+        }
+    }
+
+    /// Only a truecolor terminal gets RGB, and `CCTOP_INDEXED` takes it back;
+    /// set but empty is not set.
+    #[test]
+    fn exact_indexed_is_truecolor_unless_overridden() {
+        assert!(exact_indexed_from(true, None));
+        assert!(exact_indexed_from(true, Some("")));
+        assert!(!exact_indexed_from(true, Some("1")));
+        assert!(!exact_indexed_from(false, None));
+        assert!(!exact_indexed_from(false, Some("1")));
+    }
+
+    /// The settings page's cursor — black on the accent, 75 — is the cell that
+    /// went unreadable; after the pass it names the colour, not the slot.
+    #[test]
+    fn a_frame_is_pinned_cell_by_cell() {
+        use ratatui::buffer::Buffer;
+        use ratatui::layout::Rect;
+        let mut buf = Buffer::empty(Rect::new(0, 0, 3, 1));
+        buf[(0, 0)].set_fg(Color::Black).set_bg(Color::Indexed(75));
+        buf[(1, 0)]
+            .set_fg(Color::Indexed(245))
+            .set_bg(Color::Indexed(4));
+        buf[(2, 0)].underline_color = Color::Indexed(203);
+        pin_cells(&mut buf);
+        assert_eq!(buf[(0, 0)].fg, Color::Black);
+        assert_eq!(buf[(0, 0)].bg, Color::Rgb(0x5f, 0xaf, 0xff));
+        assert_eq!(buf[(1, 0)].fg, Color::Rgb(138, 138, 138));
+        assert_eq!(buf[(1, 0)].bg, Color::Indexed(4));
+        assert_eq!(buf[(2, 0)].underline_color, Color::Rgb(255, 95, 95));
     }
 
     #[test]

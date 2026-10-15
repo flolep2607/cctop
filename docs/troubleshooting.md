@@ -142,3 +142,17 @@ works when you ssh in by hand — name the binary instead:
 ```bash
 cctop --host devbox:/usr/local/bin/cctop
 ```
+
+## A colour is too dark to read, or not the one you expect
+
+cctop's palettes are written in xterm's 256-colour table, and some terminals
+rebuild that table from their sixteen-colour scheme — Tabby's
+`terminal.paletteGenerate`, for one, under which the accent's pale blue comes
+out navy and the settings page's black-on-accent cursor disappears. So on a
+terminal that says it takes 24-bit colour (`COLORTERM=truecolor` or `24bit`),
+cctop writes those colours as the RGB xterm gives them, which no regenerated
+table can change. The sixteen ANSI colours stay your scheme's.
+
+If your terminal takes truecolor but does not set `COLORTERM`, set it yourself.
+If you have themed the 256-colour table on purpose and want cctop to follow it,
+set `CCTOP_INDEXED=1` and the indices go out as they are.
