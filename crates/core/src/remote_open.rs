@@ -920,23 +920,43 @@ fn terminal(machine: &str, path: &str, old: Old, reopen: bool) -> Result<(), Str
             ),
         );
         link.set_state(crate::link_health::State::Reconnecting);
+        let resume = conn.token.take().map(|token| (token, received));
         let Back {
             conn: again,
             resumed,
             unsent,
-        } = reconnect(
-            &peer,
-            Lost {
+        } = loop {
+            let lost = Lost {
                 machine,
                 path,
                 old,
                 reopen,
                 why: &why,
-            },
-            conn.token.take().map(|token| (token, received)),
-            &predictor,
-            &mut std::io::stdout(),
-        )?;
+            };
+            match reconnect(
+                &peer,
+                lost,
+                resume.clone(),
+                &predictor,
+                &mut std::io::stdout(),
+            ) {
+                Ok(back) => break back,
+                Err(NotBack::Over(no)) => return Err(no),
+                Err(NotBack::Unreached(away)) => {
+                    // Keys typed at the notice are not an answer to this.
+                    drop_typed();
+                    if !try_again(
+                        machine,
+                        &away,
+                        &predictor,
+                        &mut std::io::stdin(),
+                        &mut std::io::stdout(),
+                    ) {
+                        return Ok(());
+                    }
+                }
+            }
+        };
         conn = again;
         link.set_state(crate::link_health::State::Connected);
         opened = std::time::Instant::now();
@@ -1005,6 +1025,53 @@ fn notice_text(machine: &str, why: &str) -> String {
 /// reconnect quick enough to show nothing would otherwise lose them unseen.
 fn unsent_text(machine: &str) -> String {
     format!(" {machine} back · typing while away not sent ")
+}
+
+/// The bottom row once getting back has been given up on. The keys come
+/// first: a narrow tab cuts the row short, and the reason can be long.
+fn gave_up_text(machine: &str, away: &str) -> String {
+    format!(
+        " {machine} unreachable for {}s · Enter tries again · q closes the tab · {away} ",
+        RECONNECT_FOR.as_secs()
+    )
+}
+
+/// After [`RECONNECT_FOR`] with no answer, ask the tab whether to go on:
+/// Enter tries again, `q`, Ctrl-C or Ctrl-D closes it. True to try again.
+///
+/// Asked rather than ended, because a machine that went away often comes
+/// back — one whose agent took it down with a crash (#337) is restarted —
+/// and ending meant closing the tab and finding the row again, losing the
+/// far side's last screen on the way. Trying again is [`reconnect`] again:
+/// a session's tab reopens its route when the terminal is gone, which
+/// resumes the agent there if it ended. On the bottom row rather than below
+/// the screen, so a resume carries on over a screen that is still the far
+/// side's and needs nothing redrawn.
+fn try_again(
+    machine: &str,
+    away: &str,
+    predictor: &crate::predict::Predictor,
+    keys: &mut dyn std::io::Read,
+    screen: &mut dyn std::io::Write,
+) -> bool {
+    let _ = screen.write_all(&predictor.notice(&gave_up_text(machine, away)));
+    let _ = screen.flush();
+    let mut buf = [0u8; 64];
+    let again = loop {
+        match keys.read(&mut buf) {
+            Ok(n) if n > 0 => {
+                if let Some(&key) = buf[..n].iter().find(|b| b"\r\nq\x03\x04".contains(b)) {
+                    break matches!(key, b'\r' | b'\n');
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            // This terminal went away: there is no one left to ask.
+            _ => break false,
+        }
+    };
+    let _ = screen.write_all(&predictor.unnotice());
+    let _ = screen.flush();
+    again
 }
 
 /// How long [`unsent_text`] stays up, unless a key takes it down first.
@@ -1080,7 +1147,7 @@ fn reconnect(
     mut resume: Option<(String, u64)>,
     predictor: &crate::predict::Predictor,
     screen: &mut dyn std::io::Write,
-) -> Result<Back, String> {
+) -> Result<Back, NotBack> {
     let Lost {
         machine,
         path,
@@ -1095,7 +1162,7 @@ fn reconnect(
         )
     };
     if resume.is_none() && !reopen {
-        return Err(ended(why));
+        return Err(NotBack::Over(ended(why)));
     }
     let since = std::time::Instant::now();
     let mut said = false;
@@ -1156,7 +1223,7 @@ fn reconnect(
                     if said {
                         draw(predictor.unnotice());
                     }
-                    return Err(ended(&gone));
+                    return Err(NotBack::Over(ended(&gone)));
                 }
                 continue;
             }
@@ -1168,17 +1235,14 @@ fn reconnect(
                 if said {
                     draw(predictor.unnotice());
                 }
-                return Err(no);
+                return Err(NotBack::Over(no));
             }
             Err(Failed::Unreached(away)) if since.elapsed() >= RECONNECT_FOR => {
                 trace(format_args!("{machine} {path}: gave up: {away}"));
                 if said {
                     draw(predictor.unnotice());
                 }
-                return Err(format!(
-                    "lost {machine} and could not reach it again for {}s: {away}",
-                    RECONNECT_FOR.as_secs()
-                ));
+                return Err(NotBack::Unreached(away));
             }
             Err(Failed::Unreached(away)) => {
                 trace(format_args!(
@@ -1211,6 +1275,26 @@ impl From<Failed> for String {
     fn from(failed: Failed) -> String {
         match failed {
             Failed::Refused(why) | Failed::Unreached(why) | Failed::Gone(why) => why,
+        }
+    }
+}
+
+/// Why [`reconnect`] did not get back.
+#[derive(Debug)]
+enum NotBack {
+    /// The far side said no, or the terminal is gone where it may not be
+    /// opened again: asking again will not change it.
+    Over(String),
+    /// Nothing answered for [`RECONNECT_FOR`]. The machine may yet come back
+    /// — a sibling that crashed with its agent is restarted, a laptop lid is
+    /// opened — so the tab offers to try again rather than ending.
+    Unreached(String),
+}
+
+impl From<NotBack> for String {
+    fn from(not: NotBack) -> String {
+        match not {
+            NotBack::Over(why) | NotBack::Unreached(why) => why,
         }
     }
 }
@@ -1954,6 +2038,7 @@ mod tests {
         let predictor = crate::predict::Predictor::new(crate::predict::Mode::Auto, 24, 80);
         reconnect(peer, lost, resume, &predictor, &mut Vec::new())
             .map(|back| (back.conn, back.resumed))
+            .map_err(String::from)
     }
 
     /// Coming back with a token asks for the bytes after what was received,
@@ -2059,6 +2144,33 @@ mod tests {
         let said = String::from_utf8_lossy(&screen);
         assert!(said.contains("box lost: the connection ended"), "{said}");
         assert!(screen.ends_with(&predictor.unnotice()));
+    }
+
+    /// Given up on, the tab waits on the bottom row for Enter to try again or
+    /// `q` to close; other keys are not an answer, and a terminal that went
+    /// away closes it. The row is taken back either way.
+    #[test]
+    fn a_tab_that_gave_up_asks_whether_to_try_again() {
+        let mut predictor = crate::predict::Predictor::new(crate::predict::Mode::Auto, 24, 80);
+        predictor.on_output(b"\x1b[24;1Hstatus line", std::time::Instant::now());
+        for (keys, again) in [
+            (&b"\r"[..], true),
+            (b"xy\r", true),
+            (b"q", false),
+            (b"zq\r", false),
+            (b"\x03", false),
+            (b"", false),
+        ] {
+            let mut screen = Vec::new();
+            let got = try_again("box", "no route", &predictor, &mut &keys[..], &mut screen);
+            assert_eq!(got, again, "{keys:?}");
+            let said = String::from_utf8_lossy(&screen);
+            assert!(
+                said.contains("box unreachable for 120s · Enter tries again"),
+                "{said}"
+            );
+            assert!(screen.ends_with(&predictor.unnotice()), "{said:?}");
+        }
     }
 
     /// Quick tries while a blip is likeliest to be over, then no more than
