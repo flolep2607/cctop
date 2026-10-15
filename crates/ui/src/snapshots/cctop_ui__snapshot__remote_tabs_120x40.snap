@@ -2,7 +2,7 @@
 source: crates/ui/src/snapshot.rs
 expression: screen
 ---
- 1:Dashboard │ 2:claude │ ☁ 3:desk · Fix the login hint │ ⇄ 4:codex · procdb │ + Tab (t) ───────────────────── Settings
+ 1:Dashboard │ 2:claude │ ☁︎ 3:desk · Fix the login hint │ ⇄ 4:codex@procdb │ + Tab (t) ─────────────────────── Settings
 ╭ Overview ────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
 │Live rate         $0.04                               ⡀  Models    █████████ claude-opus-4-1 68% claude-sonnet-4-5 32%│
 │Today             $8.97                               ⡀  Sessions  4 · 2 live · 3 in 24h                              │

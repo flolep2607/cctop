@@ -588,12 +588,14 @@ const ZOOM: &str = "⤢ ";
 /// the tab gets there: a sibling through its Cloudflare tunnel, or ssh — the
 /// arrow the table's Host column puts after a sandboxed row's host.
 ///
-/// One column each, text presentation in plain fonts: the bar's arithmetic
-/// counts chars, and a glyph a terminal draws two wide would push every tab
-/// after it one column off its click target.
+/// One column each: the bar counts it as one, and a glyph a terminal draws two
+/// wide would push every tab after it one column off its click target. The
+/// cloud is an emoji-capable codepoint, so it carries U+FE0E: without it a
+/// browser terminal on Windows draws Segoe UI Emoji's colour cloud, squeezed
+/// into the cell or spilling over the next.
 fn transport_mark(transport: cctop_core::reach::Transport) -> &'static str {
     match transport {
-        cctop_core::reach::Transport::Peer => "☁",
+        cctop_core::reach::Transport::Peer => "☁\u{FE0E}",
         cctop_core::reach::Transport::Ssh => "⇄",
     }
 }
@@ -1229,8 +1231,16 @@ mod tests {
         use cctop_core::reach::Transport;
         for transport in [Transport::Peer, Transport::Ssh] {
             let mark = transport_mark(transport);
-            assert_eq!(mark.chars().count(), 1, "{mark}");
             assert_eq!(unicode_width::UnicodeWidthStr::width(mark), 1, "{mark}");
+            // Miscellaneous Symbols and Dingbats are where emoji presentation
+            // lives: a glyph from there has to ask for text, or a later swap
+            // brings the colour cloud back.
+            let chars: Vec<char> = mark.chars().collect();
+            for (i, c) in chars.iter().enumerate() {
+                if ('\u{2600}'..='\u{27BF}').contains(c) {
+                    assert_eq!(chars.get(i + 1), Some(&'\u{FE0E}'), "{mark}");
+                }
+            }
             assert_eq!(Transport::parse(transport.as_str()), Some(transport));
         }
     }

@@ -989,7 +989,7 @@ fn remote_tabs() {
         .push(tabs::Tab::new(tabs::Pane::for_test("claude")));
     app.tabs
         .push(remote("desk · Fix the login hint", Transport::Peer));
-    app.tabs.push(remote("codex · procdb", Transport::Ssh));
+    app.tabs.push(remote("codex@procdb", Transport::Ssh));
     snap("remote_tabs", &mut app);
 }
 

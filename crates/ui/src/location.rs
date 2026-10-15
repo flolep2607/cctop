@@ -292,9 +292,11 @@ pub(super) fn peer_projects(sessions: &[Session], machine: &str, typed: &str) ->
 /// [`Pane::transport`](tabs::Pane::transport)), not part of the name, so a
 /// rename keeps it. The agent first, because a tab's harness is read off the
 /// front of its name and that is what picks which screen phrases mean
-/// "working" and "asking".
+/// "working" and "asking". `@` rather than the ` · ` a session opened on a
+/// sibling puts after its host, so which side is the machine reads the same
+/// way in both.
 pub(super) fn remote_label(agent: &str, host: &str) -> String {
-    format!("{agent} · {host}")
+    format!("{agent}@{host}")
 }
 
 /// Hosts offered beside the local directories before one is in the field, at

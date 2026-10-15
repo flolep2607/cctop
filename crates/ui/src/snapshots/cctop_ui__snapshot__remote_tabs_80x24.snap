@@ -2,7 +2,7 @@
 source: crates/ui/src/snapshot.rs
 expression: screen
 ---
- 1:Dashboard │ 2:claude │ ☁ 3:desk ·… │ ⇄ 4:codex … │ + Tab (t) ────── Settings
+ 1:Dashboard │ 2:claude │ ☁︎ 3:desk ·… │ ⇄ 4:codex@… │ + Tab (t) ────── Settings
 ╭ Overview ────────────────────────────────────────────────────────────────────╮
 │Live rate         $0.04                               ⡀  Models               │
 │Today             $8.97                               ⡀  Sessions  4 · 2 live │

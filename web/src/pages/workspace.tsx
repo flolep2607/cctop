@@ -36,7 +36,7 @@ function TransportMark({ transport }: { transport: string | null | undefined }) 
   if (!Icon) return null;
   const via = transport === "peer" ? "Cloudflare" : "ssh";
   return (
-    <span className="text-muted-foreground shrink-0" title={"Remote · " + via} aria-label={"Remote, " + via}>
+    <span role="img" className="text-muted-foreground shrink-0" title={"Remote · " + via} aria-label={"Remote, " + via}>
       <Icon className="size-3.5" />
     </span>
   );
