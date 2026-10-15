@@ -187,6 +187,7 @@ pub fn run(
         restore_terminal();
         previous_hook(info);
     }));
+    quit_on_signals();
     let _ = execute!(std::io::stdout(), crossterm::style::Print(MOUSE_ON));
     // Bracketed paste, so a paste arrives as one `Event::Paste` instead of as
     // one `Event::Key` per character. Without it there is no way to tell a paste
@@ -318,6 +319,37 @@ pub fn run(
 /// terminal before cctop — an agent in fullscreen, a cctop that died — can have
 /// left it on. The hover stream it keeps sending is what gets torn.
 const MOUSE_ON: &str = "\x1b[?1003l\x1b[?1000h\x1b[?1002h\x1b[?1006h";
+
+/// Set by a SIGTERM, SIGHUP, SIGINT or SIGQUIT, and read by the loop as a quit.
+static SIGNALLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+extern "C" fn on_quit_signal(_: libc::c_int) {
+    SIGNALLED.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Turn the signals that would end cctop on the spot into a quit.
+///
+/// Left to their defaults, a `kill`, a closed ssh window or a service manager
+/// stopping cctop ends it mid-frame, and the shell is handed back in raw mode
+/// on the alternate screen with mouse reporting on — a terminal that looks
+/// dead until `reset`. Through the loop instead, they take the same way out a
+/// typed quit does: panes ended, then [`restore_terminal`].
+///
+/// A flag rather than the restore itself, because almost nothing is safe to do
+/// inside a handler and an atomic store is. The loop wakes at least once per
+/// `idle_wait` to see it; glibc's `signal` restarts the interrupted `poll`, so
+/// the read in progress is not turned into an error on the way.
+fn quit_on_signals() {
+    for signal in [libc::SIGTERM, libc::SIGHUP, libc::SIGINT, libc::SIGQUIT] {
+        // SAFETY: the handler only performs an atomic store.
+        unsafe {
+            libc::signal(
+                signal,
+                on_quit_signal as extern "C" fn(libc::c_int) as libc::sighandler_t,
+            )
+        };
+    }
+}
 
 /// `ratatui::restore` intentionally only disables raw mode and leaves the
 /// alternate screen; it does not restore cursor visibility. Keep this separate
@@ -976,7 +1008,7 @@ fn event_loop(
             return Ok(code);
         }
 
-        if app.should_quit {
+        if app.should_quit || SIGNALLED.load(std::sync::atomic::Ordering::Relaxed) {
             break;
         }
 
