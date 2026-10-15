@@ -587,7 +587,7 @@ mod tests {
 
     /// What a sibling's launcher learns this machine's accounts from: names
     /// per harness, for a link that could then start an agent, and nothing
-    /// for one that could not.
+    /// for one that could not — a read-only link, or a serve with actions off.
     #[test]
     fn this_machines_accounts_are_named_for_a_full_link_only() {
         cctop_core::config::add_launchable(cctop_core::config::Profile {
@@ -596,7 +596,7 @@ mod tests {
             dir: std::env::temp_dir().join(".codex-cctop-test-listed-acct"),
             source: cctop_core::config::AccountSource::Directory,
         });
-        let s = shared("full", "ro");
+        let mut s = shared("full", "ro");
         assert!(status_of(&s, "GET", "/api/accounts?t=ro", "").contains("403"));
         let said = response_of(&s, "GET", "/api/accounts?t=full", "");
         assert!(said.starts_with("HTTP/1.1 200"), "{said}");
@@ -609,6 +609,8 @@ mod tests {
         );
         assert!(body["claude"].is_array(), "{body}");
         assert!(!said.contains(".codex-cctop-test"), "a directory went out");
+        s.actions = false;
+        assert!(status_of(&s, "GET", "/api/accounts?t=full", "").contains("403"));
     }
 
     /// End to end, as a sibling's launcher reaches it: signed, upgraded, and

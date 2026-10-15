@@ -451,6 +451,11 @@ mod tests {
             ]
         );
         assert_eq!(app.launch_account_name().as_deref(), Some("default"));
+        assert_eq!(
+            app.peer_account_to_send("acct-box", Provider::Claude),
+            None,
+            "untouched, the sibling's own default"
+        );
         app.on_key(key(KeyCode::Down));
         app.on_key(key(KeyCode::Right));
         assert_eq!(app.launch_account_name().as_deref(), Some("work"));
@@ -461,22 +466,28 @@ mod tests {
         assert_eq!(app.launch_account_name().as_deref(), Some("default"));
         app.on_key(key(KeyCode::Char('p')));
         assert_eq!(
-            app.peer_account_on("acct-box", Provider::Claude).as_deref(),
+            app.peer_account_to_send("acct-box", Provider::Claude)
+                .as_deref(),
             Some("work"),
             "what the launch carries"
         );
-        // An account the sibling no longer names falls back to its first.
+        // An account the sibling no longer names falls back to its first,
+        // and is not asked for by name.
         cctop_core::peer::set_accounts("acct-box", "claude", &["default", "spare"]);
         assert_eq!(app.launch_account_name().as_deref(), Some("default"));
+        assert_eq!(app.peer_account_to_send("acct-box", Provider::Claude), None);
 
         // One account, or a harness with none: nothing to pick, nothing sent.
         app.launch_cursor = 1;
         assert!(!app.option_rows().contains(&OptRow::Account));
-        assert_eq!(app.peer_account_on("acct-box", Provider::Codex), None);
+        assert_eq!(app.peer_account_to_send("acct-box", Provider::Codex), None);
         app.launch_cursor = 2;
         assert!(!app.option_rows().contains(&OptRow::Account));
         // A sibling that never said: none either.
-        assert_eq!(app.peer_account_on("acct-silent", Provider::Claude), None);
+        assert_eq!(
+            app.peer_account_to_send("acct-silent", Provider::Claude),
+            None
+        );
     }
 
     /// The models offered are the harness's own names and what this

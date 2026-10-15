@@ -746,7 +746,7 @@ fn launch_options_peer_account() {
         peer: true,
     });
     cctop_core::peer::set_accounts("computer40", "claude", &["default", "work"]);
-    app.launch_peer_account
+    app.launch_peer_picked
         .insert(("computer40".into(), Provider::Claude), "work".into());
     app.mode = Mode::LaunchOptions;
     app.launch_opt_cursor = 1;

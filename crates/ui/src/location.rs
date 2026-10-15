@@ -768,8 +768,9 @@ impl App {
     ///
     /// No ssh anywhere, and no account of this machine's: the account is one
     /// of the sibling's, as it named them, and goes by name for the sibling to
-    /// look up. Where it named fewer than two — or is too old to name any —
-    /// none goes, and the sibling starts it as it always did.
+    /// look up. Where none was picked here, or it named fewer than two — or
+    /// is too old to name any — none goes, and the sibling starts it as it
+    /// always did.
     fn launch_on_peer(
         &mut self,
         argv: &[String],
@@ -785,7 +786,7 @@ impl App {
             }
         };
         let account = Self::profile_provider(std::slice::from_ref(&agent))
-            .and_then(|provider| self.peer_account_on(&target.host, provider));
+            .and_then(|provider| self.peer_account_to_send(&target.host, provider));
         let spec = cctop_core::remote_open::NewAgent {
             agent: agent.clone(),
             dir: target.path.clone(),

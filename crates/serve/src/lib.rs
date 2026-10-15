@@ -1551,9 +1551,11 @@ fn serve_connection(shared: &Shared, stream: &mut TcpStream) {
         }
         // The accounts this machine can start an agent under, by name, for a
         // sibling's launcher to offer (see `cctop_core::peer::accounts`).
-        // Only for a link that could then ask for the launch.
+        // Only where the launch could then be asked for — the same gate as
+        // `open::route_new`, or the far launcher would offer a pick for a
+        // launch that is always refused.
         "/api/accounts" => {
-            if access != Access::Full {
+            if access != Access::Full || !shared.actions {
                 return http::respond_error(
                     stream,
                     Some(&request),
