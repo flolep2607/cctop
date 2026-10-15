@@ -144,10 +144,10 @@ fn disk_id(session: &Session, file: &Path) -> Option<DiskId> {
 /// rather than raw tokens, so a refreshed rate table has to invalidate them just
 /// as an appended transcript does.
 ///
-/// For Claude sessions it also folds in the newest subagent mtime. The parent's
-/// own mtime doesn't move while a subagent streams into its own file, and
-/// neither does the `subagents/` directory mtime, which only changes when files
-/// are added or removed.
+/// For Claude and Cursor sessions it also folds in the newest subagent mtime.
+/// The parent's own mtime doesn't move while a subagent streams into its own
+/// file, and neither does the `subagents/` directory mtime, which only changes
+/// when files are added or removed.
 fn cache_key(path: &Path) -> Option<DiskId> {
     let meta = std::fs::metadata(path).ok()?;
     let mut stamp = format!(
@@ -156,7 +156,7 @@ fn cache_key(path: &Path) -> Option<DiskId> {
         config::file_mtime_ms(path),
         crate::pricing::pricing_epoch()
     );
-    let sub_dir = path.with_extension("").join("subagents");
+    let sub_dir = crate::session::subagents_dir(path);
     if sub_dir.is_dir() {
         // Every transcript a session has, workflow agents included, and every
         // directory one could be removed from — a run's as well as the top's.

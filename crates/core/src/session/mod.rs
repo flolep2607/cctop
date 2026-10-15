@@ -2689,7 +2689,7 @@ fn supersedes(a: &Session, b: &Session) -> bool {
 /// spend, its subagent list, and the mtime that says it is still working.
 pub fn transcript_files(main: &Path) -> Vec<PathBuf> {
     let mut files = vec![main.to_path_buf()];
-    let subagents_dir = main.with_extension("").join("subagents");
+    let subagents_dir = subagents_dir(main);
     for entry in crate::config::list_dir(&subagents_dir) {
         if entry.ends_with(".jsonl") {
             files.push(subagents_dir.join(entry));
@@ -2703,6 +2703,22 @@ pub fn transcript_files(main: &Path) -> Vec<PathBuf> {
         }
     }
     files
+}
+
+/// Where a session's subagents keep their transcripts.
+///
+/// Claude Code puts them in a directory named after the transcript,
+/// `<id>.jsonl` beside `<id>/subagents/`. Cursor already keeps each transcript
+/// in a directory of its own, `<id>/<id>.jsonl`, and its subagents in
+/// `<id>/subagents/` beside it. A Claude Code transcript's directory is its
+/// project, never its own id, so the two cannot be mistaken for each other.
+pub fn subagents_dir(main: &Path) -> PathBuf {
+    match main.parent() {
+        Some(dir) if dir.file_name().is_some() && dir.file_name() == main.file_stem() => {
+            dir.join("subagents")
+        }
+        _ => main.with_extension("").join("subagents"),
+    }
 }
 
 /// Each workflow run's directory under a session's `subagents/`.
@@ -2724,12 +2740,12 @@ pub fn effective_mtime_ms(session: &Session) -> u64 {
         return 0;
     };
     match session.provider {
-        Provider::Claude => transcript_files(f)
+        Provider::Claude | Provider::Cursor => transcript_files(f)
             .iter()
             .map(|p| crate::config::file_mtime_ms(p))
             .max()
             .unwrap_or(0),
-        Provider::Codex | Provider::Cursor | Provider::Devin | Provider::Gemini | Provider::Pi => {
+        Provider::Codex | Provider::Devin | Provider::Gemini | Provider::Pi => {
             crate::config::file_mtime_ms(f)
         }
         // Every OpenCode session shares one WAL-backed database, as every

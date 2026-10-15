@@ -596,7 +596,12 @@ pub fn build_agent(session: &Session, agent: &str, before: Option<usize>) -> Opt
         sidechains: true,
         ..Sink::default()
     };
-    if let Err(e) = claude_line::for_each(&path, |item| sink.claude(item)) {
+    // Only Claude Code and Cursor list subagents with transcripts of their own.
+    let read = match session.provider {
+        Provider::Cursor => extract::for_each_jsonl(&path, |item| sink.cursor(item)),
+        _ => claude_line::for_each(&path, |item| sink.claude(item)),
+    };
+    if let Err(e) = read {
         return Some(unsupported(&format!("could not read the transcript: {e}")));
     }
     Some(Conversation {

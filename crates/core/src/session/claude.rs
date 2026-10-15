@@ -25,7 +25,7 @@ use std::sync::{Arc, LazyLock, Mutex};
 /// finished agent does not linger as "running" for the rest of the session. The
 /// `SubagentStop` hook answers this exactly when it is installed; this is what
 /// the transcript alone can say.
-const SUBAGENT_QUIET_MS: i64 = 30_000;
+pub(super) const SUBAGENT_QUIET_MS: i64 = 30_000;
 
 /// `<command-name>/foo</command-name>` markers left by skill/slash invocations.
 static CMD_RE: LazyLock<Regex> =
