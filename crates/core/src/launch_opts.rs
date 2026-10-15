@@ -135,6 +135,30 @@ pub fn model_ok(agent: &str, model: &str) -> bool {
         && (agent != "opencode" || model.contains('/'))
 }
 
+/// The models a launcher offers `agent`, after its own default: the names it
+/// resolves itself, then every model this machine's sessions of it have run,
+/// most recently used first — the ones actually in use here.
+///
+/// One list for the terminal's launcher and the web's, so the two offer the
+/// same eight.
+pub fn models_offered(agent: &str, sessions: &[crate::session::Session]) -> Vec<String> {
+    let provider = crate::pricing::Provider::parse(agent);
+    let mut recent: Vec<&crate::session::Session> = sessions
+        .iter()
+        .filter(|s| s.remote.is_none() && Some(s.provider) == provider)
+        .collect();
+    recent.sort_by(|a, b| b.last_active.cmp(&a.last_active));
+    let mut seen = std::collections::HashSet::new();
+    model_aliases(agent)
+        .iter()
+        .map(|m| m.to_string())
+        .chain(recent.into_iter().map(|s| s.model.clone()))
+        .filter(|m| model_ok(agent, m))
+        .filter(|m| seen.insert(m.clone()))
+        .take(8)
+        .collect()
+}
+
 /// A launch's settings beyond the agent and the directory.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Options {
@@ -144,6 +168,24 @@ pub struct Options {
 }
 
 impl Options {
+    /// Settings as a request names them, in words: a model, and a
+    /// permission setting by [`Permissions::parse`]'s word, `None` for ask.
+    /// One parse for every door a launch comes through — the web's
+    /// `/api/launch` and the `cctop://` route alike.
+    ///
+    /// Whether the agent takes them is [`Options::flags`]'s to say, at launch.
+    pub fn from_words(model: Option<&str>, permissions: Option<&str>) -> Result<Options, String> {
+        let permissions = match permissions {
+            Some(word) => Permissions::parse(word)
+                .ok_or_else(|| format!("{word:?} is not a permission setting"))?,
+            None => Permissions::Ask,
+        };
+        Ok(Options {
+            model: model.map(str::to_string),
+            permissions,
+        })
+    }
+
     pub fn is_default(&self) -> bool {
         self.model.is_none() && self.permissions == Permissions::Ask
     }

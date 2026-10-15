@@ -176,10 +176,98 @@ impl App {
         profiles.get(at).copied()
     }
 
+    /// Whether the launcher is headed to a sibling, whose accounts — not this
+    /// machine's — are the ones to pick between.
+    fn launching_on_peer(&self) -> bool {
+        self.launch_remote.as_ref().is_some_and(|t| t.peer)
+    }
+
+    /// The sibling the launcher is headed to, and the accounts it said it can
+    /// start the highlighted harness under — `None` for a launch on this
+    /// machine or an ssh host, and when the sibling named fewer than two:
+    /// one, or none because it is too old to say, leaves nothing to pick.
+    pub fn peer_accounts(&self) -> Option<(String, Provider, Vec<String>)> {
+        let target = self.launch_remote.as_ref().filter(|t| t.peer)?;
+        let provider = self.launch_provider()?;
+        let names = cctop_core::peer::accounts(&target.host, provider.as_str());
+        (names.len() > 1).then(|| (target.host.clone(), provider, names))
+    }
+
+    /// The account picked on `host` for `provider`, while `names` — what
+    /// `host` last said it has — still holds it.
+    fn peer_picked<'a>(
+        &self,
+        host: &str,
+        provider: Provider,
+        names: &'a [String],
+    ) -> Option<&'a String> {
+        let picked = self.launch_peer_picked.get(&(host.to_string(), provider))?;
+        names.iter().find(|name| *name == picked)
+    }
+
+    /// The sibling's account the highlighted harness would start under there:
+    /// the one picked, while the sibling still has it, else its first.
+    pub fn launch_peer_account(&self) -> Option<String> {
+        let (host, provider, names) = self.peer_accounts()?;
+        Some(
+            self.peer_picked(&host, provider, &names)
+                .unwrap_or(&names[0])
+                .clone(),
+        )
+    }
+
+    /// The account to ask the sibling `host` for by name: only one picked
+    /// here, and still named there. Untouched, none goes, and the sibling
+    /// starts it under its own default — the first name shown is that
+    /// default as of the last poll, and asking for it by name would refuse
+    /// the launch if it has been renamed since.
+    pub(super) fn peer_account_to_send(&self, host: &str, provider: Provider) -> Option<String> {
+        let names = cctop_core::peer::accounts(host, provider.as_str());
+        if names.len() < 2 {
+            return None;
+        }
+        self.peer_picked(host, provider, &names).cloned()
+    }
+
+    /// The account the highlighted launch would run as, by name, wherever it
+    /// runs: one of the sibling's for a sibling, else one of this machine's.
+    /// `None` where there is nothing to choose between.
+    pub fn launch_account_name(&self) -> Option<String> {
+        match self.launching_on_peer() {
+            true => self.launch_peer_account(),
+            false => self.launch_profile().map(|p| p.name.clone()),
+        }
+    }
+
+    /// How many accounts `p` cycles through for the highlighted launch.
+    pub(super) fn launch_account_count(&self) -> usize {
+        if self.launching_on_peer() {
+            return self.peer_accounts().map_or(1, |(_, _, names)| names.len());
+        }
+        self.launch_provider()
+            .map_or(1, |p| cctop_core::config::launchable_for(p).len())
+    }
+
     /// Move to the next profile of the highlighted harness. Wraps, because with
     /// two — which is the case this exists for — a key that toggles is the whole
     /// interaction.
+    ///
+    /// For a sibling, its accounts rather than this machine's: the agent runs
+    /// there, and this machine's would mean nothing to it.
     pub(super) fn cycle_launch_profile(&mut self) {
+        if self.launching_on_peer() {
+            let Some((host, provider, names)) = self.peer_accounts() else {
+                return;
+            };
+            let at = self
+                .peer_picked(&host, provider, &names)
+                .and_then(|current| names.iter().position(|n| n == current))
+                .unwrap_or(0);
+            let next = names[(at + 1) % names.len()].clone();
+            self.launch_peer_picked.insert((host, provider), next);
+            self.needs_redraw = true;
+            return;
+        }
         let Some(provider) = self.launch_provider() else {
             return;
         };

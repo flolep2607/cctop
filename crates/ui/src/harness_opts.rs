@@ -6,8 +6,9 @@
 //! flags (a model, a permission mode) were not reachable at all. This gathers
 //! them per harness, offering only what that harness takes: a model and a
 //! permission setting where [`cctop_core::launch_opts`] knows its flags, an
-//! account where it has more than one, and a worktree wherever the launch is
-//! into a repository on this machine.
+//! account where it has more than one — a sibling's own, for an agent started
+//! on a sibling ([`cctop_core::peer::accounts`]) — and a worktree wherever the
+//! launch is into a repository on this machine.
 //!
 //! Enter still starts at once, from the list or from here, with whatever the
 //! options say — the defaults, until something is changed. What was changed
@@ -79,9 +80,9 @@ impl App {
         if launch_opts::takes_model(&agent) {
             rows.push(OptRow::Model);
         }
-        // This machine's accounts, so not for an agent a sibling starts.
-        let on_peer = self.launch_remote.as_ref().is_some_and(|t| t.peer);
-        if self.launch_profile().is_some() && !on_peer {
+        // The accounts of whichever machine the agent runs on: a sibling's
+        // as it named them, else this machine's.
+        if self.launch_account_name().is_some() {
             rows.push(OptRow::Account);
         }
         if !launch_opts::permissions_for(&agent).is_empty() {
@@ -107,27 +108,13 @@ impl App {
         self.needs_redraw = true;
     }
 
-    /// The models offered for `agent`, the harness's own default first: the
-    /// names it resolves itself, then every model this machine's sessions of
-    /// it have run, most recently used first — the ones actually in use here.
+    /// The models offered for `agent`, the harness's own default first — see
+    /// [`launch_opts::models_offered`].
     pub fn model_choices(&self, agent: &str) -> Vec<Option<String>> {
-        let provider = cctop_core::pricing::Provider::parse(agent);
-        let mut recent: Vec<&Session> = self
-            .sessions
-            .iter()
-            .filter(|s| s.remote.is_none() && Some(s.provider) == provider)
-            .collect();
-        recent.sort_by(|a, b| b.last_active.cmp(&a.last_active));
-        let mut seen = HashSet::new();
         std::iter::once(None)
             .chain(
-                launch_opts::model_aliases(agent)
-                    .iter()
-                    .map(|m| m.to_string())
-                    .chain(recent.into_iter().map(|s| s.model.clone()))
-                    .filter(|m| launch_opts::model_ok(agent, m))
-                    .filter(|m| seen.insert(m.clone()))
-                    .take(8)
+                launch_opts::models_offered(agent, &self.sessions)
+                    .into_iter()
                     .map(Some),
             )
             .collect()
@@ -174,9 +161,7 @@ impl App {
             OptRow::Account => {
                 // The same cycle `p` is, so the two never disagree; backwards
                 // is all the way round less one.
-                let n = self
-                    .launch_provider()
-                    .map_or(1, |p| cctop_core::config::launchable_for(p).len());
+                let n = self.launch_account_count();
                 let steps = if forward { 1 } else { n.saturating_sub(1) };
                 for _ in 0..steps {
                     self.cycle_launch_profile();
@@ -421,6 +406,74 @@ mod tests {
         app.launch_cursor = 1;
         assert_eq!(app.option_rows(), [OptRow::Worktree]);
         assert_eq!(app.options_for("devin"), HarnessOptions::default());
+    }
+
+    /// On a sibling, the account line is the sibling's: its names, cycled by
+    /// ←/→ and `p`, and gone where it named fewer than two — this machine's
+    /// accounts never stand in for them.
+    #[test]
+    fn a_sibling_offers_its_own_accounts() {
+        let mut app = test_app();
+        on(&mut app, &["claude", "codex", "devin"]);
+        app.launch_remote = Some(location::RemoteTarget {
+            host: "acct-box".into(),
+            path: "~".into(),
+            resolved: None,
+            facts: None,
+            problem: None,
+            unchecked: None,
+            peer: true,
+        });
+        cctop_core::peer::set_accounts("acct-box", "claude", &["default", "work", "spare"]);
+        cctop_core::peer::set_accounts("acct-box", "codex", &["default"]);
+        app.open_launch_options();
+        assert_eq!(
+            app.option_rows(),
+            [
+                OptRow::Model,
+                OptRow::Account,
+                OptRow::Permissions,
+                OptRow::Worktree
+            ]
+        );
+        assert_eq!(app.launch_account_name().as_deref(), Some("default"));
+        assert_eq!(
+            app.peer_account_to_send("acct-box", Provider::Claude),
+            None,
+            "untouched, the sibling's own default"
+        );
+        app.on_key(key(KeyCode::Down));
+        app.on_key(key(KeyCode::Right));
+        assert_eq!(app.launch_account_name().as_deref(), Some("work"));
+        app.on_key(key(KeyCode::Left));
+        app.on_key(key(KeyCode::Left));
+        assert_eq!(app.launch_account_name().as_deref(), Some("spare"));
+        app.on_key(key(KeyCode::Char('p')));
+        assert_eq!(app.launch_account_name().as_deref(), Some("default"));
+        app.on_key(key(KeyCode::Char('p')));
+        assert_eq!(
+            app.peer_account_to_send("acct-box", Provider::Claude)
+                .as_deref(),
+            Some("work"),
+            "what the launch carries"
+        );
+        // An account the sibling no longer names falls back to its first,
+        // and is not asked for by name.
+        cctop_core::peer::set_accounts("acct-box", "claude", &["default", "spare"]);
+        assert_eq!(app.launch_account_name().as_deref(), Some("default"));
+        assert_eq!(app.peer_account_to_send("acct-box", Provider::Claude), None);
+
+        // One account, or a harness with none: nothing to pick, nothing sent.
+        app.launch_cursor = 1;
+        assert!(!app.option_rows().contains(&OptRow::Account));
+        assert_eq!(app.peer_account_to_send("acct-box", Provider::Codex), None);
+        app.launch_cursor = 2;
+        assert!(!app.option_rows().contains(&OptRow::Account));
+        // A sibling that never said: none either.
+        assert_eq!(
+            app.peer_account_to_send("acct-silent", Provider::Claude),
+            None
+        );
     }
 
     /// The models offered are the harness's own names and what this

@@ -1,6 +1,7 @@
 //! OpenCode session discovery and extraction from its current SQLite store.
 
 use super::extract;
+use super::opencode_line::{self, Message, Part};
 use super::readonly;
 use super::{
     ActivityState, ContextUsage, Costs, FallbackRates, ModelBreakdown, Session, SessionData,
@@ -29,7 +30,11 @@ pub fn tool_delta(name: &str, state: &Value) -> Option<super::Delta> {
     if state.get("status").and_then(Value::as_str) != Some("completed") {
         return None;
     }
-    let input = state.get("input")?;
+    input_delta(name, state.get("input")?)
+}
+
+/// [`tool_delta`] for a call already known to have completed.
+fn input_delta(name: &str, input: &Value) -> Option<super::Delta> {
     match name {
         "edit" => extract::edit_delta(input),
         "apply_patch" => input
@@ -38,13 +43,6 @@ pub fn tool_delta(name: &str, state: &Value) -> Option<super::Delta> {
             .map(|patch| extract::parse_apply_patch(patch).1),
         _ => None,
     }
-}
-
-fn tool_duration_ms(state: &Value) -> Option<i64> {
-    let time = state.get("time")?;
-    let start = time.get("start")?.as_i64()?;
-    let end = time.get("end")?.as_i64()?;
-    Some((end - start).max(0))
 }
 
 thread_local! {
@@ -118,10 +116,10 @@ fn activity_state(db: &Connection, session_id: &str) -> ActivityState {
     let Some((message_id, raw)) = message else {
         return ActivityState::Working;
     };
-    let Ok(message) = serde_json::from_str::<Value>(&raw) else {
+    let Some(message) = opencode_line::parse::<opencode_line::Message>(&raw) else {
         return ActivityState::Working;
     };
-    if message.get("role").and_then(Value::as_str) != Some("assistant") {
+    if !message.role.is("assistant") {
         return ActivityState::Working;
     }
     if is_api_failure(&message) {
@@ -141,37 +139,16 @@ fn has_input_request(db: &Connection, message_id: &str) -> bool {
         return false;
     };
     rows.flatten().any(|raw| {
-        let Ok(part) = serde_json::from_str::<Value>(&raw) else {
-            return false;
-        };
-        matches!(
-            part.get("type").and_then(Value::as_str),
-            Some("tool" | "toolCall")
-        ) && part
-            .get("tool")
-            .or_else(|| part.get("name"))
-            .and_then(Value::as_str)
-            .is_some_and(super::is_input_request_tool)
+        opencode_line::parse::<opencode_line::Part>(&raw).is_some_and(|part| {
+            part.kind.is("tool") && part.tool.get().is_some_and(super::is_input_request_tool)
+        })
     })
 }
 
-fn is_api_failure(message: &Value) -> bool {
-    let Some(error) = message.get("error") else {
+fn is_api_failure(message: &opencode_line::Message) -> bool {
+    let Some(text) = message.error_text() else {
         return false;
     };
-    let text = [
-        error.get("name").and_then(Value::as_str),
-        error
-            .get("data")
-            .and_then(|data| data.get("message"))
-            .and_then(Value::as_str),
-        error.get("message").and_then(Value::as_str),
-    ]
-    .into_iter()
-    .flatten()
-    .collect::<Vec<_>>()
-    .join(" ")
-    .to_ascii_lowercase();
     [
         "timeout",
         "timed out",
@@ -333,6 +310,34 @@ pub fn list_sessions() -> Vec<Session> {
     sessions
 }
 
+/// When a session last did something: the newest message's own update stamp,
+/// or one of its parts' if later — a tool call finishing, a reply streaming in.
+///
+/// Not the session row's `time_updated`, which keeps a different clock.
+/// OpenCode moves it for a rename, a share or an archive, and not for every
+/// message: on a real database it trailed the newest message by anything from
+/// a tenth of a second to fifteen hours. It is also the key a cached extraction
+/// is checked against (see [`super::effective_mtime_ms`]), so a stamp that
+/// missed a message kept that message's spend off the row until something else
+/// moved it.
+///
+/// Read through the two indexes OpenCode keeps — a session's messages by time,
+/// a message's parts — so it is two index probes per session, not a scan.
+///
+/// Not the newest message alone: a prompt queued while a reply is still
+/// streaming is created at once, so it is the newest row while the reply
+/// before it keeps writing. The newest few are read, and the latest stamp
+/// among them wins.
+///
+/// ponytail: a subagent is a session of its own, so its work moves the
+/// parent's stamp only when the `task` call that started it returns. And a
+/// reply still streaming behind three or more queued prompts is not seen
+/// until one of them starts.
+const LAST_ENTRY: &str = "(SELECT max(x) FROM (SELECT max(m.time_updated, coalesce(\
+     (SELECT max(p.time_updated) FROM part p WHERE p.message_id = m.id), 0)) AS x \
+     FROM message m WHERE m.session_id = session.id \
+     ORDER BY m.time_created DESC, m.id DESC LIMIT 3))";
+
 fn sessions_in(db: &Connection, path: &Path) -> Vec<Session> {
     let mut sessions = Vec::new();
     // A subagent is a session of its own, with `parent_id` naming the one that
@@ -340,12 +345,17 @@ fn sessions_in(db: &Connection, path: &Path) -> Vec<Session> {
     // here and folded into their parent by `extract`, the way Claude's subagents
     // are. A database from before the column existed has no subagents to hide,
     // so it falls back to the unfiltered query.
-    const COLUMNS: &str =
-        "SELECT id, directory, title, model, time_created, time_updated FROM session";
-    let Ok(mut stmt) = db
-        .prepare(&format!("{COLUMNS} WHERE parent_id IS NULL"))
-        .or_else(|_| db.prepare(COLUMNS))
-    else {
+    //
+    // A database without the columns the last entry is read from falls back
+    // the same way, to the row's own stamp.
+    const COLUMNS: &str = "SELECT id, directory, title, model, time_created, time_updated";
+    let candidates = [
+        format!("{COLUMNS}, {LAST_ENTRY} FROM session WHERE parent_id IS NULL"),
+        format!("{COLUMNS}, {LAST_ENTRY} FROM session"),
+        format!("{COLUMNS}, NULL FROM session WHERE parent_id IS NULL"),
+        format!("{COLUMNS}, NULL FROM session"),
+    ];
+    let Some(mut stmt) = candidates.iter().find_map(|sql| db.prepare(sql).ok()) else {
         return sessions;
     };
     let Ok(rows) = stmt.query_map([], |row| {
@@ -356,12 +366,13 @@ fn sessions_in(db: &Connection, path: &Path) -> Vec<Session> {
             row.get::<_, Option<String>>(3)?,
             row.get::<_, i64>(4)?,
             row.get::<_, i64>(5)?,
+            row.get::<_, Option<i64>>(6)?,
         ))
     }) else {
         return sessions;
     };
     for row in rows.flatten() {
-        let (id, directory, title, model_json, created, updated) = row;
+        let (id, directory, title, model_json, created, updated, last_entry) = row;
         let model = model_json
             .as_deref()
             .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
@@ -369,7 +380,7 @@ fn sessions_in(db: &Connection, path: &Path) -> Vec<Session> {
             .unwrap_or_default();
         let mut session = Session::new(Provider::OpenCode, id);
         session.started_at = util::ms_to_rfc3339(created);
-        session.last_active = util::ms_to_rfc3339(updated);
+        session.last_active = util::ms_to_rfc3339(last_entry.unwrap_or(updated));
         session.label_source = directory;
         session.title = (!title.is_empty()).then_some(title);
         session.model = model;
@@ -379,44 +390,20 @@ fn sessions_in(db: &Connection, path: &Path) -> Vec<Session> {
     sessions
 }
 
-fn u64_at(value: &Value, path: &[&str]) -> u64 {
-    let mut current = value;
-    for key in path {
-        current = current.get(*key).unwrap_or(&Value::Null);
-    }
-    current.as_u64().unwrap_or(0)
-}
-
-fn assistant_usage(value: &Value, rates: &mut FallbackRates) -> (String, String, Tokens, Costs) {
-    let model = value
-        .get("modelID")
-        .and_then(Value::as_str)
-        .unwrap_or("unknown")
-        .to_string();
-    let ts = value
-        .get("time")
-        .and_then(|v| v.get("created"))
-        .and_then(Value::as_i64)
+fn assistant_usage(
+    message: &Message,
+    rates: &mut FallbackRates,
+) -> (String, String, Tokens, Costs) {
+    let model = message.model_id.get().unwrap_or("unknown").to_string();
+    let ts = message
+        .created_ms()
         .map(util::ms_to_rfc3339)
         .unwrap_or_default();
-    let input = u64_at(value, &["tokens", "input"]);
-    let output = u64_at(value, &["tokens", "output"]);
-    let cache_read = u64_at(value, &["tokens", "cache", "read"]);
-    let cache_write = u64_at(value, &["tokens", "cache", "write"]);
-    let reasoning = u64_at(value, &["tokens", "reasoning"]);
-    let tokens = Tokens {
-        input,
-        output,
-        cache_read,
-        cache_write_5m: cache_write,
-        reasoning_output: reasoning,
-        total: input + output + cache_read + cache_write,
-        ..Default::default()
-    };
+    let tokens = message.tokens();
     // OpenCode writes `cost: 0` for providers it has no rates for, which is
     // indistinguishable in the record from a genuinely free model. A cost it did
     // compute is authoritative; a zero falls back to pricing the tokens.
-    let reported = value.get("cost").and_then(Value::as_f64).unwrap_or(0.0);
+    let reported = message.cost.value().unwrap_or(0.0);
     let total = if reported > 0.0 || tokens.total == 0 {
         reported
     } else {
@@ -456,6 +443,93 @@ pub fn extract(path: &Path, session_id: &str) -> SessionData {
         )),
         ..Default::default()
     })
+}
+
+/// Count one tool call: its detail, its outcome, the lines it changed, and the
+/// fetch, search or skill it was.
+fn record_tool(
+    data: &mut SessionData,
+    part: &Part,
+    seen_urls: &mut HashSet<String>,
+    seen_queries: &mut HashSet<String>,
+) {
+    let name = part.tool.get().unwrap_or("unknown");
+    let no_state = opencode_line::ToolState::default();
+    let state = part.state.get().unwrap_or(&no_state);
+    let args = state.input.value();
+    let (short, full) = extract::tool_detail(name, &args);
+    let ts = state
+        .time
+        .get()
+        .and_then(|t| t.start.value())
+        .map(util::ms_to_rfc3339)
+        .unwrap_or_default();
+    extract::push_tool_detail(
+        &mut data.metrics.tool_details,
+        name,
+        short,
+        full,
+        ts,
+        part.call_id.get().map(str::to_string),
+        None,
+    );
+    let m = &mut data.metrics;
+    *m.tools.entry(name.to_string()).or_insert(0) += 1;
+    m.tool_count += 1;
+    // `invalid` is what OpenCode turns a call into when the model named a tool
+    // that does not exist or handed one arguments it refused: it "completes",
+    // but the call the model meant never ran.
+    let failed = state.status.is("error") || name == "invalid";
+    m.tool_errors += u64::from(failed);
+    let delta = state
+        .status
+        .is("completed")
+        .then(|| input_delta(name, &args))
+        .flatten();
+    if let Some(d) = &delta {
+        m.lines_added += u64::from(d.added);
+        m.lines_removed += u64::from(d.removed);
+    }
+
+    let arg = |key: &str| {
+        args.get(key)
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+    };
+    match name {
+        "webfetch" => {
+            if let Some(url) = arg("url") {
+                extract::note_web(&mut m.web_fetches, &mut m.web_fetch_count, seen_urls, url);
+            }
+        }
+        "websearch" | "codesearch" => {
+            if let Some(q) = arg("query") {
+                extract::note_web(
+                    &mut m.web_searches,
+                    &mut m.web_search_count,
+                    seen_queries,
+                    q,
+                );
+            }
+        }
+        "skill" => {
+            if let Some(skill) = arg("name") {
+                *m.skills.entry(skill.to_string()).or_insert(0) += 1;
+                m.skill_count += 1;
+            }
+        }
+        _ => {}
+    }
+
+    if let Some(detail) = m
+        .tool_details
+        .get_mut(name)
+        .and_then(|details| details.last_mut())
+    {
+        detail.delta = delta;
+        detail.dur_ms = state.duration_ms();
+        detail.failed = failed;
+    }
 }
 
 fn extract_of(db: &Connection, session_id: &str) -> SessionData {
@@ -499,15 +573,23 @@ fn extract_of(db: &Connection, session_id: &str) -> SessionData {
         && let Ok(rows) = stmt.query_map(params![session_id], |row| row.get::<_, String>(0))
     {
         for raw in rows.flatten() {
-            let Ok(message) = serde_json::from_str::<Value>(&raw) else {
+            let Some(message) = opencode_line::parse::<Message>(&raw) else {
                 continue;
             };
-            if message.get("role").and_then(Value::as_str) != Some("assistant") {
+            if !message.role.is("assistant") {
                 continue;
             }
             let (model, ts, tokens, costs) = assistant_usage(&message, &mut rates);
             saw_usage = true;
-            data.last_model = model.clone();
+            // The newest turn's, as Codex's is: a session that was switched
+            // from `high` to the default shows the default. A compaction's
+            // summary turn is the summariser's, not a switch, so it leaves
+            // both as the conversation set them.
+            if !message.is_summary() {
+                data.last_model = model.clone();
+                data.reasoning_effort = message.variant.get().map(str::to_string);
+            }
+            data.metrics.api_duration_ms += message.duration_ms().unwrap_or(0);
             add_usage(&mut data, &tokens, &costs);
             let (mt, mc) = breakdown.entry(model.clone()).or_default();
             mt.input += tokens.input;
@@ -563,52 +645,18 @@ fn extract_of(db: &Connection, session_id: &str) -> SessionData {
         db.prepare("SELECT data FROM part WHERE session_id = ?1 ORDER BY time_created, id")
         && let Ok(rows) = stmt.query_map(params![session_id], |row| row.get::<_, String>(0))
     {
+        let mut seen_urls = HashSet::new();
+        let mut seen_queries = HashSet::new();
         for raw in rows.flatten() {
-            let Ok(part) = serde_json::from_str::<Value>(&raw) else {
+            let Some(part) = opencode_line::parse::<Part>(&raw) else {
                 continue;
             };
-            if part.get("type").and_then(Value::as_str) != Some("tool") {
-                continue;
-            }
-            let name = part
-                .get("tool")
-                .and_then(Value::as_str)
-                .unwrap_or("unknown");
-            let state = part.get("state").unwrap_or(&Value::Null);
-            let args = state.get("input").unwrap_or(&Value::Null);
-            let (short, full) = extract::tool_detail(name, args);
-            let delta = tool_delta(name, state);
-            let duration_ms = tool_duration_ms(state);
-            let ts = state
-                .get("time")
-                .and_then(|v| v.get("start"))
-                .and_then(Value::as_i64)
-                .map(util::ms_to_rfc3339)
-                .unwrap_or_default();
-            extract::push_tool_detail(
-                &mut data.metrics.tool_details,
-                name,
-                short,
-                full,
-                ts,
-                part.get("callID")
-                    .and_then(Value::as_str)
-                    .map(str::to_string),
-                None,
-            );
-            *data.metrics.tools.entry(name.to_string()).or_insert(0) += 1;
-            data.metrics.tool_count += 1;
-            let failed = state.get("status").and_then(Value::as_str) == Some("error");
-            data.metrics.tool_errors += u64::from(failed);
-            if let Some(detail) = data
-                .metrics
-                .tool_details
-                .get_mut(name)
-                .and_then(|details| details.last_mut())
-            {
-                detail.delta = delta;
-                detail.dur_ms = duration_ms;
-                detail.failed = failed;
+            match part.kind.or_empty() {
+                // Written where OpenCode cut the conversation down to a summary,
+                // automatically or because the person asked.
+                "compaction" => data.compactions += 1,
+                "tool" => record_tool(&mut data, &part, &mut seen_urls, &mut seen_queries),
+                _ => {}
             }
         }
     }
@@ -801,39 +849,52 @@ fn context_of(db: &Connection, session: &Session) -> Option<ContextUsage> {
     // so walk back past them rather than reading the newest row and giving up.
     let mut stmt = db
         .prepare(
-            "SELECT data FROM message WHERE session_id = ?1 \
+            "SELECT time_created, data FROM message WHERE session_id = ?1 \
              AND json_extract(data, '$.role') = 'assistant' \
              ORDER BY time_created DESC, id DESC LIMIT 40",
         )
         .ok()?;
     let rows = stmt
-        .query_map(params![session.session_id], |row| row.get::<_, String>(0))
+        .query_map(params![session.session_id], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })
         .ok()?;
 
-    for raw in rows.flatten() {
-        let Ok(message) = serde_json::from_str::<Value>(&raw) else {
+    for (created, raw) in rows.flatten() {
+        let Some(message) = opencode_line::parse::<Message>(&raw) else {
             continue;
         };
-        // What the next turn has to resend: everything the model was given,
-        // cached or not. Output is excluded — the next input count includes it.
-        let used = u64_at(&message, &["tokens", "input"])
-            + u64_at(&message, &["tokens", "cache", "read"])
-            + u64_at(&message, &["tokens", "cache", "write"]);
-        if used == 0 {
+        // A compaction's summary turn measured the window being thrown away;
+        // past it, the compaction part is newer than the measured turn and
+        // the row says the window is stale until a real turn measures it.
+        let used = message.window();
+        if used == 0 || message.is_summary() {
             continue;
         }
         let model = message
-            .get("modelID")
-            .and_then(Value::as_str)
+            .model_id
+            .get()
             .filter(|m| !m.is_empty())
             .unwrap_or(&session.model);
         return Some(ContextUsage {
             used,
             max: crate::pricing::litellm_max_input_tokens(model)?,
-            compacted: false,
+            compacted: compacted_since(db, &session.session_id, created),
         });
     }
     None
+}
+
+/// Whether a compaction was written after the turn that last measured the
+/// window, which then describes the window as it stood before it.
+fn compacted_since(db: &Connection, session_id: &str, created: i64) -> bool {
+    db.query_row(
+        "SELECT 1 FROM part WHERE session_id = ?1 AND time_created > ?2 \
+         AND json_extract(data, '$.type') = 'compaction' LIMIT 1",
+        params![session_id, created],
+        |_| Ok(()),
+    )
+    .is_ok()
 }
 
 pub fn extract_last_tool(session: &Session) -> String {
@@ -1204,12 +1265,11 @@ mod tests {
             serde_json::json!({"input_cost_per_token": 1.4e-6, "output_cost_per_token": 4.4e-6}),
         )]);
         let mut rates = FallbackRates::default();
-        let message = serde_json::json!({
-            "role": "assistant",
-            "modelID": "canopywave/zai/glm-5.1",
-            "cost": 0.5,
-            "tokens": {"input": 1_000_000, "output": 0, "cache": {"read": 0, "write": 0}},
-        });
+        let message = opencode_line::parse::<Message>(
+            r#"{"role":"assistant","modelID":"canopywave/zai/glm-5.1","cost":0.5,
+                "tokens":{"input":1000000,"output":0,"cache":{"read":0,"write":0}}}"#,
+        )
+        .unwrap();
         let (_, _, _, costs) = assistant_usage(&message, &mut rates);
         assert!((costs.total - 0.5).abs() < 1e-9);
     }
@@ -1403,6 +1463,233 @@ mod tests {
         );
 
         close_databases();
+        std::fs::remove_file(path).unwrap();
+    }
+
+    /// The three tables as a current OpenCode creates them, trimmed to the
+    /// columns cctop reads. Hand-built from the schema, with made-up rows.
+    fn current_schema(path: &Path) -> Connection {
+        let db = Connection::open(path).unwrap();
+        db.execute_batch(
+            "CREATE TABLE session (
+                id TEXT PRIMARY KEY, parent_id TEXT, agent TEXT, directory TEXT NOT NULL,
+                title TEXT NOT NULL, model TEXT, cost REAL NOT NULL DEFAULT 0,
+                tokens_input INTEGER NOT NULL DEFAULT 0, tokens_output INTEGER NOT NULL DEFAULT 0,
+                tokens_reasoning INTEGER NOT NULL DEFAULT 0,
+                tokens_cache_read INTEGER NOT NULL DEFAULT 0,
+                tokens_cache_write INTEGER NOT NULL DEFAULT 0,
+                time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL
+             );
+             CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT NOT NULL,
+                time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL, data TEXT NOT NULL);
+             CREATE INDEX message_session_time_created_id_idx ON message (session_id, time_created, id);
+             CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT NOT NULL, session_id TEXT NOT NULL,
+                time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL, data TEXT NOT NULL);
+             CREATE INDEX part_message_id_id_idx ON part (message_id, id);",
+        )
+        .unwrap();
+        db
+    }
+
+    fn part(db: &Connection, id: &str, message: &str, at: i64, data: &str) {
+        db.execute(
+            "INSERT INTO part VALUES (?1, ?2, 'ses_t', ?3, ?3, ?4)",
+            params![id, message, at, data],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn typed_rows_fill_effort_lines_web_skills_and_compactions() {
+        let path = temp_db("typed");
+        let db = current_schema(&path);
+        db.execute(
+            "INSERT INTO session (id, directory, title, time_created, time_updated) \
+             VALUES ('ses_t', '/w', 't', 1000, 1000)",
+            [],
+        )
+        .unwrap();
+        for (id, at, data) in [
+            (
+                "msg_1",
+                2000,
+                r#"{"role":"user","time":{"created":2000},"agent":"build"}"#,
+            ),
+            (
+                "msg_2",
+                3000,
+                r#"{"role":"assistant","modelID":"m","providerID":"p","variant":"high","cost":0.1,"time":{"created":3000,"completed":7000},"tokens":{"input":10,"output":2,"reasoning":0,"cache":{"read":0,"write":0}},"finish":"tool-calls"}"#,
+            ),
+            (
+                "msg_3",
+                8000,
+                r#"{"role":"assistant","modelID":"m","variant":"medium","cost":0.1,"time":{"created":8000,"completed":9000},"tokens":{"input":10,"output":2,"cache":{"read":5,"write":0}},"error":{"name":"MessageAbortedError","data":{}}}"#,
+            ),
+        ] {
+            db.execute(
+                "INSERT INTO message VALUES (?1, 'ses_t', ?2, ?2, ?3)",
+                params![id, at, data],
+            )
+            .unwrap();
+        }
+        part(
+            &db,
+            "p1",
+            "msg_2",
+            3100,
+            r#"{"type":"step-start","snapshot":"x"}"#,
+        );
+        part(
+            &db,
+            "p2",
+            "msg_2",
+            3200,
+            r#"{"type":"tool","tool":"edit","callID":"c1","state":{"status":"completed","input":{"filePath":"a.rs","oldString":"a","newString":"b\nc"},"time":{"start":3200,"end":3300}}}"#,
+        );
+        part(
+            &db,
+            "p3",
+            "msg_2",
+            3400,
+            r#"{"type":"tool","tool":"webfetch","callID":"c2","state":{"status":"completed","input":{"url":"https://example.invalid/doc","format":"markdown"},"time":{"start":3400,"end":3500}}}"#,
+        );
+        part(
+            &db,
+            "p4",
+            "msg_2",
+            3600,
+            r#"{"type":"tool","tool":"skill","callID":"c3","state":{"status":"completed","input":{"name":"run"},"time":{"start":3600,"end":3700}}}"#,
+        );
+        part(
+            &db,
+            "p5",
+            "msg_2",
+            3800,
+            r#"{"type":"tool","tool":"invalid","callID":"c4","state":{"status":"completed","input":{"tool":"nope","error":"unknown"},"time":{"start":3800,"end":3810}}}"#,
+        );
+        part(
+            &db,
+            "p6",
+            "msg_3",
+            8100,
+            r#"{"type":"compaction","auto":true}"#,
+        );
+        part(
+            &db,
+            "p7",
+            "msg_3",
+            8200,
+            r#"{"type":"some-future-part","x":[1]}"#,
+        );
+        part(&db, "p8", "msg_3", 8300, "not json");
+        drop(db);
+
+        let data = extract(&path, "ses_t");
+        let m = &data.metrics;
+        assert_eq!(
+            data.reasoning_effort.as_deref(),
+            Some("medium"),
+            "newest turn's"
+        );
+        assert_eq!(data.compactions, 1);
+        assert_eq!(m.api_duration_ms, 5000);
+        assert_eq!((m.lines_added, m.lines_removed), (2, 1));
+        assert_eq!(m.web_fetches, ["https://example.invalid/doc"]);
+        assert_eq!(m.web_fetch_count, 1);
+        assert_eq!(m.skills.get("run"), Some(&1));
+        assert_eq!(m.tool_count, 4);
+        assert_eq!(m.tool_errors, 1, "an invalid call is one that never ran");
+        assert_eq!(data.tokens.total, 29);
+
+        close_databases();
+        std::fs::remove_file(path).unwrap();
+    }
+
+    /// The row's `time_updated` trails real activity; the listing reads the
+    /// newest message and its parts instead.
+    #[test]
+    fn last_activity_is_the_newest_message_or_part() {
+        let path = temp_db("last");
+        let db = current_schema(&path);
+        db.execute_batch(
+            "INSERT INTO session (id, directory, title, time_created, time_updated) VALUES
+                ('ses_t', '/w', 't', 1000, 1500),
+                ('ses_empty', '/w', 'e', 1000, 1200);
+             INSERT INTO message VALUES ('m1', 'ses_t', 2000, 2500, '{}');
+             INSERT INTO message VALUES ('m2', 'ses_t', 3000, 3100, '{}');
+             -- A prompt queued while m2's reply was still streaming.
+             INSERT INTO message VALUES ('m3', 'ses_t', 4000, 4000, '{}');",
+        )
+        .unwrap();
+        part(&db, "p1", "m2", 3000, "{}");
+        db.execute("UPDATE part SET time_updated = 9000 WHERE id = 'p1'", [])
+            .unwrap();
+        let sessions = sessions_in(&db, &path);
+        drop(db);
+
+        let at = |id: &str| {
+            sessions
+                .iter()
+                .find(|s| s.session_id == id)
+                .map(|s| s.last_active.clone())
+                .unwrap()
+        };
+        assert_eq!(
+            at("ses_t"),
+            util::ms_to_rfc3339(9000),
+            "the part that finished last"
+        );
+        assert_eq!(
+            at("ses_empty"),
+            util::ms_to_rfc3339(1200),
+            "no messages: the row's own"
+        );
+
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn a_compaction_after_the_measured_turn_marks_the_window_stale() {
+        let _rates = crate::pricing::install_test_table(&[(
+            "m",
+            serde_json::json!({
+                "input_cost_per_token": 1e-6,
+                "output_cost_per_token": 1e-6,
+                "max_input_tokens": 100,
+            }),
+        )]);
+        let path = temp_db("compacted");
+        let db = current_schema(&path);
+        db.execute(
+            "INSERT INTO message VALUES ('m1', 'ses_t', 2000, 2000, ?1)",
+            params![r#"{"role":"assistant","modelID":"m","tokens":{"input":30,"cache":{"read":20,"write":5}}}"#],
+        )
+        .unwrap();
+        let mut session = Session::new(Provider::OpenCode, "ses_t".into());
+        session.data_file = Some(path.clone());
+        let ctx = context_of(&db, &session).unwrap();
+        assert_eq!((ctx.used, ctx.max, ctx.compacted), (55, 100, false));
+
+        part(
+            &db,
+            "p1",
+            "m1",
+            2500,
+            r#"{"type":"compaction","auto":false}"#,
+        );
+        assert!(context_of(&db, &session).unwrap().compacted);
+
+        // The summariser's turn, written just after the compaction part with
+        // the old window as its input, is not the window the session goes on
+        // with: the measure stays the last real turn's, marked stale.
+        db.execute(
+            "INSERT INTO message VALUES ('m2', 'ses_t', 2567, 2567, ?1)",
+            params![r#"{"role":"assistant","modelID":"m","summary":true,"mode":"compaction","tokens":{"input":90}}"#],
+        )
+        .unwrap();
+        let ctx = context_of(&db, &session).unwrap();
+        assert_eq!((ctx.used, ctx.compacted), (55, true));
+        drop(db);
         std::fs::remove_file(path).unwrap();
     }
 }

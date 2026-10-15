@@ -1,7 +1,15 @@
 //! Pi coding-agent session discovery and JSONL extraction.
+//!
+//! Every read goes through the typed entries of [`super::pi_line`]. What the
+//! table shows for a Pi session is what Pi wrote down: each turn's tokens and
+//! dollars, each tool call and whether its result was an error, the thinking
+//! level, compactions, and — from the newest turn's usage — how full the
+//! window is.
 
-use super::extract::{self, for_each_jsonl};
-use super::{Costs, FallbackRates, ModelBreakdown, Session, SessionData, Tokens};
+use super::extract;
+use super::lenient::Lenient;
+use super::pi_line;
+use super::{ContextUsage, Costs, FallbackRates, ModelBreakdown, Session, SessionData, Tokens};
 use crate::config;
 use crate::pricing::Provider;
 use crate::util;
@@ -46,43 +54,33 @@ pub fn list_sessions() -> Vec<Session> {
         let mut title = None;
         let mut model = String::new();
 
-        let _ = for_each_jsonl(&path, |item| {
-            match item.get("type").and_then(Value::as_str) {
-                Some("session") => {
-                    if let Some(id) = item.get("id").and_then(Value::as_str) {
-                        session_id = id.to_string();
-                    }
-                    started = item
-                        .get("timestamp")
-                        .and_then(Value::as_str)
-                        .unwrap_or("")
-                        .to_string();
-                    cwd = item
-                        .get("cwd")
-                        .and_then(Value::as_str)
-                        .unwrap_or("")
-                        .to_string();
-                    last = started.clone();
+        let _ = pi_line::for_each(&path, |entry| match entry.kind.or_empty() {
+            "session" => {
+                if let Some(id) = entry.id.get() {
+                    session_id = id.to_string();
                 }
-                Some("session_info") => {
-                    title = item.get("name").and_then(Value::as_str).map(str::to_string);
-                }
-                Some("message") => {
-                    let Some(message) = item.get("message") else {
-                        return;
-                    };
-                    let ts = message_ts(item, message);
-                    if ts > last {
-                        last = ts;
-                    }
-                    if message.get("role").and_then(Value::as_str) == Some("assistant")
-                        && let Some(m) = message.get("model").and_then(Value::as_str)
-                    {
-                        model = m.to_string();
-                    }
-                }
-                _ => {}
+                started = entry.timestamp.or_empty().to_string();
+                cwd = entry.cwd.or_empty().to_string();
+                last = started.clone();
             }
+            "session_info" => title = entry.name.get().map(str::to_string),
+            "message" => {
+                let Some(message) = entry.message() else {
+                    return;
+                };
+                // Only a message is the session doing something: a rename or a
+                // model switch written afterwards is not activity.
+                let ts = entry.ts();
+                if ts > last {
+                    last = ts;
+                }
+                if message.role.is("assistant")
+                    && let Some(m) = message.model.get()
+                {
+                    model = m.to_string();
+                }
+            }
+            _ => {}
         });
 
         if session_id.is_empty() || started.is_empty() {
@@ -101,12 +99,48 @@ pub fn list_sessions() -> Vec<Session> {
     sessions
 }
 
-fn usage_number(usage: &Value, key: &str) -> u64 {
-    usage.get(key).and_then(Value::as_u64).unwrap_or(0)
+/// The lines an edit or a write changed, from the arguments Pi's own tools
+/// take.
+///
+/// `edit` replaces `oldText` with `newText`, or each such pair in a list under
+/// `edits`; `write` is handed the whole file as `content`. Pi's spellings are
+/// mapped onto the ones [`extract::edit_delta`] reads rather than taught to
+/// every other harness's reader.
+fn edit_delta(name: &str, args: &Value) -> Option<super::Delta> {
+    let pair = |v: &Value| {
+        serde_json::json!({
+            "old_string": v.get("oldText"),
+            "new_string": v.get("newText"),
+        })
+    };
+    match name {
+        "edit" => {
+            let pairs: Vec<Value> = match args.get("edits").and_then(Value::as_array) {
+                Some(edits) => edits.iter().map(pair).collect(),
+                None => vec![pair(args)],
+            };
+            let mut total = super::Delta::default();
+            for delta in pairs.iter().filter_map(extract::edit_delta) {
+                total.added += delta.added;
+                total.removed += delta.removed;
+                let room = crate::config::MAX_DIFF_LINES.saturating_sub(total.hunks.len());
+                total.hunks.extend(delta.hunks.into_iter().take(room));
+            }
+            (total.added > 0 || total.removed > 0).then_some(total)
+        }
+        // ponytail: a write's removed lines are whatever the file held before,
+        // which the call does not record; only what it wrote is counted.
+        "write" => extract::edit_delta(&serde_json::json!({ "content": args.get("content") })),
+        _ => None,
+    }
 }
 
-fn cost_number(cost: &Value, key: &str) -> f64 {
-    cost.get(key).and_then(Value::as_f64).unwrap_or(0.0)
+fn count(n: &Lenient<u64>) -> u64 {
+    n.value().unwrap_or(0)
+}
+
+fn dollars(n: &Lenient<f64>) -> f64 {
+    n.value().unwrap_or(0.0)
 }
 
 /// Parse Pi's documented session JSONL format.
@@ -115,54 +149,86 @@ fn cost_number(cost: &Value, key: &str) -> f64 {
 /// from a model ID. The exception is a turn Pi priced at nothing while reporting
 /// tokens, which is what a provider it has no rates for produces: those are
 /// priced from LiteLLM, since reporting them as free hides real spend.
+///
+/// Every tool call is answered by a `toolResult` message naming it, which says
+/// whether it failed and, by its own stamp, when it finished.
 pub fn extract(path: &Path) -> SessionData {
     let mut data = SessionData::default();
     let mut breakdown: HashMap<String, (Tokens, Costs)> = HashMap::new();
     let mut rates = FallbackRates::default();
+    // Call id -> the tool it called, and when the turn that made it was sealed.
+    let mut open_calls: HashMap<String, (String, Option<i64>)> = HashMap::new();
 
-    let result = for_each_jsonl(path, |item| {
-        if item.get("type").and_then(Value::as_str) == Some("session_info") {
-            data.title = item.get("name").and_then(Value::as_str).map(str::to_string);
-            return;
+    let result = pi_line::for_each(path, |entry| {
+        match entry.kind.or_empty() {
+            "session_info" => {
+                data.title = entry.name.get().map(str::to_string);
+                return;
+            }
+            "thinking_level_change" => {
+                data.reasoning_effort = entry.thinking_level.get().map(str::to_string);
+                return;
+            }
+            "compaction" => {
+                data.compactions += 1;
+                return;
+            }
+            _ => {}
         }
-        if item.get("type").and_then(Value::as_str) != Some("message") {
-            return;
-        }
-        let Some(message) = item.get("message") else {
+        let Some(message) = entry.message() else {
             return;
         };
-        if message.get("role").and_then(Value::as_str) != Some("assistant") {
+        if message.role.is("toolResult") {
+            let Some(id) = message.tool_call_id.get() else {
+                return;
+            };
+            let failed = message.is_error.value() == Some(true);
+            data.metrics.tool_errors += u64::from(failed);
+            let Some((name, issued)) = open_calls.remove(id) else {
+                return;
+            };
+            let dur_ms = issued
+                .zip(message.timestamp.value())
+                .map(|(start, end)| (end - start).max(0));
+            if let Some(detail) = data
+                .metrics
+                .tool_details
+                .get_mut(&name)
+                .and_then(|list| list.iter_mut().rev().find(|d| d.id.as_deref() == Some(id)))
+            {
+                detail.failed = failed;
+                detail.dur_ms = dur_ms;
+            }
+            return;
+        }
+        if !message.role.is("assistant") {
             return;
         }
 
-        let model = message
-            .get("model")
-            .and_then(Value::as_str)
-            .unwrap_or("unknown")
-            .to_string();
+        let model = message.model.get().unwrap_or("unknown").to_string();
         data.last_model = model.clone();
-        let usage = message.get("usage").unwrap_or(&Value::Null);
-        let cost = usage.get("cost").unwrap_or(&Value::Null);
-        let cache_write = usage_number(usage, "cacheWrite");
-        let cache_write_1h = usage_number(usage, "cacheWrite1h").min(cache_write);
+        let no_usage = pi_line::Usage::default();
+        let usage = message.usage.get().unwrap_or(&no_usage);
+        let cache_write = count(&usage.cache_write);
+        let cache_write_1h = count(&usage.cache_write_1h).min(cache_write);
         let tokens = Tokens {
-            input: usage_number(usage, "input"),
-            output: usage_number(usage, "output"),
-            cache_read: usage_number(usage, "cacheRead"),
+            input: count(&usage.input),
+            output: count(&usage.output),
+            cache_read: count(&usage.cache_read),
             cache_write_5m: cache_write - cache_write_1h,
             cache_write_1h,
-            reasoning_output: usage_number(usage, "reasoning"),
-            total: usage_number(usage, "totalTokens"),
+            reasoning_output: count(&usage.reasoning),
+            total: count(&usage.total_tokens),
             ..Default::default()
         };
-        let reported = Costs {
-            input: cost_number(cost, "input"),
-            output: cost_number(cost, "output"),
-            cache_read: cost_number(cost, "cacheRead"),
-            cache_write_5m: cost_number(cost, "cacheWrite"),
-            total: cost_number(cost, "total"),
+        let reported = usage.cost.get().map_or_else(Costs::default, |cost| Costs {
+            input: dollars(&cost.input),
+            output: dollars(&cost.output),
+            cache_read: dollars(&cost.cache_read),
+            cache_write_5m: dollars(&cost.cache_write),
+            total: dollars(&cost.total),
             ..Default::default()
-        };
+        });
         let billable = tokens.input + tokens.output + tokens.cache_read + tokens.cache_write_5m;
         let costs = if reported.total > 0.0 || billable == 0 {
             reported
@@ -197,7 +263,7 @@ pub fn extract(path: &Path) -> SessionData {
         mc.cache_write_5m += costs.cache_write_5m;
         mc.total += costs.total;
 
-        let ts = message_ts(item, message);
+        let ts = entry.ts();
         if let Some(dt) = util::parse_ts(&ts) {
             data.record_cost(&dt, &model, costs.total);
             // `billable` above is only a did-anything-happen check and skips
@@ -217,28 +283,36 @@ pub fn extract(path: &Path) -> SessionData {
                 .or_insert(0) += billed;
         }
 
-        if let Some(content) = message.get("content").and_then(Value::as_array) {
-            for block in content {
-                if block.get("type").and_then(Value::as_str) != Some("toolCall") {
-                    continue;
+        for call in message.calls() {
+            let name = call.name.get().unwrap_or("unknown");
+            let args = call.arguments.value();
+            let (short, full) = extract::tool_detail(name, &args);
+            let id = call.id.get().map(str::to_string);
+            extract::push_tool_detail(
+                &mut data.metrics.tool_details,
+                name,
+                short,
+                full,
+                ts.clone(),
+                id.clone(),
+                None,
+            );
+            *data.metrics.tools.entry(name.to_string()).or_insert(0) += 1;
+            data.metrics.tool_count += 1;
+            if let Some(id) = id {
+                open_calls.insert(id, (name.to_string(), message.timestamp.value()));
+            }
+            if let Some(delta) = edit_delta(name, &args) {
+                data.metrics.lines_added += u64::from(delta.added);
+                data.metrics.lines_removed += u64::from(delta.removed);
+                if let Some(detail) = data
+                    .metrics
+                    .tool_details
+                    .get_mut(name)
+                    .and_then(|list| list.last_mut())
+                {
+                    detail.delta = Some(delta);
                 }
-                let name = block
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .unwrap_or("unknown");
-                let args = block.get("arguments").unwrap_or(&Value::Null);
-                let (short, full) = extract::tool_detail(name, args);
-                extract::push_tool_detail(
-                    &mut data.metrics.tool_details,
-                    name,
-                    short,
-                    full,
-                    ts.clone(),
-                    block.get("id").and_then(Value::as_str).map(str::to_string),
-                    None,
-                );
-                *data.metrics.tools.entry(name.to_string()).or_insert(0) += 1;
-                data.metrics.tool_count += 1;
             }
         }
     });
@@ -268,25 +342,66 @@ pub fn extract(path: &Path) -> SessionData {
 /// A Pi session is its one JSONL file.
 pub use super::delete_transcript as delete;
 
+/// How far back [`extract_context`] looks for a turn that measured the window.
+/// A run of tool results between two turns is the usual distance, and a few
+/// dozen of those is already a long one.
+const CONTEXT_TAIL_LINES: usize = 200;
+
+/// Context usage from the newest assistant turn that reported tokens.
+///
+/// Pi records each request's input, cache reads and cache writes, which
+/// together are the window the request filled — the same reading OpenCode's
+/// is. It records no window size, so the ceiling is LiteLLM's for the model;
+/// without one there is no honest denominator and nothing is shown.
+pub fn extract_context(session: &Session) -> Option<ContextUsage> {
+    let path = session.data_file.as_ref()?;
+    let mut found: Option<(u64, String)> = None;
+    let mut compacted = false;
+    extract::scan_last_lines(path, CONTEXT_TAIL_LINES, |bytes| {
+        if found.is_some() {
+            return true;
+        }
+        let Some(entry) = pi_line::Entry::parse(bytes) else {
+            return false;
+        };
+        // Newest first, so a compaction seen before any measured turn is one
+        // no request has measured the new window after.
+        if entry.kind.is("compaction") {
+            compacted = true;
+        }
+        if let Some(message) = entry.message()
+            && message.role.is("assistant")
+            && let Some(used) = message.usage.get().map(pi_line::Usage::window)
+            && used > 0
+        {
+            let model = message
+                .model
+                .get()
+                .filter(|m| !m.is_empty())
+                .unwrap_or(&session.model);
+            found = Some((used, model.to_string()));
+        }
+        true
+    });
+    let (used, model) = found?;
+    Some(ContextUsage {
+        used,
+        max: crate::pricing::litellm_max_input_tokens(&model)?,
+        compacted,
+    })
+}
+
 pub fn extract_last_tool(session: &Session) -> String {
     let Some(path) = &session.data_file else {
         return String::new();
     };
     let mut last = String::new();
-    let _ = for_each_jsonl(path, |item| {
-        let Some(content) = item
-            .get("message")
-            .and_then(|m| m.get("content"))
-            .and_then(Value::as_array)
-        else {
-            return;
-        };
-        for block in content {
-            if block.get("type").and_then(Value::as_str) == Some("toolCall")
-                && let Some(name) = block.get("name").and_then(Value::as_str)
-            {
-                last = name.to_string();
-            }
+    let _ = pi_line::for_each(path, |entry| {
+        if let Some(name) = entry
+            .message()
+            .and_then(|m| m.calls().filter_map(|c| c.name.get()).last())
+        {
+            last = name.to_string();
         }
     });
     last
@@ -369,6 +484,138 @@ mod tests {
         assert!((data.costs.cache_read - 0.26).abs() < 1e-9);
         assert_eq!(data.costs.cache_write_5m, 0.0);
 
+        std::fs::remove_file(path).unwrap();
+    }
+
+    fn scratch(tag: &str, body: &str) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "cctop-pi-{tag}-{}-{}.jsonl",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&path, body).unwrap();
+        path
+    }
+
+    /// Hand-built from the entry kinds a Pi session writes — a header, a
+    /// thinking level, a compaction, turns, tool results, and an entry kind
+    /// nothing here reads — with made-up content.
+    const SESSION: &str = concat!(
+        r#"{"type":"session","version":3,"id":"pi-3","timestamp":"2026-08-05T00:00:00Z","cwd":"/work"}"#,
+        "\n",
+        r#"{"type":"thinking_level_change","id":"e1","parentId":null,"timestamp":"2026-08-05T00:00:01Z","thinkingLevel":"high"}"#,
+        "\n",
+        r#"{"type":"message","id":"e2","timestamp":"2026-08-05T00:00:02Z","message":{"role":"user","content":"fix it","timestamp":1785888002000}}"#,
+        "\n",
+        r#"{"type":"message","id":"e3","timestamp":"2026-08-05T00:00:03Z","message":{"role":"assistant","model":"m-1","provider":"p","timestamp":1785888003000,"stopReason":"toolUse","usage":{"input":100,"output":10,"cacheRead":900,"cacheWrite":0,"totalTokens":1010,"cost":{"total":0.01}},"content":[{"type":"thinking","thinking":"..."},{"type":"toolCall","id":"c1","name":"edit","arguments":{"path":"a.rs","oldText":"one\ntwo","newText":"one\n2\nthree"}},{"type":"toolCall","id":"c2","name":"bash","arguments":{"command":"false"}}]}}"#,
+        "\n",
+        r#"{"type":"message","id":"e4","timestamp":"2026-08-05T00:00:04Z","message":{"role":"toolResult","toolCallId":"c1","toolName":"edit","content":[{"type":"text","text":"ok"}],"isError":false,"timestamp":1785888003400}}"#,
+        "\n",
+        r#"{"type":"message","id":"e5","timestamp":"2026-08-05T00:00:05Z","message":{"role":"toolResult","toolCallId":"c2","toolName":"bash","content":[{"type":"text","text":"exit 1"}],"isError":true,"timestamp":1785888005000}}"#,
+        "\n",
+        r#"{"type":"custom","id":"e6","customType":"ext","data":{"k":[1,2]}}"#,
+        "\n",
+        r#"{"type":"compaction","id":"e7","timestamp":"2026-08-05T00:00:06Z","summary":"s","firstKeptEntryId":"e3","tokensBefore":1000}"#,
+        "\n",
+        r#"{"type":"message","id":"e8","timestamp":"2026-08-05T00:00:07Z","message":{"role":"assistant","model":"m-1","provider":"p","timestamp":1785888007000,"stopReason":"toolUse","usage":{"input":50,"output":5,"cacheRead":150,"cacheWrite":20,"totalTokens":225,"cost":{"total":0.02}},"content":[{"type":"toolCall","id":"c3","name":"write","arguments":{"path":"b.rs","content":"x\ny\n"}}]}}"#,
+        "\n",
+    );
+
+    #[test]
+    fn outcomes_durations_edits_effort_and_compactions_are_read() {
+        let path = scratch("full", SESSION);
+        let data = extract(&path);
+        std::fs::remove_file(&path).unwrap();
+
+        assert_eq!(data.metrics.tool_count, 3);
+        assert_eq!(data.metrics.tool_errors, 1, "isError on the bash result");
+        let bash = &data.metrics.tool_details["bash"][0];
+        assert!(bash.failed);
+        assert_eq!(bash.dur_ms, Some(2000), "result stamp minus the turn's");
+        let edit = &data.metrics.tool_details["edit"][0];
+        assert!(!edit.failed);
+        assert_eq!(edit.dur_ms, Some(400));
+        let delta = edit.delta.as_ref().unwrap();
+        assert_eq!((delta.added, delta.removed), (3, 2));
+        // 3 + 2 from the edit, and the write's two lines added.
+        assert_eq!(data.metrics.lines_added, 5);
+        assert_eq!(data.metrics.lines_removed, 2);
+        assert_eq!(data.reasoning_effort.as_deref(), Some("high"));
+        assert_eq!(data.compactions, 1);
+        assert_eq!(data.tokens.total, 1235);
+        assert!((data.costs.total - 0.03).abs() < 1e-9);
+        assert_eq!(data.last_model, "m-1");
+    }
+
+    /// A tool result over the line cap — a read of a big file — still says
+    /// whether the call failed. The `Value` reader dropped the line whole.
+    #[test]
+    fn an_oversized_result_still_reports_its_outcome() {
+        let big = "x".repeat(crate::config::MAX_JSONL_LINE_BYTES + 10);
+        let body = format!(
+            concat!(
+                r#"{{"type":"session","id":"pi-4","timestamp":"2026-08-05T00:00:00Z","cwd":"/w"}}"#,
+                "\n",
+                r#"{{"type":"message","message":{{"role":"assistant","model":"m","timestamp":1785888003000,"content":[{{"type":"toolCall","id":"c1","name":"read","arguments":{{"path":"big"}}}}]}}}}"#,
+                "\n",
+                r#"{{"type":"message","message":{{"role":"toolResult","toolCallId":"c1","content":[{{"type":"text","text":"{}"}}],"isError":true,"timestamp":1785888004000}}}}"#,
+                "\n",
+            ),
+            big
+        );
+        let path = scratch("big", &body);
+        let data = extract(&path);
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(data.metrics.tool_errors, 1);
+        assert!(data.metrics.tool_details["read"][0].failed);
+    }
+
+    #[test]
+    fn edits_given_as_a_list_count_every_pair() {
+        let delta = edit_delta(
+            "edit",
+            &serde_json::json!({"path": "a", "edits": [
+                {"oldText": "a", "newText": "b\nc"},
+                {"oldText": "d\ne", "newText": "f"},
+            ]}),
+        )
+        .unwrap();
+        assert_eq!((delta.added, delta.removed), (3, 3));
+        assert!(edit_delta("read", &serde_json::json!({"path": "a"})).is_none());
+    }
+
+    /// The window is the newest turn's input and cache, against LiteLLM's
+    /// ceiling for its model; a compaction after it marks it as stale.
+    #[test]
+    fn context_is_the_newest_turns_window() {
+        let _rates = crate::pricing::install_test_table(&[(
+            "m-1",
+            serde_json::json!({
+                "input_cost_per_token": 1e-6,
+                "output_cost_per_token": 1e-6,
+                "max_input_tokens": 1000,
+            }),
+        )]);
+        let path = scratch("ctx", SESSION);
+        let mut session = Session::new(Provider::Pi, "pi-3".into());
+        session.data_file = Some(path.clone());
+        let ctx = extract_context(&session).unwrap();
+        assert_eq!((ctx.used, ctx.max), (220, 1000));
+        assert!(!ctx.compacted, "the compaction is older than the turn");
+
+        std::fs::write(
+            &path,
+            format!("{SESSION}{}\n", r#"{"type":"compaction","summary":"s"}"#),
+        )
+        .unwrap();
+        assert!(extract_context(&session).unwrap().compacted);
+
+        session.data_file = Some(scratch("ctx-none", "{\"type\":\"session\"}\n"));
+        assert!(extract_context(&session).is_none());
+        std::fs::remove_file(session.data_file.unwrap()).unwrap();
         std::fs::remove_file(path).unwrap();
     }
 }

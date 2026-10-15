@@ -13,12 +13,13 @@ expression: screen
 │  File ~/.config/cctop/config.toml                                                                                    ┃
 │                                                                                                                      ┃
 │config.toml · [settings]                                                                                              ┃
-│  theme             "auto"           auto/light/dark/mono; auto asks the terminal                                     ┃
+│  theme             auto         ↻   auto/light/dark/mono; auto asks the terminal                                     ┃
+│  graph_glyphs      braille      ↻   braille ⡰⠑⢄⠜  octant 𜵙𜴄𜶀𜴒  sextant 🬖🬈🬭🬅                                          ┃
 │  notify            [ ]              Bell + desktop alert when a session needs you                                    ┃
 │  auto_update       [x]              Offer to update at startup when a newer release is out                           ┃
 │  telemetry         [x]              Send an anonymous usage report once a day (see README)                           ┃
 │  compact_threshold 83.5             Context % at which the agent compacts. On restart                                ┃
-│  hide_columns      ""               Columns to hide, e.g. "tok_rate,mem"                                             ┃
+│  hide_columns      ""               Columns to hide, e.g. "tok_rate,mem"                                             │
 │  alert_cost        0                Alert when a session's cost passes $X                                            │
 │  alert_burn        0                Alert when a session burns over $X an hour                                       │
 │  alert_today       0                Alert when today's spend passes $X                                               │
@@ -29,7 +30,6 @@ expression: screen
 │  idle_after        6                Hours quiet before a live session counts as idle (I)                             │
 │  read_screen       [ ]              Read each agent's screen in a tab for its state, over hooks                      │
 │  paste_debounce_ms 250              Drop a paste repeated within this many ms; 0 = off                               │
-│  predictive_echo   "auto"           auto/always/off; auto above 60ms RTT                                             │
 │  footer_hide       ""               Footer items to hide, e.g. "sort,follow" or "share"                              │
 │  footer_note       ""               A note always shown on the footer, e.g. "on-call shift"                          │
 │  footer_command    ""               A command whose first line is shown on the footer, refreshed every 30s           │

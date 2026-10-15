@@ -25,6 +25,11 @@ pub const SETTINGS: [(&str, &str, &str); 20] = [
         "auto/light/dark/mono; auto asks the terminal",
     ),
     (
+        "graph_glyphs",
+        "\"braille\"",
+        "braille/octant/sextant: what charts are drawn in",
+    ),
+    (
         "notify",
         "false",
         "Bell + desktop alert when a session needs you",
@@ -114,6 +119,19 @@ pub const SETTINGS: [(&str, &str, &str); 20] = [
         "A command whose first line is shown on the footer, refreshed every 30s",
     ),
 ];
+
+/// The values a setting that is a choice between names takes, default first,
+/// in the order Enter turns through them.
+pub fn choices(name: &str) -> Option<&'static [&'static str]> {
+    match name {
+        "theme" => Some(&["auto", "light", "dark", "mono"]),
+        // Braille first: every font cctop has met draws it, and the block
+        // sets need one with the Legacy Computing characters.
+        "graph_glyphs" => Some(&["braille", "octant", "sextant"]),
+        "predictive_echo" => Some(&crate::predict::Mode::NAMES),
+        _ => None,
+    }
+}
 
 /// `idle_after`'s default, in hours: long enough that nobody's lunch break
 /// counts, short enough that yesterday's forgotten sessions do. The number
@@ -208,6 +226,9 @@ pub const BINDINGS: [(&str, &str, &str); 51] = [
 #[derive(Debug, Default, Clone)]
 pub struct Settings {
     pub theme: Option<String>,
+    /// One of [`choices`]`("graph_glyphs")`. Anything else is refused by the
+    /// parser, so a typo shows as a problem on the page, not as blank charts.
+    pub graph_glyphs: Option<String>,
     pub notify: Option<bool>,
     pub auto_update: Option<bool>,
     /// Whether the daily usage report is sent — see [`crate::telemetry`].
@@ -284,6 +305,11 @@ impl Settings {
             for (name, item) in table.iter() {
                 let bad = match name {
                     "theme" => item.as_str().map(|v| out.theme = Some(v.into())).is_none(),
+                    "graph_glyphs" => item
+                        .as_str()
+                        .filter(|v| choices(name).is_some_and(|c| c.contains(v)))
+                        .map(|v| out.graph_glyphs = Some(v.into()))
+                        .is_none(),
                     "notify" => item.as_bool().map(|v| out.notify = Some(v)).is_none(),
                     "auto_update" => item.as_bool().map(|v| out.auto_update = Some(v)).is_none(),
                     "telemetry" => item.as_bool().map(|v| out.telemetry = Some(v)).is_none(),
@@ -381,6 +407,7 @@ impl Settings {
     pub fn value_of(&self, name: &str) -> (String, bool) {
         let set = match name {
             "theme" => self.theme.as_ref().map(|v| format!("{v:?}")),
+            "graph_glyphs" => self.graph_glyphs.as_ref().map(|v| format!("{v:?}")),
             "notify" => self.notify.map(|v| v.to_string()),
             "auto_update" => self.auto_update.map(|v| v.to_string()),
             "telemetry" => self.telemetry.map(|v| v.to_string()),
@@ -423,16 +450,6 @@ impl Settings {
 pub fn is_toggle(name: &str) -> bool {
     let as_true = Settings::parse(&format!("[settings]\n{name} = true"));
     as_true.problems.is_empty() && as_true.value_of(name) == ("true".to_string(), true)
-}
-
-/// The values a setting that is a choice steps through, the default first —
-/// `None` for one that is a switch or a field.
-pub fn choices(name: &str) -> Option<&'static [&'static str]> {
-    match name {
-        "theme" => Some(&["auto", "light", "dark", "mono"]),
-        "predictive_echo" => Some(&crate::predict::Mode::NAMES),
-        _ => None,
-    }
 }
 
 /// A threshold as the file may spell it: a number, whole or not, and never
@@ -869,6 +886,25 @@ mod tests {
         }
         let s = Settings::parse("[settings]\npredictive_echo = \"on\"");
         assert_eq!(s.problems.len(), 1, "not one of the three");
+    }
+
+    /// Every name a choice offers reads back as itself, the default is the
+    /// first, and a name it does not offer is a problem rather than a value.
+    #[test]
+    fn graph_glyphs_round_trip_and_refuse_an_unknown_set() {
+        let offered = choices("graph_glyphs").unwrap();
+        let default = SETTINGS.iter().find(|s| s.0 == "graph_glyphs").unwrap().1;
+        assert_eq!(default, format!("{:?}", offered[0]));
+        for set in offered {
+            let s = Settings::parse(&format!("[settings]\ngraph_glyphs = \"{set}\"\n"));
+            assert!(s.problems.is_empty(), "{set}: {:?}", s.problems);
+            assert_eq!(s.graph_glyphs.as_deref(), Some(*set));
+            assert_eq!(s.value_of("graph_glyphs"), (format!("{set:?}"), true));
+        }
+        let bad = Settings::parse("[settings]\ngraph_glyphs = \"quadrant\"\n");
+        assert_eq!(bad.graph_glyphs, None);
+        assert_eq!(bad.problems.len(), 1, "{:?}", bad.problems);
+        assert_eq!(Settings::default().value_of("graph_glyphs").0, default);
     }
 
     #[test]

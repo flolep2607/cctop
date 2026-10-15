@@ -436,6 +436,14 @@ pub struct App {
     /// it came from — carrying one across would point at whichever account
     /// happened to sit in that position.
     pub launch_profile: HashMap<Provider, usize>,
+    /// Which of a sibling's accounts was picked to start each harness under
+    /// there, by machine — by name, since the list is the sibling's and may
+    /// have moved by the next poll. Absent, the launch names none and the
+    /// sibling uses its own default, which the launcher shows as its first.
+    ///
+    /// ponytail: held for the run only, unlike this machine's choice, which
+    /// is saved: a sibling's accounts are not known until it is polled.
+    pub launch_peer_picked: HashMap<(String, Provider), String>,
     /// Which entry of the row menu is under the cursor.
     ///
     /// Only ever points at an entry that can run: the menu draws the blocked
@@ -1079,6 +1087,7 @@ impl App {
                 (provider, at)
             })
             .collect(),
+            launch_peer_picked: HashMap::new(),
             menu_cursor: 0,
             cost_input: Default::default(),
             send_input: Default::default(),
@@ -1953,6 +1962,50 @@ mod tests {
         );
     }
 
+    /// The graph glyphs row turns both ways with the arrows and forward with
+    /// Enter, writes what it turned to, and the charts follow on the same
+    /// keypress — no restart, like the theme.
+    #[test]
+    fn the_graph_glyphs_row_turns_both_ways_and_redraws() {
+        use spark::Glyphs;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("config.toml");
+        let mut app = test_app();
+        app.settings_file = Some(file.clone());
+        app.goto_settings();
+        let press = |app: &mut App, code| {
+            app.settings_cursor = item_of(app, "graph_glyphs");
+            app.on_key(key(code));
+            // Writes inside one millisecond share a stamp; 0 makes the reload
+            // read the file rather than skip it as already seen.
+            app.settings_stamp = 0;
+            app.reload_settings();
+            (app.settings.graph_glyphs.clone(), spark::glyphs())
+        };
+        let mut seen = vec![press(&mut app, KeyCode::Right)];
+        seen.push(press(&mut app, KeyCode::Right));
+        seen.push(press(&mut app, KeyCode::Left));
+        // Left from the first wraps to the last, rather than stopping.
+        seen.push(press(&mut app, KeyCode::Left));
+        seen.push(press(&mut app, KeyCode::Left));
+        seen.push(press(&mut app, KeyCode::Enter));
+        let named = |s: &str, g| (Some(s.to_string()), g);
+        assert_eq!(
+            seen,
+            vec![
+                named("octant", Glyphs::Octant),
+                named("sextant", Glyphs::Sextant),
+                named("octant", Glyphs::Octant),
+                named("braille", Glyphs::Braille),
+                named("sextant", Glyphs::Sextant),
+                named("braille", Glyphs::Braille),
+            ]
+        );
+        let text = std::fs::read_to_string(&file).expect("written");
+        assert!(text.contains("graph_glyphs = \"braille\""), "{text}");
+    }
+
     /// Rebinding from the settings page: Enter on a keybind, then the new key,
     /// lands in the file and works on the dashboard at once — and the page
     /// draws what it wrote.
@@ -2010,7 +2063,7 @@ mod tests {
 
         // A toggle flips in place.
         app.settings_cursor = item_of(&app, "notify");
-        assert_eq!(cctop_core::settings::SETTINGS[1].0, "notify");
+        assert_eq!(cctop_core::settings::SETTINGS[2].0, "notify");
         app.on_key(key(KeyCode::Enter));
         assert_eq!(app.settings.notify, Some(true));
         assert!(

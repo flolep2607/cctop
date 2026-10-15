@@ -2,7 +2,6 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "wouter";
 import { ExternalLink, GripVertical, Maximize2, MessageSquareText, Minimize2, Plus, X } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { ask } from "@/lib/api";
 import { CAN_ACT } from "@/lib/config";
 import { money, shortModel, shortPath } from "@/lib/format";
 import { Button } from "@/components/ui/button";
@@ -15,7 +14,7 @@ import { PromptBar } from "@/components/prompt-bar";
 import { StateDot } from "@/components/status";
 import { dotOfTab } from "@/lib/status";
 import { TerminalFrame } from "@/components/terminal";
-import { popOut, type Terminal } from "@/lib/terminal";
+import { mintTab, popOut, type Terminal } from "@/lib/terminal";
 import { useSessions, useStored, useTabs } from "@/hooks/use-live";
 import type { Session, Tab } from "@/lib/types";
 
@@ -35,12 +34,7 @@ const autoCols = (n: number) => (n <= 1 ? 1 : n <= 4 ? 2 : n <= 9 ? 3 : 4);
 // page load — kept by name so a re-render does not ask again, forgotten on
 // failure so Retry does.
 const opening = new Map<string, Promise<Terminal>>();
-const mintShare = (name: string, fresh = false): Promise<Terminal> =>
-  ask("/api/tab/" + encodeURIComponent(name) + "/terminal", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ origin: location.origin, fresh }),
-  }).then((r) => r.json());
+const mintShare = (name: string, fresh = false) => mintTab(name, { fresh });
 function openTerminal(name: string) {
   if (!opening.has(name)) {
     opening.set(

@@ -1453,7 +1453,12 @@ fn serve_connection(shared: &Shared, stream: &mut TcpStream) {
     // [`open::route_new`]. Its own prefix, so a cctop older than it answers
     // "no such page", which the asking side reads as "update it there".
     if let Some(rest) = path.strip_prefix(cctop_core::remote_open::NEW_ROUTE) {
-        return open::route_new(shared, stream, &request, rest, access);
+        return open::route_new(shared, stream, &request, rest, access, false);
+    }
+    // The same, under one of this machine's accounts. Its own prefix for the
+    // same reason: see `NEW_AS_ROUTE`.
+    if let Some(rest) = path.strip_prefix(cctop_core::remote_open::NEW_AS_ROUTE) {
+        return open::route_new(shared, stream, &request, rest, access, true);
     }
     // A sibling on the account, through this server — see [`forward`]. The
     // page never talks to another origin, so the content policy stays as it
@@ -1544,6 +1549,27 @@ fn serve_connection(shared: &Shared, stream: &mut TcpStream) {
             }
             json(stream, &request, &failed);
         }
+        // The accounts this machine can start an agent under, by name, for a
+        // sibling's launcher to offer (see `cctop_core::peer::accounts`).
+        // Only where the launch could then be asked for — the same gate as
+        // `open::route_new`, or the far launcher would offer a pick for a
+        // launch that is always refused.
+        "/api/accounts" => {
+            if access != Access::Full || !shared.actions {
+                return http::respond_error(
+                    stream,
+                    Some(&request),
+                    403,
+                    "this link cannot start agents",
+                );
+            }
+            let body: serde_json::Map<String, serde_json::Value> =
+                cctop_core::config::launchable_names()
+                    .into_iter()
+                    .map(|(provider, names)| (provider.as_str().to_string(), names.into()))
+                    .collect();
+            json(stream, &request, &body);
+        }
         "/api/quota" => {
             // Served from memory: the document is rendered by whoever polled
             // the endpoints last, on their schedule rather than the browser's.
@@ -1588,11 +1614,24 @@ fn serve_connection(shared: &Shared, stream: &mut TcpStream) {
                 .filter(|a| cctop_core::sandbox::reach(a) == cctop_core::sandbox::Reach::Local)
                 .map(|a| (a.clone(), cctop_core::sandbox::local_only(a).into()))
                 .collect();
-            let body = serde_json::json!({
-                "actions": shared.actions && access == Access::Full,
+            let actions_on = shared.actions && access == Access::Full;
+            let mut body = serde_json::json!({
+                "actions": actions_on,
                 "agents": agents,
                 "local_only": local_only,
             });
+            // What the launcher's options offer, and where else it can start
+            // one. Only for a link that could launch at all. A page reads the
+            // presence of `options` as "this cctop takes them", so a sibling
+            // too old to would get a bare launch rather than settings it
+            // drops without a word.
+            if actions_on {
+                body["options"] = launch_offer(&current(shared).sessions, &agents);
+                body["machines"] = cctop_core::peer::known()
+                    .into_iter()
+                    .map(|(name, offline)| serde_json::json!({ "name": name, "offline": offline }))
+                    .collect();
+            }
             json(stream, &request, &body);
         }
         // Not under /api/act/<id>/ — a launch names no session because there is
@@ -1607,15 +1646,36 @@ fn serve_connection(shared: &Shared, stream: &mut TcpStream) {
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or_default();
             let cwd = body.get("cwd").and_then(serde_json::Value::as_str);
+            let field = |name: &str| {
+                body.get(name)
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::trim)
+                    .filter(|v| !v.is_empty())
+            };
+            let options = match cctop_core::launch_opts::Options::from_words(
+                field("model"),
+                field("permissions"),
+            ) {
+                Ok(options) => options,
+                Err(why) => return http::respond_error(stream, Some(&request), 400, &why),
+            };
+            let account = field("account");
+            let branch = field("branch");
             // `host:path` is a folder on an ssh host, read as the terminal's
             // field reads it.
             let launched = match cwd.map(cctop_core::remote_launch::parse) {
+                // Said rather than dropped, as the terminal's launcher says it:
+                // an agent started outside the worktree asked for would be the
+                // surprise.
+                Some(cctop_core::remote_launch::Typed::Remote { .. }) if branch.is_some() => {
+                    Err((400, "a worktree is made on this machine only".to_string()))
+                }
                 Some(cctop_core::remote_launch::Typed::Remote { host, path }) => {
-                    actions::launch_remote(agent, host, path, || {
+                    actions::launch_remote(agent, host, path, &options, account, || {
                         ssh::launch_problem(&shared.ssh, host, path)
                     })
                 }
-                _ => actions::launch_agent(agent, cwd),
+                _ => actions::launch_here(agent, cwd, &options, account, branch),
             };
             match launched {
                 Ok(done) => json(stream, &request, &done),
@@ -1749,6 +1809,35 @@ fn serve_connection(shared: &Shared, stream: &mut TcpStream) {
         }
         _ => http::respond_error(stream, Some(&request), 404, "no such page"),
     }
+}
+
+/// Per agent, what the web launcher's options offer it: the models (after the
+/// harness's default), the permission settings (its default first), and this
+/// machine's accounts for it. The same tables the terminal's launcher reads,
+/// so the two never offer different things.
+fn launch_offer(sessions: &[Session], agents: &[String]) -> serde_json::Value {
+    use cctop_core::launch_opts;
+    let offer = agents.iter().map(|agent| {
+        let models =
+            launch_opts::takes_model(agent).then(|| launch_opts::models_offered(agent, sessions));
+        let permissions: Vec<serde_json::Value> = launch_opts::permissions_for(agent)
+            .iter()
+            .map(|p| serde_json::json!({ "word": p.word(), "label": p.label() }))
+            .collect();
+        let accounts: Vec<&str> = cctop_core::pricing::Provider::parse(agent)
+            .map(cctop_core::config::launchable_for)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|p| p.name.as_str())
+            .collect();
+        let entry = serde_json::json!({
+            "models": models,
+            "permissions": permissions,
+            "accounts": accounts,
+        });
+        (agent.clone(), entry)
+    });
+    serde_json::Value::Object(offer.collect())
 }
 
 /// The table document with this machine's own rows only.
@@ -3513,5 +3602,61 @@ mod tests {
         }
         let nobody = response_of(&hub, "GET", "/api/peer/nobody/api/sessions?t=full", "");
         assert!(nobody.starts_with("HTTP/1.1 404"), "{nobody}");
+
+        // The launcher's machines: the sibling, for the link that can launch
+        // on it, and nothing for one that cannot. Its own options come
+        // through the relay, which is how the page knows it takes them.
+        let agents = |token: &str| {
+            let raw = response_of(&hub, "GET", &format!("/api/agents?t={token}"), "");
+            let body = raw.split_once("\r\n\r\n").expect("body").1.to_string();
+            serde_json::from_str::<serde_json::Value>(&body).expect("json")
+        };
+        let full = agents("full");
+        assert_eq!(full["machines"][0]["name"], "box", "{full}");
+        assert!(full["options"].is_object(), "{full}");
+        let view = agents("view");
+        assert!(
+            view.get("machines").is_none() && view.get("options").is_none(),
+            "{view}"
+        );
+        let relayed = response_of(&hub, "GET", "/api/peer/box/api/agents?t=full", "");
+        assert!(relayed.contains("\"options\""), "{relayed}");
+        // The sibling answers the relay as a full link; the hub cuts that
+        // back to what a view link sees of its own machine.
+        let relayed = response_of(&hub, "GET", "/api/peer/box/api/agents?t=view", "");
+        assert!(relayed.starts_with("HTTP/1.1 200"), "{relayed}");
+        assert!(
+            !relayed.contains("\"options\"")
+                && !relayed.contains("\"machines\"")
+                && relayed.contains("\"actions\":false"),
+            "{relayed}"
+        );
+    }
+
+    /// The launcher's settings are refused when they are not settings, and a
+    /// worktree for an ssh host is refused rather than quietly dropped —
+    /// both before anything is started or connected to.
+    #[test]
+    fn a_launch_with_options_it_cannot_honour_is_refused() {
+        let guarded = shared("full", "view");
+        for (body, why) in [
+            (
+                r#"{"agent":"claude","permissions":"root"}"#,
+                "is not a permission setting",
+            ),
+            (
+                r#"{"agent":"claude","cwd":"devbox:~","branch":"try"}"#,
+                "worktree is made on this machine only",
+            ),
+        ] {
+            let launch = post_json(&guarded, "/api/launch", "full", body);
+            assert!(launch.starts_with("HTTP/1.1 400 "), "{body}: {launch}");
+            // The status alone would pass without these guards: where claude
+            // is not installed the launch is refused for that instead.
+            assert!(
+                launch.contains(why),
+                "{body}: refused, but not for {why:?}: {launch}"
+            );
+        }
     }
 }

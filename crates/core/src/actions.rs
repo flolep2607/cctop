@@ -357,19 +357,62 @@ pub fn resume(session: &Session) -> Result<Done, Failed> {
 /// has to name a directory that exists — anywhere else the agent would launch
 /// into, the terminal's launcher already knows about.
 pub fn launch_agent(agent: &str, cwd: Option<&str>) -> Result<Done, Failed> {
-    launch_new(agent, cwd, &crate::launch_opts::Options::default())
+    launch_new(agent, cwd, &crate::launch_opts::Options::default(), None)
 }
 
-/// [`launch_agent`], with a model and a permission setting — what a sibling's
-/// launcher asks for when it starts an agent here (`cctop mux new`).
+/// [`launch_agent`], with a model, a permission setting and an account — what
+/// a sibling's launcher asks for when it starts an agent here (`cctop mux
+/// new`).
 ///
 /// The settings arrive as words and become flags only here, through
 /// [`launch_opts`](crate::launch_opts), which refuses any this agent does not
-/// take: the argv is this machine's to build, never the asker's.
+/// take: the argv is this machine's to build, never the asker's. The account
+/// is one of this machine's own profiles, already looked up by name, and goes
+/// in front the way the terminal's launcher puts one
+/// ([`argv_under_profile`](crate::config::argv_under_profile)).
 pub fn launch_new(
     agent: &str,
     cwd: Option<&str>,
     options: &crate::launch_opts::Options,
+    profile: Option<&crate::config::Profile>,
+) -> Result<Done, Failed> {
+    launch_under(agent, cwd, options, profile, None)
+}
+
+/// [`launch_new`], with the account still a name and in a new worktree of the
+/// directory's repository — the web launcher's options, which are the
+/// terminal launcher's.
+///
+/// The agent, the directory, the flags and the account are checked before the
+/// worktree is made, so a refused setting leaves no branch behind for a
+/// launch that never happened; the branch name is git's to check as it makes
+/// it.
+///
+/// The account is one [`launchable_named`](crate::config::launchable_named)
+/// lists for the agent: a name, never a directory or a token from the request.
+///
+// ponytail: a launch that fails after the worktree is made (rmux missing, a
+// name taken) leaves the checkout and its branch in place — removing a branch
+// git may have checked out, not created, is not this function's call.
+pub fn launch_here(
+    agent: &str,
+    cwd: Option<&str>,
+    options: &crate::launch_opts::Options,
+    account: Option<&str>,
+    branch: Option<&str>,
+) -> Result<Done, Failed> {
+    launch_under(agent, cwd, options, account_named(agent, account)?, branch)
+}
+
+/// What [`launch_new`] and [`launch_here`] share, once the account is a
+/// profile: a sibling's request names it and has it looked up before it gets
+/// here, the web launcher's is looked up by [`launch_here`].
+fn launch_under(
+    agent: &str,
+    cwd: Option<&str>,
+    options: &crate::launch_opts::Options,
+    profile: Option<&crate::config::Profile>,
+    branch: Option<&str>,
 ) -> Result<Done, Failed> {
     if !agents().iter().any(|known| known == agent) {
         return Err((
@@ -394,12 +437,41 @@ pub fn launch_new(
     };
     let flags = options.flags(agent).map_err(|why| (400, why))?;
     let argv: Vec<String> = std::iter::once(agent.to_string()).chain(flags).collect();
+    let argv = match profile {
+        Some(profile) => crate::config::argv_under_profile(argv, profile),
+        None => argv,
+    };
+    let dir = match branch.map(str::trim).filter(|b| !b.is_empty()) {
+        Some(branch) => {
+            let from = dir.unwrap_or_else(|| crate::config::HOME.clone());
+            let (base, repo) =
+                crate::worktree::fork_point(&from).map_err(|why| (400, why.to_string()))?;
+            let made = crate::worktree::add_worktree(&base, &repo, branch)
+                .map_err(|why| (400, format!("worktree: {why}")))?;
+            Some(made)
+        }
+        None => dir,
+    };
     let name = crate::rmux::free_name(agent);
     launch(&argv, &name, dir.as_deref())?;
     Ok(Done {
         message: format!("Started {agent} — attach with `cctop mux attach {name}`"),
         rmux: Some(name),
     })
+}
+
+/// The launchable account `account` names for `agent`, `None` for none named.
+fn account_named(
+    agent: &str,
+    account: Option<&str>,
+) -> Result<Option<&'static crate::config::Profile>, Failed> {
+    let Some(name) = account.map(str::trim).filter(|a| !a.is_empty()) else {
+        return Ok(None);
+    };
+    crate::pricing::Provider::parse(agent)
+        .and_then(|provider| crate::config::launchable_named(provider, name))
+        .map(Some)
+        .ok_or_else(|| (400, format!("no account {name} for {agent} here")))
 }
 
 /// Start `agent` fresh in `path` on the ssh host `host` — the browser's
@@ -424,6 +496,8 @@ pub fn launch_remote(
     agent: &str,
     host: &str,
     path: &str,
+    options: &crate::launch_opts::Options,
+    account: Option<&str>,
     problem: impl FnOnce() -> Option<String>,
 ) -> Result<Done, Failed> {
     if !agents().iter().any(|known| known == agent) {
@@ -438,12 +512,22 @@ pub fn launch_remote(
     if !crate::remote_launch::host_ok(host) {
         return Err((400, format!("{host} is not an ssh host name")));
     }
+    let flags = options.flags(agent).map_err(|why| (400, why))?;
+    let profile = account_named(agent, account)?;
     if let Some(why) = problem() {
         return Err((400, why));
     }
     let exe = std::env::current_exe()
         .map_err(|e| (503, format!("could not find cctop's own binary: {e}")))?;
-    let argv = crate::remote_launch::sandbox_argv(&exe, agent, host, path);
+    // The flags after the location, as the agent arguments `cctop sandbox`
+    // hands on, and the account as the environment the sandbox inherits —
+    // how the terminal's launcher carries both to an ssh host.
+    let mut argv = crate::remote_launch::sandbox_argv(&exe, agent, host, path);
+    argv.extend(flags);
+    let argv = match profile {
+        Some(profile) => crate::config::argv_under_profile(argv, profile),
+        None => argv,
+    };
     let name = crate::rmux::free_name(&format!("{agent}-{host}"));
     launch(&argv, &name, Some(crate::config::HOME.as_path()))?;
     Ok(Done {
@@ -982,9 +1066,28 @@ mod tests {
             ("codex", "devbox"),
             ("claude", "-oProxyCommand=id"),
         ] {
-            let (status, why) = launch_remote(agent, host, "~", never).unwrap_err();
+            let (status, why) =
+                launch_remote(agent, host, "~", &Default::default(), None, never).unwrap_err();
             assert_eq!(status, 400, "{agent} {host}: {why}");
         }
+    }
+
+    /// An account is one the launcher lists, by name: anything else is
+    /// refused rather than started under the default, and none named is none.
+    #[test]
+    fn a_launch_account_is_one_cctop_lists() {
+        assert_eq!(
+            account_named("claude", None).map(|p| p.is_some()),
+            Ok(false)
+        );
+        assert_eq!(
+            account_named("claude", Some("  ")).map(|p| p.is_some()),
+            Ok(false)
+        );
+        let (status, _) = account_named("claude", Some("../../etc")).unwrap_err();
+        assert_eq!(status, 400);
+        let (status, _) = account_named("sh", Some("default")).unwrap_err();
+        assert_eq!(status, 400);
     }
 
     /// Nothing is pressed at a session that is not asking: the key that answers

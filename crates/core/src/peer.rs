@@ -7,7 +7,10 @@
 //! one's page hostname off its ingress, and polls that page's `/api/sessions`
 //! over the public URL — the same document `--host` reads over ssh, parsed by
 //! the same [`fleet::parse`], merged as the same [`Remote`](crate::session::Remote)
-//! rows.
+//! rows. Every [`ACCOUNTS_EVERY`] it also asks `/api/accounts`, signed the
+//! same way: the names of the accounts that machine can start an agent
+//! under, which the launcher offers for an agent started there
+//! ([`accounts`]).
 //!
 //! # How one cctop proves itself to another
 //!
@@ -40,6 +43,7 @@
 //! slow delays the others by up to [`HTTP_TIMEOUT`]; a thread per sibling is
 //! the upgrade when an account holds enough machines for that to show.
 
+use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::os::fd::AsRawFd;
@@ -281,7 +285,8 @@ impl Peer {
         })
     }
 
-    /// Read this sibling's sessions once.
+    /// Read this sibling's sessions once — and its account names, when the
+    /// ones held are older than [`ACCOUNTS_EVERY`].
     pub fn poll(&self) -> Snapshot {
         let snapshot = self.read();
         if let Ok(mut last) = self.last_error.lock() {
@@ -290,7 +295,40 @@ impl Peer {
                 Snapshot::Failed(why) => Some(why.clone()),
             };
         }
+        if matches!(snapshot, Snapshot::Rows(_)) && accounts_stale(&self.machine) {
+            self.ask_accounts();
+        }
         snapshot
+    }
+
+    /// Ask this sibling which accounts it can start each harness under, and
+    /// hold the answer for [`accounts`].
+    ///
+    /// A sibling older than `/api/accounts` answers "no such page", which is
+    /// held as no accounts: the launcher then offers none, and launches there
+    /// go out with no account, which that sibling understands. Any other
+    /// failure keeps what was held, and is asked again after
+    /// [`ACCOUNTS_EVERY`] like a success.
+    pub fn ask_accounts(&self) {
+        let fresh = match self.send("GET", "/api/accounts", "", None) {
+            Ok(answer) if answer.status == 200 => serde_json::from_slice(&answer.body)
+                .ok()
+                .map(|named: BTreeMap<String, Vec<String>>| sane_accounts(named)),
+            Ok(answer) if answer.status == 404 => Some(BTreeMap::new()),
+            _ => None,
+        };
+        if let Ok(mut held) = ACCOUNTS.lock() {
+            let entry = held
+                .entry(self.machine.clone())
+                .or_insert_with(|| Accounts {
+                    at: Instant::now(),
+                    by_agent: BTreeMap::new(),
+                });
+            entry.at = Instant::now();
+            if let Some(fresh) = fresh {
+                entry.by_agent = fresh;
+            }
+        }
     }
 
     /// Asked even when the account's listing says the tunnel is down: that
@@ -580,6 +618,80 @@ fn flush(conn: &mut rustls::ClientConnection, s: &mut TcpStream) -> std::io::Res
         conn.write_tls(s)?;
     }
     Ok(())
+}
+
+/// How often a sibling's account names are asked for again. Accounts are
+/// added on a scale of days, and one added over there shows up here within
+/// this — the same bound as [`REDISCOVER`] puts on a new machine.
+const ACCOUNTS_EVERY: Duration = REDISCOVER;
+
+/// One sibling's account names, per harness, and when they were asked for.
+struct Accounts {
+    at: Instant,
+    by_agent: BTreeMap<String, Vec<String>>,
+}
+
+/// Every sibling's account names, by machine — kept apart from [`KNOWN`],
+/// whose peers are made anew at every listing, so the names outlive one.
+static ACCOUNTS: Mutex<BTreeMap<String, Accounts>> = Mutex::new(BTreeMap::new());
+
+/// What another machine said its accounts are, cut down to what this one
+/// will offer: a harness an account means something to, and names that
+/// [`account_ok`](crate::remote_open::account_ok) passes, each once and a
+/// screenful at most. The names go on screen and into a route.
+fn sane_accounts(named: BTreeMap<String, Vec<String>>) -> BTreeMap<String, Vec<String>> {
+    named
+        .into_iter()
+        .filter(|(agent, _)| {
+            crate::pricing::Provider::parse(agent)
+                .and_then(crate::config::profile_env)
+                .is_some()
+        })
+        .map(|(agent, names)| {
+            let mut kept: Vec<String> = Vec::new();
+            for name in names {
+                if crate::remote_open::account_ok(&name) && !kept.contains(&name) {
+                    kept.push(name);
+                }
+            }
+            kept.truncate(32);
+            (agent, kept)
+        })
+        .collect()
+}
+
+fn accounts_stale(machine: &str) -> bool {
+    ACCOUNTS.lock().is_ok_and(|held| {
+        held.get(machine)
+            .is_none_or(|a| a.at.elapsed() >= ACCOUNTS_EVERY)
+    })
+}
+
+/// The accounts the sibling `machine` can start `agent` under, in its own
+/// launcher's order, as of the last time it was asked — empty when it has
+/// not said, or is too old to.
+pub fn accounts(machine: &str, agent: &str) -> Vec<String> {
+    ACCOUNTS
+        .lock()
+        .ok()
+        .and_then(|held| held.get(machine)?.by_agent.get(agent).cloned())
+        .unwrap_or_default()
+}
+
+/// Stand `names` in as what `machine` said its `agent` accounts are — for a
+/// test of whoever offers them.
+#[cfg(any(test, feature = "test-support"))]
+pub fn set_accounts(machine: &str, agent: &str, names: &[&str]) {
+    if let Ok(mut held) = ACCOUNTS.lock() {
+        let entry = held.entry(machine.to_string()).or_insert_with(|| Accounts {
+            at: Instant::now(),
+            by_agent: BTreeMap::new(),
+        });
+        entry.by_agent.insert(
+            agent.to_string(),
+            names.iter().map(|n| n.to_string()).collect(),
+        );
+    }
 }
 
 /// The siblings found at the last listing, for whoever has to reach one by
@@ -906,6 +1018,38 @@ mod tests {
         ] {
             assert!(!verify(SECRET, junk, "GET", "/", 1_000), "{junk}");
         }
+    }
+
+    /// A sibling's account names are held per machine, cut to the harnesses
+    /// an account means something to and to names fit for a route; one too
+    /// old to have `/api/accounts` has none, and one that fails keeps what it
+    /// had.
+    #[test]
+    fn a_siblings_accounts_are_asked_for_and_held_per_machine() {
+        let (url, seen) = fake::sibling(
+            200,
+            r#"{"claude":["default","work","-x","a b","work"],"codex":["default"],"devin":["x"]}"#,
+        );
+        let peer = Peer::fixed("acct-new", &url, fake::SECRET);
+        peer.ask_accounts();
+        assert_eq!(accounts("acct-new", "claude"), ["default", "work"]);
+        assert_eq!(accounts("acct-new", "codex"), ["default"]);
+        assert!(accounts("acct-new", "devin").is_empty());
+        assert_eq!(seen.lock().unwrap().as_slice(), ["/api/accounts"]);
+        assert!(!accounts_stale("acct-new"), "asked just now");
+
+        let (url, _) = fake::sibling(404, "404 Not Found: no such page");
+        let old = Peer::fixed("acct-old", &url, fake::SECRET);
+        set_accounts("acct-old", "claude", &["stale"]);
+        old.ask_accounts();
+        assert!(accounts("acct-old", "claude").is_empty(), "too old: none");
+
+        let (url, _) = fake::sibling(500, "busy");
+        let flaky = Peer::fixed("acct-flaky", &url, fake::SECRET);
+        set_accounts("acct-flaky", "claude", &["default", "work"]);
+        flaky.ask_accounts();
+        assert_eq!(accounts("acct-flaky", "claude"), ["default", "work"]);
+        assert!(accounts("acct-never", "claude").is_empty());
     }
 
     #[test]

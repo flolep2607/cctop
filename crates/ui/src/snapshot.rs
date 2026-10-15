@@ -380,6 +380,46 @@ fn dashboard_styles() {
     insta::assert_snapshot!(styles(&buffer));
 }
 
+/// The Overview's sparklines and the Performance tab's line charts drawn in
+/// octants, the set that needs a font with the Unicode 16 blocks. Braille is
+/// every other frame here, so this is the one that shows what the choice
+/// changes.
+///
+/// A triangle wave rather than anything with `sin` in it: a libm that rounds
+/// one sample differently would move a dot, and the frame must be the same on
+/// every machine.
+#[test]
+fn octant_charts() {
+    let mut app = fixture();
+    let wave = |n: usize, period: usize, top: f64| -> Vec<f64> {
+        (0..n)
+            .map(|i| {
+                let t = i % period;
+                let up = t.min(period - t) as f64;
+                top * up / (period / 2) as f64
+            })
+            .collect()
+    };
+    for v in wave(120, 24, 80.0) {
+        app.global_cpu.push(v);
+    }
+    for v in wave(60, 10, 0.2) {
+        app.global_spend.push(v);
+    }
+    let key = app.sessions[0].key();
+    let mut cpu = spark::History::default();
+    let mut mem = spark::History::default();
+    for (c, m) in wave(200, 40, 90.0).into_iter().zip(wave(200, 64, 400.0)) {
+        cpu.push(c);
+        mem.push(m + 100.0);
+    }
+    app.cpu_history.insert(key.clone(), cpu);
+    app.mem_history.insert(key, mem);
+    app.bottom_tab = tab("Performance");
+    spark::set_glyphs(spark::Glyphs::Octant);
+    snap("octant_charts", &mut app);
+}
+
 #[test]
 fn help_modal() {
     let mut app = fixture();
@@ -722,6 +762,38 @@ fn launch_options() {
     // Back in the list, the row says what is set.
     app.mode = Mode::Launch;
     snap("launch_options_summary", &mut app);
+}
+
+/// A harness's options for an agent started on a sibling: the account line
+/// offers the sibling's accounts, as it named them, never this machine's —
+/// and the list under it says which one, the same way.
+#[test]
+fn launch_options_peer_account() {
+    use super::location::RemoteTarget;
+    let mut app = fixture();
+    app.launch_offer = vec![
+        tabs::Choice::Start(vec!["claude".into()]),
+        tabs::Choice::Start(vec!["codex".into()]),
+    ];
+    app.launch_cursor = 0;
+    app.launch_remote = Some(RemoteTarget {
+        host: "computer40".into(),
+        path: "/srv/api".into(),
+        resolved: None,
+        facts: None,
+        problem: None,
+        unchecked: Some("computer40 checks it".into()),
+        peer: true,
+    });
+    cctop_core::peer::set_accounts("computer40", "claude", &["default", "work"]);
+    app.launch_peer_picked
+        .insert(("computer40".into(), Provider::Claude), "work".into());
+    app.mode = Mode::LaunchOptions;
+    app.launch_opt_cursor = 1;
+    snap("launch_options_peer_account", &mut app);
+
+    app.mode = Mode::Launch;
+    snap("launch_options_peer_account_list", &mut app);
 }
 
 /// The directory field before anything is typed: the projects, then the ssh

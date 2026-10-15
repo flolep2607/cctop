@@ -469,16 +469,16 @@ mod tests {
         assert!(outcomes_unseen(Provider::Codex, &total(Provider::Codex, &many)).is_none());
     }
 
-    /// Pi records calls but never an outcome, so zero failures is all it can
+    /// Cursor records calls but never an outcome, so zero failures is all it can
     /// ever say — and calling that broken would be a false alarm every run.
     #[test]
     fn a_harness_that_records_no_outcome_is_never_accused_of_hiding_one() {
-        let t = total(Provider::Pi, &rows(Provider::Pi, 50, 100, 0, 1000));
-        assert!(outcomes_unseen(Provider::Pi, &t).is_none());
-        assert!(outcomes_inverted(Provider::Pi, &t).is_none());
+        let t = total(Provider::Cursor, &rows(Provider::Cursor, 50, 100, 0, 1000));
+        assert!(outcomes_unseen(Provider::Cursor, &t).is_none());
+        assert!(outcomes_inverted(Provider::Cursor, &t).is_none());
         // And its summary line does not claim the 0% it cannot know.
         assert!(
-            provider_ok(Provider::Pi, &t)
+            provider_ok(Provider::Cursor, &t)
                 .detail
                 .contains("outcomes not recorded")
         );

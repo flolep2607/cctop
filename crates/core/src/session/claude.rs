@@ -785,21 +785,23 @@ impl Extractor {
 
         match name {
             "WebFetch" => {
-                if let Some(url) = input.get("url").and_then(Value::as_str)
-                    && self.seen_urls.len() < 50
-                    && self.seen_urls.insert(url.to_string())
-                {
-                    self.metrics.web_fetches.push(url.to_string());
-                    self.metrics.web_fetch_count += 1;
+                if let Some(url) = input.get("url").and_then(Value::as_str) {
+                    extract::note_web(
+                        &mut self.metrics.web_fetches,
+                        &mut self.metrics.web_fetch_count,
+                        &mut self.seen_urls,
+                        url,
+                    );
                 }
             }
             "WebSearch" => {
-                if let Some(q) = input.get("query").and_then(Value::as_str)
-                    && self.seen_queries.len() < 50
-                    && self.seen_queries.insert(q.to_string())
-                {
-                    self.metrics.web_searches.push(q.to_string());
-                    self.metrics.web_search_count += 1;
+                if let Some(q) = input.get("query").and_then(Value::as_str) {
+                    extract::note_web(
+                        &mut self.metrics.web_searches,
+                        &mut self.metrics.web_search_count,
+                        &mut self.seen_queries,
+                        q,
+                    );
                 }
             }
             _ => {}

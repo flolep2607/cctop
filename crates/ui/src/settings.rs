@@ -318,9 +318,11 @@ impl App {
     /// Re-read `config.toml` when it has changed since the last read, so a
     /// rebinding saved in an editor works at the next key.
     ///
-    /// The settings that shape the first frame — the theme — are not re-applied
-    /// here; the row says it wants a restart. Hidden columns are, because the
-    /// table reads the list every frame and nothing about a palette is involved.
+    /// The theme and the graph glyphs are re-applied here, like the hidden
+    /// columns, so a change made on the page or in an editor shows at the next
+    /// keypress. The palette is also chosen before the first frame, in
+    /// `choose_palette`, because `auto` has to ask the terminal before ratatui
+    /// owns stdin.
     pub(super) fn reload_settings(&mut self) {
         let Some(path) = &self.settings_file else {
             return;
@@ -337,6 +339,7 @@ impl App {
         self.keymap = keymap;
         self.apply_columns();
         self.apply_theme();
+        self.apply_graph_glyphs();
         self.apply_footer();
         // `[tunnel]` is in the same file, and `cctop tunnel setup` in another
         // terminal is a change to it like any other.
@@ -356,6 +359,15 @@ impl App {
         super::theme::set_theme(self.settings.theme.as_deref());
         // And to agents opened from here on, which draw inside this palette.
         super::theme::tell_hosted_agents();
+    }
+
+    /// Redraw the charts in the set the file names, on the same reload path
+    /// as the theme and for the same reason: an edit made in an editor must
+    /// show without a restart.
+    pub(super) fn apply_graph_glyphs(&mut self) {
+        super::spark::set_glyphs(super::spark::Glyphs::from_name(
+            self.settings.graph_glyphs.as_deref(),
+        ));
     }
 
     /// Re-read the hidden columns out of the settings file.
@@ -552,32 +564,40 @@ impl App {
                 set(self, on);
                 self.set_status(format!("{name} {}", if on { "on" } else { "off" }));
             }
-            View::Choice {
-                value,
-                options,
-                set,
-            } => {
-                let options = options(self);
-                if options.is_empty() {
-                    return;
-                }
-                let now = value(self);
-                let at = options.iter().position(|o| *o == now).unwrap_or(0);
-                let next = options[(at + 1) % options.len()].clone();
-                set(self, &next);
-                // The name of what it became, not the field it was stored in: a
-                // choice between accounts is read by the account, and one
-                // between sort orders by the column.
-                self.set_status(format!("{name} = {}", said(&next)));
-            }
+            View::Choice { .. } => self.view_turn(i, 1),
             View::Number { value, .. } => {
                 self.settings_input = Some(format!("{}", value(self)).into());
             }
         }
     }
 
-    /// Change one `[settings]` entry: a boolean flips, a choice turns to the
-    /// next one, and anything else opens a field.
+    /// Turn a view choice `delta` places through its options, wrapping.
+    fn view_turn(&mut self, i: usize, delta: i32) {
+        let (name, _, view) = &VIEWS[i];
+        let View::Choice {
+            value,
+            options,
+            set,
+        } = view
+        else {
+            return;
+        };
+        let options = options(self);
+        if options.is_empty() {
+            return;
+        }
+        let now = value(self);
+        let at = options.iter().position(|o| *o == now).unwrap_or(0) as i32;
+        let next = options[(at + delta).rem_euclid(options.len() as i32) as usize].clone();
+        set(self, &next);
+        // The name of what it became, not the field it was stored in: a
+        // choice between accounts is read by the account, and one
+        // between sort orders by the column.
+        self.set_status(format!("{name} = {}", said(&next)));
+    }
+
+    /// Change one `[settings]` entry: a boolean flips, a choice (the theme, the
+    /// graph glyphs) turns to the next one, and anything else opens a field.
     fn setting_activate(&mut self, name: &str) {
         let (current, _) = self.settings.value_of(name);
         match name {
@@ -592,15 +612,41 @@ impl App {
                 }
             }
             // Reached only because a choice is not a boolean, so the guard
-            // above does not take it. A theme is repainted by `write_setting`
-            // → `reload_settings` → the reload's own `apply_theme`; see
-            // [`App::apply_theme`] for why the repaint lives there.
-            _ if let Some(options) = cctop_core::settings::choices(name) => {
-                let at = options.iter().position(|t| current.trim_matches('"') == *t);
-                let next = options[at.map_or(0, |i| (i + 1) % options.len())];
-                self.write_setting("settings", name, Some(next.into()));
-            }
+            // above does not take it.
+            _ if cctop_core::settings::choices(name).is_some() => self.setting_turn(name, 1),
             _ => self.settings_input = Some(current.trim_matches('"').to_string().into()),
+        }
+    }
+
+    /// Turn a choice setting `delta` places through its names, wrapping.
+    ///
+    /// Repainted by `write_setting` → `reload_settings` → the reload's own
+    /// `apply_theme` and `apply_graph_glyphs`, so nothing is applied here. See
+    /// [`App::apply_theme`] for why the repaint lives there and not only here.
+    fn setting_turn(&mut self, name: &str, delta: i32) {
+        let Some(names) = cctop_core::settings::choices(name) else {
+            return;
+        };
+        let (current, _) = self.settings.value_of(name);
+        let n = names.len() as i32;
+        // An unrecognised value turns to the default, wherever the key points:
+        // there is no place in the list to step from.
+        let next = match names.iter().position(|t| current.trim_matches('"') == *t) {
+            Some(at) => names[(at as i32 + delta).rem_euclid(n) as usize],
+            None => names[0],
+        };
+        self.write_setting("settings", name, Some(next.into()));
+    }
+
+    /// ←/→ on the row: turn a choice one way or the other. Anything that is
+    /// not a choice ignores it, so a stray arrow cannot flip a switch.
+    pub(super) fn settings_turn(&mut self, delta: i32) {
+        match self.settings_item() {
+            Some(Item::Setting(i)) => self.setting_turn(cctop_core::settings::SETTINGS[i].0, delta),
+            Some(Item::View(i)) if matches!(VIEWS[i].2, View::Choice { .. }) => {
+                self.view_turn(i, delta)
+            }
+            _ => {}
         }
     }
 

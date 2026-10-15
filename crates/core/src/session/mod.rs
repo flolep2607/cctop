@@ -5,16 +5,21 @@ pub(crate) mod claude_line;
 pub mod codex;
 pub(crate) mod codex_line;
 pub mod cursor;
+pub(crate) mod cursor_line;
 pub mod devin;
+pub(crate) mod devin_atif;
 pub mod extract;
 pub mod gemini;
+pub(crate) mod gemini_line;
 // Here rather than at the top of the crate because the session cache's version
 // is derived from this directory's sources (see build.rs), and what a parser
 // reads as absent is part of what it extracts.
 pub(crate) mod lenient;
 pub mod lookup;
 pub mod opencode;
+pub(crate) mod opencode_line;
 pub mod pi;
+pub(crate) mod pi_line;
 pub mod search;
 pub mod windsurf;
 
@@ -543,6 +548,9 @@ pub const EDIT_TOOLS: &[&str] = &[
     "str_replace_editor",
     "ApplyPatch",
     "apply_patch",
+    // Gemini CLI's.
+    "replace",
+    "write_file",
 ];
 
 /// How many written paths a row carries.
@@ -1446,9 +1454,9 @@ mod tests {
         s.tool_errors = 0;
         assert_eq!(s.error_rate(), Some(0.0), "a clean run is a real answer");
 
-        // Pi counts its calls but records no outcome, so the same figures mean
-        // nothing there.
-        let mut quiet = Session::new(Provider::Pi, "x".into());
+        // Cursor counts its calls but records no outcome, so the same figures
+        // mean nothing there.
+        let mut quiet = Session::new(Provider::Cursor, "x".into());
         quiet.tool_count = 40;
         assert_eq!(quiet.error_rate(), None);
     }
@@ -1609,6 +1617,36 @@ impl Tokens {
     /// Everything billed as input, across both providers' shapes.
     pub fn all_input(&self) -> u64 {
         self.input + self.cached_input + self.cache_read + self.cache_write_5m + self.cache_write_1h
+    }
+
+    /// A prompt whose cached part is counted inside it, not beside it — the
+    /// shape Gemini and Devin both report, as Codex does — split into the
+    /// uncached remainder and the cached part, so `all_input` rebuilds the
+    /// prompt. A cached count above the prompt is clamped, not underflowed.
+    pub fn from_prompt(prompt: u64, cached: u64, output: u64) -> Tokens {
+        let cached = cached.min(prompt);
+        Tokens {
+            input: prompt - cached,
+            input_total: prompt,
+            cached_input: cached,
+            output,
+            ..Default::default()
+        }
+    }
+
+    /// Add `other` into this, every field: one sum shared by every reader, so
+    /// a field one provider fills is never summed by one copy and dropped by
+    /// another.
+    pub fn add(&mut self, other: &Tokens) {
+        self.input += other.input;
+        self.output += other.output;
+        self.cache_read += other.cache_read;
+        self.cache_write_5m += other.cache_write_5m;
+        self.cache_write_1h += other.cache_write_1h;
+        self.input_total += other.input_total;
+        self.cached_input += other.cached_input;
+        self.reasoning_output += other.reasoning_output;
+        self.total += other.total;
     }
 }
 
@@ -2166,8 +2204,9 @@ pub struct SessionData {
     /// which is decimated past [`MAX_CTX_POINTS`] and can lose a marker, and
     /// which records nothing at all for a compaction no request followed.
     ///
-    /// Claude Code only, for the same reason as the breakdown above: it is the
-    /// only transcript that says a compaction happened.
+    /// Claude Code, Pi and OpenCode, the transcripts that say a compaction
+    /// happened: Claude's boundary entry, Pi's `compaction` entry, OpenCode's
+    /// `compaction` part.
     #[serde(default)]
     pub compactions: u32,
     /// When the session last went into ultracode, as its transcript stamps it.

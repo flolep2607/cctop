@@ -601,8 +601,9 @@ fn read_tail(s: &Session, want_context: bool) -> TailRead {
         true => match s.provider {
             Provider::Claude => session::claude::extract_last_tool(s),
             Provider::Codex => session::codex::extract_last_tool(s),
-            Provider::Cursor | Provider::Gemini | Provider::Windsurf => String::new(),
+            Provider::Cursor | Provider::Windsurf => String::new(),
             Provider::Devin => session::devin::extract_last_tool(s),
+            Provider::Gemini => session::gemini::extract_last_tool(s),
             Provider::OpenCode => session::opencode::extract_last_tool(s),
             Provider::Pi => session::pi::extract_last_tool(s),
         },
@@ -614,8 +615,10 @@ fn read_tail(s: &Session, want_context: bool) -> TailRead {
                 Provider::Claude => session::claude::extract_context(s),
                 Provider::Codex => session::codex::extract_context(s),
                 Provider::Devin => session::devin::extract_context(s),
+                Provider::Gemini => session::gemini::extract_context(s),
                 Provider::OpenCode => session::opencode::extract_context(s),
-                Provider::Cursor | Provider::Gemini | Provider::Pi | Provider::Windsurf => None,
+                Provider::Pi => session::pi::extract_context(s),
+                Provider::Cursor | Provider::Windsurf => None,
             }
         })
         .flatten();
