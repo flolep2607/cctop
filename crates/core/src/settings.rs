@@ -95,7 +95,7 @@ pub const SETTINGS: [(&str, &str, &str); 20] = [
     (
         "predictive_echo",
         "\"auto\"",
-        "auto/always/off: echo typing early on slow remote tabs",
+        "auto/always/off; auto above 60ms RTT",
     ),
     // The footer.
     (

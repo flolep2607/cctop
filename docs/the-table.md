@@ -655,7 +655,8 @@ first, underlined, and lets the far side's echo replace it, as mosh does. A
 guess the far side contradicts, or does not answer in time, is painted back.
 
 It guesses only plain letters typed one at a time at a visible cursor, or at
-Claude Code's own inverse-cell cursor. Enter, Tab, Esc, arrows, control keys,
+Claude Code's own inverse-cell cursor, and only at the end of the text: typing
+into the middle of a line is left to the far side. Enter, Tab, Esc, arrows, control keys,
 pastes, and `/` or `@` on an empty prompt stop the guessing until the far side
 has caught up, and after each of them nothing is drawn until one guess has
 come back right. An app that switches on the kitty keyboard protocol is not

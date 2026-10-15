@@ -677,7 +677,8 @@ fn terminal(machine: &str, path: &str, old: Old, reopen: bool) -> Result<(), Str
     // it was opened: where a resume picks up.
     let mut received = 0u64;
     // One across reconnects: a resume carries on the same byte stream, so
-    // the shadow screen it keeps is still the far side's.
+    // the shadow screen it keeps is still the far side's; a fresh open
+    // redraws over it.
     let mut predictor = crate::predict::Predictor::new(
         crate::predict::Mode::configured(),
         conn.size.1,
@@ -707,6 +708,14 @@ fn terminal(machine: &str, path: &str, old: Old, reopen: bool) -> Result<(), Str
         conn = again;
         if !resumed {
             received = 0;
+        }
+        // Guesses whose keys went down with the old socket are painted back.
+        let back = predictor.reconnected(resumed);
+        if !back.is_empty() {
+            use std::io::Write;
+            let mut stdout = std::io::stdout();
+            let _ = stdout.write_all(&back);
+            let _ = stdout.flush();
         }
     }
 }
@@ -1000,7 +1009,8 @@ fn pump(
     let mut incoming = Vec::new();
     let dropped = |e: std::io::Error| End::Dropped(e.to_string());
     // Sized to this terminal, which may have changed while it was away.
-    predictor.resize(size.1, size.0);
+    let back = predictor.resize(size.1, size.0);
+    screen.write_all(&back).map_err(|e| e.to_string())?;
     // When the keepalive in flight went out: its pong is a round trip.
     let mut pinged: Option<std::time::Instant> = None;
     // Every frame decoded so far; `Some` once one of them ends the socket.
@@ -1082,7 +1092,8 @@ fn pump(
             && now != size
         {
             size = now;
-            predictor.resize(now.1, now.0);
+            let back = predictor.resize(now.1, now.0);
+            screen.write_all(&back).map_err(|e| e.to_string())?;
             let resize = crate::ws::resize_message(now.0, now.1);
             if let Err(e) = up.write_all(&frame(Op::Text, resize.as_bytes(), true)) {
                 return Ok(dropped(e));

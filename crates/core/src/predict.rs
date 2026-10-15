@@ -27,8 +27,16 @@
 //!   second one is, once the first came back where it was guessed.
 //! - A guess needs somewhere to go: the terminal cursor when it is visible,
 //!   or — since Claude Code's Ink hides the real one and draws its own as an
-//!   inverse cell — the cursor's cell when it is drawn inverse. Never past
-//!   the right edge, never onto a box border, never onto a wide character.
+//!   inverse cell — the cursor's cell when it is drawn inverse. Only onto a
+//!   blank: never past the right edge, never onto a box border, a wide
+//!   character, or text already there — typing into the middle of a line
+//!   shifts what is right of it, which a guess of one cell cannot draw.
+//! - A space is guessed onto a blank, so its cell holds its letter before
+//!   the far side has answered at all; it is confirmed only once the far
+//!   side's cursor has moved past it.
+//! - A backspace takes back a guess still out, but its letter was sent and
+//!   will be echoed before the backspace is; that letter landing where the
+//!   next guess sits is not a wrong guess.
 //! - `/` or `@` at an empty prompt opens a menu in Claude Code, which moves
 //!   the whole screen; it ends the epoch rather than being guessed.
 //! - An application that pushes the kitty keyboard protocol (`CSI > … u`)
@@ -94,9 +102,6 @@ struct Guess {
     row: u16,
     col: u16,
     ch: char,
-    /// The cell's contents when the guess was made: still that, and the far
-    /// side has not got there yet; anything else but `ch`, and it was wrong.
-    was: String,
     epoch: u64,
     /// Whether this guess's epoch has had one confirmed, so it may be shown.
     ok: bool,
@@ -104,6 +109,15 @@ struct Guess {
     /// one to the right of the guess.
     fake_cursor: bool,
     sent_at: Instant,
+}
+
+/// A guess a backspace took back after its key had gone: the far side will
+/// still echo it, then erase it.
+struct Retracted {
+    row: u16,
+    col: u16,
+    ch: char,
+    at: Instant,
 }
 
 /// Where the far side's output is between bytes: only at rest — not inside
@@ -117,15 +131,14 @@ enum Lex {
     EscInter,
     Csi,
     Osc,
-    OscEsc,
     Str,
-    StrEsc,
 }
 
 pub struct Predictor {
     mode: Mode,
     shadow: vt100::Parser,
     pending: Vec<Guess>,
+    retracted: Vec<Retracted>,
     epoch: u64,
     /// Whether a guess of the current epoch has been confirmed.
     epoch_ok: bool,
@@ -152,6 +165,7 @@ impl Predictor {
             mode,
             shadow: vt100::Parser::new(rows, cols, 0),
             pending: Vec::new(),
+            retracted: Vec::new(),
             epoch: 0,
             epoch_ok: false,
             quiet_until: None,
@@ -170,23 +184,33 @@ impl Predictor {
         !self.pending.is_empty()
     }
 
-    /// The terminal was resized, which the far side redraws for: every guess
-    /// is off.
-    pub fn resize(&mut self, rows: u16, cols: u16) {
+    /// The terminal may have been resized, which the far side redraws for:
+    /// if it was, every guess is off. Returns what to write.
+    pub fn resize(&mut self, rows: u16, cols: u16) -> Vec<u8> {
+        if self.shadow.screen().size() == (rows, cols) {
+            return Vec::new();
+        }
         self.shadow.screen_mut().set_size(rows, cols);
-        self.forget();
+        self.forget()
     }
 
-    /// A new connection, resumed or not: what was guessed on the old one is
-    /// moot, and what is on the screen was not painted by this predictor.
-    pub fn reconnected(&mut self) {
-        self.forget();
+    /// A new connection: what was guessed on the old one is moot, its keys
+    /// may have been lost with the socket. A resume carries on the same byte
+    /// stream; a fresh open starts a new one, at rest. Returns what to write.
+    pub fn reconnected(&mut self, resumed: bool) -> Vec<u8> {
+        if !resumed {
+            self.lex = Lex::Ground;
+            self.csi.clear();
+        }
+        self.forget()
     }
 
-    fn forget(&mut self) {
+    /// Drop every guess and paint back whatever was drawn for them.
+    fn forget(&mut self) -> Vec<u8> {
         self.pending.clear();
-        self.drawn.clear();
+        self.retracted.clear();
         self.end_epoch(None);
+        self.render()
     }
 
     /// A round trip measured: a keepalive's pong, or a guess confirmed.
@@ -262,15 +286,18 @@ impl Predictor {
             return self.end_epoch(Some(now));
         }
         let screen = self.shadow.screen();
-        let Some(cell) = screen.cell(row, col).filter(|c| plain(c)) else {
+        // Blank, and so what it holds until the far side has got there;
+        // anything but blank or the letter afterwards was a wrong guess.
+        if !screen
+            .cell(row, col)
+            .is_some_and(|c| plain(c) && blank(c.contents()))
+        {
             return self.end_epoch(Some(now));
-        };
-        let was = cell.contents().to_string();
+        }
         self.pending.push(Guess {
             row,
             col,
             ch,
-            was,
             epoch: self.epoch,
             ok: self.epoch_ok,
             fake_cursor,
@@ -281,7 +308,13 @@ impl Predictor {
     fn backspace(&mut self, now: Instant) {
         match self.pending.last() {
             Some(g) if g.epoch == self.epoch => {
-                self.pending.pop();
+                let g = self.pending.pop().expect("just seen");
+                self.retracted.push(Retracted {
+                    row: g.row,
+                    col: g.col,
+                    ch: g.ch,
+                    at: now,
+                });
             }
             _ => self.end_epoch(Some(now)),
         }
@@ -328,15 +361,34 @@ impl Predictor {
             self.pending.clear();
             return self.render();
         }
+        let screen = self.shadow.screen();
+        let contents = |row, col| {
+            screen
+                .cell(row, col)
+                .map_or(String::new(), |c| c.contents().to_string())
+        };
+        // Back to blank: the far side has echoed and erased it.
+        self.retracted.retain(|r| !blank(&contents(r.row, r.col)));
+        let (crow, ccol) = screen.cursor_position();
         let mut i = 0;
         while i < self.pending.len() {
             let g = &self.pending[i];
-            let here = self
-                .shadow
-                .screen()
+            let screen = self.shadow.screen();
+            let here = screen
                 .cell(g.row, g.col)
                 .map_or(String::new(), |c| c.contents().to_string());
-            if here.chars().eq([g.ch]) {
+            // A space's cell was blank already, so holding it says nothing
+            // until the cursor has gone past.
+            let holds = if g.ch == ' ' {
+                blank(&here) && crow == g.row && ccol > g.col
+            } else {
+                here.chars().eq([g.ch])
+            };
+            let retracted = self
+                .retracted
+                .iter()
+                .any(|r| (r.row, r.col) == (g.row, g.col) && here.chars().eq([r.ch]));
+            if holds {
                 let (epoch, rtt) = (g.epoch, now.saturating_duration_since(g.sent_at));
                 self.pending.remove(i);
                 self.rtt_sample(rtt);
@@ -346,7 +398,8 @@ impl Predictor {
                 if epoch == self.epoch {
                     self.epoch_ok = true;
                 }
-            } else if here == g.was {
+            } else if blank(&here) || retracted {
+                // Not there yet, or the echo of a letter taken back.
                 i += 1;
             } else {
                 self.pending.clear();
@@ -360,6 +413,8 @@ impl Predictor {
     /// wrong. Returns what to write.
     pub fn tick(&mut self, now: Instant) -> Vec<u8> {
         let late = self.rtt() * 2 + SLACK;
+        self.retracted
+            .retain(|r| now.saturating_duration_since(r.at) <= late);
         if self
             .pending
             .first()
@@ -383,7 +438,14 @@ impl Predictor {
             }
             if let Some(last) = self.pending.iter().rfind(|g| g.ok && g.fake_cursor) {
                 let next = (last.row, last.col + 1);
-                if self.shadow.screen().cell(next.0, next.1).is_some_and(plain)
+                // A blank inverse cell, which is what Ink draws there only
+                // when it is the end of the text: anything else there would
+                // be hidden behind it.
+                if self
+                    .shadow
+                    .screen()
+                    .cell(next.0, next.1)
+                    .is_some_and(|c| plain(c) && blank(c.contents()))
                     && !want.iter().any(|w| (w.0, w.1) == next)
                 {
                     want.push((next.0, next.1, "\x1b[0;7m "));
@@ -398,7 +460,9 @@ impl Predictor {
         let (crow, ccol) = screen.cursor_position();
         // Mid-sequence, a write here would land inside the far side's; and
         // with the cursor on the last column, moving it would lose a wrap
-        // the terminal is holding. The next write tries again.
+        // the terminal is holding. `drawn` is kept, and the next write
+        // tries again — only a write can change either, and every one ends
+        // in a render, so a retry on a timer would find the same.
         //
         // ponytail: origin mode and scroll regions are not consulted — CUP is
         // taken as absolute, which is what an rmux client redraw uses.
@@ -476,13 +540,12 @@ impl Predictor {
                     Lex::Csi
                 }
                 (Lex::Osc, 0x07) => Lex::Ground,
-                (Lex::Osc, 0x1b) => Lex::OscEsc,
+                // An ESC ends a string whatever follows, as vte (and so the
+                // shadow) has it: `ESC \\` is the terminator, and anything
+                // else is the start of the next sequence.
+                (Lex::Osc | Lex::Str, 0x1b) => Lex::Esc,
                 (Lex::Osc, _) => Lex::Osc,
-                (Lex::OscEsc, _) => Lex::Ground,
-                (Lex::Str, 0x1b) => Lex::StrEsc,
                 (Lex::Str, _) => Lex::Str,
-                (Lex::StrEsc, b'\\') => Lex::Ground,
-                (Lex::StrEsc, _) => Lex::Str,
             };
         }
     }
@@ -498,6 +561,12 @@ fn plain(cell: &vt100::Cell) -> bool {
 /// push across.
 fn border(ch: char) -> bool {
     matches!(ch, '│' | '┃' | '║' | '|') || ('\u{2500}'..='\u{259f}').contains(&ch)
+}
+
+/// An empty cell, or one painted with a space: Ink and ratatui pad with
+/// spaces where an erase leaves nothing.
+fn blank(s: &str) -> bool {
+    s.is_empty() || s == " "
 }
 
 fn contains(hay: &[u8], needle: &[u8]) -> bool {
@@ -740,11 +809,73 @@ mod tests {
             &p.on_key(b"c", t + 220 * MS),
             b"\x1b[5;4H\x1b[0;4mc"
         ));
-        // A backspace over the far side's own letters is not guessed.
+        // The far side echoes the letter taken back, then erases it: neither
+        // is the guess there being wrong.
+        let echoed = p.on_output(b"b", t + 320 * MS);
+        assert!(p.waiting());
+        assert!(shown(&echoed, 'c'), "drawn again over the echo");
+        p.on_output(b"\x08 \x08", t + 330 * MS);
+        assert!(p.waiting());
+        assert!(p.retracted.is_empty(), "erased, so done with");
         p.on_output(b"c", t + 340 * MS);
+        assert!(!p.waiting(), "confirmed");
+        // A backspace over the far side's own letters is not guessed.
         p.on_key(b"\x7f", t + 350 * MS);
         p.on_key(b"d", t + 360 * MS);
         assert!(!p.waiting(), "the backspace ended the epoch");
+    }
+
+    #[test]
+    fn a_space_waits_for_the_cursor_to_pass_it() {
+        let t = Instant::now();
+        let mut p = ratatui(Mode::Auto, t);
+        // Padded with spaces, as ratatui paints a blank.
+        p.on_output(b"\x1b[5;3H          \x1b[5;3H", t);
+        echo(&mut p, 'a', 2, t, 120 * MS);
+        let srtt = p.srtt;
+        p.on_key(b" ", t + 200 * MS);
+        // A spinner elsewhere, the cursor put back: the space's cell holds a
+        // space, but that is what it held before.
+        p.on_output(b"\x1b[1;1Hspin\x1b[5;4H", t + 210 * MS);
+        assert!(p.waiting());
+        assert_eq!(p.srtt, srtt);
+        // So the next letter goes after the space, not on it.
+        let typed = p.on_key(b"b", t + 220 * MS);
+        assert!(contains(&typed, b"\x1b[5;5H\x1b[0;4mb"));
+        p.on_output(b" ", t + 320 * MS);
+        assert_eq!(p.pending.len(), 1, "the space, confirmed by the cursor");
+        p.on_output(b"b", t + 340 * MS);
+        assert!(!p.waiting());
+    }
+
+    #[test]
+    fn a_reconnect_paints_back_what_was_drawn() {
+        let t = Instant::now();
+        let mut p = ratatui(Mode::Always, t);
+        echo(&mut p, 'a', 2, t, 120 * MS);
+        assert!(shown(&p.on_key(b"b", t + 200 * MS), 'b'));
+        assert!(p.resize(24, 80).is_empty(), "the same size is no resize");
+        assert!(p.waiting());
+        let back = p.reconnected(true);
+        assert!(!p.waiting());
+        assert!(contains(&back, b"\x1b[5;4H\x1b[0m "));
+    }
+
+    #[test]
+    fn an_esc_ends_an_unterminated_string_as_vte_does() {
+        let t = Instant::now();
+        let mut p = ratatui(Mode::Always, t);
+        echo(&mut p, 'a', 2, t, 120 * MS);
+        p.on_key(b"b", t + 200 * MS);
+        // A DCS cut short by a CSI: at rest after the CSI, as the shadow is.
+        let out = p.on_output(b"\x1bPq#0\x1b[5;4H", t + 210 * MS);
+        assert!(shown(&out, 'b'));
+        // A fresh open is a fresh stream, whatever the old one was inside.
+        p.on_output(b"\x1b]0;cut off", t + 220 * MS);
+        p.reconnected(false);
+        p.on_output(b"\x1b[2J\x1b[5;1H> a", t + 230 * MS);
+        echo(&mut p, 'b', 3, t + 240 * MS, 120 * MS);
+        assert!(shown(&p.on_key(b"c", t + 400 * MS), 'c'));
     }
 
     #[test]
@@ -818,6 +949,34 @@ mod tests {
         assert_eq!(p.pending.len(), 7);
         p.on_key(b"h", t + 10 * MS);
         assert_eq!(p.pending.len(), 7, "not past the border");
+    }
+
+    #[test]
+    fn ink_spaces_and_text_mid_line() {
+        let t = Instant::now();
+        let mut p = Predictor::new(Mode::Auto, 24, 40);
+        p.on_output(INK, t);
+        p.on_key(b"h", t);
+        p.on_output(&ink_line("h"), t + 120 * MS);
+        // A space onto Ink's padding, then its spinner.
+        p.on_key(b" ", t + 200 * MS);
+        p.on_output("\x1b[2;1H✻\x1b[10;6H".as_bytes(), t + 210 * MS);
+        assert!(p.waiting());
+        let typed = p.on_key(b"i", t + 220 * MS);
+        assert!(contains(&typed, b"\x1b[10;7H\x1b[0;4mi"));
+        p.on_output(&ink_line("h "), t + 320 * MS);
+        assert_eq!(p.pending.len(), 1);
+        p.on_output(&ink_line("h i"), t + 340 * MS);
+        assert!(!p.waiting());
+        // The cursor parked on text: a letter there would be inserted, and
+        // what it pushes right cannot be drawn, so it is not guessed.
+        let mut p = Predictor::new(Mode::Always, 24, 40);
+        p.on_output(
+            b"\x1b[?25l\x1b[10;1H| > ab\x1b[7mc\x1b[27md   |\x1b[10;7H",
+            t,
+        );
+        p.on_key(b"x", t);
+        assert!(!p.waiting());
     }
 
     #[test]
