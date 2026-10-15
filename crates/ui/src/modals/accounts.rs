@@ -214,6 +214,11 @@ pub(crate) fn draw_add_account(frame: &mut Frame, area: Rect, app: &mut App, lay
         tui_term::widget::PseudoTerminal::new(pane.view.parser.screen()),
         screen,
     );
+    // Before the link's hyperlink cells: those are cctop's, and the pass may
+    // pin them like the rest of its drawing.
+    layout
+        .passthrough
+        .extend(theme::passthrough(frame.buffer_mut(), screen));
     // Every row the link is wrapped over is one target. The terminal's own
     // link detection sees only the row under the pointer, so a click there
     // opened the first line of the URL — a sign-in page that cannot work.

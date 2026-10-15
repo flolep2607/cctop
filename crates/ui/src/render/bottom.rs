@@ -83,7 +83,7 @@ pub(super) fn draw_bottom(frame: &mut Frame, area: Rect, app: &mut App, layout: 
     // Preview panel lacks for a remote row is a tab, and it says so itself.
     if app.bottom_tab == super::preview::TAB {
         app.panel_max_scroll = 0;
-        super::preview::draw(frame, area, inner, app);
+        super::preview::draw(frame, area, inner, app, layout);
         return;
     }
 

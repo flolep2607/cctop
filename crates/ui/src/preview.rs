@@ -30,6 +30,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
 use super::App;
+use super::render::Layout;
 use super::tabs::Tab;
 use super::theme;
 
@@ -260,7 +261,7 @@ fn alt_key(at: usize) -> Option<String> {
 }
 
 /// Draw the panel into `inner`, captioning `area`'s bottom border.
-pub(super) fn draw(frame: &mut Frame, area: Rect, inner: Rect, app: &App) {
+pub(super) fn draw(frame: &mut Frame, area: Rect, inner: Rect, app: &App, layout: &mut Layout) {
     let Some(target) = app.preview_target() else {
         return;
     };
@@ -326,6 +327,9 @@ pub(super) fn draw(frame: &mut Frame, area: Rect, inner: Rect, app: &App) {
         tui_term::widget::PseudoTerminal::new(&Window { screen, top }),
         area_drawn,
     );
+    layout
+        .passthrough
+        .extend(theme::passthrough(frame.buffer_mut(), area_drawn));
 
     // Said on the border, where it costs the screen nothing: which tab this is,
     // that typing here does not reach it, and how to get to where it does.

@@ -27,6 +27,8 @@
 //!   only sixteen gets them folded down by [`sixteen`], and one that can show
 //!   none gets Mono. See [`Depth`].
 
+use ratatui::buffer::{Buffer, Cell};
+use ratatui::layout::{Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
@@ -752,30 +754,83 @@ pub fn exact(color: Color) -> Color {
 }
 
 /// Every cell of a finished frame with its indices from 16 up written as RGB,
-/// when [`exact_indexed`] says so and the palette is the 256-colour one.
+/// when [`pinning`] says so — except the cells that are still an agent's.
 ///
 /// At the frame rather than at each colour because a colour reaches the
 /// buffer by more ways than the palette: [`gray`] and the tab hues build
 /// theirs, the effects ease and snap to indices, the QR code and the parties
-/// name theirs outright, and a tool's own output and an agent's pane carry
-/// whatever indices they were written with. One pass over the buffer, between
-/// drawing and flushing, cannot miss any of those or the next one added,
-/// where a conversion at each would have to be remembered at every new site.
-/// It is a few thousand cells a frame, and ratatui's diff still writes only
-/// the ones that changed.
+/// name theirs outright, and a tool's own output carries whatever indices it
+/// was written with. One pass over the buffer, between drawing and flushing,
+/// cannot miss any of those or the next one added, where a conversion at each
+/// would have to be remembered at every new site. It is a few thousand cells
+/// a frame, and ratatui's diff still writes only the ones that changed.
 ///
-/// ponytail: an agent's pane gets the same treatment, so a program inside
-/// cctop shows a 256-colour index as xterm's value even on a terminal that
-/// would have regenerated it — the value the program was written against —
-/// and `CCTOP_INDEXED` gives the terminal's table back to anyone who wants it.
-pub fn pin_indexed(buf: &mut ratatui::buffer::Buffer) {
-    if colors().depth == Depth::Indexed && exact_indexed() {
-        pin_cells(buf);
+/// A terminal cctop draws — an agent's pane, the preview of one, the login
+/// pane — is the exception, given as `agents`. What an agent prints is the
+/// agent's, and an index there has to mean what the same program run outside
+/// cctop would get from this terminal: the user may have themed that table on
+/// purpose. A cell is left alone only while it is still what the terminal
+/// widget wrote; anything cctop drew over it afterwards — a modal, the dead
+/// banner — is cctop's and pinned like the rest of the frame.
+pub fn pin_indexed(buf: &mut Buffer, agents: &[Passthrough]) {
+    if pinning() {
+        pin_cells(buf, agents);
     }
 }
 
-fn pin_cells(buf: &mut ratatui::buffer::Buffer) {
-    for cell in &mut buf.content {
+/// Whether [`pin_indexed`] does anything this run: the 256-colour palette, on
+/// a terminal [`exact_indexed`] says to write RGB to.
+pub fn pinning() -> bool {
+    colors().depth == Depth::Indexed && exact_indexed()
+}
+
+/// A rectangle of the frame as a terminal widget left it, so [`pin_indexed`]
+/// can tell the agent's cells from whatever was drawn over them later.
+///
+/// The cells themselves rather than just the rectangle, because cctop does
+/// draw over a pane — a modal, a menu, the banner of a dead agent — and a
+/// rectangle alone would leave those in the terminal's table, the very
+/// colours the pass is there to pin. A cell that is still what was recorded
+/// is the agent's; one that differs was drawn over.
+#[derive(Debug, Clone)]
+pub struct Passthrough {
+    area: Rect,
+    cells: Vec<Cell>,
+}
+
+impl Passthrough {
+    /// What `area` of `buf` holds now. Clipped to the buffer, so a rectangle
+    /// reaching past it records only what is there.
+    pub fn record(buf: &Buffer, area: Rect) -> Self {
+        let area = area.intersection(buf.area);
+        let cells = area.positions().map(|p| buf[p].clone()).collect();
+        Self { area, cells }
+    }
+
+    /// Whether the cell at `pos` is still the one recorded there.
+    fn untouched(&self, pos: Position, cell: &Cell) -> bool {
+        self.area.contains(pos) && {
+            let i = (pos.y - self.area.y) as usize * self.area.width as usize
+                + (pos.x - self.area.x) as usize;
+            self.cells.get(i) == Some(cell)
+        }
+    }
+}
+
+/// [`Passthrough::record`], when the pass that would read it is going to run;
+/// nothing otherwise, so a frame that pins nothing copies nothing.
+pub fn passthrough(buf: &Buffer, area: Rect) -> Option<Passthrough> {
+    pinning().then(|| Passthrough::record(buf, area))
+}
+
+fn pin_cells(buf: &mut Buffer, agents: &[Passthrough]) {
+    let width = buf.area.width.max(1) as usize;
+    let (x0, y0) = (buf.area.x, buf.area.y);
+    for (i, cell) in buf.content.iter_mut().enumerate() {
+        let pos = Position::new(x0 + (i % width) as u16, y0 + (i / width) as u16);
+        if agents.iter().any(|a| a.untouched(pos, cell)) {
+            continue;
+        }
         cell.fg = exact(cell.fg);
         cell.bg = exact(cell.bg);
         cell.underline_color = exact(cell.underline_color);
@@ -2009,20 +2064,53 @@ pub(super) mod tests {
     /// went unreadable; after the pass it names the colour, not the slot.
     #[test]
     fn a_frame_is_pinned_cell_by_cell() {
-        use ratatui::buffer::Buffer;
-        use ratatui::layout::Rect;
         let mut buf = Buffer::empty(Rect::new(0, 0, 3, 1));
         buf[(0, 0)].set_fg(Color::Black).set_bg(Color::Indexed(75));
         buf[(1, 0)]
             .set_fg(Color::Indexed(245))
             .set_bg(Color::Indexed(4));
         buf[(2, 0)].underline_color = Color::Indexed(203);
-        pin_cells(&mut buf);
+        pin_cells(&mut buf, &[]);
         assert_eq!(buf[(0, 0)].fg, Color::Black);
         assert_eq!(buf[(0, 0)].bg, Color::Rgb(0x5f, 0xaf, 0xff));
         assert_eq!(buf[(1, 0)].fg, Color::Rgb(138, 138, 138));
         assert_eq!(buf[(1, 0)].bg, Color::Indexed(4));
         assert_eq!(buf[(2, 0)].underline_color, Color::Rgb(255, 95, 95));
+    }
+
+    /// An agent's 75 is the agent's: it reaches the terminal as the index,
+    /// where the same 75 drawn by cctop beside it, or over the pane after the
+    /// agent's screen was, goes out as xterm's RGB.
+    #[test]
+    fn an_agents_cells_keep_their_indices() {
+        let mut buf = Buffer::empty(Rect::new(0, 0, 6, 2));
+        for x in 0..6 {
+            buf[(x, 0)].set_bg(Color::Indexed(75));
+            buf[(x, 1)].set_bg(Color::Indexed(75));
+        }
+        // The pane: columns 1..4 of the top row, as the terminal widget left them.
+        let pane = Passthrough::record(&buf, Rect::new(1, 0, 3, 1));
+        // A modal drawn over the pane's last cell afterwards.
+        buf[(3, 0)].set_symbol("x");
+        pin_cells(&mut buf, &[pane]);
+        let rgb = Color::Rgb(0x5f, 0xaf, 0xff);
+        assert_eq!(buf[(0, 0)].bg, rgb, "cctop's, left of the pane");
+        assert_eq!(buf[(1, 0)].bg, Color::Indexed(75), "the agent's");
+        assert_eq!(buf[(2, 0)].bg, Color::Indexed(75), "the agent's");
+        assert_eq!(buf[(3, 0)].bg, rgb, "drawn over the pane");
+        assert_eq!(buf[(4, 0)].bg, rgb, "cctop's, right of the pane");
+        assert_eq!(buf[(1, 1)].bg, rgb, "below the pane");
+    }
+
+    /// A rectangle reaching past the frame records what is inside it.
+    #[test]
+    fn a_passthrough_is_clipped_to_the_frame() {
+        let mut buf = Buffer::empty(Rect::new(0, 0, 2, 2));
+        buf[(1, 1)].set_bg(Color::Indexed(75));
+        let pane = Passthrough::record(&buf, Rect::new(1, 1, 10, 10));
+        assert_eq!(pane.area, Rect::new(1, 1, 1, 1));
+        pin_cells(&mut buf, &[pane]);
+        assert_eq!(buf[(1, 1)].bg, Color::Indexed(75));
     }
 
     #[test]

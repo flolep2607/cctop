@@ -151,7 +151,8 @@ rebuild that table from their sixteen-colour scheme — Tabby's
 out navy and the settings page's black-on-accent cursor disappears. So on a
 terminal that says it takes 24-bit colour (`COLORTERM=truecolor` or `24bit`),
 cctop writes those colours as the RGB xterm gives them, which no regenerated
-table can change. The sixteen ANSI colours stay your scheme's.
+table can change. The sixteen ANSI colours stay your scheme's, and what an
+agent prints in its pane reaches your terminal exactly as it printed it.
 
 If your terminal takes truecolor but does not set `COLORTERM`, set it yourself.
 If you have themed the 256-colour table on purpose and want cctop to follow it,

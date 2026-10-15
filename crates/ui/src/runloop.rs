@@ -911,7 +911,7 @@ fn event_loop(
             terminal.draw(|frame| {
                 layout = render::draw(frame, app);
                 // Last, so it sees every cell however it was coloured.
-                theme::pin_indexed(frame.buffer_mut());
+                theme::pin_indexed(frame.buffer_mut(), &layout.passthrough);
             })?;
             app.needs_redraw = false;
         }
