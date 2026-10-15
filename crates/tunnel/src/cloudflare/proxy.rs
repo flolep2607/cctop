@@ -31,8 +31,8 @@ use crate::Routes;
 
 use super::pool::Pool;
 use super::stream::{
-    self, ConnectRequest, ConnectionType, HTTP_HEADER_KEY, HTTP_HOST_KEY, HTTP_METHOD_KEY,
-    HTTP_STATUS_KEY,
+    self, ConnectRequest, ConnectionType, EdgeWrite, HTTP_HEADER_KEY, HTTP_HOST_KEY,
+    HTTP_METHOD_KEY, HTTP_STATUS_KEY,
 };
 
 /// Byte counters the supervisor accumulates across all streams.
@@ -56,15 +56,33 @@ const MAX_HEADER_BYTES: usize = 32 * 1024;
 pub async fn handle_inbound_stream<R, W>(
     routes: &Routes,
     mut reader: R,
+    writer: W,
+    counters: StreamCounters,
+    pool: Arc<Pool>,
+) -> Result<(), Error>
+where
+    R: futures::io::AsyncRead + Unpin,
+    W: EdgeWrite,
+{
+    let req = stream::read_connect_request(&mut reader).await?;
+    serve_request(routes, req, reader, writer, counters, pool).await
+}
+
+/// Answer one request the edge sent, whichever transport framed it: QUIC
+/// reads it as a `ConnectRequest`, HTTP/2 builds the same thing from the
+/// stream's headers (`http2::connect_request`).
+pub(crate) async fn serve_request<R, W>(
+    routes: &Routes,
+    req: ConnectRequest,
+    mut reader: R,
     mut writer: W,
     counters: StreamCounters,
     pool: Arc<Pool>,
 ) -> Result<(), Error>
 where
     R: futures::io::AsyncRead + Unpin,
-    W: futures::io::AsyncWrite + Unpin,
+    W: EdgeWrite,
 {
-    let req = stream::read_connect_request(&mut reader).await?;
     debug!(dest = %req.dest, ty = ?req.conn_type, "inbound stream");
     let host = request_host(&req);
     let Some(local_port) = routes.port_for(&host) else {
@@ -219,7 +237,7 @@ async fn proxy_http<R, W>(
 ) -> Result<(), Error>
 where
     R: futures::io::AsyncRead + Unpin,
-    W: futures::io::AsyncWrite + Unpin,
+    W: EdgeWrite,
 {
     let req_shape = analyse_request(&request);
 
@@ -270,7 +288,7 @@ async fn run_pooled<R, W>(
 ) -> Result<(), Error>
 where
     R: futures::io::AsyncRead + Unpin,
-    W: futures::io::AsyncWrite + Unpin,
+    W: EdgeWrite,
 {
     let in_counter = counters.bytes_in.clone();
     let out_counter = counters.bytes_out.clone();
@@ -297,7 +315,7 @@ where
         meta.push((format!("{HTTP_HEADER_KEY}:{name}"), value.clone()));
     }
     let meta_refs: Vec<(&str, &str)> = meta.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
-    stream::write_connect_response(&mut to_edge, "", &meta_refs).await?;
+    to_edge.write_head("", &meta_refs).await?;
 
     // 4. Flush any header-over-read bytes (start of body) first.
     if !leftover.is_empty() {
@@ -354,7 +372,7 @@ async fn run_bidi<R, W>(
 ) -> Result<(), Error>
 where
     R: futures::io::AsyncRead + Unpin,
-    W: futures::io::AsyncWrite + Unpin,
+    W: EdgeWrite,
 {
     // Two concurrent halves; each terminates when its source EOFs.
     // Used for WebSocket Upgrades (where both directions flow
@@ -381,7 +399,7 @@ where
         }
         let meta_refs: Vec<(&str, &str)> =
             meta.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
-        stream::write_connect_response(&mut to_edge, "", &meta_refs).await?;
+        to_edge.write_head("", &meta_refs).await?;
         if !leftover.is_empty() {
             to_edge
                 .write_all(&leftover)
@@ -485,11 +503,11 @@ fn extract_path(dest: &str) -> String {
 
 async fn write_error_response<W>(writer: &mut W, status: u16, msg: &str) -> Result<(), Error>
 where
-    W: futures::io::AsyncWrite + Unpin,
+    W: EdgeWrite,
 {
     let meta = [(HTTP_STATUS_KEY, status.to_string())];
     let refs: Vec<(&str, &str)> = meta.iter().map(|(k, v)| (*k, v.as_str())).collect();
-    stream::write_connect_response(writer, msg, &refs).await?;
+    writer.write_head(msg, &refs).await?;
     Ok(())
 }
 
@@ -497,11 +515,11 @@ where
 /// error, which the edge would turn into a 502 of its own.
 async fn write_not_found<W>(writer: &mut W) -> Result<(), Error>
 where
-    W: futures::io::AsyncWrite + Unpin,
+    W: EdgeWrite,
 {
     let content_length = format!("{HTTP_HEADER_KEY}:Content-Length");
     let meta = [(HTTP_STATUS_KEY, "404"), (content_length.as_str(), "0")];
-    stream::write_connect_response(writer, "", &meta).await?;
+    writer.write_head("", &meta).await?;
     writer
         .close()
         .await
@@ -566,13 +584,13 @@ async fn proxy_tcp<R, W>(
 ) -> Result<(), Error>
 where
     R: futures::io::AsyncRead + Unpin,
-    W: futures::io::AsyncWrite + Unpin,
+    W: EdgeWrite,
 {
     let tcp = TcpStream::connect(("127.0.0.1", local_port))
         .await
         .map_err(|e| Error::Internal(format!("tcp connect: {e}")))?;
     let (mut r, mut w) = tcp.into_split();
-    stream::write_connect_response(to_edge, "", &[]).await?;
+    to_edge.write_head("", &[]).await?;
     let edge_to_local = pump_futures_to_tokio_counted(from_edge, &mut w, &counters.bytes_in);
     let local_to_edge = pump_tokio_to_futures_counted(&mut r, to_edge, &counters.bytes_out);
     let _ = futures::future::join(edge_to_local, local_to_edge).await;

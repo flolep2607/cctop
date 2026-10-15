@@ -18,7 +18,9 @@ crates.io package can depend only on others that are there too.
   tunnel, and the edge's configuration push acknowledged.
 
 Both speak the argotunnel protocol natively — QUIC to the edge, Cap'n Proto RPC
-over it — so nothing needs `cloudflared` installed.
+over it — so nothing needs `cloudflared` installed. Where QUIC's UDP does not get
+through, or keeps dropping, the tunnel moves to HTTP/2 over TCP, as cloudflared's
+`--protocol auto` does; `cloudflare::Protocol` pins either.
 
 ## Where it came from
 

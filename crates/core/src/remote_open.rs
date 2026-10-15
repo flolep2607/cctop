@@ -811,6 +811,9 @@ fn terminal(machine: &str, path: &str, old: Old, reopen: bool) -> Result<(), Str
     );
     let mut opened = std::time::Instant::now();
     let mut notice = None;
+    // The numbers the dashboard's corner shows for this tab, kept beside the
+    // session for as long as this bridge runs.
+    let link = crate::link_health::Writer::from_env();
     loop {
         let why = match pump(
             &mut conn.up,
@@ -818,6 +821,7 @@ fn terminal(machine: &str, path: &str, old: Old, reopen: bool) -> Result<(), Str
             conn.size,
             &mut received,
             &mut predictor,
+            &link,
             machine,
             notice.take(),
         )? {
@@ -832,6 +836,7 @@ fn terminal(machine: &str, path: &str, old: Old, reopen: bool) -> Result<(), Str
                 opened.elapsed().as_secs_f64()
             ),
         );
+        link.set_state(crate::link_health::State::Reconnecting);
         let Back {
             conn: again,
             resumed,
@@ -850,6 +855,7 @@ fn terminal(machine: &str, path: &str, old: Old, reopen: bool) -> Result<(), Str
             &mut std::io::stdout(),
         )?;
         conn = again;
+        link.set_state(crate::link_health::State::Connected);
         opened = std::time::Instant::now();
         if !resumed {
             received = 0;
@@ -1310,12 +1316,16 @@ const SILENCE: std::time::Duration = std::time::Duration::from_secs(75);
 /// key typed asks it. A live socket's pong is back in well under a second.
 const UNANSWERED: std::time::Duration = std::time::Duration::from_secs(5);
 
+// Eight, because each is a different piece of the one tab's state that
+// outlives a socket; a struct of them would be a name for this argument list.
+#[allow(clippy::too_many_arguments)]
 fn pump(
     up: &mut crate::peer::Upstream,
     decoder: &mut crate::ws::Decoder,
     mut size: (u16, u16),
     received: &mut u64,
     predictor: &mut crate::predict::Predictor,
+    link: &crate::link_health::Writer,
     machine: &str,
     notice: Option<String>,
 ) -> Result<End, String> {
@@ -1375,6 +1385,7 @@ fn pump(
                 Op::Pong => {
                     if let Some(at) = pinged.take() {
                         predictor.rtt_sample(at.elapsed());
+                        link.rtt(predictor.srtt());
                     }
                 }
                 // Output, counted once it is on this terminal: what a resume
@@ -1383,6 +1394,7 @@ fn pump(
                 Op::Binary => {
                     stdout.write_all(&payload).map_err(|e| e.to_string())?;
                     *received += payload.len() as u64;
+                    link.received_raw(payload.len());
                     let over = predictor.on_output(&payload, std::time::Instant::now());
                     stdout.write_all(&over).map_err(|e| e.to_string())?;
                 }
@@ -1488,6 +1500,7 @@ fn pump(
                     if let Err(e) = up.write_all(&frame(Op::Binary, &buf[..n], true)) {
                         return Ok(dropped(e));
                     }
+                    link.sent(n);
                     said = std::time::Instant::now();
                     // A key into a socket that has said nothing for a while
                     // asks whether anyone is there, so a dead one is noticed
@@ -1519,6 +1532,10 @@ fn pump(
             };
             if !incoming.is_empty() {
                 heard = std::time::Instant::now();
+                link.received_wire(incoming.len());
+                // A typed key that came back is a sample too, taken in
+                // `on_output`; read off here rather than there, once a read.
+                link.rtt(predictor.srtt());
             }
             decoder.push(&incoming);
             if let Some(end) = deliver(decoder, up, predictor, &mut pinged)? {

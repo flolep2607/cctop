@@ -447,6 +447,9 @@ const LINK_MIN_HINTS: usize = 26;
 /// The link takes its columns before the hints and badges do, and is drawn after
 /// them, so nothing lands on top of a cell holding an escape sequence.
 pub(super) fn draw_footer(frame: &mut Frame, area: Rect, app: &App, layout: &mut Layout) {
+    // The link first, in the cells just left of the share corner: it is the
+    // focused tab's, and the corner is the machine's.
+    let area = draw_link(frame, area, app);
     // `footer_hide = "share"` leaves the whole corner off.
     if app.hidden_footer.iter().any(|h| h == "share") {
         draw_footer_keys(frame, area, app, layout);
@@ -527,6 +530,43 @@ pub(super) fn draw_footer(frame: &mut Frame, area: Rect, app: &App, layout: &mut
         }
     }
     layout.share_corner = Some((area.y, x, x + width as u16));
+}
+
+/// The focused remote tab's link — `☁ 118ms · 2↻ · ×4.1` — in the
+/// bottom-right corner, and the footer left of it for everything else.
+///
+/// Coloured by the round trip, because that is the number typing is felt
+/// through: green under 100 ms, amber under 250, red past that and while the
+/// link is being dialled again. `footer_hide = "link"` leaves it off.
+fn draw_link(frame: &mut Frame, area: Rect, app: &App) -> Rect {
+    use unicode_width::UnicodeWidthStr;
+    if app.hidden_footer.iter().any(|h| h == "link") {
+        return area;
+    }
+    let Some((label, tone)) = app.link.as_ref().and_then(crate::link::label) else {
+        return area;
+    };
+    // Measured as drawn: the cloud carries a zero-width selector.
+    let width = label.width();
+    if (area.width as usize) < width + 2 + LINK_MIN_HINTS {
+        return area;
+    }
+    let colors = theme::colors();
+    let style = match tone {
+        crate::link::Tone::Good => Style::default().fg(colors.cost_low),
+        crate::link::Tone::Slow => Style::default().fg(colors.cost_mid),
+        crate::link::Tone::Bad => Style::default().fg(colors.cost_high),
+        crate::link::Tone::Unknown => theme::dim(),
+    };
+    // One column short of the edge, as the share corner is, for its reason.
+    let x = area.right() - width as u16 - 1;
+    frame.buffer_mut().set_string(x, area.y, &label, style);
+    // What is left ends one column before the label, which is the gap the
+    // share corner's own margin leaves.
+    Rect {
+        width: x - area.x,
+        ..area
+    }
 }
 
 /// The footer's key hints, which are always there.

@@ -46,6 +46,8 @@ pub mod json;
 /// A new agent's model and permission settings, per harness.
 pub mod launch_opts;
 pub mod letterbox;
+/// A remote tab's link health, from its bridge to the dashboard.
+pub mod link_health;
 pub mod loader;
 pub mod mux;
 pub mod notify;
