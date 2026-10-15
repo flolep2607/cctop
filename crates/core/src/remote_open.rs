@@ -670,7 +670,10 @@ fn shell_in(dir: Option<&Path>, why: &str) -> Result<(), String> {
 ///
 /// Cloudflare's edge closes a WebSocket that has carried nothing for 100
 /// seconds, and an agent waiting for input is silent for far longer than that.
-const KEEPALIVE: std::time::Duration = std::time::Duration::from_secs(30);
+/// Each one is a ping whose pong is the corner's round trip, so this is also
+/// how stale that number gets on a tab nobody types in. Hence five seconds
+/// rather than anything near the edge's limit: a ping is a few bytes.
+const KEEPALIVE: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// How long the sibling has to answer an open or a resume. The edge answers
 /// in well under a second, or with a 5xx page; past this, the try is counted
@@ -1307,8 +1310,8 @@ impl Drop for Raw {
 ///
 /// A socket whose far end vanished without a FIN, which is how a dropped
 /// network ends one, stays open here for as long as the kernel cares to
-/// retry: the tab would sit frozen rather than close. Two keepalives
-/// unanswered and some slack is a connection that is not coming back.
+/// retry: the tab would sit frozen rather than close. Over a minute of
+/// keepalives unanswered is a connection that is not coming back.
 const SILENCE: std::time::Duration = std::time::Duration::from_secs(75);
 
 /// How long a ping may go unanswered before the tab says the far side is
@@ -1414,7 +1417,7 @@ fn pump(
     }
     // A ping straight away, so the corner has a round trip as soon as the
     // link is up rather than at the first key typed or the first keepalive
-    // thirty seconds on — until then it can only say `—`.
+    // — until then it can only say `—`.
     if let Err(e) = up.write_all(&frame(Op::Ping, b"", true)) {
         return Ok(dropped(e));
     }
