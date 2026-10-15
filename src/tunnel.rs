@@ -86,12 +86,12 @@ pub fn run(argv: &[String]) -> anyhow::Result<i32> {
     }
 }
 
+/// One line per fact, aligned like the Settings rows, so the answer is read
+/// down a column rather than out of sentences.
 fn status() -> i32 {
     let Some(account) = tunnel::account() else {
-        println!(
-            "No Cloudflare account connected: --tunnel uses a quick tunnel, at a new \
-             address each run.\n`cctop tunnel setup` connects one."
-        );
+        println!("tunnel     none · quick tunnel, new address each run");
+        println!("           `cctop tunnel setup` for one that stays");
         return 0;
     };
     let from = match account.from_env {
@@ -99,46 +99,36 @@ fn status() -> i32 {
         false => "config.toml",
     };
     match &account.hostname {
-        Some(host) => println!("Connected: https://{host} (from {from})"),
-        None => println!(
-            "Connected (from {from}); the hostname comes from the tunnel's configuration \
-             when it connects"
-        ),
+        Some(host) => println!("dashboard  https://{host}  ({from})"),
+        None => println!("dashboard  from the tunnel's config  ({from})"),
     }
     if let Some(share) = &account.share_hostname {
-        println!("Share hostname: https://{share}");
+        println!("shares     https://{share}");
     }
     if let Some(id) = &account.tunnel_id {
-        println!("Tunnel: {id}");
+        println!("tunnel     {id}");
     }
     match tunnel::access_settings() {
         Some(access) => {
-            println!(
-                "Cloudflare Access: on — log in as {} at the dashboard's hostname",
-                access.owner
-            );
+            println!("access     on · owner {}", access.owner);
             for line in invite_lines(&access.invites) {
-                println!("  {line}");
+                println!("           {line}");
             }
             match (access.public_links, &access.link_hostname) {
-                (true, Some(host)) => {
-                    println!("Public token links: on — at https://{host}")
-                }
-                (true, None) => println!("Public token links: on"),
-                (false, _) => println!(
-                    "Public token links: off — a token gets nothing through the tunnel \
-                     (`cctop tunnel access links on`)"
-                ),
+                (true, Some(host)) => println!("links      on · https://{host}"),
+                (true, None) => println!("links      on"),
+                (false, _) => println!("links      off · `cctop tunnel access links on`"),
             }
         }
-        None => println!(
-            "Cloudflare Access: off — the dashboard is opened with its token link \
-             (`cctop tunnel access on` puts it behind a login)"
-        ),
+        None => println!("access     off · token link · `cctop tunnel access on`"),
     }
-    if tunnel::in_use(&account) {
-        println!("A cctop on this machine is serving over it now.");
-    }
+    println!(
+        "serving    {}",
+        match tunnel::in_use(&account) {
+            true => "yes, here",
+            false => "no",
+        }
+    );
     0
 }
 

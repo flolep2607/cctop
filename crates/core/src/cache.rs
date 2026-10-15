@@ -683,6 +683,8 @@ pub struct UiPrefs {
     pub inactivity_filter: Option<String>,
     pub agent_live_filter: bool,
     pub tool_show_diff: bool,
+    /// Whether a terminal tab gives the Overview's rows to its agent (`F4`).
+    pub tab_overview_hidden: bool,
     /// Session keys whose subagents are shown as child rows.
     ///
     /// Unlike the table's sort, this is worth persisting: expanding a session is
@@ -769,6 +771,7 @@ impl Default for UiPrefs {
             inactivity_filter: None,
             agent_live_filter: false,
             tool_show_diff: false,
+            tab_overview_hidden: false,
             expanded: Vec::new(),
             subagent_sort_col: "last".into(),
             // Ascending for `last` is newest-first, so this default keeps the

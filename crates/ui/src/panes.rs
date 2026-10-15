@@ -151,6 +151,42 @@ impl App {
         self.tabs.get_mut(self.tab.checked_sub(1)?)
     }
 
+    /// Name a freshly launched agent's tab after its session, once it has one.
+    ///
+    /// A launch is named after its command — `claude` — because the session's
+    /// title does not exist yet; a resume already carries one. Left alone, two
+    /// launches read `7:claude │ 8:claude` for as long as they live. Only a tab
+    /// still under its bare command is renamed, so a name someone chose is
+    /// never overwritten, and the rename goes through [`tabs::Tab::rename`] so
+    /// other cctops and a reattach see it too.
+    pub fn title_launched_tabs(&mut self) {
+        let titled: Vec<(u32, &str)> = self
+            .sessions
+            .iter()
+            .filter(|s| s.remote.is_none())
+            .filter_map(|s| Some((s.root_pid()?, s.title.as_deref().filter(|t| !t.is_empty())?)))
+            .collect();
+        if titled.is_empty() {
+            return;
+        }
+        let mut names = Vec::new();
+        for (i, tab) in self.tabs.iter().enumerate() {
+            let Some(pane) = tab.panes.first() else {
+                continue;
+            };
+            if !pane.is_agent() || pane.resumed.is_some() || pane.label.contains(' ') {
+                continue;
+            }
+            if let Some((_, title)) = titled.iter().find(|(pid, _)| *pid == pane.agent()) {
+                let title = cctop_core::util::truncate(title, super::launch::TAB_LABEL_CHARS);
+                names.push((i, format!("{} · {title}", pane.label)));
+            }
+        }
+        for (i, name) in names {
+            self.tabs[i].rename(name);
+        }
+    }
+
     /// What bar position `i` is called, for the bar and the switcher alike.
     ///
     /// One answer for both, because the two used to work it out separately and

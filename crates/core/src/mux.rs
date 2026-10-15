@@ -107,6 +107,11 @@ pub const HISTORY_LINES: &str = "50000";
 ///   dropped, so a copy in Claude Code went nowhere.
 /// - `remain-on-exit failed`: see [`REMAIN_ON_EXIT`].
 /// - `extended-keys on`: see [`EXTENDED_KEYS`].
+/// - `prefix None`, `prefix2 None`: cctop's keys are its own and nobody drives
+///   these sessions with rmux's bindings, so tmux's `C-b` prefix only ate a key
+///   an agent wanted — Claude Code's Ctrl+B, "run in background", never
+///   arrived in a tab whose keys went through an rmux client, which is every
+///   remote tab.
 fn defaults() -> String {
     format!(
         "\
@@ -118,6 +123,8 @@ set-option -g allow-passthrough on
 set-option -s set-clipboard on
 set-option -wg remain-on-exit {REMAIN_ON_EXIT}
 set-option -s extended-keys {EXTENDED_KEYS}
+set-option -g prefix None
+set-option -g prefix2 None
 "
     )
 }
@@ -353,6 +360,8 @@ pub fn new_session(
             "extended-keys",
             EXTENDED_KEYS,
         ),
+        (OptionScopeSelector::SessionGlobal, "prefix", "None"),
+        (OptionScopeSelector::SessionGlobal, "prefix2", "None"),
     ] {
         let _ = set_option(scope, name, value);
     }

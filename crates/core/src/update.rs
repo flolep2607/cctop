@@ -691,13 +691,34 @@ fn install(
     let placement = place()?;
 
     println!("Downloading {}…", asset.name);
+    let started = std::time::Instant::now();
+    // Which source the archive came from, said once it has: the mirror is the
+    // fast path, and an update that quietly fell back to GitHub is the only
+    // sign the mirror is down.
+    let served = std::cell::Cell::new("GitHub");
     let body = fetch_archive(release, asset, &release_keys(), &|url| {
         // The signature is a line of base64: no bar for that.
         match url.ends_with(SIGNATURE_SUFFIX) {
             true => fetch_small(url),
-            false => download(url, DOWNLOAD_IDLE),
+            false => {
+                let body = download(url, DOWNLOAD_IDLE)?;
+                served.set(match url.starts_with(MIRROR_ASSETS) {
+                    true => "mirror",
+                    false => "GitHub",
+                });
+                Ok(body)
+            }
         }
     })?;
+    println!(
+        "✓ {} · {:.1}s{}",
+        served.get(),
+        started.elapsed().as_secs_f64(),
+        match release_keys().is_empty() {
+            true => "",
+            false => " · signature ok",
+        }
+    );
 
     let staging = match placement {
         Placement::Beside(staging) => staging,
