@@ -18,7 +18,7 @@ use std::path::Path;
 
 /// Every `[settings]` key: its name, its default as the file would spell it,
 /// and what it does.
-pub const SETTINGS: [(&str, &str, &str); 20] = [
+pub const SETTINGS: [(&str, &str, &str); 21] = [
     (
         "theme",
         "\"auto\"",

@@ -24,5 +24,5 @@ expression: screen
 │  invite            boss@example.org · full ↻ * ↵ read/full · ⌫ remove        ┃
 │  invite            + add                       email or @domain              ┃
 │  remove            y / n                       delete tunnel + DNS?          │
-╰ 12 of 92   ↑↓ scroll   / filter   Esc back ──────────────────────────────────╯
+╰ 12 of 94   ↑↓ scroll   / filter   Esc back ──────────────────────────────────╯
 / Filter ↵ Change ⌫ Reset e Edit file , Back Alt+←→ Tabs F1 Help        ⧉ share
