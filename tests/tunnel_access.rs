@@ -133,11 +133,7 @@ fn access_is_set_up_with_the_tunnel_invites_reach_the_policy_and_remove_deletes_
     assert!(list.contains("boss@company.test: full"), "{list}");
 
     let out = cctop(&dir, &api, &["status"], "");
-    assert!(
-        said(&out).contains("Cloudflare Access: on"),
-        "{}",
-        said(&out)
-    );
+    assert!(said(&out).contains("access     on"), "{}", said(&out));
 
     let out = cctop(&dir, &api, &["invite", "add", "not an email"], "");
     assert!(!out.status.success());
@@ -198,12 +194,8 @@ fn access_off_deletes_what_was_made_and_keeps_the_tunnel() {
     );
     assert_eq!(gone.len(), 5, "{gone:?}");
     let out = cctop(&dir, &api, &["status"], "");
-    assert!(said(&out).contains("Connected: https://"), "{}", said(&out));
-    assert!(
-        said(&out).contains("Cloudflare Access: off"),
-        "{}",
-        said(&out)
-    );
+    assert!(said(&out).contains("dashboard  https://"), "{}", said(&out));
+    assert!(said(&out).contains("access     off"), "{}", said(&out));
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -225,7 +217,7 @@ fn public_links_off_deletes_the_token_hostname_and_on_makes_it_again() {
     assert!(out.status.success(), "{}", said(&out));
     assert!(said(&out).contains("-link.example.test"), "{}", said(&out));
     let status = said(&cctop(&dir, &api, &["status"], ""));
-    assert!(status.contains("Public token links: on"), "{status}");
+    assert!(status.contains("links      on"), "{status}");
 
     seen.lock().unwrap().clear();
     let out = cctop(&dir, &api, &["access", "links", "off"], "");
@@ -238,7 +230,7 @@ fn public_links_off_deletes_the_token_hostname_and_on_makes_it_again() {
     );
     assert!(!gone.iter().any(|c| c.contains("/access/")), "{gone:?}");
     let status = said(&cctop(&dir, &api, &["status"], ""));
-    assert!(status.contains("Public token links: off"), "{status}");
+    assert!(status.contains("links      off"), "{status}");
     let config = std::fs::read_to_string(dir.join("config/cctop/config.toml")).unwrap();
     assert!(config.contains("public_links = false"), "{config}");
     assert!(!config.contains("link_hostname"), "{config}");

@@ -737,6 +737,7 @@ fn event_loop(
             // it can still race anyone, and cheap enough to redo wholesale:
             // it compares paths already in memory and reads no transcript.
             app.collisions = cctop_core::collide::apply(&mut app.sessions);
+            app.title_launched_tabs();
             app.hear_ultracode();
         }
         // Before the bells: a YOLO prompt answered here is one nobody needs

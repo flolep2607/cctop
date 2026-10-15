@@ -122,6 +122,7 @@ fn tab_hints() -> Vec<Hint> {
         hint("F9", "Image"),
         hint("Alt+v/s", "Split"),
         hint("F10", "Quit"),
+        hint("F4", "Overview"),
     ]
 }
 

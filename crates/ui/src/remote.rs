@@ -35,10 +35,10 @@ impl App {
         let first = files.iter().next()?;
         let more = match files.len() {
             1 => String::new(),
-            n => format!(" +{} more", n - 1),
+            n => format!(" +{}", n - 1),
         };
         Some(format!(
-            "Conflict: ⚠ {}{more} — {agents} agents have written it",
+            "⚠ {}{more} · {agents} agents",
             cctop_core::util::path_tail(first, 2)
         ))
     }

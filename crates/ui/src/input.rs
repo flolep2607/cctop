@@ -1237,6 +1237,17 @@ impl App {
             // the dashboard forward would take the composer off screen at the
             // moment something is being put into it.
             KeyCode::F(9) => self.paste_image_into_pane(),
+            // The Overview's six rows, given to the agent or taken back.
+            KeyCode::F(4) => {
+                let shown = !render::tab_overview();
+                render::set_tab_overview(shown);
+                self.save_prefs();
+                self.set_status(if shown {
+                    "Overview shown"
+                } else {
+                    "Overview hidden · F4"
+                });
+            }
             // The help sheet, over the pane. Every frame repaints it on top of
             // the agent, and Esc gives the keyboard back to the same pane.
             KeyCode::F(1) => self.mode = Mode::Help,

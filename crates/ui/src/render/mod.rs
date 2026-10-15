@@ -285,9 +285,32 @@ fn panel_block_titled(title: &str, title_style: Style) -> Block<'static> {
 }
 
 /// A tab's rows below the bar: the Overview, its terminals, and the footer.
+/// Whether a terminal tab shows the Overview above its panes — `F4` in a tab.
+///
+/// Global rather than on `App`, because [`pane_size`] sizes an agent before
+/// any `App` frame exists and has to agree with the layout it will be drawn in.
+static TAB_OVERVIEW: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+pub fn set_tab_overview(shown: bool) {
+    TAB_OVERVIEW.store(shown, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn tab_overview() -> bool {
+    TAB_OVERVIEW.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Where a tab's toasts go: the Overview, or the top of the panes while `F4`
+/// has handed the Overview's rows to them.
+fn toast_area(chunks: &[Rect]) -> Rect {
+    match chunks[0].height {
+        0 => chunks[1],
+        _ => chunks[0],
+    }
+}
+
 fn tab_chunks(area: Rect) -> std::rc::Rc<[Rect]> {
     RLayout::vertical([
-        Constraint::Length(6),
+        Constraint::Length(if tab_overview() { 6 } else { 0 }),
         Constraint::Min(3),
         Constraint::Length(1),
     ])
@@ -354,7 +377,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) -> Layout {
             Mode::Help => modals::draw_help(frame, area, app),
             _ => {}
         }
-        draw_toasts(frame, chunks[0], app);
+        draw_toasts(frame, toast_area(&chunks), app);
         return layout;
     }
 
@@ -412,7 +435,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) -> Layout {
                 !app.raving() && !app.tripping(),
             );
         }
-        draw_toasts(frame, chunks[0], app);
+        draw_toasts(frame, toast_area(&chunks), app);
         return layout;
     }
 

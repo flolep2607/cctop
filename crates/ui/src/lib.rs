@@ -1008,6 +1008,7 @@ impl App {
     /// test runs on. [`App::new`] loads the burn log itself, because that is the
     /// one that has to be there.
     fn with_prefs(plan: Plan, tx: Sender<Request>, prefs: UiPrefs) -> Self {
+        render::set_tab_overview(!prefs.tab_overview_hidden);
         let age_filter = prefs
             .inactivity_filter
             .as_deref()
@@ -1256,6 +1257,7 @@ impl App {
         self.prefs.inactivity_filter = self.age_filter.map(|a| a.key().to_string());
         self.prefs.agent_live_filter = self.tool_live_only;
         self.prefs.tool_show_diff = self.tool_show_diff;
+        self.prefs.tab_overview_hidden = !render::tab_overview();
         // Sorted so the file does not churn on every save purely because a
         // HashSet iterated in a different order.
         let mut expanded: Vec<String> = self.expanded.iter().cloned().collect();
