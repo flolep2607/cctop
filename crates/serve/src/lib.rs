@@ -1453,7 +1453,12 @@ fn serve_connection(shared: &Shared, stream: &mut TcpStream) {
     // [`open::route_new`]. Its own prefix, so a cctop older than it answers
     // "no such page", which the asking side reads as "update it there".
     if let Some(rest) = path.strip_prefix(cctop_core::remote_open::NEW_ROUTE) {
-        return open::route_new(shared, stream, &request, rest, access);
+        return open::route_new(shared, stream, &request, rest, access, false);
+    }
+    // The same, under one of this machine's accounts. Its own prefix for the
+    // same reason: see `NEW_AS_ROUTE`.
+    if let Some(rest) = path.strip_prefix(cctop_core::remote_open::NEW_AS_ROUTE) {
+        return open::route_new(shared, stream, &request, rest, access, true);
     }
     // A sibling on the account, through this server — see [`forward`]. The
     // page never talks to another origin, so the content policy stays as it
@@ -1543,6 +1548,27 @@ fn serve_connection(shared: &Shared, stream: &mut TcpStream) {
                 }
             }
             json(stream, &request, &failed);
+        }
+        // The accounts this machine can start an agent under, by name, for a
+        // sibling's launcher to offer (see `cctop_core::peer::accounts`).
+        // Only where the launch could then be asked for — the same gate as
+        // `open::route_new`, or the far launcher would offer a pick for a
+        // launch that is always refused.
+        "/api/accounts" => {
+            if access != Access::Full || !shared.actions {
+                return http::respond_error(
+                    stream,
+                    Some(&request),
+                    403,
+                    "this link cannot start agents",
+                );
+            }
+            let body: serde_json::Map<String, serde_json::Value> =
+                cctop_core::config::launchable_names()
+                    .into_iter()
+                    .map(|(provider, names)| (provider.as_str().to_string(), names.into()))
+                    .collect();
+            json(stream, &request, &body);
         }
         "/api/quota" => {
             // Served from memory: the document is rendered by whoever polled

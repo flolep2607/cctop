@@ -581,6 +581,38 @@ pub fn launchable_for(provider: Provider) -> Vec<&'static Profile> {
         .unwrap_or_default()
 }
 
+/// The names of every account the launcher offers, per harness that takes
+/// one, in the launcher's order: what this machine tells a sibling's launcher
+/// (`/api/accounts`), so an agent started here from there can be put under
+/// one. Names only — a directory or a token is this machine's business.
+pub fn launchable_names() -> Vec<(Provider, Vec<String>)> {
+    refresh_launchable();
+    PROFILED
+        .iter()
+        .map(|(provider, _, _)| {
+            let names = launchable_for(*provider)
+                .into_iter()
+                .map(|p| p.name.clone())
+                .collect();
+            (*provider, names)
+        })
+        .collect()
+}
+
+/// Add `profile` to the accounts the launcher offers — for a test of a launch
+/// under one, which cannot count on the machine running it having any.
+#[cfg(any(test, feature = "test-support"))]
+pub fn add_launchable(profile: Profile) {
+    if LAUNCHABLE.lock().map(|l| l.is_empty()).unwrap_or(false) {
+        refresh_launchable();
+    }
+    if let Ok(mut known) = LAUNCHABLE.lock()
+        && !known.iter().any(|p| **p == profile)
+    {
+        known.push(Box::leak(Box::new(profile)));
+    }
+}
+
 /// One account the launcher offers for `provider`, by name.
 ///
 /// The launchable counterpart of [`profile_named`], which knows directories

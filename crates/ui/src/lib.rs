@@ -436,6 +436,14 @@ pub struct App {
     /// it came from — carrying one across would point at whichever account
     /// happened to sit in that position.
     pub launch_profile: HashMap<Provider, usize>,
+    /// Which of a sibling's accounts was picked to start each harness under
+    /// there, by machine — by name, since the list is the sibling's and may
+    /// have moved by the next poll. Absent, the launch names none and the
+    /// sibling uses its own default, which the launcher shows as its first.
+    ///
+    /// ponytail: held for the run only, unlike this machine's choice, which
+    /// is saved: a sibling's accounts are not known until it is polled.
+    pub launch_peer_picked: HashMap<(String, Provider), String>,
     /// Which entry of the row menu is under the cursor.
     ///
     /// Only ever points at an entry that can run: the menu draws the blocked
@@ -1079,6 +1087,7 @@ impl App {
                 (provider, at)
             })
             .collect(),
+            launch_peer_picked: HashMap::new(),
             menu_cursor: 0,
             cost_input: Default::default(),
             send_input: Default::default(),
