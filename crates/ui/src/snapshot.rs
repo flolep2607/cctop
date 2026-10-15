@@ -380,6 +380,46 @@ fn dashboard_styles() {
     insta::assert_snapshot!(styles(&buffer));
 }
 
+/// The Overview's sparklines and the Performance tab's line charts drawn in
+/// octants, the set that needs a font with the Unicode 16 blocks. Braille is
+/// every other frame here, so this is the one that shows what the choice
+/// changes.
+///
+/// A triangle wave rather than anything with `sin` in it: a libm that rounds
+/// one sample differently would move a dot, and the frame must be the same on
+/// every machine.
+#[test]
+fn octant_charts() {
+    let mut app = fixture();
+    let wave = |n: usize, period: usize, top: f64| -> Vec<f64> {
+        (0..n)
+            .map(|i| {
+                let t = i % period;
+                let up = t.min(period - t) as f64;
+                top * up / (period / 2) as f64
+            })
+            .collect()
+    };
+    for v in wave(120, 24, 80.0) {
+        app.global_cpu.push(v);
+    }
+    for v in wave(60, 10, 0.2) {
+        app.global_spend.push(v);
+    }
+    let key = app.sessions[0].key();
+    let mut cpu = spark::History::default();
+    let mut mem = spark::History::default();
+    for (c, m) in wave(200, 40, 90.0).into_iter().zip(wave(200, 64, 400.0)) {
+        cpu.push(c);
+        mem.push(m + 100.0);
+    }
+    app.cpu_history.insert(key.clone(), cpu);
+    app.mem_history.insert(key, mem);
+    app.bottom_tab = tab("Performance");
+    spark::set_glyphs(spark::Glyphs::Octant);
+    snap("octant_charts", &mut app);
+}
+
 #[test]
 fn help_modal() {
     let mut app = fixture();

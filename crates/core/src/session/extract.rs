@@ -357,7 +357,9 @@ pub fn tool_detail(name: &str, input: &Value) -> (String, Option<String>) {
     }
 
     let s = match name {
-        "Read" | "read" | "Edit" | "edit" | "Write" | "write" => file_field(input).to_string(),
+        // Gemini CLI's file tools last: `read_file`, `replace`, `write_file`.
+        "Read" | "read" | "Edit" | "edit" | "Write" | "write" | "read_file" | "replace"
+        | "write_file" => file_field(input).to_string(),
         "Glob" | "glob" => str_field(input, "pattern").to_string(),
         "WebFetch" | "webfetch" => str_field(input, "url").to_string(),
         "WebSearch" | "websearch" => str_field(input, "query").to_string(),
@@ -625,6 +627,25 @@ fn generic_detail(input: &Value) -> String {
         }
     }
     fallback
+}
+
+/// How many distinct fetched URLs, or distinct search queries, a session keeps.
+/// The count stops with the list, so the two never disagree.
+pub const MAX_WEB_ITEMS: usize = 50;
+
+/// Note one web fetch or search: a repeat of one already noted is not news,
+/// and past [`MAX_WEB_ITEMS`] nothing more is kept. One rule for every
+/// harness, so the cap and the de-duplication move together.
+pub fn note_web(
+    list: &mut Vec<String>,
+    count: &mut u64,
+    seen: &mut std::collections::HashSet<String>,
+    item: &str,
+) {
+    if seen.len() < MAX_WEB_ITEMS && seen.insert(item.to_string()) {
+        list.push(item.to_string());
+        *count += 1;
+    }
 }
 
 /// Append an invocation detail, capping retained history at the newest N.

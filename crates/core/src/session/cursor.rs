@@ -1,10 +1,13 @@
 //! Cursor native-agent discovery and transcript extraction.
 //!
 //! Cursor's exported JSONL contains conversation content and tool calls, but
-//! no model, token, context, cost, or per-event timestamp data. Keep those
-//! fields unavailable rather than estimating them from incomplete evidence.
+//! no model, token, context, cost, tool outcome or per-event timestamp data.
+//! Keep those fields unavailable rather than estimating them from incomplete
+//! evidence; what the calls themselves say — the tools, the lines an edit
+//! changed, the pages and searches — is read through [`super::cursor_line`].
 
-use super::extract::{for_each_jsonl, push_tool_detail, tool_detail};
+use super::cursor_line;
+use super::extract::{edit_delta, note_web, push_tool_detail, tool_detail};
 use super::{Session, SessionData, Surface};
 use crate::config;
 use crate::pricing::Provider;
@@ -78,30 +81,35 @@ pub fn list_sessions() -> Vec<Session> {
     sessions
 }
 
+/// Whether a tool, by its name, writes files — the calls whose arguments are
+/// read for the lines they changed.
+fn edits(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    ["edit", "write", "replace"]
+        .iter()
+        .any(|verb| name.contains(verb))
+}
+
+/// The tools, their arguments, and what those say: the lines an edit changed,
+/// the pages fetched, the searches run.
+///
+/// ponytail: the export records no tool result, so no call is ever known to
+/// have failed and the error rate is `─` rather than `0%`; see
+/// [`Provider::records_tool_outcomes`].
 pub fn extract(path: &Path) -> SessionData {
     let mut data = SessionData::default();
-    let result = for_each_jsonl(path, |item| {
-        let Some(content) = item
-            .get("message")
-            .and_then(|m| m.get("content"))
-            .and_then(Value::as_array)
-        else {
-            return;
-        };
-        for block in content {
-            if block.get("type").and_then(Value::as_str) != Some("tool_use") {
-                continue;
-            }
-            let name = block
-                .get("name")
-                .and_then(Value::as_str)
-                .unwrap_or("unknown");
-            let input = block.get("input").unwrap_or(&Value::Null);
-            let (short, full) = tool_detail(name, input);
-            data.metrics.tool_count += 1;
-            *data.metrics.tools.entry(name.to_string()).or_insert(0) += 1;
+    let mut seen_urls = HashSet::new();
+    let mut seen_queries = HashSet::new();
+    let result = cursor_line::for_each(path, |line| {
+        for call in line.calls() {
+            let name = call.name.get().unwrap_or("unknown");
+            let input = call.input.value();
+            let (short, full) = tool_detail(name, &input);
+            let m = &mut data.metrics;
+            m.tool_count += 1;
+            *m.tools.entry(name.to_string()).or_insert(0) += 1;
             push_tool_detail(
-                &mut data.metrics.tool_details,
+                &mut m.tool_details,
                 name,
                 short,
                 full,
@@ -109,6 +117,47 @@ pub fn extract(path: &Path) -> SessionData {
                 None,
                 None,
             );
+            // The snake and camel spellings `edit_delta` reads are the ones
+            // every harness that names its edits this way has used; arguments
+            // in any other shape add nothing rather than a guess.
+            if edits(name)
+                && let Some(delta) = edit_delta(&input)
+            {
+                m.lines_added += u64::from(delta.added);
+                m.lines_removed += u64::from(delta.removed);
+                if let Some(detail) = m.tool_details.get_mut(name).and_then(|l| l.last_mut()) {
+                    detail.delta = Some(delta);
+                }
+            }
+            let arg = |key: &str| {
+                input
+                    .get(key)
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.is_empty())
+            };
+            match name.to_ascii_lowercase().replace('_', "").as_str() {
+                "webfetch" => {
+                    if let Some(url) = arg("url") {
+                        note_web(
+                            &mut m.web_fetches,
+                            &mut m.web_fetch_count,
+                            &mut seen_urls,
+                            url,
+                        );
+                    }
+                }
+                "websearch" => {
+                    if let Some(q) = arg("query").or_else(|| arg("search_term")) {
+                        note_web(
+                            &mut m.web_searches,
+                            &mut m.web_search_count,
+                            &mut seen_queries,
+                            q,
+                        );
+                    }
+                }
+                _ => {}
+            }
         }
     });
     if let Err(err) = result {
@@ -151,5 +200,49 @@ mod tests {
         assert_eq!(data.tokens.total, 0);
         assert_eq!(data.costs.total, 0.0);
         assert!(data.last_model.is_empty());
+    }
+
+    /// Hand-built in the export's shape, with made-up content: what the calls'
+    /// own arguments say is counted, and a line of an unexpected shape is
+    /// passed over without losing the rest.
+    #[test]
+    fn edits_fetches_and_searches_come_from_the_arguments() {
+        let path = std::env::temp_dir().join(format!(
+            "cctop-cursor-args-{}-{}.jsonl",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(
+            &path,
+            concat!(
+                r#"{"role":"user","message":{"content":[{"type":"text","text":"go"}]}}"#,
+                "\n",
+                r#"{"role":"assistant","message":{"content":[{"type":"tool_use","name":"StrReplace","input":{"path":"a.rs","old_string":"x","new_string":"y\nz"}},{"type":"tool_use","name":"WebFetch","input":{"url":"https://example.invalid"}},{"type":"tool_use","name":"WebSearch","input":{"search_term":"rust"}}]}}"#,
+                "\n",
+                r#"{"role":"assistant","message":"not blocks","unknown":{"a":1}}"#,
+                "\n",
+                r#"{"role":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{"path":"a.rs","content":"not an edit"}}]}}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+        let data = extract(&path);
+        let _ = std::fs::remove_file(path);
+
+        let m = &data.metrics;
+        assert_eq!(m.tool_count, 4);
+        assert_eq!(
+            (m.lines_added, m.lines_removed),
+            (2, 1),
+            "a read is not an edit"
+        );
+        assert_eq!(m.web_fetches, ["https://example.invalid"]);
+        assert_eq!(m.web_searches, ["rust"]);
+        assert!(m.tool_details["StrReplace"][0].delta.is_some());
+        assert_eq!(m.tool_errors, 0);
+        assert!(!Provider::Cursor.records_tool_outcomes());
     }
 }

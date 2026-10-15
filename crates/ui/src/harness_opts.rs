@@ -108,27 +108,13 @@ impl App {
         self.needs_redraw = true;
     }
 
-    /// The models offered for `agent`, the harness's own default first: the
-    /// names it resolves itself, then every model this machine's sessions of
-    /// it have run, most recently used first — the ones actually in use here.
+    /// The models offered for `agent`, the harness's own default first — see
+    /// [`launch_opts::models_offered`].
     pub fn model_choices(&self, agent: &str) -> Vec<Option<String>> {
-        let provider = cctop_core::pricing::Provider::parse(agent);
-        let mut recent: Vec<&Session> = self
-            .sessions
-            .iter()
-            .filter(|s| s.remote.is_none() && Some(s.provider) == provider)
-            .collect();
-        recent.sort_by(|a, b| b.last_active.cmp(&a.last_active));
-        let mut seen = HashSet::new();
         std::iter::once(None)
             .chain(
-                launch_opts::model_aliases(agent)
-                    .iter()
-                    .map(|m| m.to_string())
-                    .chain(recent.into_iter().map(|s| s.model.clone()))
-                    .filter(|m| launch_opts::model_ok(agent, m))
-                    .filter(|m| seen.insert(m.clone()))
-                    .take(8)
+                launch_opts::models_offered(agent, &self.sessions)
+                    .into_iter()
                     .map(Some),
             )
             .collect()
