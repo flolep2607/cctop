@@ -135,9 +135,9 @@ read-only.
 
 Machines connected to one Cloudflare account find each other: their sessions
 are rows here, with the machine in the `HOST` column. `R` on one of them opens
-it in a tab on this screen, and `t` starts a new agent over there. A tab on
-another machine says how it gets there: `☁` through a sibling's tunnel, `⇄`
-over ssh.
+it in a tab on this screen, and `t` starts a new agent or a shell over there.
+A tab on another machine says how it gets there: `☁` through a sibling's
+tunnel, `⇄` over ssh.
 
 A remote tab is built for a link that is slow or flaky:
 

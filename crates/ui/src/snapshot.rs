@@ -694,8 +694,8 @@ fn new_tab_remote() {
 
 /// The new-tab launcher pointed at a project on a sibling cctop: the line
 /// says it goes through the tunnel, the agents are offered with no sandbox
-/// to need, and the shell — which a sibling does not start — is greyed with
-/// why while it is the one picked.
+/// to need, and the shell is offered as the sibling's own, named `shell`
+/// rather than after this machine's.
 #[test]
 fn new_tab_peer() {
     use super::location::RemoteTarget;

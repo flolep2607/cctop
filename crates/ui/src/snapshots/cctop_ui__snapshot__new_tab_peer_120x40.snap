@@ -18,13 +18,13 @@ expression: screen
 │                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │
+│                                                                                                                      │
 │                            ╭ New tab ───────────────────────────────────────────────────╮                            │
 │                            │   claude                                                   │                            │
 │                            │   codex                                                    │                            │
-│                            │   sh                      needs ssh                        │                            │
+│                            │   shell                                                    │                            │
 │                            │ in computer36:/srv/api (via tunnel)  (c to change)         │                            │
-│                            │ computer36 starts agents, not sh — that needs ssh          │                            │
-╰────────────────────────────│ ↑/↓  c change folder  Esc cancel                           │────────────────────────────╯
+╰────────────────────────────│ ↑/↓  → options  Enter start  Esc cancel                    │────────────────────────────╯
 ╭ Info  Performance  Processe╰────────────────────────────────────────────────────────────╯────────────────────────────╮
 │Root /usr/bin/claude --model opus                                                                                     │
 │    PID    CPU%       MEM  COMMAND                                                                                    │
