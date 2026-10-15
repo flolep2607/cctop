@@ -1,14 +1,13 @@
 import { useState } from "react";
 import { ExternalLink, SquareTerminal, X } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { ask } from "@/lib/api";
 import { CAN_ACT } from "@/lib/config";
 import { shortPath } from "@/lib/format";
 import { Button } from "@/components/ui/button";
 import { StateDot } from "@/components/status";
 import { dotOfTab } from "@/lib/status";
 import { TerminalFrame } from "@/components/terminal";
-import { popOut, type Terminal } from "@/lib/terminal";
+import { mintTab, popOut, type Terminal } from "@/lib/terminal";
 import type { Tab } from "@/lib/types";
 
 // The TUI's tab bar, read from rmux: every agent cctop has open. A tab opens
@@ -16,12 +15,7 @@ import type { Tab } from "@/lib/types";
 // hands it to the palette.
 export function Tabs({ tabs }: { tabs: Tab[] | null }) {
   const [open, setOpen] = useState<{ tab: Tab; term?: Terminal; error?: string } | null>(null);
-  const mint = (name: string, fresh = false): Promise<Terminal> =>
-    ask("/api/tab/" + encodeURIComponent(name) + "/terminal", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ origin: location.origin, fresh }),
-    }).then((r) => r.json());
+  const mint = (name: string, fresh = false) => mintTab(name, { fresh });
   const toggle = async (t: Tab) => {
     if (open?.tab.name === t.name) return setOpen(null);
     setOpen({ tab: t });

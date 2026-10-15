@@ -99,8 +99,10 @@ pub(crate) fn forward(
         };
         // A terminal is minted for the sibling's own copy of the frame app
         // and its own relay; the link that comes back is pointed at this
-        // page's relay below.
-        if path.starts_with("/api/act/terminal/") {
+        // page's relay below. A tab's terminal too — what the launcher opens
+        // after starting an agent there, which has no session yet to name.
+        let tab_terminal = path.starts_with("/api/tab/") && path.ends_with("/terminal");
+        if path.starts_with("/api/act/terminal/") || tab_terminal {
             page_origin = json
                 .get("origin")
                 .and_then(serde_json::Value::as_str)
@@ -153,6 +155,22 @@ pub(crate) fn forward(
             }
         }
         answered = terminal.to_string().into_bytes();
+    }
+    // The sibling answers the relay as a full link, so what it offers a
+    // launcher — its accounts, its own siblings, `actions: true` — is cut back
+    // here to what this link may see, as this server's own `/api/agents`
+    // would for it. Narrowed rather than refused: the harness list is no
+    // secret, and a view link's page still reads it.
+    if path == "/api/agents"
+        && (access != Access::Full || !shared.actions)
+        && answer.status == 200
+        && let Ok(mut agents) = serde_json::from_slice::<serde_json::Value>(&answered)
+        && let Some(fields) = agents.as_object_mut()
+    {
+        fields.remove("options");
+        fields.remove("machines");
+        fields.insert("actions".into(), serde_json::Value::Bool(false));
+        answered = agents.to_string().into_bytes();
     }
     http::respond(
         stream,
