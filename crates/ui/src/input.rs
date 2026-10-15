@@ -356,7 +356,9 @@ impl App {
 
     /// A paste, once it is known to be text.
     fn paste_text(&mut self, text: &str) {
-        if self.tab > 0 && self.mode == Mode::List {
+        // Not while the settings page is up: it covers the tab without being
+        // it, so there is no pane to paste into, and its fields are below.
+        if self.tab > 0 && self.mode == Mode::List && !self.on_settings() {
             if let Some(pane) = self.focused_pane() {
                 // The same bookkeeping a keystroke does: text put in front of an
                 // agent is an answer to whatever it asked, and no hook reports

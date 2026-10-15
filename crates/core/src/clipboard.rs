@@ -816,6 +816,62 @@ pub fn over_ssh() -> bool {
     std::env::var_os("SSH_CONNECTION").is_some() || std::env::var_os("SSH_TTY").is_some()
 }
 
+/// Hand `url` to whatever this desktop opens links with.
+///
+/// Best effort by design: there is no answer worth waiting for and plenty of
+/// machines with no browser to give it to — a headless box, an ssh session, a
+/// container. `false` means nothing was launched, which the caller says on the
+/// status line so the link can be copied instead.
+///
+/// Spawned and forgotten rather than waited on: `xdg-open` on some desktops
+/// does not return until the browser it started exits, and a dashboard frozen
+/// behind somebody's Firefox is not a trade worth making.
+///
+/// Under WSL the browser in front of the user is Windows', not whatever
+/// `xdg-open` finds inside the distribution — often a Linux browser drawn
+/// through WSLg, logged into nothing. So Windows is asked first, through
+/// `rundll32 url.dll,FileProtocolHandler`, which opens the default browser and
+/// takes the URL as one argument: `cmd /c start` would split a link at its `&`,
+/// and `explorer.exe` drops a query string on some builds. A loopback address
+/// still works from there, since WSL forwards `localhost` to Windows.
+pub fn open_in_browser(url: &str) -> bool {
+    let spawn = |program: &str, args: &[&str]| {
+        Command::new(program)
+            .args(args)
+            .arg(url)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .is_ok()
+    };
+    let windows = under_wsl()
+        && WSL_RUNDLL32
+            .iter()
+            .any(|program| spawn(program, &["url.dll,FileProtocolHandler"]));
+    // `xdg-open` is what every freedesktop environment answers to.
+    windows || spawn("xdg-open", &[])
+}
+
+/// Windows' `rundll32`, by name and then where it lives, for the WSL sessions
+/// whose `PATH` lacks the interop entries — the same gap [`WSL_POWERSHELL`]
+/// covers.
+const WSL_RUNDLL32: &[&str] = &[
+    "rundll32.exe",
+    "/mnt/c/Windows/System32/rundll32.exe",
+    "/mnt/c/WINDOWS/System32/rundll32.exe",
+];
+
+/// Whether this is a WSL distribution that can start Windows programs.
+///
+/// The interop entry rather than `WSL_DISTRO_NAME`: the variable is missing
+/// from a session nobody logged into interactively, and interop can be turned
+/// off, in which case no Windows program would start anyway.
+fn under_wsl() -> bool {
+    Path::new("/proc/sys/fs/binfmt_misc/WSLInterop").exists()
+        || Path::new("/proc/sys/fs/binfmt_misc/WSLInterop-late").exists()
+}
+
 /// Hand `text` to the terminal emulator's clipboard, which is the user's
 /// wherever cctop runs — it travels down the same connection the screen does.
 fn osc52(text: &str) {
