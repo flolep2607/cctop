@@ -148,13 +148,18 @@ fn open_or_resume(stream: &mut TcpStream, request: &Request, argv: impl FnOnce()
     else {
         return http::respond_error(stream, Some(request), 400, "not a resume cctop understands");
     };
+    let asked = std::time::Instant::now();
     let term = match resume::claim(token, &request.path) {
         Ok(term) => term,
-        Err(why) => return http::respond_error(stream, Some(request), 410, why),
+        Err(why) => {
+            trace(&request.path, format_args!("resume refused: {why}"));
+            return http::respond_error(stream, Some(request), 410, why);
+        }
     };
     // Out of the ring, the gap cannot be filled from here; the terminal is
     // ended with this answer, since the tab will not come back to it.
     let Some(missed) = term.ring.since(offset) else {
+        trace(&request.path, format_args!("resume past the ring"));
         return http::respond_error(
             stream,
             Some(request),
@@ -164,9 +169,28 @@ fn open_or_resume(stream: &mut TcpStream, request: &Request, argv: impl FnOnce()
     };
     // The tab may have been resized while it was away.
     cctop_core::shim::set_pty_size(&term.master, size.0, size.1);
+    trace(
+        &request.path,
+        format_args!(
+            "resumed, claimed in {:.1}s, {} bytes missed",
+            asked.elapsed().as_secs_f64(),
+            missed.len()
+        ),
+    );
     if upgrade(stream, key, term.token(), deflate.as_ref()).is_ok() {
-        run(term, stream, &missed, deflate.map(|(_, d)| d));
+        run(
+            term,
+            stream,
+            &request.path,
+            &missed,
+            deflate.map(|(_, d)| d),
+        );
     }
+}
+
+/// [`ws::trace`], for this end of a terminal.
+fn trace(route: &str, what: std::fmt::Arguments) {
+    ws::trace("serve", format_args!("{route}: {what}"));
 }
 
 /// Spawn `argv` on a pty, upgrade to a WebSocket, and pump the one through
@@ -194,7 +218,7 @@ fn terminal(
     };
     let term = resume::Term::new(child, master, resumable.then_some(request.path.as_str()));
     if upgrade(stream, key, term.token(), deflate.as_ref()).is_ok() {
-        run(term, stream, &[], deflate.map(|(_, d)| d));
+        run(term, stream, &request.path, &[], deflate.map(|(_, d)| d));
     }
 }
 
@@ -228,31 +252,176 @@ fn upgrade(
 fn run(
     mut term: resume::Term,
     stream: &mut TcpStream,
+    route: &str,
     missed: &[u8],
     deflate: Option<ws::Deflater>,
 ) {
     let mut out = Output(deflate);
+    let limits = Limits::for_route(route);
+    let opened = std::time::Instant::now();
     // A terminal sits quiet for minutes; the request deadlines would cut it.
     let _ = stream.set_read_timeout(None);
-    // But a write that makes no progress is a socket nobody is reading, and a
-    // thread stuck in it could neither park the terminal nor hand it over.
+    // Every frame but a last Close goes through `send`, which has its own
+    // clock; this one is for that Close alone.
     let _ = stream.set_write_timeout(Some(WRITE_TIMEOUT));
     let sent = missed
         .chunks(16 * 1024)
-        .try_for_each(|chunk| stream.write_all(&out.frame(chunk)));
+        .try_for_each(|chunk| send(stream, &out.frame(chunk), &mut term, &limits));
     let pumped = match sent {
-        Ok(()) => pump(stream, &mut term, &mut out),
-        Err(_) => Pumped::Dropped,
+        Ok(()) => pump(stream, &mut term, &mut out, &limits),
+        Err(stop) => stop,
     };
+    let lasted = opened.elapsed().as_secs_f64();
     match pumped {
         Pumped::Ended => {}
         // Refused only when the asker gave up waiting, and then the terminal
         // ends with the send.
         Pumped::Claimed(reply) => {
+            trace(
+                route,
+                format_args!("handed to a resume after {lasted:.1}s; this socket was dead"),
+            );
             let _ = reply.send(term);
         }
-        Pumped::Dropped => resume::park(term, resume::GRACE),
+        Pumped::Dropped(why) => {
+            trace(
+                route,
+                format_args!("dropped after {lasted:.1}s: {why}; parked"),
+            );
+            // Said at once, so whatever is between here and the tab — the
+            // tunnel, the edge — ends its side too, and the tab is back to
+            // resuming rather than waiting out a socket nobody serves.
+            let _ = stream.shutdown(std::net::Shutdown::Both);
+            resume::park(term, resume::GRACE);
+        }
     }
+}
+
+/// How a terminal's socket is kept honest: pinged, and given up on.
+struct Limits {
+    /// How long either direction may carry nothing before a ping goes out.
+    keepalive: std::time::Duration,
+    /// How long the tab may say nothing — not even a pong — before the
+    /// socket is taken for dropped.
+    silence: std::time::Duration,
+    /// How long a write may make no progress before the same.
+    stall: std::time::Duration,
+}
+
+impl Limits {
+    /// The limits a terminal at `route` is kept to. Under test, the session
+    /// `quiet` is kept to short ones, so a test sees a ping and a silence.
+    fn for_route(route: &str) -> Limits {
+        if cfg!(test) && route.ends_with("/quiet") {
+            return Limits {
+                keepalive: std::time::Duration::from_millis(100),
+                silence: std::time::Duration::from_millis(800),
+                stall: STALL,
+            };
+        }
+        Limits {
+            keepalive: KEEPALIVE,
+            silence: SILENCE,
+            stall: STALL,
+        }
+    }
+}
+
+/// How long the socket may carry nothing, either way, before the server pings
+/// the tab.
+///
+/// The tab pings when *it* has said nothing for as long, and once had to be
+/// the only one: a server that never pinged had only the tab's word that the
+/// socket was alive, and kept a dead one — and its connection slot — for as
+/// long as the kernel cared to retry. Pinging from here too means a tab that
+/// is listening is heard at least this often whatever it is (a browser
+/// answers a ping on its own), which is what lets [`SILENCE`] be enforced.
+/// Inside Cloudflare's 100-second idle close with room to spare.
+const KEEPALIVE: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// How long the tab may say nothing before its socket is taken for dropped
+/// and the terminal parked: three keepalives unanswered. Longer than the
+/// tab's own 75 s, so a tab still waiting out a slow link is never cut off
+/// here first.
+const SILENCE: std::time::Duration = std::time::Duration::from_secs(90);
+
+/// How long a write of output may make no progress before the socket is
+/// taken for dropped.
+///
+/// The socket here is the tunnel's on loopback, which drains only as fast as
+/// the path to the tab: a burst — a full redraw, a resume's replay — over a
+/// lossy link, behind a tab busy writing to its own terminal, can sit for
+/// seconds and still be a socket that is alive. It was ten seconds, and
+/// dropped those. A resume does not wait on it: a claim interrupts the wait
+/// (see [`send`]).
+const STALL: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Write `bytes` to the tab, waiting while the socket cannot take more — but
+/// not past `limits.stall` without progress, and not past a resume's claim:
+/// the tab is back on another connection, so this one is dead whether or not
+/// it has said so, and the terminal goes to the new one at once.
+fn send(
+    stream: &TcpStream,
+    mut bytes: &[u8],
+    term: &mut resume::Term,
+    limits: &Limits,
+) -> Result<(), Pumped> {
+    let fd = stream.as_raw_fd();
+    let mut progress = std::time::Instant::now();
+    while !bytes.is_empty() {
+        // SAFETY: a live socket, and a buffer of `bytes.len()` that outlives
+        // the call. Non-blocking for this call alone, so a full socket is a
+        // wait this loop controls rather than one the kernel does.
+        let n = unsafe {
+            libc::send(
+                fd,
+                bytes.as_ptr().cast(),
+                bytes.len(),
+                libc::MSG_DONTWAIT | libc::MSG_NOSIGNAL,
+            )
+        };
+        if n > 0 {
+            bytes = &bytes[n as usize..];
+            progress = std::time::Instant::now();
+            continue;
+        }
+        let error = std::io::Error::last_os_error();
+        match error.kind() {
+            _ if n == 0 => return Err(Pumped::Dropped("the socket took nothing".into())),
+            std::io::ErrorKind::Interrupted => continue,
+            std::io::ErrorKind::WouldBlock => {}
+            _ => return Err(Pumped::Dropped(format!("write failed: {error}"))),
+        }
+        let left = limits.stall.saturating_sub(progress.elapsed());
+        if left.is_zero() {
+            return Err(Pumped::Dropped(format!(
+                "a write made no progress for {}s",
+                limits.stall.as_secs()
+            )));
+        }
+        let mut fds = [
+            libc::pollfd {
+                fd,
+                events: libc::POLLOUT,
+                revents: 0,
+            },
+            libc::pollfd {
+                fd: term.wake_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            },
+        ];
+        let ms = left.as_millis().clamp(1, 1000) as i32;
+        // SAFETY: two valid pollfds (or -1, which poll skips) on fds owned
+        // for this call.
+        unsafe { libc::poll(fds.as_mut_ptr(), 2, ms) };
+        if fds[1].revents != 0
+            && let Some(reply) = term.take_claim()
+        {
+            return Err(Pumped::Claimed(reply));
+        }
+    }
+    Ok(())
 }
 
 /// How a terminal's output is framed for one socket: compressed when the tab
@@ -277,9 +446,8 @@ impl Output {
     }
 }
 
-/// How long a write to the tab may make no progress before the socket is
-/// taken for dropped. Well inside `resume`'s wait for a claim, so a terminal
-/// stuck writing to a dead socket is still handed over.
+/// How long the Close that ends a terminal may take to write: well inside
+/// `resume`'s wait for a claim. Every other write goes through [`send`].
 pub(crate) const WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 const NO_SESSION: &str = "no such session on this machine";
@@ -370,17 +538,27 @@ fn open_argv(provider: &str, id: &str) -> Vec<String> {
 enum Pumped {
     /// The terminal is over: closed by the tab, or its program ended.
     Ended,
-    /// The socket went without a Close: the tab may come back.
-    Dropped,
+    /// The socket went without a Close, for the reason given: the tab may
+    /// come back.
+    Dropped(String),
     /// A resume on another connection wants the terminal.
     Claimed(std::sync::mpsc::Sender<resume::Term>),
 }
 
 /// Pump the pty and the socket into each other until either closes, the
 /// socket drops, or a resume claims the terminal.
-fn pump(stream: &mut TcpStream, term: &mut resume::Term, out: &mut Output) -> Pumped {
+fn pump(
+    stream: &mut TcpStream,
+    term: &mut resume::Term,
+    out: &mut Output,
+    limits: &Limits,
+) -> Pumped {
+    use std::time::Instant;
     let mut decoder = out.decoder();
     let mut buf = [0u8; 16 * 1024];
+    // When something last went to the tab, and came from it; when the last
+    // ping went out.
+    let (mut said, mut heard, mut pinged) = (Instant::now(), Instant::now(), Instant::now());
     loop {
         let mut fds = [
             libc::pollfd {
@@ -399,13 +577,15 @@ fn pump(stream: &mut TcpStream, term: &mut resume::Term, out: &mut Output) -> Pu
                 revents: 0,
             },
         ];
+        // Woken at least once a keepalive, to ping and to notice silence.
+        let ms = limits.keepalive.as_millis().clamp(1, 1000) as i32;
         // SAFETY: three valid pollfds (or -1, which poll skips) on fds owned
         // for this call.
-        if unsafe { libc::poll(fds.as_mut_ptr(), 3, -1) } < 0 {
+        if unsafe { libc::poll(fds.as_mut_ptr(), 3, ms) } < 0 {
             if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
                 continue;
             }
-            return Pumped::Dropped;
+            return Pumped::Dropped(format!("poll: {}", std::io::Error::last_os_error()));
         }
         // The tab is back on another connection: this one was dead and had
         // not said so, which is how a network that went away ends a socket.
@@ -414,10 +594,34 @@ fn pump(stream: &mut TcpStream, term: &mut resume::Term, out: &mut Output) -> Pu
         {
             return Pumped::Claimed(reply);
         }
+        // Checked only with nothing waiting to be read: a tab whose words sat
+        // unread behind a slow write was not silent.
+        if fds[0].revents == 0 && heard.elapsed() >= limits.silence {
+            return Pumped::Dropped(format!(
+                "no word from the tab for {}s",
+                limits.silence.as_secs_f64()
+            ));
+        }
+        // Quiet either way: the tab is asked, and its pong is what it is
+        // heard by when it has nothing to say. A tab older than this answers
+        // a ping as any WebSocket does.
+        if pinged.elapsed() >= limits.keepalive
+            && (said.elapsed() >= limits.keepalive || heard.elapsed() >= limits.keepalive)
+        {
+            if let Err(stop) = send(stream, &frame(Op::Ping, b"", false), term, limits) {
+                return stop;
+            }
+            said = Instant::now();
+            pinged = said;
+        }
         if fds[0].revents != 0 {
             match stream.read(&mut buf) {
-                Ok(n) if n > 0 => decoder.push(&buf[..n]),
-                _ => return Pumped::Dropped,
+                Ok(n) if n > 0 => {
+                    decoder.push(&buf[..n]);
+                    heard = Instant::now();
+                }
+                Ok(_) => return Pumped::Dropped("the socket ended".into()),
+                Err(e) => return Pumped::Dropped(format!("read failed: {e}")),
             }
             loop {
                 match decoder.frame() {
@@ -434,9 +638,12 @@ fn pump(stream: &mut TcpStream, term: &mut resume::Term, out: &mut Output) -> Pu
                         return Pumped::Ended;
                     }
                     Ok(Some((Op::Ping, payload))) => {
-                        if stream.write_all(&frame(Op::Pong, &payload, false)).is_err() {
-                            return Pumped::Dropped;
+                        if let Err(stop) =
+                            send(stream, &frame(Op::Pong, &payload, false), term, limits)
+                        {
+                            return stop;
                         }
+                        said = Instant::now();
                     }
                     Ok(Some((Op::Pong, _))) => {}
                     // Text is a resize, or a resumed tab asking for a redraw;
@@ -464,9 +671,10 @@ fn pump(stream: &mut TcpStream, term: &mut resume::Term, out: &mut Output) -> Pu
                     // Kept before it is sent, so a socket that fails partway
                     // through the frame loses nothing a resume cannot replay.
                     term.ring.push(&buf[..n]);
-                    if stream.write_all(&out.frame(&buf[..n])).is_err() {
-                        return Pumped::Dropped;
+                    if let Err(stop) = send(stream, &out.frame(&buf[..n]), term, limits) {
+                        return stop;
                     }
+                    said = Instant::now();
                 }
                 // EIO once the program on it has exited: the far tab is told
                 // the terminal closed, and shows what it last said.
@@ -1096,6 +1304,79 @@ mod tests {
             old.received
         );
         old.close();
+    }
+
+    impl Tab {
+        /// Read frames for `long`, answering pings when `answer`: how many
+        /// pings came, and whether the socket was still open at the end.
+        fn listen(&mut self, long: std::time::Duration, answer: bool) -> (usize, bool) {
+            use cctop_core::ws::{Op, frame};
+            use std::os::fd::AsRawFd;
+            let until = std::time::Instant::now() + long;
+            let mut pings = 0;
+            while std::time::Instant::now() < until {
+                while let Some((op, payload)) = self.decoder.frame().unwrap() {
+                    if op == Op::Ping {
+                        pings += 1;
+                        if answer {
+                            self.up.write_all(&frame(Op::Pong, &payload, true)).unwrap();
+                        }
+                    }
+                }
+                let mut fds = [libc::pollfd {
+                    fd: self.up.socket().as_raw_fd(),
+                    events: libc::POLLIN,
+                    revents: 0,
+                }];
+                // SAFETY: one valid pollfd on a socket this tab owns.
+                if unsafe { libc::poll(fds.as_mut_ptr(), 1, 50) } <= 0 {
+                    continue;
+                }
+                let mut more = Vec::new();
+                match self.up.read_ready(&mut more) {
+                    Ok(true) => self.decoder.push(&more),
+                    _ => return (pings, false),
+                }
+            }
+            (pings, true)
+        }
+    }
+
+    /// The server pings a tab that says nothing, and one that answers is
+    /// kept however long it says nothing else — the terminal still answers
+    /// what is typed into it after.
+    #[test]
+    fn the_server_pings_a_quiet_tab_and_keeps_one_that_answers() {
+        use cctop_core::ws::RESUME_NEW;
+        let (port, _s) = serving(&["quiet"], 1);
+        let mut tab = tab(port, "/api/term/claude/quiet", RESUME_NEW).expect("open");
+        tab.until("opened claude quiet");
+        // Past the silence `quiet` is held to (0.8 s), answering every ping.
+        let (pings, open) = tab.listen(std::time::Duration::from_millis(1500), true);
+        assert!(open, "a tab that answers is kept");
+        assert!(pings >= 3, "{pings} pings");
+        tab.send(b"still here\r");
+        tab.until("got still here");
+        tab.close();
+    }
+
+    /// A tab that answers nothing is taken for gone once the silence is up:
+    /// the socket is ended, so whatever is between — the tunnel, the edge —
+    /// lets the tab know, and the terminal is parked for it to resume.
+    #[test]
+    fn a_tab_that_never_answers_is_dropped_and_its_terminal_parked() {
+        use cctop_core::ws::RESUME_NEW;
+        let (port, _s) = serving(&["quiet"], 2);
+        let mut first = tab(port, "/api/term/claude/quiet", RESUME_NEW).expect("open");
+        first.until("opened claude quiet");
+        let (pings, open) = first.listen(std::time::Duration::from_secs(10), false);
+        assert!(!open, "never ended");
+        assert!(pings >= 1, "{pings} pings");
+        let resume = first.resume_header();
+        let mut back = tab(port, "/api/term/claude/quiet", &resume).expect("resumed");
+        back.send(b"back\r");
+        back.until("got back");
+        back.close();
     }
 
     /// A new agent's tab resumes like any other — and a resume never starts

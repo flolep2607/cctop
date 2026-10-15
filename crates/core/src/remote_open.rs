@@ -668,6 +668,15 @@ fn shell_in(dir: Option<&Path>, why: &str) -> Result<(), String> {
 /// seconds, and an agent waiting for input is silent for far longer than that.
 const KEEPALIVE: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// How long the sibling has to answer an open or a resume. The edge answers
+/// in well under a second, or with a 5xx page; past this, the try is counted
+/// as one that did not reach it, and the next one is made.
+const HANDSHAKE: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// How long a write to an open socket may make no progress before the
+/// connection is taken for dropped.
+const WRITE_STALL: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// The most of a refusal the bridge will read before giving up on the rest.
 const MAX_HEAD: usize = 64 * 1024;
 
@@ -781,6 +790,10 @@ pub fn bridge_new(args: &[String]) -> Result<(), String> {
 fn terminal(machine: &str, path: &str, old: Old, reopen: bool) -> Result<(), String> {
     let peer = crate::peer::lookup(machine)?;
     let mut conn = connect(&peer, machine, path, old, None)?;
+    // Raw for the tab's whole life, reconnects included: a terminal back in
+    // cooked mode while the socket is away echoes every key typed at it onto
+    // the far side's screen, where nothing would ever erase it.
+    let _raw = Raw(crossterm::terminal::enable_raw_mode().is_ok());
     // How much of the far terminal's output this one has been handed since
     // it was opened: where a resume picks up.
     let mut received = 0u64;
@@ -792,6 +805,7 @@ fn terminal(machine: &str, path: &str, old: Old, reopen: bool) -> Result<(), Str
         conn.size.1,
         conn.size.0,
     );
+    let mut opened = std::time::Instant::now();
     loop {
         let why = match pump(
             &mut conn.up,
@@ -804,16 +818,28 @@ fn terminal(machine: &str, path: &str, old: Old, reopen: bool) -> Result<(), Str
             End::Closed(Some(why)) => return Err(format!("{machine} closed the terminal: {why}")),
             End::Dropped(why) => why,
         };
+        crate::ws::trace(
+            "bridge",
+            format_args!(
+                "{machine} {path}: dropped after {:.1}s, {received} bytes in: {why}",
+                opened.elapsed().as_secs_f64()
+            ),
+        );
         let (again, resumed) = reconnect(
             &peer,
-            machine,
-            path,
-            old,
+            Lost {
+                machine,
+                path,
+                old,
+                reopen,
+                why: &why,
+            },
             conn.token.take().map(|token| (token, received)),
-            reopen,
-            &why,
+            &predictor,
+            &mut std::io::stdout(),
         )?;
         conn = again;
+        opened = std::time::Instant::now();
         if !resumed {
             received = 0;
         }
@@ -828,82 +854,158 @@ fn terminal(machine: &str, path: &str, old: Old, reopen: bool) -> Result<(), Str
     }
 }
 
-/// Get back to a sibling after the socket dropped for `why`: resume `resume`
-/// (its token, and how much was received) when there is one, and open afresh
-/// when not and `reopen`. Says whether it resumed.
+/// What was lost, for [`reconnect`]: which terminal, on which sibling, why,
+/// and what may be done about it.
+struct Lost<'a> {
+    machine: &'a str,
+    path: &'a str,
+    old: Old,
+    /// Whether the route may be opened afresh when it cannot be resumed.
+    reopen: bool,
+    why: &'a str,
+}
+
+/// How long getting back may take before the tab says so. A tunnel that
+/// recovers inside this is a drop nobody sees: no notice, nothing to clean.
+/// Short under test, so the notice is seen without a test waiting for it.
+const NOTICE_AFTER: std::time::Duration = if cfg!(test) {
+    std::time::Duration::from_secs(1)
+} else {
+    std::time::Duration::from_secs(2)
+};
+
+/// The longest wait between tries to get back.
+const RETRY_MAX: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// How long to wait after try `n` (from 1) failed: quick at first, while a
+/// blip is likeliest to be over — the edge answers 530 for a few seconds
+/// after the tunnel's connection moves — then backing off to [`RETRY_MAX`].
+fn retry_wait(n: u32) -> std::time::Duration {
+    let ms = 250u64 << n.saturating_sub(1).min(8);
+    std::time::Duration::from_millis(ms).min(RETRY_MAX)
+}
+
+/// The bottom row while getting back takes a while.
+fn notice_text(machine: &str, why: &str) -> String {
+    format!(" {machine} lost: {why} · reconnecting ")
+}
+
+/// Get back to a sibling after the socket dropped: resume `resume` (its
+/// token, and how much was received) when there is one, and open afresh when
+/// not and the route may be. Says whether it resumed.
 ///
-/// The first try is at once and says nothing, so a blip the tunnel recovers
-/// from at once leaves the screen as it was. Only when that fails is the
-/// person told — on the screen itself, which the far side is then asked to
-/// redraw over once it is resumed (a fresh open redraws anyway).
+/// Nothing is said for the first [`NOTICE_AFTER`]: most drops are the tunnel
+/// moving, and over before anyone could read a word about them. Past that, a
+/// one-line notice goes over the bottom row (see
+/// [`crate::predict::Predictor::notice`]), and once back — or on giving up —
+/// the row is painted as the far side left it, from the predictor's shadow.
+/// The far side is asked for nothing, so a sibling of any version is left
+/// with a clean screen.
 ///
 /// Keys typed while the tab was away are dropped, not sent: they were typed
 /// at a screen that was not answering, and would land on one that has moved
 /// on — an Enter meant for a prompt that has since gone.
 fn reconnect(
     peer: &crate::peer::Peer,
-    machine: &str,
-    path: &str,
-    old: Old,
+    lost: Lost,
     mut resume: Option<(String, u64)>,
-    reopen: bool,
-    why: &str,
+    predictor: &crate::predict::Predictor,
+    screen: &mut dyn std::io::Write,
 ) -> Result<(Conn, bool), String> {
-    let lost = |gone: &str| {
+    let Lost {
+        machine,
+        path,
+        old,
+        reopen,
+        why,
+    } = lost;
+    let ended = |gone: &str| {
         format!(
             "lost {machine}: {gone}. The agent goes on running there — \
              its row's R gets back to it once it has a session"
         )
     };
     if resume.is_none() && !reopen {
-        return Err(lost(why));
+        return Err(ended(why));
     }
     let since = std::time::Instant::now();
-    let mut wait = std::time::Duration::from_secs(1);
     let mut said = false;
+    let mut draw = |bytes: Vec<u8>| {
+        let _ = screen.write_all(&bytes);
+        let _ = screen.flush();
+    };
+    let trace = |what: std::fmt::Arguments| crate::ws::trace("bridge", what);
+    let mut tries = 0u32;
     loop {
+        tries += 1;
         let asked = resume.as_ref().map(|(token, at)| (token.as_str(), *at));
         match connect(peer, machine, path, old, asked) {
-            Ok(mut conn) => {
+            Ok(conn) => {
                 // A sibling that read the resume answers with its token; one
                 // too old to answers like a fresh open.
                 let resumed = asked.is_some() && conn.token.is_some();
                 // SAFETY: tcflush on stdin only discards what is queued on it.
                 unsafe { libc::tcflush(0, libc::TCIFLUSH) };
-                if resumed && said {
-                    let redraw =
-                        crate::ws::frame(crate::ws::Op::Text, crate::ws::REDRAW.as_bytes(), true);
-                    let _ = conn.up.write_all(&redraw);
+                if said {
+                    draw(predictor.unnotice());
                 }
+                trace(format_args!(
+                    "{machine} {path}: {} after {:.1}s, try {tries}{}",
+                    if resumed { "resumed" } else { "reopened" },
+                    since.elapsed().as_secs_f64(),
+                    if said { ", notice shown" } else { "" },
+                ));
                 return Ok((conn, resumed));
             }
             // The far terminal is gone: open afresh at once, which redraws,
             // or — where that would start a second agent — say so.
             Err(Failed::Gone(gone)) => {
+                trace(format_args!("{machine} {path}: try {tries}: gone: {gone}"));
                 resume = None;
                 if !reopen {
-                    return Err(lost(&gone));
+                    if said {
+                        draw(predictor.unnotice());
+                    }
+                    return Err(ended(&gone));
                 }
                 continue;
             }
             // A refusal is the far side's answer — the session has gone, or
             // this machine is no longer let in — and asking again will not
             // change it.
-            Err(Failed::Refused(why)) => return Err(why),
-            Err(Failed::Unreached(why)) if since.elapsed() >= RECONNECT_FOR => {
+            Err(Failed::Refused(no)) => {
+                trace(format_args!("{machine} {path}: try {tries}: refused: {no}"));
+                if said {
+                    draw(predictor.unnotice());
+                }
+                return Err(no);
+            }
+            Err(Failed::Unreached(away)) if since.elapsed() >= RECONNECT_FOR => {
+                trace(format_args!("{machine} {path}: gave up: {away}"));
+                if said {
+                    draw(predictor.unnotice());
+                }
                 return Err(format!(
-                    "lost {machine} and could not reach it again for {}s: {why}",
+                    "lost {machine} and could not reach it again for {}s: {away}",
                     RECONNECT_FOR.as_secs()
                 ));
             }
-            Err(Failed::Unreached(_)) => {}
+            Err(Failed::Unreached(away)) => {
+                trace(format_args!(
+                    "{machine} {path}: try {tries}: unreached: {away}"
+                ));
+            }
         }
-        if !said {
-            eprint!("\r\n\x1b[0m[lost {machine}: {why} — reconnecting]\r\n");
+        // The notice goes up when it is due, not at the end of a wait that
+        // runs past it.
+        let next = std::time::Instant::now() + retry_wait(tries);
+        let due = since + NOTICE_AFTER;
+        if !said && due < next {
+            std::thread::sleep(due.saturating_duration_since(std::time::Instant::now()));
+            draw(predictor.notice(&notice_text(machine, why)));
             said = true;
         }
-        std::thread::sleep(wait);
-        wait = (wait * 2).min(std::time::Duration::from_secs(10));
+        std::thread::sleep(next.saturating_duration_since(std::time::Instant::now()));
     }
 }
 
@@ -969,6 +1071,11 @@ fn connect(
     let mut up = peer
         .socket(path, &format!("cols={cols}&rows={rows}"), &headers)
         .map_err(Failed::Unreached)?;
+    // The handshake is a request like any other, and an edge that took the
+    // connection but never answers it would otherwise hold the tab past
+    // `RECONNECT_FOR`, frozen and saying nothing.
+    let _ = up.socket().set_read_timeout(Some(HANDSHAKE));
+    let _ = up.socket().set_write_timeout(Some(HANDSHAKE));
 
     let mut got = Vec::new();
     let end = loop {
@@ -1018,6 +1125,12 @@ fn connect(
             "{machine} answered with something that is not a terminal"
         )));
     }
+    // Upgraded: reads only ever follow a `poll`, and `SILENCE` is the clock
+    // on a far side that says nothing. A write is a few keys, which a live
+    // socket takes at once; one that cannot is a connection gone, to be
+    // reconnected rather than blocked on.
+    let _ = up.socket().set_read_timeout(None);
+    let _ = up.socket().set_write_timeout(Some(WRITE_STALL));
     let mut decoder = crate::ws::Decoder::default();
     if header(&head, "sec-websocket-extensions").is_some_and(crate::ws::deflate_agreed) {
         decoder = decoder.inflating();
@@ -1103,9 +1216,9 @@ fn pump(
     use crate::ws::{Op, frame};
     use std::io::{Read, Write};
     use std::os::fd::AsRawFd;
-    // Raw, so every key goes to the far side as typed — Ctrl+C included,
-    // which is the agent's to see and not this bridge's to die of.
-    let _raw = Raw(crossterm::terminal::enable_raw_mode().is_ok());
+    // Raw (from `terminal`), so every key goes to the far side as typed —
+    // Ctrl+C included, which is the agent's to see and not this bridge's to
+    // die of.
     let mut stdin = std::io::stdin();
     let mut stdout = std::io::stdout();
     // A second handle on it for the loop, which `deliver` holds the first:
@@ -1470,6 +1583,8 @@ mod tests {
         /// An upgrade, with a resume token or — like a sibling older than
         /// resume — without.
         Upgrade(Option<&'static str>),
+        /// The edge's 530 while the sibling's tunnel is away.
+        Away,
     }
 
     /// A sibling that answers each request in turn with the next of
@@ -1510,6 +1625,7 @@ mod tests {
                             body.len()
                         )
                     }
+                    Answer::Away => "HTTP/1.1 530 \r\nContent-Length: 0\r\n\r\n".to_string(),
                     Answer::Upgrade(token) => format!(
                         "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n\
                          Connection: Upgrade\r\nSec-WebSocket-Accept: {}\r\n{}\r\n",
@@ -1529,14 +1645,32 @@ mod tests {
         again: "try again",
     };
 
+    /// [`reconnect`] to "box", drawing on a screen nobody looks at.
+    fn back(
+        peer: &crate::peer::Peer,
+        path: &str,
+        resume: Option<(String, u64)>,
+        reopen: bool,
+        why: &str,
+    ) -> Result<(Conn, bool), String> {
+        let lost = Lost {
+            machine: "box",
+            path,
+            old: OLD,
+            reopen,
+            why,
+        };
+        let predictor = crate::predict::Predictor::new(crate::predict::Mode::Auto, 24, 80);
+        reconnect(peer, lost, resume, &predictor, &mut Vec::new())
+    }
+
     /// Coming back with a token asks for the bytes after what was received,
     /// and an answer with a token is a resume.
     #[test]
     fn a_dropped_tab_asks_to_resume_from_what_it_received() {
         let (peer, asked) = fake_sibling(vec![Answer::Upgrade(Some("id.s2"))]);
         let resume = Some(("id.s1".to_string(), 42));
-        let (conn, resumed) =
-            reconnect(&peer, "box", "/api/term/claude/a", OLD, resume, false, "x").expect("back");
+        let (conn, resumed) = back(&peer, "/api/term/claude/a", resume, false, "x").expect("back");
         assert!(resumed);
         assert_eq!(conn.token.as_deref(), Some("id.s2"));
         assert_eq!(asked.recv().unwrap(), "id.s1 42");
@@ -1549,23 +1683,15 @@ mod tests {
     fn a_resume_that_is_gone_reopens_only_where_that_is_safe() {
         let (peer, asked) = fake_sibling(vec![Answer::Gone, Answer::Upgrade(Some("id.new"))]);
         let resume = Some(("id.old".to_string(), 7));
-        let (conn, resumed) = reconnect(
-            &peer,
-            "box",
-            "/api/term/claude/a",
-            OLD,
-            resume.clone(),
-            true,
-            "x",
-        )
-        .expect("reopened");
+        let (conn, resumed) =
+            back(&peer, "/api/term/claude/a", resume.clone(), true, "x").expect("reopened");
         assert!(!resumed, "a fresh open redraws from nothing");
         assert_eq!(conn.token.as_deref(), Some("id.new"));
         assert_eq!(asked.recv().unwrap(), "id.old 7");
         assert_eq!(asked.recv().unwrap(), crate::ws::RESUME_NEW);
 
         let (peer, asked) = fake_sibling(vec![Answer::Gone]);
-        let why = reconnect(&peer, "box", NEW_ROUTE, OLD, resume, false, "x")
+        let why = back(&peer, NEW_ROUTE, resume, false, "x")
             .err()
             .expect("not reopened");
         assert!(why.contains("goes on running there"), "{why}");
@@ -1574,18 +1700,90 @@ mod tests {
         assert!(asked.try_recv().is_err(), "asked only once");
     }
 
+    fn lost_box() -> Lost<'static> {
+        Lost {
+            machine: "box",
+            path: "/api/term/claude/a",
+            old: OLD,
+            reopen: false,
+            why: "the connection ended",
+        }
+    }
+
+    /// A tunnel back within the notice's wait is a drop nobody sees: nothing
+    /// is drawn on the tab at all.
+    #[test]
+    fn a_quick_reconnect_draws_nothing() {
+        let (peer, _asked) = fake_sibling(vec![Answer::Away, Answer::Upgrade(Some("id.s2"))]);
+        let predictor = crate::predict::Predictor::new(crate::predict::Mode::Auto, 24, 80);
+        let mut screen = Vec::new();
+        let resume = Some(("id.s1".to_string(), 1));
+        let (_, resumed) =
+            reconnect(&peer, lost_box(), resume, &predictor, &mut screen).expect("back");
+        assert!(resumed);
+        assert!(screen.is_empty(), "{}", String::from_utf8_lossy(&screen));
+    }
+
+    /// Past the wait, one line goes on the bottom row; once back, that row
+    /// is painted as the far side left it, so nothing of it stays.
+    #[test]
+    fn a_slow_reconnect_says_so_on_one_line_and_takes_it_back() {
+        let (peer, _asked) = fake_sibling(vec![
+            Answer::Away,
+            Answer::Away,
+            Answer::Away,
+            Answer::Upgrade(Some("id.s2")),
+        ]);
+        let mut predictor = crate::predict::Predictor::new(crate::predict::Mode::Auto, 24, 80);
+        let far = b"\x1b[2J\x1b[24;1Hstatus line\x1b[3;5H";
+        predictor.on_output(far, std::time::Instant::now());
+        let mut screen = Vec::new();
+        let resume = Some(("id.s1".to_string(), 1));
+        reconnect(&peer, lost_box(), resume, &predictor, &mut screen).expect("back");
+        let said = String::from_utf8_lossy(&screen);
+        assert_eq!(
+            said.matches("box lost: the connection ended").count(),
+            1,
+            "{said}"
+        );
+        assert!(!said.contains('\n'), "nothing scrolls: {said:?}");
+        assert!(screen.ends_with(&predictor.unnotice()));
+        let mut here = vt100::Parser::new(24, 80, 0);
+        here.process(far);
+        let before = here.screen().contents_formatted();
+        here.process(&screen);
+        assert_eq!(here.screen().contents_formatted(), before);
+    }
+
+    /// Quick tries while a blip is likeliest to be over, then no more than
+    /// one every few seconds; four go in before anything is said.
+    #[test]
+    fn retries_start_quick_and_back_off() {
+        let ms = |n| retry_wait(n).as_millis();
+        assert_eq!(
+            [ms(1), ms(2), ms(3), ms(4), ms(5)],
+            [250, 500, 1000, 2000, 4000]
+        );
+        assert_eq!(retry_wait(6), RETRY_MAX);
+        assert_eq!(retry_wait(60), RETRY_MAX);
+        let waited = |n: u32| (1..n).map(retry_wait).sum::<std::time::Duration>();
+        let silent = (1..)
+            .take_while(|&n| waited(n) < std::time::Duration::from_secs(2))
+            .count();
+        assert_eq!(silent, 4);
+    }
+
     /// A sibling older than resume gives no token: a session's tab reopens
     /// as it always did, and a new agent's tab is not reconnected at all.
     #[test]
     fn a_sibling_older_than_resume_is_reopened_as_before() {
         let (peer, asked) = fake_sibling(vec![Answer::Upgrade(None)]);
-        let (conn, resumed) =
-            reconnect(&peer, "box", "/api/term/claude/a", OLD, None, true, "x").expect("open");
+        let (conn, resumed) = back(&peer, "/api/term/claude/a", None, true, "x").expect("open");
         assert!(!resumed);
         assert_eq!(conn.token, None);
         assert_eq!(asked.recv().unwrap(), crate::ws::RESUME_NEW);
         let (peer, asked) = fake_sibling(vec![]);
-        let why = reconnect(&peer, "box", NEW_ROUTE, OLD, None, false, "it dropped")
+        let why = back(&peer, NEW_ROUTE, None, false, "it dropped")
             .err()
             .expect("not reconnected");
         assert!(why.contains("it dropped"), "{why}");

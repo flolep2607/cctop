@@ -583,6 +583,18 @@ reach it on its `-link` hostname, which is outside Access; with public token
 links off there is no such hostname, and that machine shows as offline with the
 reason.
 
+A sibling's terminal in a tab survives its connection dropping — the tunnel
+moving, the edge restarting, a network change. The tab gets back to the same
+terminal and is sent what it missed. A drop that is over within two seconds
+shows nothing; a longer one shows a single line on the tab's bottom row,
+which is painted back as it was once the tab is back. Both ends ping a quiet
+socket every 30 seconds, and give up on one that has said nothing for longer
+than any live one would. To see why a tab keeps dropping, create
+`cctop/ws-trace.log` in the runtime directory (`$XDG_RUNTIME_DIR`, or the cache
+directory without one) on either machine, or start cctop there with
+`CCTOP_TRACE_WS=1`. Each drop, its reason, and how long getting back took are
+appended to that file.
+
 ## Flags
 
 | | |

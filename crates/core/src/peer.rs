@@ -465,6 +465,25 @@ pub fn relayed_link(url: &str, sibling: &str, page_origin: &str, machine: &str) 
     moved.then(|| format!("{base}#{}", params.join("&")))
 }
 
+/// How long one address may take to accept a connection.
+const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// A TCP connection to `address`, each of its addresses tried in turn under
+/// [`CONNECT_TIMEOUT`]. A plain `connect` waits out the kernel's SYN retries,
+/// two minutes and more, on a network that dropped packets rather than
+/// refusing — longer than a tab spends trying to get back at all.
+fn connect_tcp(address: &str) -> std::io::Result<TcpStream> {
+    use std::net::ToSocketAddrs;
+    let mut last = std::io::Error::new(std::io::ErrorKind::NotFound, "no address");
+    for addr in address.to_socket_addrs()? {
+        match TcpStream::connect_timeout(&addr, CONNECT_TIMEOUT) {
+            Ok(stream) => return Ok(stream),
+            Err(e) => last = e,
+        }
+    }
+    Err(last)
+}
+
 /// A connection to a sibling: plain TCP for an `http://` one (a test's), TLS
 /// for every real one.
 pub enum Upstream {
@@ -479,8 +498,10 @@ impl Upstream {
             (false, true) => format!("{host}:443"),
             (false, false) => format!("{host}:80"),
         };
-        let stream =
-            TcpStream::connect(&address).map_err(|e| format!("could not reach {host} ({e})"))?;
+        let stream = connect_tcp(&address).map_err(|e| format!("could not reach {host} ({e})"))?;
+        // Keys and keepalives are a few bytes each, and Nagle would hold
+        // each one back behind the last one's ack.
+        let _ = stream.set_nodelay(true);
         if !tls {
             return Ok(Upstream::Plain(stream));
         }
