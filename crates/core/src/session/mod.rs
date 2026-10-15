@@ -6,8 +6,10 @@ pub mod codex;
 pub(crate) mod codex_line;
 pub mod cursor;
 pub mod devin;
+pub(crate) mod devin_atif;
 pub mod extract;
 pub mod gemini;
+pub(crate) mod gemini_line;
 // Here rather than at the top of the crate because the session cache's version
 // is derived from this directory's sources (see build.rs), and what a parser
 // reads as absent is part of what it extracts.
@@ -543,6 +545,9 @@ pub const EDIT_TOOLS: &[&str] = &[
     "str_replace_editor",
     "ApplyPatch",
     "apply_patch",
+    // Gemini CLI's.
+    "replace",
+    "write_file",
 ];
 
 /// How many written paths a row carries.

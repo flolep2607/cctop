@@ -12,8 +12,14 @@
 //!
 //! Cost is the honest gap: neither side records one, so a Devin row reports
 //! tokens and tools but never a dollar figure — the same position Cursor and
-//! Windsurf are in.
+//! Windsurf are in. ponytail: the session row's `metadata` does carry
+//! `total_credit_cost` and `total_acu_cost`, but those are Devin's own plan
+//! units, not dollars, and read zero on every session seen; the cost column
+//! stays empty rather than show a credit count under a `$`.
+//!
+//! The transcript is read through the typed model in [`super::devin_atif`].
 
+use super::devin_atif::Transcript;
 use super::extract::{push_tool_detail, tool_detail};
 use super::readonly;
 use super::{ActivityState, Costs, ModelBreakdown, Session, SessionData, Tokens};
@@ -111,6 +117,12 @@ fn list_in(db_path: &Path, transcripts: &Path, sessions: &mut Vec<Session>) {
 }
 
 /// Parse an ATIF transcript, enriched with tool outcomes from the database.
+///
+/// Tokens are summed from the steps rather than taken from `final_metrics`:
+/// the two agree on every transcript seen, but only the steps say which model
+/// and which hour a token belongs to, and a session total that is the sum of
+/// its own breakdown cannot disagree with it. `final_metrics` answers only for
+/// a transcript whose steps carry no counts at all.
 pub fn extract(path: &Path) -> SessionData {
     let mut data = SessionData::default();
 
@@ -125,7 +137,7 @@ pub fn extract(path: &Path) -> SessionData {
         }
     };
 
-    let transcript: Value = match serde_json::from_str(&json_content) {
+    let transcript = match Transcript::parse(&json_content) {
         Ok(t) => t,
         Err(err) => {
             data.error = Some(format!(
@@ -136,35 +148,12 @@ pub fn extract(path: &Path) -> SessionData {
         }
     };
 
-    let agent_model = transcript
-        .get("agent")
-        .and_then(|a| a.get("model_name"))
-        .and_then(Value::as_str);
-
-    // `final_metrics` is the session's token ledger; prompt is billed input,
-    // completion is output, and cached input reads cheaper.
-    if let Some(fm) = transcript.get("final_metrics") {
-        data.tokens.input = fm
-            .get("total_prompt_tokens")
-            .and_then(Value::as_u64)
-            .unwrap_or(0);
-        data.tokens.output = fm
-            .get("total_completion_tokens")
-            .and_then(Value::as_u64)
-            .unwrap_or(0);
-        data.tokens.cache_read = fm
-            .get("total_cached_tokens")
-            .and_then(Value::as_u64)
-            .unwrap_or(0);
-    }
+    let agent_model = transcript.agent.get().and_then(|a| a.model_name.get());
 
     // Outcomes live in the database, not the transcript: one query maps each
     // call id to the status its update last reported, so a call still running
     // (no update row) is not mistaken for a failure.
-    let statuses = tool_statuses(
-        transcript.get("session_id").and_then(Value::as_str),
-        &db_for(Some(path)),
-    );
+    let statuses = tool_statuses(transcript.session_id.get(), &db_for(Some(path)));
 
     // Tokens attributed to each model across the session's steps. One model is
     // spelled two ways in the same transcript — most steps record the slug the
@@ -175,126 +164,109 @@ pub fn extract(path: &Path) -> SessionData {
     let mut per_model: HashMap<String, Tokens> = HashMap::new();
     let mut spellings: HashMap<String, String> = HashMap::new();
     let mut canon_order: Vec<String> = Vec::new();
+    let mut counted = false;
 
-    if let Some(steps) = transcript.get("steps").and_then(Value::as_array) {
-        for step in steps {
-            let source = step.get("source").and_then(Value::as_str).unwrap_or("");
-            if source != "agent" {
-                continue;
-            }
+    for step in transcript.steps().filter(|s| s.source.is("agent")) {
+        let ts = step.timestamp.or_empty();
 
-            let ts = step
-                .get("timestamp")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string();
+        let step_tokens = step.metrics.get().map(|m| m.tokens());
+        if let Some(tokens) = &step_tokens {
+            counted = true;
+            add(&mut data.tokens, tokens);
+        }
 
-            if let Some(model) = step.get("model_name").and_then(Value::as_str) {
-                // Buckets key on the fold and the spelling is chosen once all
-                // steps are read: bucketing under the spelling seen so far
-                // splits the model the moment a later step spells it better.
-                let canon = canonical_model(model);
-                match spellings.get_mut(&canon) {
-                    Some(seen)
-                        if *seen != seen.to_ascii_lowercase()
-                            && model == model.to_ascii_lowercase() =>
-                    {
-                        *seen = model.to_string();
-                    }
-                    Some(_) => {}
-                    None => {
-                        spellings.insert(canon.clone(), model.to_string());
-                        canon_order.push(canon.clone());
-                    }
+        if let Some(model) = step.model_name.get() {
+            // Buckets key on the fold and the spelling is chosen once all
+            // steps are read: bucketing under the spelling seen so far
+            // splits the model the moment a later step spells it better.
+            let canon = canonical_model(model);
+            match spellings.get_mut(&canon) {
+                Some(seen)
+                    if *seen != seen.to_ascii_lowercase()
+                        && model == model.to_ascii_lowercase() =>
+                {
+                    *seen = model.to_string();
                 }
-                let entry = per_model.entry(canon.clone()).or_default();
-                if let Some(m) = step.get("metrics") {
-                    let prompt = m.get("prompt_tokens").and_then(Value::as_u64).unwrap_or(0);
-                    let completion = m
-                        .get("completion_tokens")
-                        .and_then(Value::as_u64)
-                        .unwrap_or(0);
-                    let cached = m.get("cached_tokens").and_then(Value::as_u64).unwrap_or(0);
-                    entry.input += prompt;
-                    entry.output += completion;
-                    entry.cache_read += cached;
-                    // A step with a timestamp and its own token counts is all a
-                    // bucket needs; a step missing either contributes nothing
-                    // rather than an invented figure.
-                    if let Some(dt) = util::parse_ts(&ts) {
-                        let billed = prompt + completion + cached;
-                        *data
-                            .tokens_by_day
-                            .entry(util::local_date_key(&dt))
-                            .or_default()
-                            .entry(canon.clone())
-                            .or_insert(0) += billed;
-                        *data
-                            .tokens_by_hour
-                            .entry(util::local_hour_key(&dt))
-                            .or_default()
-                            .entry(canon.clone())
-                            .or_insert(0) += billed;
-                    }
+                Some(_) => {}
+                None => {
+                    spellings.insert(canon.clone(), model.to_string());
+                    canon_order.push(canon.clone());
                 }
             }
-
-            let Some(calls) = step.get("tool_calls").and_then(Value::as_array) else {
-                continue;
-            };
-            for call in calls {
-                let name = call
-                    .get("function_name")
-                    .and_then(Value::as_str)
-                    .unwrap_or("unknown");
-                let input = call.get("arguments").cloned().unwrap_or(Value::Null);
-                let call_id = call
-                    .get("tool_call_id")
-                    .and_then(Value::as_str)
-                    .map(str::to_string);
-
-                let (short, full) = tool_detail(name, &input);
-                push_tool_detail(
-                    &mut data.metrics.tool_details,
-                    name,
-                    short,
-                    full,
-                    ts.clone(),
-                    call_id.clone(),
-                    None,
-                );
-                // The diff an edit made lives in its arguments — ATIF keeps no
-                // structuredPatch — and the report's Changes view is built from
-                // deltas, so it is attached here rather than on display.
-                if matches!(name, "edit" | "write")
-                    && let Some(delta) = super::extract::edit_delta(&input)
-                    && let Some(detail) = data
-                        .metrics
-                        .tool_details
-                        .get_mut(name)
-                        .and_then(|details| details.last_mut())
-                {
-                    detail.delta = Some(delta);
-                }
-                *data.metrics.tools.entry(name.to_string()).or_insert(0) += 1;
-                data.metrics.tool_count += 1;
-
-                let failed = call_id
-                    .as_deref()
-                    .and_then(|id| statuses.get(id))
-                    .is_some_and(|status| status != "completed");
-                data.metrics.tool_errors += u64::from(failed);
-                if failed
-                    && let Some(detail) = data
-                        .metrics
-                        .tool_details
-                        .get_mut(name)
-                        .and_then(|details| details.last_mut())
-                {
-                    detail.failed = true;
+            let entry = per_model.entry(canon.clone()).or_default();
+            if let Some(tokens) = &step_tokens {
+                add(entry, tokens);
+                // A step with a timestamp and its own token counts is all a
+                // bucket needs; a step missing either contributes nothing
+                // rather than an invented figure.
+                if let Some(dt) = util::parse_ts(ts) {
+                    *data
+                        .tokens_by_day
+                        .entry(util::local_date_key(&dt))
+                        .or_default()
+                        .entry(canon.clone())
+                        .or_insert(0) += tokens.total;
+                    *data
+                        .tokens_by_hour
+                        .entry(util::local_hour_key(&dt))
+                        .or_default()
+                        .entry(canon.clone())
+                        .or_insert(0) += tokens.total;
                 }
             }
         }
+
+        for call in step.calls() {
+            let name = call.function_name.get().unwrap_or("unknown");
+            let input = call.arguments.value();
+            let call_id = call.tool_call_id.get().map(str::to_string);
+
+            let (short, full) = tool_detail(name, &input);
+            push_tool_detail(
+                &mut data.metrics.tool_details,
+                name,
+                short,
+                full,
+                ts.to_string(),
+                call_id.clone(),
+                None,
+            );
+            *data.metrics.tools.entry(name.to_string()).or_insert(0) += 1;
+            data.metrics.tool_count += 1;
+
+            let failed = call_id
+                .as_deref()
+                .and_then(|id| statuses.get(id))
+                .is_some_and(|status| status != "completed");
+            data.metrics.tool_errors += u64::from(failed);
+            // The diff an edit made lives in its arguments — ATIF keeps no
+            // structuredPatch — and the report's Changes view is built from
+            // deltas, so it is attached here rather than on display.
+            let delta = matches!(name, "edit" | "write")
+                .then(|| super::extract::edit_delta(&input))
+                .flatten();
+            if let Some(detail) = data
+                .metrics
+                .tool_details
+                .get_mut(name)
+                .and_then(|details| details.last_mut())
+            {
+                detail.failed = failed;
+                if let Some(delta) = delta {
+                    // A failed edit changed nothing, so it adds no lines; its
+                    // diff is still what it tried, which the Tools panel shows.
+                    if !failed {
+                        data.metrics.lines_added += delta.added as u64;
+                        data.metrics.lines_removed += delta.removed as u64;
+                    }
+                    detail.delta = Some(delta);
+                }
+            }
+        }
+    }
+
+    if !counted && let Some(totals) = transcript.final_metrics.get() {
+        data.tokens = totals.tokens();
     }
 
     let display = |canon: &str| {
@@ -332,6 +304,14 @@ pub fn extract(path: &Path) -> SessionData {
         .sort_by_key(|b| std::cmp::Reverse(b.tokens.total));
 
     data
+}
+
+fn add(target: &mut Tokens, step: &Tokens) {
+    target.input += step.input;
+    target.input_total += step.input_total;
+    target.cached_input += step.cached_input;
+    target.output += step.output;
+    target.total += step.total;
 }
 
 /// The name a model's spellings fold into: lowercase, letters and digits only.
@@ -519,6 +499,10 @@ fn permission_mode(db: &Connection, session_id: &str) -> Option<crate::hook::Per
 /// `num_tokens_preceding` is what the next request would carry in; the window
 /// size comes from the model table, and a model it does not know simply has
 /// no context figure to show.
+///
+/// ponytail: Cognition's own SWE models are in no published table and Devin
+/// records no window for them, so a session on one shows no context figure.
+/// Guessing a window would put a percentage on the row that means nothing.
 pub fn extract_context(session: &Session) -> Option<crate::session::ContextUsage> {
     let db = readonly(&db_for(session.data_file.as_deref())).ok()?;
     let used = db
@@ -599,33 +583,38 @@ mod tests {
         let data = extract(&write(&dir, "test-session.json", TRANSCRIPT));
 
         assert_eq!(data.last_model, "swe-1-6-slow");
-        assert_eq!(data.tokens.input, 220);
+        // Cached tokens are the part of the prompt read from cache, not an
+        // addition to it: 220 prompt tokens in all, 110 of them cached.
+        assert_eq!(data.tokens.all_input(), 220);
+        assert_eq!(data.tokens.input, 110);
+        assert_eq!(data.tokens.cached_input, 110);
+        assert_eq!(data.tokens.cache_read, 0);
         assert_eq!(data.tokens.output, 30);
-        assert_eq!(data.tokens.cache_read, 110);
+        assert_eq!(data.tokens.total, 250);
         // Invocations, not tool_definitions — the toolset is not the usage.
         assert_eq!(data.metrics.tool_count, 2);
         assert_eq!(data.metrics.tools["read"], 1);
         assert_eq!(data.metrics.tools["exec"], 1);
         assert_eq!(data.models, vec!["swe-1-6-slow".to_string()]);
         let breakdown = &data.model_breakdown[0];
-        assert_eq!(breakdown.tokens.input, 220);
+        assert_eq!(breakdown.tokens.all_input(), 220);
         assert_eq!(breakdown.tokens.output, 30);
         // Every agent step carries both a timestamp and its own metrics, so
-        // the token buckets fill: 160 + 200 billed across the two steps,
-        // wherever the local day boundary happens to fall.
+        // the token buckets fill: 110 + 140 across the two steps, wherever
+        // the local day boundary happens to fall.
         assert_eq!(
             data.tokens_by_day
                 .values()
                 .flat_map(|m| m.values())
                 .sum::<u64>(),
-            360
+            250
         );
         assert_eq!(
             data.tokens_by_hour
                 .values()
                 .flat_map(|m| m.values())
                 .sum::<u64>(),
-            360
+            250
         );
     }
 
@@ -636,6 +625,57 @@ mod tests {
         // "test-session" has no rows in any reachable database, and a call with
         // no recorded status is not a failure — zero, not a guess.
         assert_eq!(data.metrics.tool_errors, 0);
+    }
+
+    /// The ERR column for Devin is the database's word on each call: a
+    /// `failed` update is an error, a `completed` one is not, and the
+    /// transcript is read from `transcripts/` beside the `sessions.db` that
+    /// says so.
+    #[test]
+    fn a_failed_status_in_the_database_is_a_tool_error() {
+        let dir = TempDir::new().unwrap();
+        fs::create_dir(dir.path().join("transcripts")).unwrap();
+        let db = Connection::open(dir.path().join("sessions.db")).unwrap();
+        db.execute_batch(
+            "CREATE TABLE tool_call_state (session_id TEXT, tool_call_id TEXT, \
+             tool_call_json TEXT, tool_call_update_json TEXT);
+             INSERT INTO tool_call_state VALUES
+               ('test-session', 'call_1', '{}', '{\"status\":\"completed\"}'),
+               ('test-session', 'call_2', '{}', '{\"status\":\"failed\"}');",
+        )
+        .unwrap();
+        drop(db);
+        let data = extract(&write(&dir, "transcripts/test-session.json", TRANSCRIPT));
+        assert_eq!(data.metrics.tool_count, 2);
+        assert_eq!(data.metrics.tool_errors, 1);
+        assert!(data.metrics.tool_details["exec"][0].failed);
+        assert!(!data.metrics.tool_details["read"][0].failed);
+    }
+
+    /// An edit's arguments are its diff, so the lines column fills from them;
+    /// steps with no counts of their own leave the session's total to
+    /// `final_metrics`.
+    #[test]
+    fn edits_count_lines_and_final_metrics_stand_in_for_missing_steps() {
+        let dir = TempDir::new().unwrap();
+        let transcript = r#"{
+            "session_id": "edits",
+            "agent": {"model_name": "swe-2-high"},
+            "steps": [
+                {"source": "agent", "timestamp": "2026-09-15T06:33:05Z", "model_name": "swe-2-high",
+                 "tool_calls": [{"tool_call_id": "e1", "function_name": "edit",
+                    "arguments": {"file_path": "/src/a.rs", "old_string": "a\nb", "new_string": "c\nd\ne"}}]},
+                {"source": "agent", "unknown_future_field": {"x": [1]}, "metrics": "n/a"}
+            ],
+            "final_metrics": {"total_prompt_tokens": 500, "total_completion_tokens": 20, "total_cached_tokens": 400}
+        }"#;
+        let data = extract(&write(&dir, "edits.json", transcript));
+        assert_eq!(data.metrics.lines_added, 3);
+        assert_eq!(data.metrics.lines_removed, 2);
+        assert_eq!(data.metrics.tool_details["edit"][0].d, "/src/a.rs");
+        assert_eq!(data.tokens.all_input(), 500);
+        assert_eq!(data.tokens.cached_input, 400);
+        assert_eq!(data.tokens.output, 20);
     }
 
     #[test]
@@ -675,7 +715,7 @@ mod tests {
         assert_eq!(data.last_model, "swe-1-6-slow");
         assert_eq!(data.model_breakdown.len(), 1);
         assert_eq!(data.model_breakdown[0].model, "swe-1-6-slow");
-        assert_eq!(data.model_breakdown[0].tokens.input, 220);
+        assert_eq!(data.model_breakdown[0].tokens.all_input(), 220);
         let spellings: std::collections::HashSet<&String> =
             data.tokens_by_day.values().flat_map(|m| m.keys()).collect();
         assert_eq!(spellings.len(), 1);
