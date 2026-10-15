@@ -358,6 +358,23 @@ cctop tunnel status     # what is connected
 cctop tunnel remove     # delete what setup made, and forget it
 ```
 
+**QUIC or HTTP/2.** The tunnel reaches Cloudflare over QUIC, which is UDP. On a
+network that blocks UDP to port 7844, or drops it for seconds at a time — WSL2
+behind Windows' NAT is one — QUIC connections die and every terminal on them
+with it, so the tunnel moves to HTTP/2 over TCP: at once when QUIC cannot connect
+at all, and after three timeouts within half an hour when it connects but does
+not stay up. It tries QUIC again at a reconnect after half an hour on HTTP/2;
+it never cuts a working connection to do so. To choose yourself, as cloudflared's
+`--protocol` does:
+
+```toml
+[tunnel]
+protocol = "http2"   # or "quic", or "auto" (the default)
+```
+
+or `CCTOP_TUNNEL_PROTOCOL=http2`, which wins over the file. It applies to quick
+tunnels too, and `cctop tunnel remove` leaves it in place.
+
 `remove` deletes only what setup created — the DNS records and the tunnel, by
 the ids it stored — then clears the `[tunnel]` table of `config.toml`. If the API
 token has been revoked since, it lists what is left for you to delete in the

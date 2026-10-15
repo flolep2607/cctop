@@ -186,6 +186,37 @@ pub async fn register_connection(
         .open_bi()
         .await
         .map_err(|e| Error::Register(format!("open_bi on control stream: {e}")))?;
+    register_over(
+        recv.compat(),
+        send.compat_write(),
+        auth,
+        tunnel_id,
+        conn_index,
+        options,
+        ingress,
+    )
+    .await
+}
+
+/// [`register_connection`] on a control stream already open, whatever
+/// carries it: QUIC's first stream, or over HTTP/2 the request the edge sends
+/// with `Cf-Cloudflared-Proxy-Connection-Upgrade: control-stream`, whose body
+/// is read and whose response body is written (cloudflared
+/// `connection/http2.go`, `TypeControlStream`). The RPC is the same bytes on
+/// both.
+pub(crate) async fn register_over<R, W>(
+    reader: R,
+    writer: W,
+    auth: &TunnelAuth,
+    tunnel_id: Uuid,
+    conn_index: u8,
+    options: &ConnectionOptions,
+    ingress: IngressTx,
+) -> Result<(RegistrationDetails, ControlSession), Error>
+where
+    R: futures::io::AsyncRead + Unpin + Send + 'static,
+    W: futures::io::AsyncWrite + Unpin + Send + 'static,
+{
     // capnp-rpc's `RpcSystem` is `!Send` (internal Rc<RefCell<_>>),
     // so we can't drive it from a tokio task. Spawn a dedicated OS
     // thread with its own current-thread tokio runtime + LocalSet
@@ -212,10 +243,7 @@ pub async fn register_connection(
             let local = tokio::task::LocalSet::new();
             local.block_on(&rt, async move {
                 // Construct VatNetwork inside this thread because
-                // its internals are !Send (Rc<RefCell<…>>). We bridge
-                // the quinn streams to futures-io here too.
-                let reader = recv.compat();
-                let writer = send.compat_write();
+                // its internals are !Send (Rc<RefCell<…>>).
                 let network = Box::new(twoparty::VatNetwork::new(
                     reader,
                     writer,

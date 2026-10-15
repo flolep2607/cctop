@@ -18,19 +18,21 @@
 //! when it cannot come up, with the reason said ([`Tunnel::fallback`]).
 //!
 //! The client for both is [`cctop_tunnel`], which speaks the edge's protocol
-//! itself — QUIC to the edge and capnp-RPC over it — rather than shelling out
-//! to `cloudflared` and reading a URL off its stderr. So `--tunnel` needs
-//! nothing installed and cctop stays one binary, which is the whole reason it
-//! ships as one.
+//! itself — QUIC to the edge and capnp-RPC over it, or HTTP/2 over TCP where
+//! UDP does not get through or keeps dropping ([`protocol`]) — rather than
+//! shelling out to `cloudflared` and reading a URL off its stderr. So
+//! `--tunnel` needs nothing installed and cctop stays one binary, which is the
+//! whole reason it ships as one.
 //!
 //! Not inside `serve`, though `cctop serve --tunnel` is its first user: a terminal
 //! share from rmux opens one too ([`crate::rmux`]), with no server of cctop's
 //! around it.
 //!
 //! The consequence worth knowing: the tunnel's data path is *inside this
-//! process*. Every request from the internet arrives as a QUIC stream, gets
-//! proxied to the loopback listener by a task on the runtime below, and lands on
-//! the same socket a local browser would use. So the connection cap, the token
+//! process*. Every request from the internet arrives as a stream on the
+//! tunnel's connection to the edge, QUIC or HTTP/2, gets proxied to the
+//! loopback listener by a task on the runtime below, and lands on the same
+//! socket a local browser would use. So the connection cap, the token
 //! check and the deadlines in `serve::http` all still apply — the tunnel adds
 //! a route in, not a second server.
 //!
@@ -55,7 +57,7 @@ use std::fmt;
 use std::fs::File;
 use std::path::Path;
 
-use cctop_tunnel::cloudflare::{Credentials, Named, Quick};
+use cctop_tunnel::cloudflare::{Credentials, Named, Protocol, Quick};
 use cctop_tunnel::{Provider, Routes};
 
 use crate::config;
@@ -144,9 +146,10 @@ pub fn start(port: u16, want: Want, share_front: Option<u16>) -> anyhow::Result<
         Want::Auto => account(),
         Want::Quick => None,
     };
+    let protocol = protocol();
     let mut fallback = None;
     if let Some(account) = account {
-        match open_account(&runtime, port, &account) {
+        match open_account(&runtime, port, &account, protocol) {
             Ok((handle, lock)) => {
                 // Share hostnames only with a front to send them to: one
                 // routed anywhere else would be a road nobody vetted.
@@ -172,7 +175,7 @@ pub fn start(port: u16, want: Want, share_front: Option<u16>) -> anyhow::Result<
     // second QUIC connection for masking a single-POP reconnect, and the page
     // reports a gap of its own anyway.
     let handle = runtime
-        .block_on(Quick::new().open(Routes::new(port)))
+        .block_on(Quick::new().with_protocol(protocol).open(Routes::new(port)))
         .map_err(|e| match &fallback {
             Some(why) => anyhow::anyhow!("{why}, and a quick tunnel failed too: {e}"),
             None => anyhow::anyhow!("{e}\nDrop --tunnel to serve on this machine only."),
@@ -193,13 +196,14 @@ fn open_account(
     runtime: &tokio::runtime::Runtime,
     port: u16,
     account: &Account,
+    protocol: Protocol,
 ) -> Result<(cctop_tunnel::Tunnel, File), String> {
     let credentials = Credentials::from_token(&account.token)
         .map_err(|e| format!("the Cloudflare tunnel token cctop has is not usable ({e})"))?;
     let lock = claim(&credentials).ok_or_else(|| {
         "another cctop on this machine is already serving your Cloudflare tunnel".to_string()
     })?;
-    let named = Named::new(credentials, account.hostname.clone());
+    let named = Named::new(credentials, account.hostname.clone()).with_protocol(protocol);
     let handle = runtime
         .block_on(named.open(Routes::new(port)))
         .map_err(|e| why_not(&e))?;
@@ -744,6 +748,45 @@ pub fn account() -> Option<Account> {
     )
 }
 
+/// How the tunnel reaches Cloudflare: `CCTOP_TUNNEL_PROTOCOL`, else
+/// `protocol` in the `[tunnel]` table, else `auto` — QUIC, falling back to
+/// HTTP/2 over TCP. The words are cloudflared's `--protocol`: `auto`, `quic`,
+/// `http2`. It applies to a quick tunnel as much as to the account's, so it
+/// is read whether or not an account is connected.
+///
+/// ponytail: a word that is none of those is taken as `auto`, silently — this
+/// is read with the dashboard on screen, where nothing may print.
+pub fn protocol() -> Protocol {
+    let file = std::fs::read_to_string(&*config::CONFIG_FILE).ok();
+    protocol_from(
+        std::env::var("CCTOP_TUNNEL_PROTOCOL").ok().as_deref(),
+        file.as_deref(),
+    )
+}
+
+/// [`protocol`] from its two sources.
+pub(crate) fn protocol_from(env: Option<&str>, file: Option<&str>) -> Protocol {
+    let in_file = || {
+        let doc = file?.parse::<toml_edit::DocumentMut>().ok()?;
+        doc.get("tunnel")?
+            .get("protocol")?
+            .as_str()
+            .map(str::to_string)
+    };
+    env.map(str::trim)
+        .filter(|w| !w.is_empty())
+        .map(str::to_string)
+        .or_else(in_file)
+        .and_then(|word| word.parse().ok())
+        .unwrap_or_default()
+}
+
+/// The `protocol` key of the `[tunnel]` table, which is a setting rather than
+/// part of the account: saving or forgetting the account keeps it.
+fn kept_protocol(doc: &toml_edit::DocumentMut) -> Option<toml_edit::Item> {
+    doc.get("tunnel")?.get("protocol").cloned()
+}
+
 /// The Access settings in `config.toml`, whatever connected the tunnel: a
 /// service running on `CCTOP_TUNNEL_TOKEN` can still put its page behind
 /// Access by hand. `None` when there are none, or none that are complete.
@@ -973,11 +1016,15 @@ pub(crate) fn save_account_in(path: &Path, account: &Account) -> anyhow::Result<
             entry.insert("invites", toml_edit::value(invites));
             table.insert("access", toml_edit::Item::Table(entry));
         }
+        if let Some(protocol) = kept_protocol(doc) {
+            table.insert("protocol", protocol);
+        }
         doc.insert("tunnel", toml_edit::Item::Table(table));
     })
 }
 
-/// Remove the `[tunnel]` table, leaving the rest of the file as it was.
+/// Remove the `[tunnel]` table, leaving the rest of the file as it was — and
+/// its `protocol`, which is not the account's.
 pub fn clear_account() -> anyhow::Result<()> {
     clear_account_in(&config::CONFIG_FILE)
 }
@@ -987,7 +1034,13 @@ pub(crate) fn clear_account_in(path: &Path) -> anyhow::Result<()> {
         return Ok(());
     }
     edit_config(path, |doc| {
+        let protocol = kept_protocol(doc);
         doc.remove("tunnel");
+        if let Some(protocol) = protocol {
+            let mut table = toml_edit::Table::new();
+            table.insert("protocol", protocol);
+            doc.insert("tunnel", toml_edit::Item::Table(table));
+        }
     })
 }
 
@@ -1096,6 +1149,38 @@ mod tests {
         assert_eq!(account_from(None, None, Some(&text)), None);
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
+    }
+
+    #[test]
+    fn the_protocol_comes_from_the_environment_then_the_file_then_auto() {
+        let file = "[tunnel]\nprotocol = \"http2\"\n";
+        assert_eq!(protocol_from(None, None), Protocol::Auto);
+        assert_eq!(protocol_from(None, Some(file)), Protocol::Http2);
+        assert_eq!(protocol_from(Some("quic"), Some(file)), Protocol::Quic);
+        assert_eq!(protocol_from(Some(" "), Some(file)), Protocol::Http2);
+        assert_eq!(
+            protocol_from(None, Some("[tunnel]\nprotocol = \"carrier pigeon\"\n")),
+            Protocol::Auto
+        );
+        // A protocol alone is not an account.
+        assert_eq!(account_from(None, None, Some(file)), None);
+    }
+
+    #[test]
+    fn saving_and_forgetting_the_account_keep_the_protocol() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[tunnel]\nprotocol = \"http2\"\n").unwrap();
+        save_account_in(&path, &full()).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(protocol_from(None, Some(&text)), Protocol::Http2, "{text}");
+        assert_eq!(account_from(None, None, Some(&text)), Some(full()));
+
+        clear_account_in(&path).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(protocol_from(None, Some(&text)), Protocol::Http2, "{text}");
+        assert_eq!(account_from(None, None, Some(&text)), None);
+        assert!(!text.contains("token"), "{text}");
     }
 
     #[test]
