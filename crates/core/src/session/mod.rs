@@ -1615,6 +1615,36 @@ impl Tokens {
     pub fn all_input(&self) -> u64 {
         self.input + self.cached_input + self.cache_read + self.cache_write_5m + self.cache_write_1h
     }
+
+    /// A prompt whose cached part is counted inside it, not beside it — the
+    /// shape Gemini and Devin both report, as Codex does — split into the
+    /// uncached remainder and the cached part, so `all_input` rebuilds the
+    /// prompt. A cached count above the prompt is clamped, not underflowed.
+    pub fn from_prompt(prompt: u64, cached: u64, output: u64) -> Tokens {
+        let cached = cached.min(prompt);
+        Tokens {
+            input: prompt - cached,
+            input_total: prompt,
+            cached_input: cached,
+            output,
+            ..Default::default()
+        }
+    }
+
+    /// Add `other` into this, every field: one sum shared by every reader, so
+    /// a field one provider fills is never summed by one copy and dropped by
+    /// another.
+    pub fn add(&mut self, other: &Tokens) {
+        self.input += other.input;
+        self.output += other.output;
+        self.cache_read += other.cache_read;
+        self.cache_write_5m += other.cache_write_5m;
+        self.cache_write_1h += other.cache_write_1h;
+        self.input_total += other.input_total;
+        self.cached_input += other.cached_input;
+        self.reasoning_output += other.reasoning_output;
+        self.total += other.total;
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

@@ -159,29 +159,18 @@ pub fn list_sessions() -> Vec<Session> {
 /// input is the uncached remainder, which is the same split Codex reports.
 fn turn_tokens(usage: &TokenCounts) -> Tokens {
     let count = TokenCounts::count;
-    let input_total = count(&usage.input);
-    let cached_input = count(&usage.cached).min(input_total);
     Tokens {
-        input: input_total - cached_input,
-        input_total,
-        cached_input,
-        output: count(&usage.output),
         reasoning_output: count(&usage.thoughts),
         // Gemini's `tool` bucket is counted into `total` but has no rate of its
         // own and reads zero on every turn seen so far; leave it to `total`
         // rather than folding it into a bucket that would be billed.
         total: count(&usage.total),
-        ..Default::default()
+        ..Tokens::from_prompt(
+            count(&usage.input),
+            count(&usage.cached),
+            count(&usage.output),
+        )
     }
-}
-
-fn add(target: &mut Tokens, turn: &Tokens) {
-    target.input += turn.input;
-    target.input_total += turn.input_total;
-    target.cached_input += turn.cached_input;
-    target.output += turn.output;
-    target.reasoning_output += turn.reasoning_output;
-    target.total += turn.total;
 }
 
 /// What one turn cost at the model's published rates.
@@ -235,7 +224,7 @@ impl Turn {
                 .calls()
                 .map(|call| Call {
                     name: call.name.get().unwrap_or("unknown").to_string(),
-                    args: call.args.value(),
+                    args: call.args(),
                     id: call.id.get().map(str::to_string),
                     ts: call.timestamp.get().map(str::to_string),
                     failed: call.status.is("error"),
@@ -299,10 +288,10 @@ pub fn extract(path: &Path) -> SessionData {
         if let Some(tokens) = &turn.tokens {
             data.last_model = turn.model.clone();
             let costs = turn_costs(tokens, &pricing::resolve_codex(&turn.model));
-            add(&mut data.tokens, tokens);
+            data.tokens.add(tokens);
             add_costs(&mut data.costs, &costs);
             let (model_tokens, model_costs) = breakdown.entry(turn.model.clone()).or_default();
-            add(model_tokens, tokens);
+            model_tokens.add(tokens);
             add_costs(model_costs, &costs);
 
             if let Some(dt) = util::parse_ts(&turn.ts) {
@@ -354,9 +343,13 @@ pub fn extract(path: &Path) -> SessionData {
                 .and_then(|details| details.last_mut())
             {
                 detail.failed = call.failed;
-                if let Some(delta) = delta.filter(|_| !call.failed) {
-                    data.metrics.lines_added += delta.added as u64;
-                    data.metrics.lines_removed += delta.removed as u64;
+                if let Some(delta) = delta {
+                    // A failed edit changed nothing, so it adds no lines; its
+                    // diff is still what it tried, which the Tools panel shows.
+                    if !call.failed {
+                        data.metrics.lines_added += delta.added as u64;
+                        data.metrics.lines_removed += delta.removed as u64;
+                    }
                     detail.delta = Some(delta);
                 }
             }
@@ -383,20 +376,27 @@ pub fn extract(path: &Path) -> SessionData {
 /// measured against the window it almost certainly has rather than none.
 const GEMINI_DEFAULT_CTX: u64 = 1_048_576;
 
-/// The newest `gemini` message in the chat's tail, read whole.
+/// The newest `gemini` message in the chat's tail that `f` answers for.
+///
+/// The window widens until it holds that message whole: a reply keeps its
+/// tool results inline, so the one after a large `read_file` or shell run is
+/// itself larger than any fixed tail, and a fixed window would cut it at the
+/// start and come up empty exactly when the session has just done heavy work.
+/// The partial first line of each window fails to parse and is skipped.
 ///
 /// ponytail: the JSONL shape only, for the reason [`last_turn_ms`] gives.
 fn last_reply<T>(path: &Path, mut f: impl FnMut(&Record) -> Option<T>) -> Option<T> {
     if path.extension().is_none_or(|ext| ext != "jsonl") {
         return None;
     }
-    let text = util::read_tail(path, 65_536)?;
-    text.lines().rev().find_map(|line| {
-        let record = Record::parse(line.trim().as_bytes())?;
-        if !record.kind.is("gemini") {
-            return None;
-        }
-        f(&record)
+    util::scan_tail_escalating(path, |text| {
+        text.lines().rev().find_map(|line| {
+            let record = Record::parse(line.trim().as_bytes())?;
+            if !record.kind.is("gemini") {
+                return None;
+            }
+            f(&record)
+        })
     })
 }
 
@@ -477,7 +477,7 @@ mod tests {
                 "{\"type\":\"gemini\",\"timestamp\":\"2026-05-14T17:34:13.475Z\",\"model\":\"gemini-test\",",
                 "\"tokens\":{\"input\":8678,\"output\":133,\"cached\":8000,\"thoughts\":364,\"tool\":0,\"total\":9175},",
                 "\"toolCalls\":[{\"id\":\"read_file_1\",\"name\":\"read_file\",\"args\":{\"file_path\":\"README.md\"},\"status\":\"success\"},",
-                "{\"id\":\"replace_1\",\"name\":\"replace\",\"args\":{\"file_path\":\"src/main.rs\"},\"status\":\"error\"}]}\n",
+                "{\"id\":\"replace_1\",\"name\":\"replace\",\"args\":{\"file_path\":\"src/main.rs\",\"old_string\":\"a\",\"new_string\":\"b\\nc\"},\"status\":\"error\"}]}\n",
             ),
         );
 
@@ -513,6 +513,10 @@ mod tests {
             data.metrics.tool_details["replace"][0].failed,
             "status=error must be flagged"
         );
+        // A failed edit changed nothing, but its diff is still what it tried.
+        assert_eq!(data.metrics.lines_added, 0);
+        assert_eq!(data.metrics.lines_removed, 0);
+        assert!(data.metrics.tool_details["replace"][0].delta.is_some());
     }
 
     /// The older whole-file shape has to yield the same figures as the newer
@@ -619,6 +623,53 @@ mod tests {
         assert_eq!(data.tokens.input_total, 7);
         assert_eq!(data.metrics.tool_count, 1);
         assert_eq!(data.metrics.lines_added, 0);
+        // The path survives the cut, so the write still names its file.
+        assert_eq!(data.metrics.tool_details["write_file"][0].d, "f");
+    }
+
+    /// An oversized rewrite of a message replaces a copy whose arguments were
+    /// whole; the edit keeps its path rather than dropping out of the writes.
+    #[test]
+    fn an_oversized_rewrite_keeps_the_edits_path() {
+        let filler = "x".repeat(crate::config::MAX_JSONL_LINE_BYTES + 1);
+        let reply = |result: &str| {
+            format!(
+                "{{\"id\":\"g\",\"type\":\"gemini\",\"timestamp\":\"2026-05-14T17:34:10.000Z\",\"model\":\"gemini-test\",\
+                 \"tokens\":{{\"input\":7,\"output\":3,\"total\":10}},\
+                 \"toolCalls\":[{{\"id\":\"c\",\"name\":\"replace\",\"args\":{{\"file_path\":\"src/a.rs\",\"old_string\":\"a\",\"new_string\":\"b\"}},\
+                 \"status\":\"success\",\"result\":\"{result}\"}}]}}\n"
+            )
+        };
+        let body = format!("{}{}", reply(""), reply(&filler));
+        let path = fixture("rewrite-big.jsonl", &body);
+        let data = extract(&path);
+        std::fs::remove_file(&path).expect("remove fixture");
+
+        assert_eq!(data.metrics.tool_count, 1);
+        assert_eq!(data.metrics.tool_details["replace"][0].d, "src/a.rs");
+    }
+
+    /// The newest reply carries its tool result inline, so it can be larger
+    /// than the first tail window; context and last tool still read it.
+    #[test]
+    fn a_reply_larger_than_the_tail_window_still_answers() {
+        let result = "y".repeat(200 * 1024);
+        let body = format!(
+            "{{\"sessionId\":\"s\",\"startTime\":\"2026-05-14T17:34:00.000Z\"}}\n\
+             {{\"id\":\"g\",\"type\":\"gemini\",\"timestamp\":\"2026-05-14T17:34:10.000Z\",\"model\":\"gemini-test\",\
+             \"tokens\":{{\"input\":9000,\"output\":3,\"total\":9003}},\
+             \"toolCalls\":[{{\"id\":\"c\",\"name\":\"read_file\",\"args\":{{\"file_path\":\"big\"}},\"status\":\"success\",\"result\":\"{result}\"}}]}}\n\
+             {{\"$set\":{{\"lastUpdated\":\"2026-05-14T17:35:00.000Z\"}}}}\n"
+        );
+        let path = fixture("wide.jsonl", &body);
+        let mut session = Session::new(Provider::Gemini, "s".into());
+        session.data_file = Some(path.clone());
+        let context = extract_context(&session);
+        let last_tool = extract_last_tool(&session);
+        std::fs::remove_file(&path).expect("remove fixture");
+
+        assert_eq!(context.expect("a context figure").used, 9000);
+        assert_eq!(last_tool, "read_file");
     }
 
     #[test]

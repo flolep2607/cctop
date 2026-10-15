@@ -113,25 +113,28 @@ impl<'a> Step<'a> {
 
 /// Prompt, completion and cached counts as cctop's [`super::Tokens`], with the
 /// cached part split out of the prompt the way Codex's and Gemini's are.
-pub(crate) fn tokens(prompt: u64, completion: u64, cached: u64) -> super::Tokens {
-    let cached = cached.min(prompt);
+fn tokens(prompt: u64, completion: u64, cached: u64) -> super::Tokens {
     super::Tokens {
-        input: prompt - cached,
-        input_total: prompt,
-        cached_input: cached,
-        output: completion,
         total: prompt + completion,
-        ..Default::default()
+        ..super::Tokens::from_prompt(prompt, cached, completion)
     }
 }
 
 impl StepMetrics {
-    pub(crate) fn tokens(&self) -> super::Tokens {
-        tokens(
-            self.prompt_tokens.value().unwrap_or(0),
-            self.completion_tokens.value().unwrap_or(0),
+    /// The step's tokens, or `None` when it carries neither a prompt nor a
+    /// completion count: a `metrics` object with nothing usable in it is no
+    /// count, and must not stand in front of `final_metrics` as a zero.
+    pub(crate) fn tokens(&self) -> Option<super::Tokens> {
+        let prompt = self.prompt_tokens.value();
+        let completion = self.completion_tokens.value();
+        if prompt.is_none() && completion.is_none() {
+            return None;
+        }
+        Some(tokens(
+            prompt.unwrap_or(0),
+            completion.unwrap_or(0),
             self.cached_tokens.value().unwrap_or(0),
-        )
+        ))
     }
 }
 
@@ -167,7 +170,7 @@ mod tests {
         assert_eq!(steps.len(), 2);
         let agent = steps[1];
         assert!(agent.source.is("agent"));
-        let tokens = agent.metrics.get().unwrap().tokens();
+        let tokens = agent.metrics.get().unwrap().tokens().unwrap();
         assert_eq!(
             (tokens.input, tokens.cached_input, tokens.output),
             (10, 90, 5)
@@ -190,7 +193,7 @@ mod tests {
         assert!(t.final_metrics.get().is_none());
         let steps: Vec<_> = t.steps().collect();
         assert_eq!(steps.len(), 1);
-        assert_eq!(steps[0].metrics.get().unwrap().tokens().output, 3);
+        assert_eq!(steps[0].metrics.get().unwrap().tokens().unwrap().output, 3);
         assert_eq!(steps[0].calls().count(), 0);
     }
 }

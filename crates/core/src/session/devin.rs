@@ -169,10 +169,10 @@ pub fn extract(path: &Path) -> SessionData {
     for step in transcript.steps().filter(|s| s.source.is("agent")) {
         let ts = step.timestamp.or_empty();
 
-        let step_tokens = step.metrics.get().map(|m| m.tokens());
+        let step_tokens = step.metrics.get().and_then(|m| m.tokens());
         if let Some(tokens) = &step_tokens {
             counted = true;
-            add(&mut data.tokens, tokens);
+            data.tokens.add(tokens);
         }
 
         if let Some(model) = step.model_name.get() {
@@ -195,7 +195,7 @@ pub fn extract(path: &Path) -> SessionData {
             }
             let entry = per_model.entry(canon.clone()).or_default();
             if let Some(tokens) = &step_tokens {
-                add(entry, tokens);
+                entry.add(tokens);
                 // A step with a timestamp and its own token counts is all a
                 // bucket needs; a step missing either contributes nothing
                 // rather than an invented figure.
@@ -304,14 +304,6 @@ pub fn extract(path: &Path) -> SessionData {
         .sort_by_key(|b| std::cmp::Reverse(b.tokens.total));
 
     data
-}
-
-fn add(target: &mut Tokens, step: &Tokens) {
-    target.input += step.input;
-    target.input_total += step.input_total;
-    target.cached_input += step.cached_input;
-    target.output += step.output;
-    target.total += step.total;
 }
 
 /// The name a model's spellings fold into: lowercase, letters and digits only.
@@ -653,7 +645,8 @@ mod tests {
     }
 
     /// An edit's arguments are its diff, so the lines column fills from them;
-    /// steps with no counts of their own leave the session's total to
+    /// steps with no counts of their own — no `metrics`, or one with nothing
+    /// usable in it — leave the session's total to
     /// `final_metrics`.
     #[test]
     fn edits_count_lines_and_final_metrics_stand_in_for_missing_steps() {
@@ -665,7 +658,9 @@ mod tests {
                 {"source": "agent", "timestamp": "2026-09-15T06:33:05Z", "model_name": "swe-2-high",
                  "tool_calls": [{"tool_call_id": "e1", "function_name": "edit",
                     "arguments": {"file_path": "/src/a.rs", "old_string": "a\nb", "new_string": "c\nd\ne"}}]},
-                {"source": "agent", "unknown_future_field": {"x": [1]}, "metrics": "n/a"}
+                {"source": "agent", "unknown_future_field": {"x": [1]}, "metrics": "n/a"},
+                {"source": "agent", "metrics": {}},
+                {"source": "agent", "metrics": {"prompt_tokens": "many", "cached_tokens": 3}}
             ],
             "final_metrics": {"total_prompt_tokens": 500, "total_completion_tokens": 20, "total_cached_tokens": 400}
         }"#;

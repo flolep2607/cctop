@@ -76,6 +76,46 @@ pub(crate) struct ToolCall<'a> {
     pub status: Str<'a>,
     #[serde(borrow)]
     pub timestamp: Str<'a>,
+    /// What [`for_each`] kept of `args` on an oversized line: the path fields
+    /// alone, in place of arguments it would not build whole.
+    #[serde(skip)]
+    pub kept_args: Option<serde_json::Value>,
+}
+
+/// The fields of a call's arguments that name the file it touched — all an
+/// edit needs to stay in recent writes, collisions and touched files.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct PathArgs<'a> {
+    #[serde(borrow)]
+    file_path: Str<'a>,
+    #[serde(borrow)]
+    path: Str<'a>,
+}
+
+impl<'a> ToolCall<'a> {
+    /// The call's arguments built: whole, or only their path fields when the
+    /// line was too large to build them whole.
+    pub(crate) fn args(&self) -> serde_json::Value {
+        match &self.kept_args {
+            Some(kept) => kept.clone(),
+            None => self.args.value(),
+        }
+    }
+
+    /// Swap the arguments for their path fields alone. Only those are read —
+    /// the rest of a whole-file `write_file` is skipped, never built.
+    fn keep_only_paths(&mut self) {
+        let paths = self.args.read::<PathArgs>().unwrap_or_default();
+        let mut kept = serde_json::Map::new();
+        for (key, value) in [("file_path", paths.file_path), ("path", paths.path)] {
+            if let Some(value) = value.get() {
+                kept.insert(key.to_string(), value.into());
+            }
+        }
+        self.kept_args = Some(serde_json::Value::Object(kept));
+        self.args = Raw::default();
+    }
 }
 
 impl<'a> Record<'a> {
@@ -115,14 +155,17 @@ pub(crate) fn for_each(path: &Path, mut f: impl FnMut(&Record)) -> std::io::Resu
             // An oversized line is a message whose tool output alone passes the
             // cap. The output is a field this reader skips without building, so
             // the turn's tokens and calls are kept — the `Value` reader lost
-            // them — and only the arguments are dropped, since a whole-file
-            // `write_file` is exactly what would be built into a `Value` next.
+            // them — and only the arguments are cut to their path fields, since
+            // a whole-file `write_file` is exactly what would be built into a
+            // `Value` next. The path stays because this copy may be a later
+            // rewrite of the message, replacing one whose arguments were whole:
+            // without it the edit would drop out of recent writes.
             if let Some(mut record) = Record::parse(bytes) {
                 if oversized && let Some(calls) = record.tool_calls.0.as_mut() {
                     calls
                         .iter_mut()
                         .filter_map(|call| call.0.as_mut())
-                        .for_each(|call| call.args = Raw::default());
+                        .for_each(ToolCall::keep_only_paths);
                 }
                 match record.set.get() {
                     Some(patch) => f(patch),
