@@ -15,6 +15,7 @@ expression: screen
 │config.toml · [settings]                                                      │
 │  theme             auto         ↻   auto/light/dark/mono; auto asks the term…│
 │  graph_glyphs      braille      ↻   braille ⡰⠑⢄⠜  octant 𜵙𜴄𜶀𜴒  sextant 🬖🬈🬭🬅  │
+│  tab_bar           top          ↻   top/bottom/left/right: where the tab bar…│
 │  notify            [ ]              Bell + desktop alert when a session need…│
 │  auto_update       [x]              Offer to update at startup when a newer …│
 │  telemetry         [x]              Send an anonymous usage report once a da…│
@@ -23,6 +24,5 @@ expression: screen
 │  alert_cost        0                Alert when a session's cost passes $X    │
 │  alert_burn        0                Alert when a session burns over $X an ho…│
 │  alert_today       0                Alert when today's spend passes $X       │
-│  alert_errors      0                Alert when X% of 10m of tool calls fail …│
-╰ 85   ↑↓ scroll   / filter   Esc back ────────────────────────────────────────╯
+╰ 86   ↑↓ scroll   / filter   Esc back ────────────────────────────────────────╯
 / Filter ↵ Change ⌫ Reset e Edit file , Back Alt+←→ Tabs F1 Help        ⧉ share

@@ -993,6 +993,40 @@ fn remote_tabs() {
     snap("remote_tabs", &mut app);
 }
 
+/// The bar on each other side `tab_bar` puts it, inside a tab: a title wide in
+/// cells, one with an emoji sequence, a remote tab's mark and a zoomed split's,
+/// so every way a label is measured and cut is on screen at once.
+#[test]
+fn tab_bar_sides() {
+    use super::render::{TabBar, set_tab_bar};
+    use cctop_core::reach::Transport;
+    let mut app = fixture();
+    let mut split = tabs::Tab::new(tabs::Pane::for_test("claude"));
+    split.panes.push(tabs::Pane::for_test("zsh"));
+    split.toggle_zoom();
+    app.tabs.push(split);
+    app.tabs.push(tabs::Tab::new(tabs::Pane::for_test(
+        "日本語プロジェクトの長いタイトル",
+    )));
+    let mut remote = tabs::Pane::for_test("desk · Fix the login hint");
+    remote.transport = Some(Transport::Peer);
+    app.tabs.push(tabs::Tab::new(remote));
+    app.tabs.push(tabs::Tab::new(tabs::Pane::for_test(
+        "⚠\u{FE0F} 🧑\u{200D}🌾 hotfix",
+    )));
+    app.tab = 2;
+    for (side, name) in [
+        (TabBar::Bottom, "bottom"),
+        (TabBar::Left, "left"),
+        (TabBar::Right, "right"),
+    ] {
+        set_tab_bar(side);
+        let screen = text(&draw(&mut app, LARGE));
+        insta::assert_snapshot!(format!("tab_bar_{name}_120x40"), screen);
+    }
+    set_tab_bar(TabBar::Top);
+}
+
 /// Inside a sibling's tab, its link in the bottom-right corner: the round trip,
 /// the reconnects so far and how well the output compresses, beside the share
 /// button.

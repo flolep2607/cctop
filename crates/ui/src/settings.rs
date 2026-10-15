@@ -340,6 +340,9 @@ impl App {
         self.apply_columns();
         self.apply_theme();
         self.apply_graph_glyphs();
+        super::render::set_tab_bar(super::render::TabBar::from_name(
+            self.settings.tab_bar.as_deref(),
+        ));
         self.apply_footer();
         // `[tunnel]` is in the same file, and `cctop tunnel setup` in another
         // terminal is a change to it like any other.

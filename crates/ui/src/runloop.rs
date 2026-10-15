@@ -52,8 +52,14 @@ const PENDING_WALK_INTERVAL: Duration = Duration::from_secs(3);
 /// run`'s, not `host`'s — so choosing this before the agent starts is as safe
 /// as choosing it in `run` was.
 pub fn choose_palette() {
-    theme::init_from_env(cctop_core::settings::Settings::load().theme.as_deref());
+    let settings = cctop_core::settings::Settings::load();
+    theme::init_from_env(settings.theme.as_deref());
     theme::tell_hosted_agents();
+    // Here too, for the same agent: `pane_size` sizes it before the first
+    // frame, and has to know which side the bar will take room from.
+    crate::render::set_tab_bar(crate::render::TabBar::from_name(
+        settings.tab_bar.as_deref(),
+    ));
 }
 
 /// Run the UI. `hosted` is an agent cctop launched for this session, which it

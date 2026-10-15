@@ -15,10 +15,11 @@ expression: screen
 │config.toml · [settings]                                                                                              ┃
 │  theme             auto         ↻   auto/light/dark/mono; auto asks the terminal                                     ┃
 │  graph_glyphs      braille      ↻   braille ⡰⠑⢄⠜  octant 𜵙𜴄𜶀𜴒  sextant 🬖🬈🬭🬅                                          ┃
+│  tab_bar           top          ↻   top/bottom/left/right: where the tab bar sits                                    ┃
 │  notify            [ ]              Bell + desktop alert when a session needs you                                    ┃
 │  auto_update       [x]              Offer to update at startup when a newer release is out                           ┃
 │  telemetry         [x]              Send an anonymous usage report once a day (see README)                           ┃
-│  compact_threshold 83.5             Context % at which the agent compacts. On restart                                ┃
+│  compact_threshold 83.5             Context % at which the agent compacts. On restart                                │
 │  hide_columns      ""               Columns to hide, e.g. "tok_rate,mem"                                             │
 │  alert_cost        0                Alert when a session's cost passes $X                                            │
 │  alert_burn        0                Alert when a session burns over $X an hour                                       │
@@ -39,6 +40,5 @@ expression: screen
 │  tree              [ ]              Draw the table as repositories and their checkouts                               │
 │  live_only         [ ]              Only sessions that are running                                                   │
 │  age               default      ↻   Hide sessions quiet for longer than                                              │
-│  cost_floor        $0               Only sessions costing at least $X (0 for all)                                    │
-╰ 85   ↑↓ scroll   / filter   Esc back ────────────────────────────────────────────────────────────────────────────────╯
+╰ 86   ↑↓ scroll   / filter   Esc back ────────────────────────────────────────────────────────────────────────────────╯
 / Filter ↵ Change ⌫ Reset e Edit file , Back Alt+←→ Tabs F1 Help F10 Quit                                       ⧉ share
