@@ -8,7 +8,11 @@ machine.
 
 ## Letting the agents tell cctop directly
 
-Both of those are cctop guessing. The agents can just say it:
+Both of those are cctop guessing. The agents can just say it, and cctop sets
+that up itself: on start it installs its hooks, for this user, into every agent
+whose config directory exists here, and keeps them current on every start
+after. Removing them by hand (`--remove-hooks`) is remembered, so they stay out
+until `--install-hooks` puts them back. By hand, for the rest:
 
 ```bash
 cctop --install-hooks           # for this user: every agent below
