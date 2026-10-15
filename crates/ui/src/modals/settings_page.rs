@@ -96,6 +96,62 @@ pub(crate) fn draw_settings(
         inner.height as usize,
         scroll as usize,
     );
+    if let Some(of) = app.cf.qr
+        && let Some(link) = app.qr_link(of)
+    {
+        draw_settings_qr(frame, area, of, link);
+    }
+}
+
+/// A link as a QR code over the whole settings pane, until any key.
+///
+/// Over the pane rather than in a row: a code is twenty-odd rows and a row is
+/// one. The pane's own frame, so the page is plainly still underneath and any
+/// key is plainly the way back. Never cropped — [`qr::Qr::fits`] — so a pane
+/// too short for it says so instead.
+fn draw_settings_qr(frame: &mut Frame, area: Rect, of: crate::connect::QrOf, link: &str) {
+    use crate::connect::QrOf;
+    let (title, warn) = match of {
+        QrOf::Dashboard => (" dashboard link ", "full access · keep it private"),
+        QrOf::Login => (" Cloudflare login ", "logs in as you"),
+    };
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(theme::colors().border_hi))
+        .style(theme::canvas())
+        .title(Line::from(Span::styled(title, theme::title())))
+        .title_bottom(Line::from(Span::styled(" any key closes ", theme::dim())));
+    let inner = block.inner(area);
+    frame.render_widget(Clear, area);
+    frame.render_widget(block, area);
+    // The code, a blank row, and the warning under it, read together.
+    let (text, style, y) = match qr::encode(link) {
+        Some(code) if code.fits(inner.width, inner.height.saturating_sub(2)) => {
+            let top = inner.y + (inner.height - code.height - 2) / 2;
+            let at = Rect {
+                y: top,
+                height: code.height,
+                ..inner
+            };
+            code.draw(at, frame.buffer_mut());
+            let warning = Style::default().fg(theme::colors().cost_mid);
+            (warn, warning, top + code.height + 1)
+        }
+        _ => (
+            "too small for QR · taller terminal",
+            theme::dim(),
+            inner.y + inner.height / 2,
+        ),
+    };
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(text, style)).centered()),
+        Rect {
+            y,
+            height: 1,
+            ..inner
+        }
+        .intersection(inner),
+    );
 }
 
 /// The offset that keeps the cursor's line on screen, moving as little as it

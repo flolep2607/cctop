@@ -59,9 +59,11 @@ pub enum Row {
     Status,
     /// The dashboard's address, renamed in place.
     Hostname,
+    /// The served link as a QR code, for a phone.
+    Qr,
     /// The domain, fixed at setup.
     Zone,
-    /// The default share hostname, fixed at setup.
+    /// The default share hostname, renamed in place.
     Shares,
     /// Cloudflare Access on or off.
     Access,
@@ -91,6 +93,7 @@ impl Row {
         match self {
             Row::Status => "status",
             Row::Hostname | Row::SetupHostname => "hostname",
+            Row::Qr => "qr",
             Row::Zone | Row::SetupZone => "zone",
             Row::Shares => "share_hostname",
             Row::Access => "access",
@@ -109,6 +112,8 @@ impl Row {
 pub enum Typing {
     /// The dashboard's new address.
     Hostname,
+    /// The default share hostname's new address.
+    ShareHostname,
     /// The owner's email, which turns Access on or moves it.
     Owner,
     /// An email or `@domain` to invite, read-only.
@@ -159,6 +164,17 @@ pub enum Setup {
     },
 }
 
+/// Which link a QR code drawn over the page encodes. Named rather than held,
+/// so the link is read afresh each frame — a serve stopped under it takes the
+/// code with it — and no second copy of a credential is kept.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QrOf {
+    /// The served link, token and all.
+    Dashboard,
+    /// The login being waited for.
+    Login,
+}
+
 /// What the last change on a row came to, said where it was made.
 pub struct Note {
     pub row: Row,
@@ -201,6 +217,8 @@ pub struct Rows {
     /// What the page's open field is for, when it is on one of these rows.
     pub typing: Option<Typing>,
     pub setup: Option<Setup>,
+    /// A QR code over the page, until any key.
+    pub qr: Option<QrOf>,
     /// Set when a login is given up on, so its thread stops polling rather
     /// than waiting out its ten minutes.
     cancel: Arc<AtomicBool>,
@@ -218,6 +236,7 @@ impl Default for Rows {
             confirm: None,
             typing: None,
             setup: None,
+            qr: None,
             cancel: Arc::default(),
             new_login: Box::new(Login::new),
             apply_access: Arc::new(access_setup::apply),
@@ -361,7 +380,7 @@ impl App {
         let mut rows = vec![Row::Status];
         match &self.connected {
             Some(c) => {
-                rows.extend([Row::Hostname, Row::Zone, Row::Shares, Row::Access]);
+                rows.extend([Row::Hostname, Row::Qr, Row::Zone, Row::Shares, Row::Access]);
                 if c.access_owner.is_some() {
                     rows.extend([Row::Owner, Row::Links]);
                     rows.extend((0..c.invites.len()).map(Row::Invite));
@@ -466,6 +485,10 @@ impl App {
                 Shape::Text,
                 "dashboard address".to_string(),
             ),
+            Row::Qr => match self.qr_link(QrOf::Dashboard) {
+                Some(_) => text("↵ show", "dashboard link · has token"),
+                None => text("—", "nothing served · t"),
+            },
             Row::Zone => (
                 or_dash(c.and_then(|c| c.zone.as_ref())),
                 Shape::Text,
@@ -474,7 +497,7 @@ impl App {
             Row::Shares => (
                 or_dash(c.and_then(|c| c.share_hostname.as_ref())),
                 Shape::Text,
-                "W shares · fixed".to_string(),
+                "W shares · rename breaks links".to_string(),
             ),
             Row::Access => (
                 String::new(),
@@ -617,7 +640,13 @@ impl App {
         // so one that cannot is refused here and not after typing.
         let writes = matches!(
             row,
-            Row::Hostname | Row::Access | Row::Owner | Row::Links | Row::Invite(_) | Row::AddInvite
+            Row::Hostname
+                | Row::Shares
+                | Row::Access
+                | Row::Owner
+                | Row::Links
+                | Row::Invite(_)
+                | Row::AddInvite
         );
         if writes && let Err(why) = c.rename {
             return self.tunnel_note(row, why, true);
@@ -627,8 +656,20 @@ impl App {
                 let label = label_of(c.hostname.as_deref().unwrap_or_default(), c.zone.as_deref());
                 self.tunnel_type(Typing::Hostname, &label);
             }
+            Row::Qr => match self.qr_link(QrOf::Dashboard) {
+                Some(_) => self.cf.qr = Some(QrOf::Dashboard),
+                None => self.tunnel_note(row, "nothing served · t first", true),
+            },
             Row::Zone => self.tunnel_note(row, "fixed · remove, set up again", false),
-            Row::Shares => self.tunnel_note(row, "fixed · per agent: e in W", false),
+            Row::Shares => {
+                let label = label_of(
+                    c.share_hostname.as_deref().unwrap_or_default(),
+                    c.zone.as_deref(),
+                );
+                self.tunnel_type(Typing::ShareHostname, &label);
+                // Said before the Enter that does it, not after.
+                self.tunnel_note(row, "old W links break · per agent: e in W", false);
+            }
             Row::Access => match (&c.access_owner, c.login) {
                 (Some(_), _) => self.cf.confirm = Some(Row::Access),
                 // A browser login's token cannot manage Access; an API token
@@ -671,7 +712,7 @@ impl App {
             Row::Login => match &self.cf.setup {
                 Some(Setup::LoggingIn { url }) => {
                     render::copy_to_clipboard(url);
-                    self.tunnel_note(row, "link copied · ⌫ cancel", false);
+                    self.tunnel_note(row, "link copied · q QR · ⌫ cancel", false);
                 }
                 _ => self.log_in(),
             },
@@ -771,11 +812,19 @@ impl App {
         };
         let who = cctop_core::cloudflare::access::parse_who(text);
         match typing {
-            Typing::Hostname if text.is_empty() => refuse(self, "type a name"),
+            Typing::Hostname | Typing::ShareHostname if text.is_empty() => {
+                refuse(self, "type a name")
+            }
             Typing::Hostname => {
                 let typed = text.to_string();
                 self.tunnel_work(row, "moving", move || {
                     Answer::Renamed(cloudflare::name_dashboard(&typed))
+                });
+            }
+            Typing::ShareHostname => {
+                let typed = text.to_string();
+                self.tunnel_work(row, "moving", move || {
+                    Answer::Renamed(cloudflare::name_default_share(&typed))
                 });
             }
             Typing::Owner => match who {
@@ -862,8 +911,8 @@ impl App {
         self.tunnel_note(
             Row::Login,
             match opened {
-                true => "browser opened · link copied · ⌫ cancel",
-                false => "link copied: open it · ↵ copy · ⌫ cancel",
+                true => "browser opened · link copied · q QR · ⌫ cancel",
+                false => "link copied · ↵ copy · q QR · ⌫ cancel",
             },
             false,
         );
@@ -1171,6 +1220,9 @@ impl App {
                 self.follow_page_host();
                 match (&renamed.note, &renamed.old, renamed.changed) {
                     (Some(note), ..) => self.tunnel_note(row, note.clone(), true),
+                    (None, Some(_), true) if row == Row::Shares => {
+                        self.tunnel_note(row, "moved · old W links dead", false)
+                    }
                     (None, Some(old), true) => {
                         self.tunnel_note(row, format!("moved · {old} stops"), false)
                     }
@@ -1179,6 +1231,40 @@ impl App {
             }
             Answer::Renamed(Err(message)) => self.tunnel_note(row, message, true),
         }
+    }
+
+    /// The link `of` encodes, while there is one: the served link through
+    /// the tunnel — `y` in the serve panel copies the same — and the login's
+    /// while it is waited for. The loopback link is never one: a phone cannot
+    /// reach it.
+    pub(super) fn qr_link(&self, of: QrOf) -> Option<&str> {
+        match of {
+            QrOf::Dashboard => self.serving.as_ref()?.public.as_deref(),
+            QrOf::Login => match &self.cf.setup {
+                Some(Setup::LoggingIn { url }) => Some(url),
+                _ => None,
+            },
+        }
+    }
+
+    /// A key on the settings page that belongs to a QR code: any key puts
+    /// one away, and `q` on a login being waited for draws its link. Returns
+    /// whether the key was taken.
+    ///
+    /// `q` and not the page's quit only there, where the login is the one
+    /// thing on screen to scan and a quit would give it up besides.
+    pub(super) fn tunnel_qr_key(&mut self, key: KeyEvent) -> bool {
+        if self.cf.qr.take().is_some() {
+            self.needs_redraw = true;
+            return true;
+        }
+        let on_login = self.settings_item() == Some(Item::Tunnel(Row::Login));
+        if key.code == KeyCode::Char('q') && on_login && self.qr_link(QrOf::Login).is_some() {
+            self.cf.qr = Some(QrOf::Login);
+            self.needs_redraw = true;
+            return true;
+        }
+        false
     }
 
     /// Copy the token link, and open it where a browser would be on this
@@ -1462,6 +1548,7 @@ mod tests {
             [
                 Row::Status,
                 Row::Hostname,
+                Row::Qr,
                 Row::Zone,
                 Row::Shares,
                 Row::Access,
@@ -1668,5 +1755,104 @@ mod tests {
         );
         assert!(note(&app).is_some_and(|(r, _, e)| r == Row::Hostname && e));
         assert_eq!(app.tunnel_view(Row::Hostname).tone, Tone::Error);
+    }
+
+    /// The default share hostname is renamed in place like the dashboard's,
+    /// and the row says before the Enter that does it that old links break.
+    #[test]
+    fn the_share_hostname_is_renamed_in_place_and_says_old_links_break() {
+        let (mut app, _) = access_app();
+        on(&mut app, Row::Shares);
+        assert!(
+            app.tunnel_view(Row::Shares).what.contains("breaks links"),
+            "the row says it before anyone opens it"
+        );
+        key(&mut app, KeyCode::Enter);
+        assert_eq!(app.cf.typing, Some(Typing::ShareHostname));
+        assert!(note(&app).is_some_and(|(r, t, e)| r == Row::Shares && !e && t.contains("break")));
+        // Empty is refused in the row, the field still open.
+        app.settings_input = Some(LineEdit::default());
+        key(&mut app, KeyCode::Enter);
+        assert!(app.cf.working.is_none());
+        assert!(note(&app).is_some_and(|(r, _, e)| r == Row::Shares && e));
+        assert_eq!(app.cf.typing, Some(Typing::ShareHostname));
+        key(&mut app, KeyCode::Esc);
+
+        // What the worker comes back with lands in the row: the move, and
+        // what it cost; a refusal in red.
+        let renamed = |old: Option<&str>| Renamed {
+            account: Account::default(),
+            old: old.map(str::to_string),
+            new: Some("w.example.test".into()),
+            changed: true,
+            note: None,
+        };
+        app.tunnel_answer(
+            Row::Shares,
+            Answer::Renamed(Ok(renamed(Some("cctop-share.example.test")))),
+        );
+        assert!(
+            note(&app).is_some_and(|(r, t, e)| r == Row::Shares && !e && t.contains("old W links"))
+        );
+        app.tunnel_answer(
+            Row::Shares,
+            Answer::Renamed(Err(
+                "cctop.example.test is already used by the dashboard".into()
+            )),
+        );
+        assert_eq!(app.tunnel_view(Row::Shares).tone, Tone::Error);
+    }
+
+    /// A served stand-in, its tunnel link made up.
+    fn serve(app: &mut App) {
+        app.serving = Some(share::Served {
+            local: "http://127.0.0.1:7777/?t=made-up".into(),
+            public: Some("https://cctop.example.test/?t=made-up".into()),
+            tunnel_fallback: None,
+            readonly: String::new(),
+            actions: true,
+            publish: Box::new(|_, _, _| {}),
+        });
+    }
+
+    #[test]
+    fn the_qr_row_draws_the_served_link_until_any_key() {
+        let (mut app, _) = access_app();
+        on(&mut app, Row::Qr);
+        // Nothing served: no code, and the row says what would make one.
+        key(&mut app, KeyCode::Enter);
+        assert_eq!(app.cf.qr, None);
+        assert!(note(&app).is_some_and(|(r, _, e)| r == Row::Qr && e));
+
+        serve(&mut app);
+        assert_eq!(app.tunnel_view(Row::Qr).value, "↵ show");
+        key(&mut app, KeyCode::Enter);
+        assert_eq!(app.cf.qr, Some(QrOf::Dashboard));
+        assert_eq!(
+            app.qr_link(QrOf::Dashboard),
+            Some("https://cctop.example.test/?t=made-up")
+        );
+        // Any key puts it away and does nothing else: not even `q`'s quit.
+        key(&mut app, KeyCode::Char('q'));
+        assert_eq!(app.cf.qr, None);
+        assert!(app.on_settings());
+    }
+
+    #[test]
+    fn q_on_a_login_being_waited_for_draws_its_link() {
+        let mut app = test_app();
+        on(&mut app, Row::Login);
+        app.cf.setup = Some(Setup::LoggingIn {
+            url: "https://dash.cloudflare.com/argotunnel?aud=&callback=made-up".into(),
+        });
+        key(&mut app, KeyCode::Char('q'));
+        assert_eq!(app.cf.qr, Some(QrOf::Login));
+        key(&mut app, KeyCode::Down);
+        assert_eq!(app.cf.qr, None);
+        assert_eq!(
+            app.settings_item(),
+            Some(Item::Tunnel(Row::Login)),
+            "the key that closed it moved nothing"
+        );
     }
 }

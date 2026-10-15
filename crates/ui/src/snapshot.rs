@@ -455,6 +455,21 @@ fn settings_page() {
     app.cf.confirm = Some(Row::Remove);
     snap("settings_tunnel_connected", &mut app);
 
+    // The same account served over it, its link drawn as a QR code over the
+    // pane: whole where the pane has the rows, said not to fit where it has
+    // not. The token in the link is made up.
+    app.cf.confirm = None;
+    app.serving = Some(super::share::Served {
+        local: "http://127.0.0.1:7777/?t=f3a9c2e17b4d0a6658e1c3b7d92f4e05".into(),
+        public: Some("https://cctop.example.com/?t=f3a9c2e17b4d0a6658e1c3b7d92f4e05".into()),
+        tunnel_fallback: None,
+        readonly: String::new(),
+        actions: true,
+        publish: Box::new(|_, _, _| {}),
+    });
+    app.cf.qr = Some(super::connect::QrOf::Dashboard);
+    snap("settings_tunnel_qr", &mut app);
+
     // A setup half done: two domains to cycle, and the name open to create.
     let mut app = fixture();
     app.settings_open = true;
