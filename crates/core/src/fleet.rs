@@ -523,8 +523,8 @@ fn row(host: &str, v: &Value) -> Option<Session> {
             .unwrap_or_else(|| num(c, "this_hour"));
         s.cost_today = num(c, "today");
         s.cost_per_min = num(c, "per_min");
-        s.costs_by_day = Arc::new(buckets(c.get("by_day")));
-        s.costs_by_hour = Arc::new(buckets(c.get("by_hour")));
+        s.costs_by_day = Arc::new(buckets(c.get("by_day"), &s.model));
+        s.costs_by_hour = Arc::new(buckets(c.get("by_hour"), &s.model));
     }
 
     if let Some(ctx) = v.get("context") {
@@ -567,16 +567,16 @@ fn row(host: &str, v: &Value) -> Option<Session> {
 /// Re-nest a flattened `key -> USD` bucket map into the `key -> model -> USD`
 /// shape the local pipeline uses.
 ///
-/// The model breakdown is lost across the wire and is not worth carrying: every
-/// consumer of these maps sums the models straight back up, and the single
-/// synthetic key below is what that sum reads.
-fn buckets(v: Option<&Value>) -> HashMap<String, HashMap<String, f64>> {
+/// The model breakdown is lost across the wire, so each bucket is filed whole
+/// under the session's own model. The overview's Models row names these keys,
+/// and a placeholder there read as a model called "remote".
+fn buckets(v: Option<&Value>, model: &str) -> HashMap<String, HashMap<String, f64>> {
     let Some(map) = v.and_then(Value::as_object) else {
         return HashMap::new();
     };
     map.iter()
         .filter_map(|(k, v)| v.as_f64().map(|amount| (k.clone(), amount)))
-        .map(|(k, amount)| (k, HashMap::from([("remote".to_string(), amount)])))
+        .map(|(k, amount)| (k, HashMap::from([(model.to_string(), amount)])))
         .collect()
 }
 
@@ -662,6 +662,8 @@ mod tests {
         // The buckets have to survive, or a remote machine's spend would reach
         // the lifetime total and none of the overview's windows.
         assert_eq!(s.costs_by_day["2026-08-11"].values().sum::<f64>(), 1.25);
+        // Filed under the session's model, which the overview's Models row names.
+        assert_eq!(s.costs_by_day["2026-08-11"]["claude-opus-5"], 1.25);
     }
 
     #[test]

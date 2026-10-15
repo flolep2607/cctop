@@ -259,9 +259,8 @@ impl Aggregate {
     /// Cost by model, total and today.
     ///
     /// Today is read off the row's day buckets, which the loader copies from
-    /// the extraction for a local row. A remote row's buckets carry one
-    /// synthetic model, so a remote session is filed whole under the model it
-    /// is on — the only per-model fact that crossed the wire.
+    /// the extraction for a local row. A remote row's buckets carry one model,
+    /// the one it is on — the only per-model fact that crossed the wire.
     fn add_model_costs(
         &mut self,
         s: &Session,
@@ -290,13 +289,9 @@ impl Aggregate {
                 continue;
             }
             for (model, usd) in models {
-                let model = match remote {
-                    true => model_label(&s.model),
-                    false => model_label(model),
-                };
                 *self
                     .model_today
-                    .entry((provider, model, included))
+                    .entry((provider, model_label(model), included))
                     .or_default() += usd;
             }
         }
