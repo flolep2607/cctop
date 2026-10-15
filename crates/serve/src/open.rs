@@ -76,12 +76,18 @@ pub(crate) fn route(
 /// and what this machine cannot do — an agent not installed here, a directory
 /// that is not one — is refused before a terminal is opened, so the reason
 /// arrives as the tab's message rather than as a pty that ended.
+///
+/// `with_account` for `/api/new-term-as/…/<account>`
+/// ([`NEW_AS_ROUTE`](cctop_core::remote_open::NEW_AS_ROUTE)): the same, under
+/// one of this machine's accounts, and an account it does not have is one of
+/// the things refused.
 pub(crate) fn route_new(
     shared: &Shared,
     stream: &mut TcpStream,
     request: &Request,
     rest: &str,
     access: Access,
+    with_account: bool,
 ) {
     if access != Access::Full || !shared.actions {
         return http::respond_error(stream, Some(request), 403, "this link cannot start agents");
@@ -94,7 +100,11 @@ pub(crate) fn route_new(
             "a terminal socket is a WebSocket",
         );
     }
-    let spec = match cctop_core::remote_open::NewAgent::from_route(rest) {
+    let parsed = match with_account {
+        true => cctop_core::remote_open::NewAgent::from_route_as(rest),
+        false => cctop_core::remote_open::NewAgent::from_route(rest),
+    };
+    let spec = match parsed {
         Ok(spec) => spec,
         Err(why) => return http::respond_error(stream, Some(request), 400, &why),
     };
@@ -300,13 +310,16 @@ fn problem_here(spec: &cctop_core::remote_open::NewAgent) -> Option<String> {
     spec.problem_here()
 }
 
-/// Under test no agent need be installed, so only the directory is asked
-/// about — the half of the check that is about this machine's disk.
+/// Under test no agent need be installed, so only the directory and the
+/// account are asked about — the half of the check that is about this
+/// machine's disk and its accounts.
 #[cfg(test)]
 fn problem_here(spec: &cctop_core::remote_open::NewAgent) -> Option<String> {
     let dir = cctop_core::util::untildify(&spec.dir);
-    (!spec.dir.is_empty() && !std::path::Path::new(&dir).is_dir())
-        .then(|| format!("{} is not a directory on this machine", spec.dir))
+    if !spec.dir.is_empty() && !std::path::Path::new(&dir).is_dir() {
+        return Some(format!("{} is not a directory on this machine", spec.dir));
+    }
+    spec.profile_here().err()
 }
 
 /// Under test a shell stands in for `mux new`, as for [`open_argv`]: it says
@@ -484,7 +497,7 @@ fn redraw(master: &std::fs::File) {
 #[cfg(test)]
 mod tests {
     use crate::Snapshot;
-    use crate::tests::{session, shared, status_of};
+    use crate::tests::{response_of, session, shared, status_of};
     use std::sync::Arc;
 
     /// A terminal is opened only for a full link with actions on, as a
@@ -542,17 +555,109 @@ mod tests {
             agent: "claude".into(),
             dir: "/no/such/dir/here".into(),
             options: Default::default(),
+            account: None,
         };
         let said = status(&s, &format!("{}?t=full", nowhere.route()), ws);
         assert!(said.contains("404"), "{said}");
+
+        // Under an account: the name checked as strictly as a model, and
+        // looked up among this machine's — one it does not have is refused,
+        // never started under the default instead.
+        for bad in [
+            "/api/new-term-as/claude/ask/-/-?t=full",
+            "/api/new-term-as/claude/ask/-/-/2d78?t=full",
+            "/api/new-term-as/claude/ask/-/-/zz?t=full",
+            "/api/new-term-as/opencode/ask/-/-/776f726b?t=full",
+            "/api/new-term-as/claude/ask/-/-/776f726b/x?t=full",
+        ] {
+            assert!(status(&s, bad, ws).contains("400"), "{bad}");
+        }
+        let stranger = cctop_core::remote_open::NewAgent {
+            agent: "claude".into(),
+            dir: String::new(),
+            options: Default::default(),
+            account: Some("cctop-test-no-such-account".into()),
+        };
+        let said = response_of(&s, "GET", &format!("{}?t=full", stranger.route()), ws);
+        assert!(said.starts_with("HTTP/1.1 404"), "{said}");
+        assert!(said.contains("no claude account"), "{said}");
         s.actions = false;
         assert!(status(&s, "/api/new-term/claude/ask/-/-?t=full", ws).contains("403"));
+    }
+
+    /// What a sibling's launcher learns this machine's accounts from: names
+    /// per harness, for a link that could then start an agent, and nothing
+    /// for one that could not.
+    #[test]
+    fn this_machines_accounts_are_named_for_a_full_link_only() {
+        cctop_core::config::add_launchable(cctop_core::config::Profile {
+            provider: cctop_core::pricing::Provider::Codex,
+            name: "cctop-test-listed-acct".into(),
+            dir: std::env::temp_dir().join(".codex-cctop-test-listed-acct"),
+            source: cctop_core::config::AccountSource::Directory,
+        });
+        let s = shared("full", "ro");
+        assert!(status_of(&s, "GET", "/api/accounts?t=ro", "").contains("403"));
+        let said = response_of(&s, "GET", "/api/accounts?t=full", "");
+        assert!(said.starts_with("HTTP/1.1 200"), "{said}");
+        let body: serde_json::Value =
+            serde_json::from_str(said.split("\r\n\r\n").nth(1).expect("body")).expect("json");
+        let codex = body["codex"].as_array().expect("codex names");
+        assert!(
+            codex.iter().any(|n| n == "cctop-test-listed-acct"),
+            "{body}"
+        );
+        assert!(body["claude"].is_array(), "{body}");
+        assert!(!said.contains(".codex-cctop-test"), "a directory went out");
     }
 
     /// End to end, as a sibling's launcher reaches it: signed, upgraded, and
     /// the far side handed the launch as words — agent, directory, settings.
     #[test]
     fn a_sibling_starts_a_new_agent_here_with_its_settings() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let launch = cctop_core::remote_open::NewAgent {
+            agent: "claude".into(),
+            dir: dir.path().to_string_lossy().into_owned(),
+            options: cctop_core::launch_opts::Options {
+                model: Some("opus".into()),
+                permissions: cctop_core::launch_opts::Permissions::Plan,
+            },
+            account: None,
+        };
+        let want = format!("new claude {} --model opus --permissions plan", launch.dir);
+        sibling_launch_shows(&launch, &want);
+    }
+
+    /// The same, under one of this machine's accounts: the name reaches the
+    /// far side's `mux new`, which puts the agent under it.
+    #[test]
+    fn a_sibling_starts_a_new_agent_here_under_an_account_of_this_machines() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        cctop_core::config::add_launchable(cctop_core::config::Profile {
+            provider: cctop_core::pricing::Provider::Claude,
+            name: "cctop-test-serve-acct".into(),
+            dir: dir.path().join(".claude-cctop-test-serve-acct"),
+            source: cctop_core::config::AccountSource::Directory,
+        });
+        let launch = cctop_core::remote_open::NewAgent {
+            agent: "claude".into(),
+            dir: dir.path().to_string_lossy().into_owned(),
+            options: Default::default(),
+            account: Some("cctop-test-serve-acct".into()),
+        };
+        assert!(
+            launch
+                .route()
+                .starts_with(cctop_core::remote_open::NEW_AS_ROUTE)
+        );
+        let want = format!("new claude {} --account cctop-test-serve-acct", launch.dir);
+        sibling_launch_shows(&launch, &want);
+    }
+
+    /// Open `launch` on a serve here as a sibling would, signed, and read the
+    /// terminal until it shows `want`.
+    fn sibling_launch_shows(launch: &cctop_core::remote_open::NewAgent, want: &str) {
         use cctop_core::ws::{Decoder, Op};
         use std::net::TcpListener;
         const SECRET: &str = "eyJhIjoi-made-up-tunnel-token";
@@ -568,15 +673,6 @@ mod tests {
                 let (mut stream, _) = listener.accept().unwrap();
                 crate::serve_connection(&s, &mut stream);
             })
-        };
-        let dir = tempfile::tempdir().expect("tempdir");
-        let launch = cctop_core::remote_open::NewAgent {
-            agent: "claude".into(),
-            dir: dir.path().to_string_lossy().into_owned(),
-            options: cctop_core::launch_opts::Options {
-                model: Some("opus".into()),
-                permissions: cctop_core::launch_opts::Permissions::Plan,
-            },
         };
         let peer =
             cctop_core::peer::Peer::fixed("box", &format!("http://127.0.0.1:{port}"), SECRET);
@@ -602,14 +698,13 @@ mod tests {
         let mut decoder = Decoder::default();
         decoder.push(&got[end..]);
         let mut screen = String::new();
-        let want = format!("new claude {} --model opus --permissions plan", launch.dir);
-        while !screen.contains(&want) {
+        while !screen.contains(want) {
             while let Some((op, payload)) = decoder.frame().unwrap() {
                 if op == Op::Binary {
                     screen.push_str(&String::from_utf8_lossy(&payload));
                 }
             }
-            if screen.contains(&want) {
+            if screen.contains(want) {
                 break;
             }
             let mut more = Vec::new();
@@ -1012,6 +1107,7 @@ mod tests {
             agent: "claude".into(),
             dir: dir.path().to_string_lossy().into_owned(),
             options: Default::default(),
+            account: None,
         };
         let mut first = tab(port, &launch.route(), RESUME_NEW).expect("open");
         first.until("new claude");

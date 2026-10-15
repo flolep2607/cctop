@@ -357,19 +357,24 @@ pub fn resume(session: &Session) -> Result<Done, Failed> {
 /// has to name a directory that exists — anywhere else the agent would launch
 /// into, the terminal's launcher already knows about.
 pub fn launch_agent(agent: &str, cwd: Option<&str>) -> Result<Done, Failed> {
-    launch_new(agent, cwd, &crate::launch_opts::Options::default())
+    launch_new(agent, cwd, &crate::launch_opts::Options::default(), None)
 }
 
-/// [`launch_agent`], with a model and a permission setting — what a sibling's
-/// launcher asks for when it starts an agent here (`cctop mux new`).
+/// [`launch_agent`], with a model, a permission setting and an account — what
+/// a sibling's launcher asks for when it starts an agent here (`cctop mux
+/// new`).
 ///
 /// The settings arrive as words and become flags only here, through
 /// [`launch_opts`](crate::launch_opts), which refuses any this agent does not
-/// take: the argv is this machine's to build, never the asker's.
+/// take: the argv is this machine's to build, never the asker's. The account
+/// is one of this machine's own profiles, already looked up by name, and goes
+/// in front the way the terminal's launcher puts one
+/// ([`argv_under_profile`](crate::config::argv_under_profile)).
 pub fn launch_new(
     agent: &str,
     cwd: Option<&str>,
     options: &crate::launch_opts::Options,
+    profile: Option<&crate::config::Profile>,
 ) -> Result<Done, Failed> {
     if !agents().iter().any(|known| known == agent) {
         return Err((
@@ -394,6 +399,10 @@ pub fn launch_new(
     };
     let flags = options.flags(agent).map_err(|why| (400, why))?;
     let argv: Vec<String> = std::iter::once(agent.to_string()).chain(flags).collect();
+    let argv = match profile {
+        Some(profile) => crate::config::argv_under_profile(argv, profile),
+        None => argv,
+    };
     let name = crate::rmux::free_name(agent);
     launch(&argv, &name, dir.as_deref())?;
     Ok(Done {

@@ -766,9 +766,10 @@ impl App {
     /// cctop's `mux launch`, which asks the sibling's serve to start the
     /// agent in its own rmux and bridges this terminal to it.
     ///
-    /// No ssh anywhere, and no account of this machine's: which account the
-    /// agent runs as is the far machine's business, as it is for a session
-    /// opened there with `R`.
+    /// No ssh anywhere, and no account of this machine's: the account is one
+    /// of the sibling's, as it named them, and goes by name for the sibling to
+    /// look up. Where it named fewer than two — or is too old to name any —
+    /// none goes, and the sibling starts it as it always did.
     fn launch_on_peer(
         &mut self,
         argv: &[String],
@@ -783,10 +784,13 @@ impl App {
                 return;
             }
         };
+        let account = Self::profile_provider(std::slice::from_ref(&agent))
+            .and_then(|provider| self.peer_account_on(&target.host, provider));
         let spec = cctop_core::remote_open::NewAgent {
             agent: agent.clone(),
             dir: target.path.clone(),
             options,
+            account: account.clone(),
         };
         let argv = match cctop_core::remote_open::new_argv(&target.host, &exe, &spec) {
             Ok(argv) => argv,
@@ -816,8 +820,11 @@ impl App {
                 self.go_to_tab(self.tabs.len());
             }
         }
+        // Not on the pane's `profile`: that names one of this machine's
+        // accounts, whose limits the border would then show.
+        let as_account = account.map(|a| format!(" as {a}")).unwrap_or_default();
         self.set_status(format!(
-            "Starting {label} in {}, through its Cloudflare tunnel",
+            "Starting {label}{as_account} in {}, through its Cloudflare tunnel",
             target.spelled()
         ));
     }

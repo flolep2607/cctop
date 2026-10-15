@@ -38,6 +38,11 @@
 //! the command itself. A sibling too old to know the route answers "no such
 //! page", and the tab says to update it.
 //!
+//! Which of the sibling's accounts it runs as is picked here, from the names
+//! the sibling's `/api/accounts` gave ([`crate::peer::accounts`]), and asked
+//! for by name on a route of its own ([`NEW_AS_ROUTE`]): the far side looks
+//! the name up among its own profiles and refuses one it does not have.
+//!
 //! Every name in here — the host, the session id, the provider — came out of
 //! another machine's answer, so each is checked before it goes anywhere near a
 //! command line: [`remote_launch::host_ok`] for an ssh destination, [`id_ok`]
@@ -77,6 +82,29 @@ pub fn id_ok(id: &str) -> bool {
 /// nothing about updating.
 pub const NEW_ROUTE: &str = "/api/new-term/";
 
+/// [`NEW_ROUTE`] with an account of the far machine's to start it under.
+///
+/// A prefix of its own for the same reason [`NEW_ROUTE`] has one, and it
+/// matters more here: a sibling that knows [`NEW_ROUTE`] but not accounts
+/// would answer a fifth segment there with "not a launch this cctop
+/// understands", which reads as a bad request rather than as "update it" — and
+/// a sibling that dropped the segment instead would start the agent under the
+/// wrong subscription. Under this prefix every older cctop answers "no such
+/// page", and [`refusal`] says to update it. A launch with no account still
+/// goes to [`NEW_ROUTE`], so an old sibling starts it as it always did.
+pub const NEW_AS_ROUTE: &str = "/api/new-term-as/";
+
+/// Whether `name` may be handed on as an account to launch under.
+///
+/// What [`valid_account_name`](crate::quota::valid_account_name) takes, less a
+/// leading dash or dot: a token account reaches the far side's argv as
+/// `cctop as <name>`, where a dash would read as an option. Whether it is an
+/// account that machine *has* is the far side's to say
+/// ([`NewAgent::profile_here`]).
+pub fn account_ok(name: &str) -> bool {
+    name.len() <= 100 && !name.starts_with(['-', '.']) && crate::quota::valid_account_name(name)
+}
+
 /// A new agent to start on a sibling — what the launcher's `machine:path`
 /// asks for when the machine is reached through its Cloudflare tunnel.
 ///
@@ -90,6 +118,10 @@ pub struct NewAgent {
     /// As the launcher took it: `~`, `~/…`, or absolute. Empty is the home.
     pub dir: String,
     pub options: crate::launch_opts::Options,
+    /// One of the far machine's accounts for this agent, by name — the
+    /// launcher learns them from the sibling's `/api/accounts`. `None` is
+    /// whichever that machine starts it under by default.
+    pub account: Option<String>,
 }
 
 /// Whether `dir` may be handed on as the directory to start an agent in.
@@ -106,7 +138,8 @@ pub fn dir_ok(dir: &str) -> bool {
 
 impl NewAgent {
     /// Every part checked: an agent cctop starts, a directory spelled as one,
-    /// and settings that agent takes.
+    /// settings that agent takes, and an account name for an agent that is
+    /// started under one.
     pub fn check(&self) -> Result<(), String> {
         if !crate::alias::AGENTS
             .split_whitespace()
@@ -120,6 +153,19 @@ impl NewAgent {
                 self.dir
             ));
         }
+        if let Some(account) = &self.account {
+            if !account_ok(account) {
+                return Err(format!("{account:?} is not an account name"));
+            }
+            // Only a harness an env var points at an account: anything else
+            // would start under its one account and say it had another.
+            let takes = crate::pricing::Provider::parse(&self.agent)
+                .and_then(crate::config::profile_env)
+                .is_some();
+            if !takes {
+                return Err(format!("{} is not started under an account", self.agent));
+            }
+        }
         self.options.flags(&self.agent).map(|_| ())
     }
 
@@ -127,26 +173,48 @@ impl NewAgent {
     /// signature covers it: the agent, the permission setting, then the model
     /// and the directory as hex — either may hold a `/`, and a path segment
     /// that may hold one cannot be split back apart. `-` stands for none.
+    ///
+    /// With an account it is [`NEW_AS_ROUTE`] and the account's name, in hex
+    /// too, last; without one, [`NEW_ROUTE`] as before.
     pub fn route(&self) -> String {
         let hex_or_dash = |s: Option<&str>| match s.filter(|s| !s.is_empty()) {
             Some(s) => hex(s),
             None => "-".to_string(),
         };
-        format!(
-            "{NEW_ROUTE}{}/{}/{}/{}",
+        let parts = format!(
+            "{}/{}/{}/{}",
             self.agent,
             self.options.permissions.word(),
             hex_or_dash(self.options.model.as_deref()),
             hex_or_dash(Some(&self.dir)),
-        )
+        );
+        match &self.account {
+            Some(account) => format!("{NEW_AS_ROUTE}{parts}/{}", hex(account)),
+            None => format!("{NEW_ROUTE}{parts}"),
+        }
     }
 
-    /// Read back what [`NewAgent::route`] wrote, after the `NEW_ROUTE`
+    /// Read back what [`NewAgent::route`] wrote, after the [`NEW_ROUTE`]
     /// prefix, and check it.
     pub fn from_route(rest: &str) -> Result<NewAgent, String> {
+        Self::parse_route(rest, false)
+    }
+
+    /// Read back what [`NewAgent::route`] wrote, after the [`NEW_AS_ROUTE`]
+    /// prefix, and check it. The account is not optional here: a route that
+    /// says it carries one and does not is not a launch.
+    pub fn from_route_as(rest: &str) -> Result<NewAgent, String> {
+        Self::parse_route(rest, true)
+    }
+
+    fn parse_route(rest: &str, with_account: bool) -> Result<NewAgent, String> {
         let parts: Vec<&str> = rest.split('/').collect();
-        let [agent, permissions, model, dir] = parts[..] else {
-            return Err("not a launch this cctop understands".into());
+        let (agent, permissions, model, dir, account) = match (with_account, &parts[..]) {
+            (false, [agent, permissions, model, dir]) => (*agent, *permissions, *model, *dir, None),
+            (true, [agent, permissions, model, dir, account]) => {
+                (*agent, *permissions, *model, *dir, Some(unhex(account)?))
+            }
+            _ => return Err("not a launch this cctop understands".into()),
         };
         let unhex_or_none = |s: &str| match s {
             "-" => Ok(None),
@@ -160,35 +228,65 @@ impl NewAgent {
                 permissions: crate::launch_opts::Permissions::parse(permissions)
                     .ok_or_else(|| format!("{permissions:?} is not a permission setting"))?,
             },
+            account,
         };
         spec.check()?;
         Ok(spec)
     }
 
     /// As arguments to `cctop mux new` or `cctop mux launch`: the agent, the
-    /// directory, then the settings as flags of cctop's own.
+    /// directory, then the settings as flags of cctop's own, the account
+    /// last.
     pub fn args(&self) -> Vec<String> {
         let mut args = vec![self.agent.clone(), self.dir.clone()];
         args.extend(self.options.to_args());
+        if let Some(account) = &self.account {
+            args.extend(["--account".to_string(), account.clone()]);
+        }
         args
     }
 
     /// Read back what [`NewAgent::args`] wrote, and check it.
     pub fn from_args(args: &[String]) -> Result<NewAgent, String> {
         let [agent, dir, rest @ ..] = args else {
-            return Err("usage: AGENT DIR [--model MODEL] [--permissions SETTING]".into());
+            return Err(
+                "usage: AGENT DIR [--model MODEL] [--permissions SETTING] [--account NAME]".into(),
+            );
+        };
+        // `--account` is the launch's, not the harness's: taken off the end
+        // here, and the rest handed to the options, which refuse anything
+        // else — an `--account` anywhere but last among them.
+        let (account, rest) = match rest {
+            [options @ .., flag, name] if flag == "--account" => (Some(name.clone()), options),
+            rest => (None, rest),
         };
         let spec = NewAgent {
             agent: agent.clone(),
             dir: dir.clone(),
             options: crate::launch_opts::Options::from_args(rest)?,
+            account,
         };
         spec.check()?;
         Ok(spec)
     }
 
+    /// The account this machine would start it under: `None` for its default,
+    /// or the one named — refused when this machine has no such account for
+    /// this agent, never quietly swapped for the default, which would spend a
+    /// subscription nobody picked.
+    pub fn profile_here(&self) -> Result<Option<&'static crate::config::Profile>, String> {
+        let Some(name) = &self.account else {
+            return Ok(None);
+        };
+        crate::pricing::Provider::parse(&self.agent)
+            .and_then(|provider| crate::config::launchable_named(provider, name))
+            .map(Some)
+            .ok_or_else(|| format!("no {} account {name} on this machine", self.agent))
+    }
+
     /// Why this machine cannot start it, asked before a terminal is opened
-    /// for it: the agent is not installed here, or the directory is not one.
+    /// for it: the agent is not installed here, the directory is not one, or
+    /// the account is not one of this machine's.
     pub fn problem_here(&self) -> Option<String> {
         if !crate::actions::agents().contains(&self.agent) {
             return Some(format!("{} is not installed on this machine", self.agent));
@@ -197,7 +295,7 @@ impl NewAgent {
         if !dir.is_empty() && !Path::new(&crate::util::untildify(dir)).is_dir() {
             return Some(format!("{dir} is not a directory on this machine"));
         }
-        None
+        self.profile_here().err()
     }
 }
 
@@ -237,9 +335,10 @@ pub fn new_argv(machine: &str, exe: &Path, spec: &NewAgent) -> Result<Vec<String
     Ok(argv)
 }
 
-/// `cctop mux new AGENT DIR [--model M] [--permissions P]`: on the machine
-/// the agent is to run on, start it in rmux, the way the browser's launcher
-/// does, and attach to it. `--check` answers `ok`.
+/// `cctop mux new AGENT DIR [--model M] [--permissions P] [--account A]`: on
+/// the machine the agent is to run on, start it in rmux — under that account,
+/// one of this machine's — the way the browser's launcher does, and attach to
+/// it. `--check` answers `ok`.
 ///
 /// In rmux, not on the pty this runs on, so the agent outlives the
 /// connection: the tab on the other machine closing detaches, and the agent
@@ -252,8 +351,11 @@ pub fn new_here(args: &[String]) -> Result<(), String> {
         return Ok(());
     }
     let spec = NewAgent::from_args(args)?;
+    // Asked again here, not only by the route: this is what starts it, and a
+    // name the route let through must still be an account by the time it does.
+    let profile = spec.profile_here()?;
     eprint!("Starting {} on this machine…\r\n", spec.agent);
-    let done = crate::actions::launch_new(&spec.agent, Some(&spec.dir), &spec.options)
+    let done = crate::actions::launch_new(&spec.agent, Some(&spec.dir), &spec.options, profile)
         .map_err(|(_, why)| why)?;
     match done.rmux {
         Some(name) => attach(&name),
@@ -627,14 +729,16 @@ struct Old {
     again: &'static str,
 }
 
-/// `cctop mux launch MACHINE AGENT DIR [--model M] [--permissions P]`: the
-/// tab's end of a new agent on a sibling. Opens the sibling's [`NEW_ROUTE`],
-/// where its `cctop mux new` starts the agent, and pumps this terminal
-/// through it — the launcher's way onto a machine with no ssh route.
+/// `cctop mux launch MACHINE AGENT DIR [--model M] [--permissions P]
+/// [--account A]`: the tab's end of a new agent on a sibling. Opens the
+/// sibling's [`NEW_ROUTE`] (or [`NEW_AS_ROUTE`], for an account), where its
+/// `cctop mux new` starts the agent, and pumps this terminal through it — the
+/// launcher's way onto a machine with no ssh route.
 pub fn bridge_new(args: &[String]) -> Result<(), String> {
     let [machine, rest @ ..] = args else {
         return Err(
-            "usage: cctop mux launch MACHINE AGENT DIR [--model M] [--permissions P]".into(),
+            "usage: cctop mux launch MACHINE AGENT DIR [--model M] [--permissions P] [--account A]"
+                .into(),
         );
     };
     if !host_ok(machine) {
@@ -648,7 +752,12 @@ pub fn bridge_new(args: &[String]) -> Result<(), String> {
         machine,
         &spec.route(),
         Old {
-            too_old: "to start agents for another machine",
+            // One that knows the plain route but not accounts is too old for
+            // the account alone; saying "to start agents" would be wrong.
+            too_old: match spec.account {
+                Some(_) => "to start agents under one of its accounts",
+                None => "to start agents for another machine",
+            },
             again: "start it again",
         },
         false,
@@ -1452,6 +1561,7 @@ mod tests {
             agent: agent.into(),
             dir: dir.into(),
             options: crate::launch_opts::Options::default(),
+            account: None,
         }
     }
 
@@ -1467,6 +1577,7 @@ mod tests {
                 model: Some("anthropic/claude-sonnet-4".into()),
                 permissions: crate::launch_opts::Permissions::Ask,
             },
+            account: None,
         };
         let route = launch.route();
         let rest = route.strip_prefix(NEW_ROUTE).expect("prefix");
@@ -1531,6 +1642,135 @@ mod tests {
             assert!(NewAgent::from_route(rest).is_err(), "{rest}");
         }
         assert!(new_argv("-x", Path::new("/usr/bin/cctop"), &spec("claude", "~")).is_err());
+    }
+
+    /// An account rides last, in hex, on a route of its own — and reads back
+    /// from the route and from the command line to the same launch.
+    #[test]
+    fn an_account_survives_its_route_and_its_command_line() {
+        let launch = NewAgent {
+            options: crate::launch_opts::Options {
+                model: Some("opus".into()),
+                permissions: crate::launch_opts::Permissions::Plan,
+            },
+            account: Some("work.2".into()),
+            ..spec("claude", "~/src")
+        };
+        let route = launch.route();
+        let rest = route.strip_prefix(NEW_AS_ROUTE).expect("prefix");
+        assert_eq!(rest.split('/').count(), 5, "{route}");
+        assert!(rest.ends_with(&format!("/{}", hex("work.2"))), "{route}");
+        assert_eq!(NewAgent::from_route_as(rest), Ok(launch.clone()));
+        assert_eq!(NewAgent::from_args(&launch.args()), Ok(launch.clone()));
+        assert_eq!(
+            launch.args()[launch.args().len() - 2..],
+            ["--account", "work.2"]
+        );
+        // Each prefix reads only its own shape: no account where one is
+        // promised, and none smuggled onto the route that has none.
+        assert!(NewAgent::from_route(rest).is_err());
+        let bare = spec("claude", "~/src").route();
+        let bare = bare.strip_prefix(NEW_ROUTE).expect("prefix");
+        assert!(NewAgent::from_route_as(bare).is_err());
+    }
+
+    /// What a cctop older than accounts does with a launch under one: its
+    /// router knows [`NEW_ROUTE`] at most, which the account's route does not
+    /// start with, so it answers "no such page" — and the tab says to update
+    /// it, rather than the launch going ahead under that machine's default.
+    /// A launch with no account is still the route it always was.
+    #[test]
+    fn an_old_sibling_never_starts_an_account_launch_under_another_account() {
+        let launch = NewAgent {
+            account: Some("work".into()),
+            ..spec("claude", "~")
+        };
+        let route = launch.route();
+        assert!(!route.starts_with(NEW_ROUTE), "{route}");
+        assert!(!NEW_AS_ROUTE.starts_with(NEW_ROUTE));
+        assert!(spec("claude", "~").route().starts_with(NEW_ROUTE));
+        let old = refusal(
+            "box",
+            404,
+            "404 Not Found: no such page\n",
+            "to start agents for another machine",
+            "start it again",
+        );
+        assert!(old.contains("cctop --update"), "{old}");
+    }
+
+    /// An account name is checked as strictly as a model: one a far `cctop
+    /// as` could read as an option, or that is not a name at all, goes
+    /// nowhere; so does an account for an agent that is not started under
+    /// one.
+    #[test]
+    fn a_hostile_account_is_refused_before_it_starts_anything() {
+        for bad in ["", "-x", "--help", ".hidden", "a b", "a/b", "$(x)", "a\nb"] {
+            let launch = NewAgent {
+                account: Some(bad.into()),
+                ..spec("claude", "~")
+            };
+            assert!(launch.check().is_err(), "{bad:?}");
+            assert!(
+                new_argv("box", Path::new("/usr/bin/cctop"), &launch).is_err(),
+                "{bad:?}"
+            );
+        }
+        let no_accounts = NewAgent {
+            account: Some("work".into()),
+            ..spec("opencode", "~")
+        };
+        assert!(no_accounts.check().is_err());
+        assert!(account_ok("work-2_x.y"));
+        let args = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        // `--account` only last, once, and with a value.
+        assert!(NewAgent::from_args(&args(&["claude", "~", "--account"])).is_err());
+        assert!(
+            NewAgent::from_args(&args(&["claude", "~", "--account", "a", "--model", "opus"]))
+                .is_err()
+        );
+        assert!(
+            NewAgent::from_args(&args(&["claude", "~", "--account", "a", "--account", "b"]))
+                .is_err()
+        );
+    }
+
+    /// The far side starts it only under an account it has: an unknown name
+    /// is refused, never swapped for the default; a known one is that
+    /// profile; none is the default.
+    #[test]
+    fn the_far_side_starts_only_under_an_account_it_has() {
+        crate::config::add_launchable(crate::config::Profile {
+            provider: crate::pricing::Provider::Claude,
+            name: "cctop-test-remote-acct".into(),
+            dir: std::env::temp_dir().join(".claude-cctop-test-remote-acct"),
+            source: crate::config::AccountSource::Directory,
+        });
+        let under = |name: &str| NewAgent {
+            account: Some(name.into()),
+            ..spec("claude", "")
+        };
+        let found = under("cctop-test-remote-acct")
+            .profile_here()
+            .expect("known")
+            .expect("a profile");
+        assert_eq!(found.name, "cctop-test-remote-acct");
+        let why = under("cctop-test-no-such-acct")
+            .profile_here()
+            .expect_err("unknown");
+        assert!(why.contains("no claude account"), "{why}");
+        // Codex has its own accounts; Claude's name is not one of them.
+        let codex = NewAgent {
+            account: Some("cctop-test-remote-acct".into()),
+            ..spec("codex", "")
+        };
+        assert!(codex.profile_here().is_err());
+        assert_eq!(spec("claude", "").profile_here(), Ok(None));
+        assert!(
+            new_here(&under("cctop-test-no-such-acct").args())
+                .expect_err("refused")
+                .contains("no claude account")
+        );
     }
 
     #[test]

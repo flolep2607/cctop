@@ -36,9 +36,7 @@ fn draw_launch_options(
             ),
             OptRow::Account => (
                 "account",
-                app.launch_profile()
-                    .map(|p| p.name.clone())
-                    .unwrap_or_default(),
+                app.launch_account_name().unwrap_or_default(),
                 false,
                 None,
             ),
@@ -522,16 +520,17 @@ pub(crate) fn draw_launch(
     // Only for an agent the profile reaches, and only where there is more than
     // one to be in: on a machine with a single account this says nothing, and a
     // line offering a key that changes nothing is worse than no line.
-    let profile = match picked {
-        // `launch_profile` already answers for the highlighted choice, so the
-        // line appears exactly when the harness has an account to pick.
-        Some(tabs::Choice::Start(_)) => app.launch_profile(),
+    let account = match picked {
+        // `launch_account_name` already answers for the highlighted choice —
+        // and for a sibling, from the sibling's accounts — so the line
+        // appears exactly when the harness has an account to pick there.
+        Some(tabs::Choice::Start(_)) => app.launch_account_name(),
         _ => None,
     };
-    if let Some(profile) = profile {
+    if let Some(account) = account {
         lines.push(Line::from(vec![
             Span::styled(" as ", Style::default().fg(theme::colors().label)),
-            Span::styled(profile.name.clone(), theme::value()),
+            Span::styled(account, theme::value()),
             Span::styled("  (p to change)", theme::dim()),
         ]));
     }

@@ -176,10 +176,77 @@ impl App {
         profiles.get(at).copied()
     }
 
+    /// The sibling the launcher is headed to, and the accounts it said it can
+    /// start the highlighted harness under — `None` for a launch on this
+    /// machine or an ssh host, and when the sibling named fewer than two:
+    /// one, or none because it is too old to say, leaves nothing to pick.
+    pub fn peer_accounts(&self) -> Option<(String, Provider, Vec<String>)> {
+        let target = self.launch_remote.as_ref().filter(|t| t.peer)?;
+        let provider = self.launch_provider()?;
+        let names = cctop_core::peer::accounts(&target.host, provider.as_str());
+        (names.len() > 1).then(|| (target.host.clone(), provider, names))
+    }
+
+    /// The sibling's account the highlighted harness would start under there:
+    /// the one picked, while the sibling still has it, else its first.
+    pub fn launch_peer_account(&self) -> Option<String> {
+        let (host, provider, _) = self.peer_accounts()?;
+        self.peer_account_on(&host, provider)
+    }
+
+    /// The account of the sibling `host`'s that `provider` starts under
+    /// there: the one picked, while `host` still has it, else its first —
+    /// `None` when it named fewer than two.
+    pub(super) fn peer_account_on(&self, host: &str, provider: Provider) -> Option<String> {
+        let names = cctop_core::peer::accounts(host, provider.as_str());
+        if names.len() < 2 {
+            return None;
+        }
+        let picked = self
+            .launch_peer_account
+            .get(&(host.to_string(), provider))
+            .filter(|name| names.contains(name));
+        Some(picked.unwrap_or(&names[0]).clone())
+    }
+
+    /// The account the highlighted launch would run as, by name, wherever it
+    /// runs: one of the sibling's for a sibling, else one of this machine's.
+    /// `None` where there is nothing to choose between.
+    pub fn launch_account_name(&self) -> Option<String> {
+        match self.launch_remote.as_ref().is_some_and(|t| t.peer) {
+            true => self.launch_peer_account(),
+            false => self.launch_profile().map(|p| p.name.clone()),
+        }
+    }
+
+    /// How many accounts `p` cycles through for the highlighted launch.
+    pub(super) fn launch_account_count(&self) -> usize {
+        if self.launch_remote.as_ref().is_some_and(|t| t.peer) {
+            return self.peer_accounts().map_or(1, |(_, _, names)| names.len());
+        }
+        self.launch_provider()
+            .map_or(1, |p| cctop_core::config::launchable_for(p).len())
+    }
+
     /// Move to the next profile of the highlighted harness. Wraps, because with
     /// two — which is the case this exists for — a key that toggles is the whole
     /// interaction.
+    ///
+    /// For a sibling, its accounts rather than this machine's: the agent runs
+    /// there, and this machine's would mean nothing to it.
     pub(super) fn cycle_launch_profile(&mut self) {
+        if self.launch_remote.as_ref().is_some_and(|t| t.peer) {
+            let (Some((host, provider, names)), Some(current)) =
+                (self.peer_accounts(), self.launch_peer_account())
+            else {
+                return;
+            };
+            let at = names.iter().position(|n| *n == current).unwrap_or(0);
+            let next = names[(at + 1) % names.len()].clone();
+            self.launch_peer_account.insert((host, provider), next);
+            self.needs_redraw = true;
+            return;
+        }
         let Some(provider) = self.launch_provider() else {
             return;
         };
