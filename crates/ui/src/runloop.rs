@@ -217,6 +217,9 @@ pub fn run(
     // means discovery falls back to the periodic walk.
     let watch = cctop_core::watch::Watch::start();
     app.listener = cctop_core::hook::Listener::start();
+    // Shim sockets left by a cctop that died on a signal. Off the first
+    // frame's path: it is a connect per file, and there were hundreds.
+    std::thread::spawn(cctop_core::shim::sweep);
     app.yolo = cctop_core::yolo::Auto::new(true);
     // Hooks are brought in line with this binary at every start — a cctop
     // that was moved or deleted, events an older one did not know, entries in

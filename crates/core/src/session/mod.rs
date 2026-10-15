@@ -7,8 +7,10 @@ pub(crate) mod codex_line;
 pub mod cursor;
 pub(crate) mod cursor_line;
 pub mod devin;
+pub(crate) mod devin_atif;
 pub mod extract;
 pub mod gemini;
+pub(crate) mod gemini_line;
 // Here rather than at the top of the crate because the session cache's version
 // is derived from this directory's sources (see build.rs), and what a parser
 // reads as absent is part of what it extracts.
@@ -546,6 +548,9 @@ pub const EDIT_TOOLS: &[&str] = &[
     "str_replace_editor",
     "ApplyPatch",
     "apply_patch",
+    // Gemini CLI's.
+    "replace",
+    "write_file",
 ];
 
 /// How many written paths a row carries.
@@ -1612,6 +1617,36 @@ impl Tokens {
     /// Everything billed as input, across both providers' shapes.
     pub fn all_input(&self) -> u64 {
         self.input + self.cached_input + self.cache_read + self.cache_write_5m + self.cache_write_1h
+    }
+
+    /// A prompt whose cached part is counted inside it, not beside it — the
+    /// shape Gemini and Devin both report, as Codex does — split into the
+    /// uncached remainder and the cached part, so `all_input` rebuilds the
+    /// prompt. A cached count above the prompt is clamped, not underflowed.
+    pub fn from_prompt(prompt: u64, cached: u64, output: u64) -> Tokens {
+        let cached = cached.min(prompt);
+        Tokens {
+            input: prompt - cached,
+            input_total: prompt,
+            cached_input: cached,
+            output,
+            ..Default::default()
+        }
+    }
+
+    /// Add `other` into this, every field: one sum shared by every reader, so
+    /// a field one provider fills is never summed by one copy and dropped by
+    /// another.
+    pub fn add(&mut self, other: &Tokens) {
+        self.input += other.input;
+        self.output += other.output;
+        self.cache_read += other.cache_read;
+        self.cache_write_5m += other.cache_write_5m;
+        self.cache_write_1h += other.cache_write_1h;
+        self.input_total += other.input_total;
+        self.cached_input += other.cached_input;
+        self.reasoning_output += other.reasoning_output;
+        self.total += other.total;
     }
 }
 

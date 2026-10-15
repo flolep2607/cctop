@@ -357,7 +357,9 @@ pub fn tool_detail(name: &str, input: &Value) -> (String, Option<String>) {
     }
 
     let s = match name {
-        "Read" | "read" | "Edit" | "edit" | "Write" | "write" => file_field(input).to_string(),
+        // Gemini CLI's file tools last: `read_file`, `replace`, `write_file`.
+        "Read" | "read" | "Edit" | "edit" | "Write" | "write" | "read_file" | "replace"
+        | "write_file" => file_field(input).to_string(),
         "Glob" | "glob" => str_field(input, "pattern").to_string(),
         "WebFetch" | "webfetch" => str_field(input, "url").to_string(),
         "WebSearch" | "websearch" => str_field(input, "query").to_string(),

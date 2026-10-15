@@ -155,11 +155,10 @@ impl NewAgent {
         let spec = NewAgent {
             agent: agent.to_string(),
             dir: unhex_or_none(dir)?.unwrap_or_default(),
-            options: crate::launch_opts::Options {
-                model: unhex_or_none(model)?,
-                permissions: crate::launch_opts::Permissions::parse(permissions)
-                    .ok_or_else(|| format!("{permissions:?} is not a permission setting"))?,
-            },
+            options: crate::launch_opts::Options::from_words(
+                unhex_or_none(model)?.as_deref(),
+                Some(permissions),
+            )?,
         };
         spec.check()?;
         Ok(spec)

@@ -8,9 +8,15 @@
 //!
 //! Gemini records per-turn token counts but never a cost, so costs here are
 //! estimated from published rates the same way Codex's are — see [`extract`].
+//!
+//! The table's figures — tokens, cost, calls and their failures, the context
+//! meter, the last tool — are read through the typed model in
+//! [`super::gemini_line`]; [`for_each_record`] stays a `Value` walk for the
+//! conversation view, which renders every field a message has.
 
 use super::extract::{self, for_each_jsonl};
-use super::{Costs, ModelBreakdown, Session, SessionData, Surface, Tokens};
+use super::gemini_line::{self, Record, TokenCounts};
+use super::{ContextUsage, Costs, ModelBreakdown, Session, SessionData, Surface, Tokens};
 use crate::config;
 use crate::pricing::{self, Provider};
 use crate::util;
@@ -111,13 +117,11 @@ fn last_turn_ms(path: &Path) -> Option<i64> {
         return None;
     }
     extract::last_entry_ms(path, |bytes| {
-        let item: Value = serde_json::from_slice(bytes).ok()?;
-        let kind = item.get("type").and_then(Value::as_str)?;
-        if kind != "user" && kind != "gemini" {
+        let record = Record::parse(bytes)?;
+        if !record.kind.is("user") && !record.kind.is("gemini") {
             return None;
         }
-        let ts = item.get("timestamp").and_then(Value::as_str)?;
-        util::parse_ts(ts).map(|d| d.timestamp_millis())
+        util::parse_ts(record.timestamp.get()?).map(|d| d.timestamp_millis())
     })
 }
 
@@ -147,40 +151,26 @@ pub fn list_sessions() -> Vec<Session> {
     sessions
 }
 
-fn token(tokens: &Value, key: &str) -> u64 {
-    tokens.get(key).and_then(Value::as_u64).unwrap_or(0)
-}
-
 /// One assistant turn's token counts, in cctop's shape.
 ///
 /// Verified against 605 recorded turns: `total` equals `input + output +
 /// thoughts + tool` exactly, and `cached` is never among the addends — it is
 /// the part of `input` that was served from context cache. So the full-rate
 /// input is the uncached remainder, which is the same split Codex reports.
-fn turn_tokens(usage: &Value) -> Tokens {
-    let input_total = token(usage, "input");
-    let cached_input = token(usage, "cached").min(input_total);
+fn turn_tokens(usage: &TokenCounts) -> Tokens {
+    let count = TokenCounts::count;
     Tokens {
-        input: input_total - cached_input,
-        input_total,
-        cached_input,
-        output: token(usage, "output"),
-        reasoning_output: token(usage, "thoughts"),
+        reasoning_output: count(&usage.thoughts),
         // Gemini's `tool` bucket is counted into `total` but has no rate of its
         // own and reads zero on every turn seen so far; leave it to `total`
         // rather than folding it into a bucket that would be billed.
-        total: token(usage, "total"),
-        ..Default::default()
+        total: count(&usage.total),
+        ..Tokens::from_prompt(
+            count(&usage.input),
+            count(&usage.cached),
+            count(&usage.output),
+        )
     }
-}
-
-fn add(target: &mut Tokens, turn: &Tokens) {
-    target.input += turn.input;
-    target.input_total += turn.input_total;
-    target.cached_input += turn.cached_input;
-    target.output += turn.output;
-    target.reasoning_output += turn.reasoning_output;
-    target.total += turn.total;
 }
 
 /// What one turn cost at the model's published rates.
@@ -207,6 +197,43 @@ fn add_costs(target: &mut Costs, turn: &Costs) {
     target.total += turn.total;
 }
 
+/// What the table needs from one `gemini` message, owned so it can outlive the
+/// line it was read from.
+struct Turn {
+    model: String,
+    ts: String,
+    tokens: Option<Tokens>,
+    calls: Vec<Call>,
+}
+
+struct Call {
+    name: String,
+    args: Value,
+    id: Option<String>,
+    ts: Option<String>,
+    failed: bool,
+}
+
+impl Turn {
+    fn read(record: &Record) -> Turn {
+        Turn {
+            model: record.model.get().unwrap_or("unknown").to_string(),
+            ts: record.timestamp.or_empty().to_string(),
+            tokens: record.tokens.get().map(turn_tokens),
+            calls: record
+                .calls()
+                .map(|call| Call {
+                    name: call.name.get().unwrap_or("unknown").to_string(),
+                    args: call.args(),
+                    id: call.id.get().map(str::to_string),
+                    ts: call.timestamp.get().map(str::to_string),
+                    failed: call.status.is("error"),
+                })
+                .collect(),
+        }
+    }
+}
+
 /// Parse one Gemini chat file.
 ///
 /// Gemini records what a turn consumed but never what it cost, so cost is
@@ -215,99 +242,36 @@ fn add_costs(target: &mut Costs, turn: &Costs) {
 /// but the shape — flat input, cached input, output, with no cache-write tier —
 /// is Gemini's billing model too, and duplicating the resolver to rename it
 /// would buy nothing.
+///
+/// A message written again under an id already seen replaces the earlier copy
+/// rather than adding to it. An append-only log revises a message — a call's
+/// result arriving, its status settling — by writing it out again, and summing
+/// both copies would count the turn's tokens and calls twice. A message with
+/// no id is always its own.
 pub fn extract(path: &Path) -> SessionData {
     let mut data = SessionData::default();
-    let mut breakdown: HashMap<String, (Tokens, Costs)> = HashMap::new();
+    let mut turns: Vec<Turn> = Vec::new();
+    let mut by_id: HashMap<String, usize> = HashMap::new();
 
-    let result = for_each_record(path, |item| {
+    let result = gemini_line::for_each(path, |record| {
         // Header records and `$set` patches both carry the topic Gemini's
         // `update_topic` tool writes, which is the closest thing to a title.
-        if let Some(summary) = item.get("summary").and_then(Value::as_str) {
+        if let Some(summary) = record.summary.get() {
             data.title = Some(summary.to_string());
         }
-        if item.get("type").and_then(Value::as_str) != Some("gemini") {
+        if !record.kind.is("gemini") {
             return;
         }
-
-        let model = item
-            .get("model")
-            .and_then(Value::as_str)
-            .unwrap_or("unknown")
-            .to_string();
-        let ts = item
-            .get("timestamp")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string();
-
-        if let Some(usage) = item.get("tokens") {
-            data.last_model = model.clone();
-            let tokens = turn_tokens(usage);
-            let costs = turn_costs(&tokens, &pricing::resolve_codex(&model));
-            add(&mut data.tokens, &tokens);
-            add_costs(&mut data.costs, &costs);
-            let (model_tokens, model_costs) = breakdown.entry(model.clone()).or_default();
-            add(model_tokens, &tokens);
-            add_costs(model_costs, &costs);
-
-            if let Some(dt) = util::parse_ts(&ts) {
-                data.record_cost(&dt, &model, costs.total);
-                // All input kinds plus output — and thinking, which Gemini
-                // bills as output. `total` is not reused because it folds in
-                // the unbilled `tool` bucket.
-                let billed =
-                    tokens.input + tokens.cached_input + tokens.output + tokens.reasoning_output;
-                *data
-                    .tokens_by_day
-                    .entry(util::local_date_key(&dt))
-                    .or_default()
-                    .entry(model.clone())
-                    .or_insert(0) += billed;
-                *data
-                    .tokens_by_hour
-                    .entry(util::local_hour_key(&dt))
-                    .or_default()
-                    .entry(model.clone())
-                    .or_insert(0) += billed;
-            }
-        }
-
-        for call in item
-            .get("toolCalls")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-        {
-            let name = call
-                .get("name")
-                .and_then(Value::as_str)
-                .unwrap_or("unknown");
-            let args = call.get("args").unwrap_or(&Value::Null);
-            let (short, full) = extract::tool_detail(name, args);
-            extract::push_tool_detail(
-                &mut data.metrics.tool_details,
-                name,
-                short,
-                full,
-                call.get("timestamp")
-                    .and_then(Value::as_str)
-                    .unwrap_or(&ts)
-                    .to_string(),
-                call.get("id").and_then(Value::as_str).map(str::to_string),
-                None,
-            );
-            *data.metrics.tools.entry(name.to_string()).or_insert(0) += 1;
-            data.metrics.tool_count += 1;
-            let failed = call.get("status").and_then(Value::as_str) == Some("error");
-            data.metrics.tool_errors += u64::from(failed);
-            if let Some(detail) = data
-                .metrics
-                .tool_details
-                .get_mut(name)
-                .and_then(|details| details.last_mut())
-            {
-                detail.failed = failed;
-            }
+        let turn = Turn::read(record);
+        match record.id.get() {
+            Some(id) => match by_id.get(id) {
+                Some(&at) => turns[at] = turn,
+                None => {
+                    by_id.insert(id.to_string(), turns.len());
+                    turns.push(turn);
+                }
+            },
+            None => turns.push(turn),
         }
     });
 
@@ -317,6 +281,79 @@ pub fn extract(path: &Path) -> SessionData {
             path.display()
         ));
         return data;
+    }
+
+    let mut breakdown: HashMap<String, (Tokens, Costs)> = HashMap::new();
+    for turn in turns {
+        if let Some(tokens) = &turn.tokens {
+            data.last_model = turn.model.clone();
+            let costs = turn_costs(tokens, &pricing::resolve_codex(&turn.model));
+            data.tokens.add(tokens);
+            add_costs(&mut data.costs, &costs);
+            let (model_tokens, model_costs) = breakdown.entry(turn.model.clone()).or_default();
+            model_tokens.add(tokens);
+            add_costs(model_costs, &costs);
+
+            if let Some(dt) = util::parse_ts(&turn.ts) {
+                data.record_cost(&dt, &turn.model, costs.total);
+                // All input kinds plus output — and thinking, which Gemini
+                // bills as output. `total` is not reused because it folds in
+                // the unbilled `tool` bucket.
+                let billed =
+                    tokens.input + tokens.cached_input + tokens.output + tokens.reasoning_output;
+                *data
+                    .tokens_by_day
+                    .entry(util::local_date_key(&dt))
+                    .or_default()
+                    .entry(turn.model.clone())
+                    .or_insert(0) += billed;
+                *data
+                    .tokens_by_hour
+                    .entry(util::local_hour_key(&dt))
+                    .or_default()
+                    .entry(turn.model.clone())
+                    .or_insert(0) += billed;
+            }
+        }
+
+        for call in turn.calls {
+            let name = call.name.as_str();
+            let (short, full) = extract::tool_detail(name, &call.args);
+            extract::push_tool_detail(
+                &mut data.metrics.tool_details,
+                name,
+                short,
+                full,
+                call.ts.unwrap_or_else(|| turn.ts.clone()),
+                call.id,
+                None,
+            );
+            *data.metrics.tools.entry(name.to_string()).or_insert(0) += 1;
+            data.metrics.tool_count += 1;
+            data.metrics.tool_errors += u64::from(call.failed);
+            // The edit's own arguments are its diff: Gemini keeps no patch, so
+            // the lines it changed are read off what it was asked to write.
+            let delta = matches!(name, "replace" | "write_file")
+                .then(|| extract::edit_delta(&call.args))
+                .flatten();
+            if let Some(detail) = data
+                .metrics
+                .tool_details
+                .get_mut(name)
+                .and_then(|details| details.last_mut())
+            {
+                detail.failed = call.failed;
+                if let Some(delta) = delta {
+                    // A failed edit changed nothing, so it adds no lines; its
+                    // diff is still what it tried, which the Tools panel shows.
+                    if !call.failed {
+                        data.metrics.lines_added += delta.added as u64;
+                        data.metrics.lines_removed += delta.removed as u64;
+                    }
+                    detail.delta = Some(delta);
+                }
+            }
+        }
     }
 
     let mut models: Vec<_> = breakdown.into_iter().collect();
@@ -332,6 +369,67 @@ pub fn extract(path: &Path) -> SessionData {
         })
         .collect();
     data
+}
+
+/// Every Gemini model the CLI runs — 2.5 Pro and Flash, 3 Pro and Flash — takes
+/// a million-token prompt, so a model LiteLLM has not listed yet is still
+/// measured against the window it almost certainly has rather than none.
+const GEMINI_DEFAULT_CTX: u64 = 1_048_576;
+
+/// The newest `gemini` message in the chat's tail that `f` answers for.
+///
+/// The window widens until it holds that message whole: a reply keeps its
+/// tool results inline, so the one after a large `read_file` or shell run is
+/// itself larger than any fixed tail, and a fixed window would cut it at the
+/// start and come up empty exactly when the session has just done heavy work.
+/// The partial first line of each window fails to parse and is skipped.
+///
+/// ponytail: the JSONL shape only, for the reason [`last_turn_ms`] gives.
+fn last_reply<T>(path: &Path, mut f: impl FnMut(&Record) -> Option<T>) -> Option<T> {
+    if path.extension().is_none_or(|ext| ext != "jsonl") {
+        return None;
+    }
+    util::scan_tail_escalating(path, |text| {
+        text.lines().rev().find_map(|line| {
+            let record = Record::parse(line.trim().as_bytes())?;
+            if !record.kind.is("gemini") {
+                return None;
+            }
+            f(&record)
+        })
+    })
+}
+
+/// Context-window use: the prompt the newest reply was sent, which is what
+/// Gemini counts as `input` — cached part included, as Codex's is.
+pub fn extract_context(session: &Session) -> Option<ContextUsage> {
+    let path = session.data_file.as_deref()?;
+    let (used, model) = last_reply(path, |record| {
+        let used = TokenCounts::count(&record.tokens.get()?.input);
+        (used > 0).then(|| (used, record.model.or_empty().to_string()))
+    })?;
+    Some(ContextUsage {
+        used,
+        max: pricing::litellm_max_input_tokens(&model).unwrap_or(GEMINI_DEFAULT_CTX),
+        compacted: false,
+    })
+}
+
+/// Name of the newest call in the chat's tail.
+pub fn extract_last_tool(session: &Session) -> String {
+    session
+        .data_file
+        .as_deref()
+        .and_then(|path| {
+            last_reply(path, |record| {
+                record
+                    .calls()
+                    .filter_map(|call| call.name.get())
+                    .last()
+                    .map(str::to_string)
+            })
+        })
+        .unwrap_or_default()
 }
 
 /// A Gemini session is its one JSONL file.
@@ -379,7 +477,7 @@ mod tests {
                 "{\"type\":\"gemini\",\"timestamp\":\"2026-05-14T17:34:13.475Z\",\"model\":\"gemini-test\",",
                 "\"tokens\":{\"input\":8678,\"output\":133,\"cached\":8000,\"thoughts\":364,\"tool\":0,\"total\":9175},",
                 "\"toolCalls\":[{\"id\":\"read_file_1\",\"name\":\"read_file\",\"args\":{\"file_path\":\"README.md\"},\"status\":\"success\"},",
-                "{\"id\":\"replace_1\",\"name\":\"replace\",\"args\":{\"file_path\":\"src/main.rs\"},\"status\":\"error\"}]}\n",
+                "{\"id\":\"replace_1\",\"name\":\"replace\",\"args\":{\"file_path\":\"src/main.rs\",\"old_string\":\"a\",\"new_string\":\"b\\nc\"},\"status\":\"error\"}]}\n",
             ),
         );
 
@@ -415,6 +513,10 @@ mod tests {
             data.metrics.tool_details["replace"][0].failed,
             "status=error must be flagged"
         );
+        // A failed edit changed nothing, but its diff is still what it tried.
+        assert_eq!(data.metrics.lines_added, 0);
+        assert_eq!(data.metrics.lines_removed, 0);
+        assert!(data.metrics.tool_details["replace"][0].delta.is_some());
     }
 
     /// The older whole-file shape has to yield the same figures as the newer
@@ -441,6 +543,133 @@ mod tests {
         assert_eq!(data.tokens.cached_input, 0);
         assert_eq!(data.metrics.tool_count, 1);
         assert_eq!(data.model_breakdown.len(), 1);
+    }
+
+    /// A hand-built chat in the JSONL shape: a header, a prompt, a reply that
+    /// is written once while its call runs and again once it has finished,
+    /// an `info` line, a second reply with an edit, and a header patch.
+    const CHAT: &str = concat!(
+        "{\"sessionId\":\"s\",\"startTime\":\"2026-05-14T17:34:00.000Z\",\"kind\":\"main\"}\n",
+        "{\"id\":\"u1\",\"type\":\"user\",\"timestamp\":\"2026-05-14T17:34:06.000Z\",\"content\":[{\"text\":\"go\"}]}\n",
+        "{\"id\":\"g1\",\"type\":\"gemini\",\"timestamp\":\"2026-05-14T17:34:10.000Z\",\"model\":\"gemini-test\",",
+        "\"tokens\":{\"input\":1000,\"output\":10,\"cached\":0,\"thoughts\":5,\"tool\":0,\"total\":1015},",
+        "\"toolCalls\":[{\"id\":\"c1\",\"name\":\"run_shell_command\",\"args\":{\"command\":\"ls\"}}]}\n",
+        "{\"id\":\"g1\",\"type\":\"gemini\",\"timestamp\":\"2026-05-14T17:34:10.000Z\",\"model\":\"gemini-test\",",
+        "\"tokens\":{\"input\":1000,\"output\":10,\"cached\":0,\"thoughts\":5,\"tool\":0,\"total\":1015},",
+        "\"toolCalls\":[{\"id\":\"c1\",\"name\":\"run_shell_command\",\"args\":{\"command\":\"ls\"},\"status\":\"error\",\"result\":[{\"x\":1}]}]}\n",
+        "{\"id\":\"i1\",\"type\":\"info\",\"timestamp\":\"2026-05-14T17:34:11.000Z\",\"content\":\"Switched\"}\n",
+        "{\"id\":\"g2\",\"type\":\"gemini\",\"timestamp\":\"2026-05-14T17:34:20.000Z\",\"model\":\"gemini-test\",",
+        "\"tokens\":{\"input\":4000,\"output\":20,\"cached\":3000,\"thoughts\":0,\"tool\":0,\"total\":4020},",
+        "\"toolCalls\":[{\"id\":\"c2\",\"name\":\"replace\",\"args\":{\"file_path\":\"src/a.rs\",\"old_string\":\"a\",\"new_string\":\"b\\nc\"},\"status\":\"success\"},",
+        "{\"id\":\"c3\",\"name\":\"read_file\",\"args\":{\"file_path\":\"src/b.rs\"},\"status\":\"success\"}],",
+        "\"futureField\":{\"nested\":[1,2]}}\n",
+        "{\"$set\":{\"lastUpdated\":\"2026-05-14T17:35:00.000Z\"}}\n",
+    );
+
+    /// A reply written twice under one id is one turn: its tokens and its
+    /// call are counted once, with the outcome the later copy settled on.
+    #[test]
+    fn a_rewritten_message_counts_once_with_its_final_outcome() {
+        let path = fixture("rewrite.jsonl", CHAT);
+        let data = extract(&path);
+        std::fs::remove_file(&path).expect("remove fixture");
+
+        assert_eq!(data.tokens.input_total, 5000);
+        assert_eq!(data.tokens.cached_input, 3000);
+        assert_eq!(data.tokens.output, 30);
+        assert_eq!(data.metrics.tool_count, 3);
+        assert_eq!(data.metrics.tools["run_shell_command"], 1);
+        assert_eq!(data.metrics.tool_errors, 1);
+        assert!(data.metrics.tool_details["run_shell_command"][0].failed);
+        // The edit's arguments are its diff, and the path is the detail.
+        assert_eq!(data.metrics.lines_added, 2);
+        assert_eq!(data.metrics.lines_removed, 1);
+        assert_eq!(data.metrics.tool_details["replace"][0].d, "src/a.rs");
+        assert_eq!(data.metrics.tool_details["read_file"][0].d, "src/b.rs");
+    }
+
+    /// The context meter reads the newest reply's prompt, and the last-tool
+    /// cell the newest call — both from the tail, past the header patch.
+    #[test]
+    fn context_and_last_tool_come_from_the_newest_reply() {
+        let path = fixture("tail.jsonl", CHAT);
+        let mut session = Session::new(Provider::Gemini, "s".into());
+        session.data_file = Some(path.clone());
+        let context = extract_context(&session);
+        let last_tool = extract_last_tool(&session);
+        std::fs::remove_file(&path).expect("remove fixture");
+
+        let context = context.expect("a context figure");
+        assert_eq!(context.used, 4000);
+        // `gemini-test` is in no table: the Gemini window stands in.
+        assert_eq!(context.max, GEMINI_DEFAULT_CTX);
+        assert_eq!(last_tool, "read_file");
+    }
+
+    /// A reply too long to build — a tool output past the line cap — still
+    /// counts its tokens and calls; only its arguments are dropped.
+    #[test]
+    fn an_oversized_reply_keeps_its_tokens() {
+        let filler = "x".repeat(crate::config::MAX_JSONL_LINE_BYTES + 1);
+        let body = format!(
+            "{{\"id\":\"g\",\"type\":\"gemini\",\"timestamp\":\"2026-05-14T17:34:10.000Z\",\"model\":\"gemini-test\",\
+             \"tokens\":{{\"input\":7,\"output\":3,\"total\":10}},\
+             \"toolCalls\":[{{\"name\":\"write_file\",\"args\":{{\"file_path\":\"f\",\"content\":\"{filler}\"}},\"status\":\"success\"}}]}}\n"
+        );
+        let path = fixture("big.jsonl", &body);
+        let data = extract(&path);
+        std::fs::remove_file(&path).expect("remove fixture");
+
+        assert_eq!(data.tokens.input_total, 7);
+        assert_eq!(data.metrics.tool_count, 1);
+        assert_eq!(data.metrics.lines_added, 0);
+        // The path survives the cut, so the write still names its file.
+        assert_eq!(data.metrics.tool_details["write_file"][0].d, "f");
+    }
+
+    /// An oversized rewrite of a message replaces a copy whose arguments were
+    /// whole; the edit keeps its path rather than dropping out of the writes.
+    #[test]
+    fn an_oversized_rewrite_keeps_the_edits_path() {
+        let filler = "x".repeat(crate::config::MAX_JSONL_LINE_BYTES + 1);
+        let reply = |result: &str| {
+            format!(
+                "{{\"id\":\"g\",\"type\":\"gemini\",\"timestamp\":\"2026-05-14T17:34:10.000Z\",\"model\":\"gemini-test\",\
+                 \"tokens\":{{\"input\":7,\"output\":3,\"total\":10}},\
+                 \"toolCalls\":[{{\"id\":\"c\",\"name\":\"replace\",\"args\":{{\"file_path\":\"src/a.rs\",\"old_string\":\"a\",\"new_string\":\"b\"}},\
+                 \"status\":\"success\",\"result\":\"{result}\"}}]}}\n"
+            )
+        };
+        let body = format!("{}{}", reply(""), reply(&filler));
+        let path = fixture("rewrite-big.jsonl", &body);
+        let data = extract(&path);
+        std::fs::remove_file(&path).expect("remove fixture");
+
+        assert_eq!(data.metrics.tool_count, 1);
+        assert_eq!(data.metrics.tool_details["replace"][0].d, "src/a.rs");
+    }
+
+    /// The newest reply carries its tool result inline, so it can be larger
+    /// than the first tail window; context and last tool still read it.
+    #[test]
+    fn a_reply_larger_than_the_tail_window_still_answers() {
+        let result = "y".repeat(200 * 1024);
+        let body = format!(
+            "{{\"sessionId\":\"s\",\"startTime\":\"2026-05-14T17:34:00.000Z\"}}\n\
+             {{\"id\":\"g\",\"type\":\"gemini\",\"timestamp\":\"2026-05-14T17:34:10.000Z\",\"model\":\"gemini-test\",\
+             \"tokens\":{{\"input\":9000,\"output\":3,\"total\":9003}},\
+             \"toolCalls\":[{{\"id\":\"c\",\"name\":\"read_file\",\"args\":{{\"file_path\":\"big\"}},\"status\":\"success\",\"result\":\"{result}\"}}]}}\n\
+             {{\"$set\":{{\"lastUpdated\":\"2026-05-14T17:35:00.000Z\"}}}}\n"
+        );
+        let path = fixture("wide.jsonl", &body);
+        let mut session = Session::new(Provider::Gemini, "s".into());
+        session.data_file = Some(path.clone());
+        let context = extract_context(&session);
+        let last_tool = extract_last_tool(&session);
+        std::fs::remove_file(&path).expect("remove fixture");
+
+        assert_eq!(context.expect("a context figure").used, 9000);
+        assert_eq!(last_tool, "read_file");
     }
 
     #[test]
