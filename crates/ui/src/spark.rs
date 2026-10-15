@@ -180,9 +180,11 @@ fn sparkline_in(
         }
         // The bottom dot is reserved for "nothing happened here", so a sample
         // that is merely small still stands up out of the baseline. With four
-        // levels there is no room for both a faithful scale and a distinct
-        // empty state, and a chart where an idle hour and a cheap one draw the
-        // same glyph is a chart nobody can read.
+        // levels (three in a sextant) there is no room for both a faithful
+        // scale and a distinct empty state, and a chart where an idle hour and
+        // a cheap one draw the same glyph is a chart nobody can read. A
+        // sextant has only two levels left above that dot, so its sparklines
+        // are coarser on purpose: a quarter and a half draw the same glyph.
         let ratio = (v / hi).clamp(0.0, 1.0);
         let filled = ((ratio * levels as f64).ceil() as usize).clamp(1, levels) + 1;
         let style = if is_now {

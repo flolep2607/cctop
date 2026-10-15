@@ -461,15 +461,24 @@ fn settings_lines(
             let Item::Setting(i) = entry else { continue };
             let (name, default, what) = cctop_core::settings::SETTINGS[*i];
             let (value, set) = app.settings.value_of(name);
-            // The schema decides the type: the parser is what knows a bool
-            // (`is_toggle`), a default the file would spell as a number makes
-            // the row numeric, and anything else is a string to read.
-            let kind = if cctop_core::settings::is_toggle(name) {
-                ValueKind::Bool(value == "true")
+            // The schema decides the type: a name with a fixed list of
+            // `choices` turns under Enter like a view choice, so it carries the
+            // same mark and drops the quotes that would make it read as a field
+            // to type into; the parser is what knows a bool (`is_toggle`), a
+            // default the file would spell as a number makes the row numeric,
+            // and anything else is a string to read.
+            let (kind, mark) = if cctop_core::settings::choices(name).is_some() {
+                (ValueKind::Cycle, Kind::Cycles)
+            } else if cctop_core::settings::is_toggle(name) {
+                (ValueKind::Bool(value == "true"), Kind::Plain)
             } else if default.parse::<f64>().is_ok() {
-                ValueKind::Number
+                (ValueKind::Number, Kind::Plain)
             } else {
-                ValueKind::Text
+                (ValueKind::Text, Kind::Plain)
+            };
+            let value = match kind {
+                ValueKind::Cycle => value.trim_matches('"').to_string(),
+                _ => value,
             };
             // Each set drawn in itself rather than described: a font without
             // octants shows boxes here, before they are chosen, rather than
@@ -493,7 +502,7 @@ fn settings_lines(
                 set,
                 what,
                 theme::dim(),
-                Kind::Plain,
+                mark,
             );
         }
     }
@@ -757,6 +766,30 @@ mod tests {
         assert_eq!(drawn_width(&value), VALUE_W, "the column moved: {value:?}");
     }
 
+    /// A `[settings]` name with a fixed list turns under Enter just as a view
+    /// choice does, so it owes the reader the same mark, and no quotes that
+    /// would make it look like a field to type into.
+    #[test]
+    fn a_settings_choice_carries_the_cycle_mark_without_quotes() {
+        let mut app = crate::tests::test_app();
+        app.settings_open = true;
+        at_row(&mut app, |i| {
+            matches!(i, crate::settings::Item::Setting(s)
+                if cctop_core::settings::SETTINGS[*s].0 == "graph_glyphs")
+        });
+        let value = value(&app);
+        assert_eq!(
+            value.last().map(|(t, _)| t.as_str()),
+            Some("↻"),
+            "no cycle mark on graph_glyphs: {value:?}"
+        );
+        assert!(
+            value.iter().all(|(t, _)| !t.contains('"')),
+            "a choice drawn as a quoted string: {value:?}"
+        );
+        assert_eq!(drawn_width(&value), VALUE_W, "the column moved: {value:?}");
+    }
+
     /// A filter that matched something should say which part of the row is
     /// why, so the page can be read rather than scanned.
     #[test]
@@ -948,7 +981,11 @@ mod tests {
                 pal.number_hue,
                 "{named}"
             );
-            assert_eq!(buffer[(21, row("theme"))].fg, pal.text_hue, "{named}");
+            assert_eq!(
+                buffer[(21, row("hide_columns"))].fg,
+                pal.text_hue,
+                "{named}"
+            );
             assert_eq!(
                 buffer[(21, row("bottom_panel"))].fg,
                 pal.cycle_hue,

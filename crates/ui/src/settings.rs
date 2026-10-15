@@ -318,9 +318,11 @@ impl App {
     /// Re-read `config.toml` when it has changed since the last read, so a
     /// rebinding saved in an editor works at the next key.
     ///
-    /// The settings that shape the first frame — the theme — are not re-applied
-    /// here; the row says it wants a restart. Hidden columns are, because the
-    /// table reads the list every frame and nothing about a palette is involved.
+    /// The theme and the graph glyphs are re-applied here, like the hidden
+    /// columns, so a change made on the page or in an editor shows at the next
+    /// keypress. The palette is also chosen before the first frame, in
+    /// `choose_palette`, because `auto` has to ask the terminal before ratatui
+    /// owns stdin.
     pub(super) fn reload_settings(&mut self) {
         let Some(path) = &self.settings_file else {
             return;

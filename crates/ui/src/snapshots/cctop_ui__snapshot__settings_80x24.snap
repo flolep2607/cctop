@@ -13,8 +13,8 @@ expression: screen
 │  File ~/.config/cctop/config.toml                                            ┃
 │                                                                              ┃
 │config.toml · [settings]                                                      │
-│  theme             "auto"           auto/light/dark/mono; auto asks the term…│
-│  graph_glyphs      "braille"        braille ⡰⠑⢄⠜  octant 𜵙𜴄𜶀𜴒  sextant 🬖🬈🬭🬅  │
+│  theme             auto         ↻   auto/light/dark/mono; auto asks the term…│
+│  graph_glyphs      braille      ↻   braille ⡰⠑⢄⠜  octant 𜵙𜴄𜶀𜴒  sextant 🬖🬈🬭🬅  │
 │  notify            [ ]              Bell + desktop alert when a session need…│
 │  auto_update       [x]              Offer to update at startup when a newer …│
 │  telemetry         [x]              Send an anonymous usage report once a da…│
