@@ -265,6 +265,11 @@ impl App {
         if cctop_core::branch::branch_of(s).is_some_and(|b| contains_ascii_ci(&b, query)) {
             return true;
         }
+        // So is the repository, which is what finds a session in a worktree or
+        // clone whose path does not say the repository's name.
+        if cctop_core::worktree::repo_of(s).is_some_and(|r| contains_ascii_ci(&r.key, query)) {
+            return true;
+        }
         self.search_content && self.scan_query == query && self.scan_hits.contains_key(&s.key())
     }
 

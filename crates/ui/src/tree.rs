@@ -34,7 +34,6 @@
 use super::*;
 use cctop_core::session::ActivityState;
 use std::path::{Path, PathBuf};
-use std::sync::{LazyLock, Mutex, PoisonError};
 
 /// One heading in the tree: a repository, or one checkout of it.
 ///
@@ -113,41 +112,16 @@ pub(super) struct Tree {
 struct Place {
     repo: String,
     repo_label: String,
+    /// What makes separate clones one repository ([`cctop_core::worktree::Repo::key`]);
+    /// empty where `repo` alone says it.
+    ident: String,
     /// `None` outside a repository, where there is no second level to show.
     checkout: Option<(String, String)>,
 }
 
-/// How long a directory's place is trusted; the same bargain as the branch
-/// cache in [`columns`], since a checkout moves about as often as a branch.
-const PLACE_TTL: Duration = Duration::from_secs(60);
-
-use cctop_core::worktree::Located;
-
-static PLACES: LazyLock<Mutex<HashMap<String, (Located, Instant)>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
-
-/// The repository's common git directory and the checkout root, for a
-/// directory inside one. Cached, since the tree is rebuilt on every refresh.
-///
-/// `pub(super)` because the launcher's directory list resolves the same way —
-/// see [`super::launch_cwd::App::known_dirs`], which offers the repository
-/// rather than the subdirectory an agent happened to be sitting in. One
-/// resolution of what a `.git` means, so the two cannot answer differently
-/// about a worktree.
-pub(super) fn locate_cached(dir: &str) -> Located {
-    let mut cache = PLACES.lock().unwrap_or_else(PoisonError::into_inner);
-    if let Some((found, at)) = cache.get(dir)
-        && at.elapsed() < PLACE_TTL
-    {
-        return found.clone();
-    }
-    let found = locate(Path::new(dir));
-    cache.insert(dir.to_string(), (found.clone(), Instant::now()));
-    found
-}
-
-use cctop_core::worktree::locate;
-pub(super) use cctop_core::worktree::repo_dir;
+/// The tree, the launcher's directory list and `F` resolve a `.git` one way,
+/// through core's cache, so they cannot answer differently about a worktree.
+pub(super) use cctop_core::worktree::{locate_cached, repo_dir};
 
 fn place(s: &Session) -> Place {
     let dir = s.label_source.as_str();
@@ -158,11 +132,12 @@ fn place(s: &Session) -> Place {
         return Place {
             repo: format!("host:{}:{dir}", r.host),
             repo_label: format!("{}:{dir}", r.host),
+            ident: String::new(),
             checkout: None,
         };
     }
-    match locate_cached(dir) {
-        Some((common, root)) => {
+    match cctop_core::worktree::repo_cached(dir) {
+        Some(cctop_core::worktree::Repo { common, root, key }) => {
             let home = repo_dir(&common);
             let checkout_label = if root == home {
                 // The main checkout is the one the repository is named after,
@@ -177,6 +152,7 @@ fn place(s: &Session) -> Place {
             Place {
                 repo: format!("repo:{}", common.display()),
                 repo_label: cctop_core::util::tildify(&home.to_string_lossy()),
+                ident: key,
                 checkout: Some((format!("wt:{}", root.display()), checkout_label)),
             }
         }
@@ -186,11 +162,13 @@ fn place(s: &Session) -> Place {
         None if dir.is_empty() => Place {
             repo: "dir:".into(),
             repo_label: "(no directory)".into(),
+            ident: String::new(),
             checkout: None,
         },
         None => Place {
             repo: format!("dir:{dir}"),
             repo_label: cctop_core::util::tildify(dir),
+            ident: String::new(),
             checkout: None,
         },
     }
@@ -395,19 +373,41 @@ fn repos(
     // (repo place, [(checkout, members)]), in first-seen order. Linear lookup:
     // a table holds tens of repositories, not thousands.
     let mut repos: Vec<(Place, Vec<Checkout>)> = Vec::new();
+    // Clones whose checkouts went under another clone's heading.
+    let mut merged: HashSet<String> = HashSet::new();
     for &i in ordered {
         let p = place(&sessions[i]);
-        let at = match repos.iter().position(|(r, _)| r.repo == p.repo) {
+        let same = |r: &Place| r.repo == p.repo || (!p.ident.is_empty() && r.ident == p.ident);
+        let at = match repos.iter().position(|(r, _)| same(r)) {
             Some(at) => at,
             None => {
                 repos.push((p.clone(), Vec::new()));
                 repos.len() - 1
             }
         };
-        let checkouts = &mut repos[at].1;
+        let (heading, checkouts) = &mut repos[at];
+        if heading.repo != p.repo {
+            merged.insert(p.ident.clone());
+            // Separate clones of one origin share a heading. It is keyed by
+            // the least of their directories, so its fold and `F` stay put
+            // whichever clone sorts first this refresh.
+            if p.repo < heading.repo {
+                heading.repo = p.repo.clone();
+            }
+            heading.repo_label = p.ident.clone();
+        }
         match checkouts.iter_mut().find(|(c, _)| *c == p.checkout) {
             Some((_, members)) => members.push(i),
             None => checkouts.push((p.checkout.clone(), vec![i])),
+        }
+    }
+    // Under several clones, `cctop (main)` could be any of them: each
+    // checkout is named by where it is instead.
+    for (heading, checkouts) in &mut repos {
+        if merged.contains(&heading.ident) {
+            for (key, label) in checkouts.iter_mut().filter_map(|(c, _)| c.as_mut()) {
+                *label = cctop_core::util::tildify(key.trim_start_matches("wt:"));
+            }
         }
     }
     // A repository is ranked by the same total its heading shows, which is
@@ -733,6 +733,59 @@ mod tests {
             .unwrap();
         assert_eq!(app.visible[at + 1], Row::Session(3));
         assert_eq!(app.indent[at + 1], "└─ ");
+    }
+
+    /// Two clones of one origin share nothing on disk, and are still one
+    /// repository: one heading named by the origin, each clone a checkout
+    /// named by its path. A search for the repository finds both.
+    #[test]
+    fn clones_of_one_origin_share_a_heading() {
+        let fx = Scratch::new("clones");
+        let origin = |dir: &str, url: &str| {
+            std::fs::write(
+                Path::new(dir).join(".git/config"),
+                format!("[remote \"origin\"]\n\turl = {url}\n"),
+            )
+            .expect("config");
+        };
+        let a = fx.repo("work/proj");
+        origin(&a, "git@github.com:o/shared.git");
+        let b = fx.repo("other/proj");
+        origin(&b, "https://github.com/o/shared");
+        let other = fx.repo("unrelated");
+
+        let mut app = test_app();
+        app.tree = true;
+        app.sessions = vec![
+            session("a", true, &a),
+            session("b", true, &b),
+            session("c", true, &other),
+        ];
+        app.refilter();
+
+        let groups = groups_of(&app);
+        let top: Vec<&str> = groups
+            .iter()
+            .filter(|g| g.0 == 0)
+            .map(|g| g.1.as_str())
+            .collect();
+        assert_eq!(top.len(), 2, "{groups:?}");
+        assert!(top.contains(&"github.com/o/shared"), "{groups:?}");
+        let checkouts: Vec<&str> = groups
+            .iter()
+            .filter(|g| g.0 == 1)
+            .map(|g| g.1.as_str())
+            .collect();
+        assert_eq!(checkouts.len(), 2, "{groups:?}");
+        assert!(
+            checkouts.iter().all(|c| !c.ends_with("(main)")),
+            "{groups:?}"
+        );
+
+        app.search = "o/shared".into();
+        app.refilter();
+        let found: Vec<usize> = app.visible.iter().filter_map(|r| r.session()).collect();
+        assert_eq!(found.len(), 2, "both clones match: {found:?}");
     }
 
     /// The heading adds up exactly the rows beneath it.
@@ -1131,7 +1184,7 @@ mod tests {
     /// directory, which is itself a checkout when the tests run.
     #[test]
     fn a_relative_directory_is_its_own_group() {
-        assert_eq!(locate(Path::new("src")), None);
+        assert_eq!(cctop_core::worktree::locate(Path::new("src")), None);
         let s = session("a", false, "src");
         assert_eq!(place(&s).repo, "dir:src");
     }
