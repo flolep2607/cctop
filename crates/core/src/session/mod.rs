@@ -5,6 +5,7 @@ pub(crate) mod claude_line;
 pub mod codex;
 pub(crate) mod codex_line;
 pub mod cursor;
+pub(crate) mod cursor_line;
 pub mod devin;
 pub(crate) mod devin_atif;
 pub mod extract;
@@ -16,7 +17,9 @@ pub(crate) mod gemini_line;
 pub(crate) mod lenient;
 pub mod lookup;
 pub mod opencode;
+pub(crate) mod opencode_line;
 pub mod pi;
+pub(crate) mod pi_line;
 pub mod search;
 pub mod windsurf;
 
@@ -1451,9 +1454,9 @@ mod tests {
         s.tool_errors = 0;
         assert_eq!(s.error_rate(), Some(0.0), "a clean run is a real answer");
 
-        // Pi counts its calls but records no outcome, so the same figures mean
-        // nothing there.
-        let mut quiet = Session::new(Provider::Pi, "x".into());
+        // Cursor counts its calls but records no outcome, so the same figures
+        // mean nothing there.
+        let mut quiet = Session::new(Provider::Cursor, "x".into());
         quiet.tool_count = 40;
         assert_eq!(quiet.error_rate(), None);
     }
@@ -2201,8 +2204,9 @@ pub struct SessionData {
     /// which is decimated past [`MAX_CTX_POINTS`] and can lose a marker, and
     /// which records nothing at all for a compaction no request followed.
     ///
-    /// Claude Code only, for the same reason as the breakdown above: it is the
-    /// only transcript that says a compaction happened.
+    /// Claude Code, Pi and OpenCode, the transcripts that say a compaction
+    /// happened: Claude's boundary entry, Pi's `compaction` entry, OpenCode's
+    /// `compaction` part.
     #[serde(default)]
     pub compactions: u32,
     /// When the session last went into ultracode, as its transcript stamps it.

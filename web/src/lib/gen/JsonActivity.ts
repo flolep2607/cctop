@@ -8,6 +8,7 @@ export type JsonActivity = { tool_count: number,
  */
 tool_errors?: number | null, 
 /**
- * Compactions the session has been through. Claude Code only.
+ * Compactions the session has been through, where the transcript says:
+ * Claude Code, Pi and OpenCode.
  */
 compactions?: number | null, tools: { [key in string]: number }, skill_count: number, skills: { [key in string]: number }, web_fetch_count: number, web_fetches: Array<string>, web_search_count: number, web_searches: Array<string>, mcp_tool_count: number, mcp_tools: Array<string>, lines_added: number, lines_removed: number, };

@@ -698,11 +698,13 @@ pub fn extract(path: &Path) -> SessionData {
             "web_search_call" => {
                 if let Some(q) = p.action.get().and_then(|a| a.query.get())
                     && !q.is_empty()
-                    && seen_queries.len() < 50
-                    && seen_queries.insert(q.to_string())
                 {
-                    metrics.web_searches.push(q.to_string());
-                    metrics.web_search_count += 1;
+                    super::extract::note_web(
+                        &mut metrics.web_searches,
+                        &mut metrics.web_search_count,
+                        &mut seen_queries,
+                        q,
+                    );
                 }
             }
             _ => {}

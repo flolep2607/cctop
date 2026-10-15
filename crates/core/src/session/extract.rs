@@ -629,6 +629,25 @@ fn generic_detail(input: &Value) -> String {
     fallback
 }
 
+/// How many distinct fetched URLs, or distinct search queries, a session keeps.
+/// The count stops with the list, so the two never disagree.
+pub const MAX_WEB_ITEMS: usize = 50;
+
+/// Note one web fetch or search: a repeat of one already noted is not news,
+/// and past [`MAX_WEB_ITEMS`] nothing more is kept. One rule for every
+/// harness, so the cap and the de-duplication move together.
+pub fn note_web(
+    list: &mut Vec<String>,
+    count: &mut u64,
+    seen: &mut std::collections::HashSet<String>,
+    item: &str,
+) {
+    if seen.len() < MAX_WEB_ITEMS && seen.insert(item.to_string()) {
+        list.push(item.to_string());
+        *count += 1;
+    }
+}
+
 /// Append an invocation detail, capping retained history at the newest N.
 pub fn push_tool_detail(
     details: &mut std::collections::HashMap<String, Vec<super::ToolDetail>>,

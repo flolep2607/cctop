@@ -690,16 +690,17 @@ impl Provider {
     /// Kept as a fact about the provider rather than a flag on the extraction:
     /// a transcript with no failures in it and a transcript that cannot express
     /// one look identical, and the difference decides whether an error rate is
-    /// `0%` or `─`. Pi records tool calls but no outcome; Cursor and Windsurf
-    /// record neither.
+    /// `0%` or `─`. Pi answers each call with a `toolResult` that says
+    /// `isError`; Cursor and Windsurf record no outcome at all.
     pub fn records_tool_outcomes(&self) -> bool {
         match self {
             Provider::Claude
             | Provider::Codex
             | Provider::Devin
             | Provider::Gemini
-            | Provider::OpenCode => true,
-            Provider::Cursor | Provider::Pi | Provider::Windsurf => false,
+            | Provider::OpenCode
+            | Provider::Pi => true,
+            Provider::Cursor | Provider::Windsurf => false,
         }
     }
 
