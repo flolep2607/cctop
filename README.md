@@ -7,16 +7,21 @@
 
 **htop for your AI coding agents.** One terminal screen listing every Claude
 Code, Codex, Cursor, Devin, Gemini CLI, OpenCode, Pi and Windsurf session on
-your machine: what each is doing, what it has cost, and which one is waiting on
-you. You can open any of them in a tab and type into it.
+your machine, and on your other machines: what each is doing, what it has cost,
+and which one is waiting on you. You can open any of them in a tab and type
+into it.
 
-![cctop: walking the session table, opening the context breakdown, then filtering](docs/assets/demo.gif)
+> **Quick start:** install with the one line under [Install](#install), then
+> run `cctop`. Nothing to configure first.
 
-<sub>A real recording. [Play it in a terminal](docs/assets/demo.cast) with
-`asciinema play docs/assets/demo.cast`.</sub>
+![The cctop dashboard: six sessions, two of them on other machines, with the Context panel showing what fills the selected session's window](docs/assets/readme/dashboard.png)
+
+<sub>Every screenshot on this page is cctop drawing made-up sessions. Want it
+moving? [A recording](docs/assets/demo.gif), or
+[the same in a terminal](docs/assets/demo.cast) with `asciinema play`.</sub>
 
 It reads what the agents already write to disk, so it sees sessions it did not
-start, including ones that ended weeks ago. Nothing to configure first.
+start, including ones that ended weeks ago.
 
 ## Install
 
@@ -68,8 +73,14 @@ Checksums and updating (`cctop --update`) are in
 cctop
 ```
 
-It finds your sessions, prices them and draws the table. The keys to start
-with:
+It finds your sessions, prices them and draws the table. On its first run it
+also installs its hooks into every agent it finds a config directory for, so
+Claude Code, Codex, Gemini CLI, Cursor and OpenCode report their state as it
+happens instead of cctop inferring it from disk. `cctop --hooks-status` shows
+what is installed, and `cctop doctor` says what is wrong when something looks
+off.
+
+The keys to start with:
 
 | Key | |
 |---|---|
@@ -81,23 +92,14 @@ with:
 | `t` | new tab: an agent or a shell, here or on another machine |
 | `Alt+b` | jump to the tab that is waiting on you |
 | `F12` or `Alt+1` | back to the dashboard; the tab keeps running |
+| `,` | settings |
 | `?` | every key |
 | `q` | quit |
 
 Agents in cctop's tabs run in its built-in multiplexer, so they keep running
 after you quit and are back in their tabs next time.
 
-### 2. Install the hooks
-
-```bash
-cctop --install-hooks
-```
-
-Claude Code, Codex, Gemini CLI, Cursor and OpenCode then report their state to
-cctop as it happens, instead of cctop inferring it from disk. `cctop doctor`
-says what is wrong when something looks off.
-
-### 3. Use it from your phone
+### 2. Use it from your phone
 
 Press `B` in the dashboard for the browser panel, then `t` to serve the same
 table, and a page per session, over a public Cloudflare link (`l` serves it on
@@ -114,7 +116,7 @@ cctop tunnel setup --browser
 
 Details, Cloudflare Access logins and invites: [In a browser](docs/serve.md).
 
-### 4. Several machines, one table
+### 3. Several machines, one table
 
 Run `cctop tunnel setup --browser` on each machine, against the same Cloudflare
 account, and keep each one serving on its tunnel (`B` then `t`, or
@@ -126,6 +128,88 @@ Over ssh instead: `cctop --host devbox` adds another machine's sessions,
 read-only.
 
 ## Features
+
+### Every machine, one table
+
+![The tab bar with a local agent, a ☁ tab on a sibling machine and a ⇄ tab over ssh, above a table whose HOST column names desk and laptop](docs/assets/readme/remote-tabs.png)
+
+Machines connected to one Cloudflare account find each other: their sessions
+are rows here, with the machine in the `HOST` column. `R` on one of them opens
+it in a tab on this screen, and `t` starts a new agent over there. A tab on
+another machine says how it gets there: `☁` through a sibling's tunnel, `⇄`
+over ssh.
+
+A remote tab is built for a link that is slow or flaky:
+
+- **Local echo.** Each key would wait a round trip through Cloudflare (around
+  120 ms) before its letter appeared. cctop draws the letter at once,
+  underlined, and lets the far side's echo confirm it, as mosh does.
+  `predictive_echo` in settings: `auto` (on above 60 ms), `always` or `off`.
+- **Resume on drop.** When the connection drops (the tunnel moves, the network
+  changes) the tab gets back to the same terminal and is sent what it missed.
+  A drop shorter than two seconds shows nothing at all.
+
+### A new tab, anywhere, set up the way you want
+
+<p align="center">
+  <img alt="Three steps of the New tab menu: the list of agents with codex set to gpt-5-codex and YOLO; the place field offering local projects, a sibling machine named desk and an ssh host; and codex's options for model, permissions and worktree" src="docs/assets/readme/new-tab.png" width="560">
+</p>
+
+`t` (or `Alt+n`) lists the agents installed here and a shell. `c` changes
+where it starts: a directory here, a machine on your Cloudflare account, or an
+ssh host. `→` opens the agent's options before it starts: its model, which
+account it spends, its permission mode (YOLO is drawn in red) and a fresh git
+worktree. The line under them is the exact command `Enter` runs.
+
+### The web dashboard
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/readme/web-dark.png">
+  <img alt="cctop serve in a browser: the session list with project, title, model, cost and context per row" src="docs/assets/readme/web-light.png">
+</picture>
+
+`cctop serve` (or `B` in the dashboard) puts the same sessions in a browser,
+with a page per session for its conversation, its changes and its tools, a
+workspace of live terminals, and analytics. It follows your system's light or
+dark theme.
+
+<p align="center">
+  <img alt="The same page at phone width, in the dark and the light theme" src="docs/assets/readme/web-phone.png" width="560">
+</p>
+
+On a phone it is one column. Over your Cloudflare tunnel, the agent waiting on
+you can reach you wherever you are.
+
+### Your tunnel, inside Settings
+
+![The Settings tab filtered to tunnel: status connected, the dashboard hostname, zone, share hostname, Cloudflare Access with its owner and two invites, public links, and remove](docs/assets/readme/settings-tunnel.png)
+
+`,` opens every setting on one filterable page. Type `/tunnel` and the
+Cloudflare tunnel is right there as rows: whether it is connected, its
+hostnames, who Cloudflare Access lets in (an email, or a whole `@domain`, read
+or full), and the button that deletes it with its DNS records.
+
+### Graphs in braille, octants or sextants
+
+![The Performance panel's CPU and memory charts drawn twice: in braille dots, then in solid octant blocks](docs/assets/readme/graph-glyphs.png)
+
+The charts are braille by default, since every font has it. `graph_glyphs` in
+settings switches them to solid octants (Unicode 16) or sextants, if your
+terminal font has them; the setting's row draws a sample of each before you
+choose.
+
+### Updates you can trust
+
+![cctop --update in a terminal: it downloads the new archive, updates 0.36.4 to 0.37.0, and prints what changed](docs/assets/readme/update.png)
+
+cctop updates itself when it starts, once it knows a newer release exists, and
+`cctop --update` does it on demand. The archive comes from a mirror on
+Cloudflare's edge, or from GitHub if the mirror cannot serve it, and is checked
+against the ed25519 signature the release was published with, whichever one
+served it. Then it tells you what changed. A `cargo install` or a distro
+package is left to whatever installed it.
+
+### And everything else
 
 - **Cost.** Tokens times published rates, per session, hour, day and model.
 - **Context.** `CTX%` shows how full each context window is; the Context panel
@@ -186,6 +270,7 @@ cctop doctor          # check this installation and say what is wrong with it
 cctop serve           # the same table in a browser
 cctop tunnel setup    # your own Cloudflare tunnel, for a link that stays the same
 cctop claude          # start an agent on a pty cctop can watch and type into
+cctop --update        # update now, rather than at the next start
 ```
 
 `cctop --help` has the rest.
@@ -195,39 +280,16 @@ cctop claude          # start an agent on a pty cctop can watch and type into
 ## Documentation
 
 - [Reading the table](docs/the-table.md): every column, the status dot,
-  filtering, and the full key list
+  filtering, settings and the full key list
 - [Driving agents](docs/driving-agents.md): typing into sessions, resuming,
   tabs and splits, notifications
 - [In a browser](docs/serve.md): `cctop serve`, tunnels, phones, several
   machines
 - [The bottom panels](docs/panels.md): Tool Activity and the context breakdown
 - [Installing cctop](docs/install.md) · [troubleshooting](docs/troubleshooting.md)
+- [Telemetry, and how to turn it off](docs/telemetry.md)
 
 More: [what it cost you for](docs/optimize-and-compare.md)
 · [did the spend ship](docs/yield.md) · [what the subscription bought](docs/subscription-burn.md)
 · [what the cost figures mean](docs/costs.md) · [provider by provider](docs/providers/)
 · [integrations](docs/integrations.md)
-
-## Telemetry
-
-cctop sends a small usage report at most once a day to
-`https://cctop-releases.ecorsiste.workers.dev/telemetry`. It is on by default,
-and nothing is sent until a one-time notice has been shown on an interactive
-run. `cctop hook` and `cctop yolo-hook` never send anything. A report holds
-only:
-
-- `id`: 128 random bits, made at the first report; `cctop telemetry reset-id`
-  replaces it.
-- `version`, `os`, `arch`: cctop's version, and e.g. `linux`, `x86_64`.
-- `features`: how many times each of `tui`, `serve`, `workspace`, `tunnel`,
-  `yolo` and `update` ran since the last report.
-- `agents`: the most agents of each kind seen running at once.
-- `crash`, only if cctop panicked: the file and line in cctop's source, and
-  the panic message with paths, URLs, emails, user and host names, IPs and long
-  tokens removed, cut to 200 characters.
-
-It never sends prompts, session names, working directories, account names,
-hostnames or IP addresses. `cctop telemetry status` shows the next report.
-To turn it off, any one of: `cctop telemetry off` (also deletes the ID and the
-counts), `telemetry = false` under `[settings]` in `config.toml` or the toggle
-in settings (`,`), or `CCTOP_TELEMETRY=0` / `DO_NOT_TRACK=1`.
