@@ -510,6 +510,26 @@ pub fn display(name: &str, format: &str) -> Option<String> {
     Some(printed(&response))
 }
 
+/// What rmux says of the client whose process is `pid`, attached to `name`:
+/// its `client_activity` — the time of its last input, in seconds — and the
+/// size of the window it shows. `None` when that client is not there.
+///
+/// Two requests: `list-clients` leaves the window's formats empty, so the size
+/// is asked of the session's pane.
+pub fn client_view(name: &str, pid: u32) -> Option<(u64, (u16, u16))> {
+    let listing = list_clients(name, "#{client_pid}\t#{client_activity}")?;
+    let activity = listing.lines().find_map(|line| {
+        let (who, activity) = line.split_once('\t')?;
+        (who.trim().parse::<u32>().ok()? == pid).then(|| activity.trim().parse().ok())?
+    })?;
+    let size = display(name, "#{window_width} #{window_height}")?;
+    let mut parts = size.split_whitespace().map(|v| v.parse::<u16>().ok());
+    Some((
+        activity,
+        parts.next().flatten().zip(parts.next().flatten())?,
+    ))
+}
+
 /// The clients attached to a session, rendered through `format`.
 pub fn list_clients(name: &str, format: &str) -> Option<String> {
     let response = ask(Request::ListClients(Box::new(ListClientsRequest {
@@ -738,12 +758,17 @@ fn ls() -> Result<(), String> {
 /// not there yet, and attached to as it is otherwise.
 fn attach(args: &[String]) -> Result<(), String> {
     let mut create = false;
+    let mut follow = false;
     let mut cwd = None;
     let mut rest = args;
     loop {
         match rest {
             [flag, tail @ ..] if flag == "--create" => {
                 create = true;
+                rest = tail;
+            }
+            [flag, tail @ ..] if flag == "--follow" => {
+                follow = true;
                 rest = tail;
             }
             [flag, dir, tail @ ..] if flag == "--cwd" => {
@@ -756,7 +781,11 @@ fn attach(args: &[String]) -> Result<(), String> {
     let (name, argv) = match rest {
         [name] => (name, &[][..]),
         [name, dash, argv @ ..] if dash == "--" => (name, argv),
-        _ => return Err("usage: cctop mux attach [--create [--cwd DIR]] NAME [-- ARGV…]".into()),
+        _ => {
+            return Err(
+                "usage: cctop mux attach [--follow] [--create [--cwd DIR]] NAME [-- ARGV…]".into(),
+            );
+        }
     };
     if create && !has_session(name) {
         let env = crate::opencode::launch_env(argv)
@@ -801,12 +830,15 @@ fn attach(args: &[String]) -> Result<(), String> {
     match transition {
         rmux_client::AttachTransition::Upgraded(upgrade) => {
             let (stream, initial) = upgrade.into_parts();
-            match geometry {
+            // Drawn through a letterbox for whenever another client holds the
+            // window, and with `--follow` taking it back on input: see
+            // `letterbox`.
+            crate::letterbox::around(name, follow, || match geometry {
                 true => rmux_client::attach_terminal_with_initial_bytes_and_resize_geometry(
                     stream, initial,
                 ),
                 false => rmux_client::attach_terminal_with_initial_bytes(stream, initial),
-            }
+            })
             .map_err(|e| e.to_string())
         }
         rmux_client::AttachTransition::Rejected(Response::Error(error)) => {
