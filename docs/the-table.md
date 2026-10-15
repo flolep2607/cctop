@@ -601,8 +601,9 @@ bottom panel's bar does the same for the panel's text.
 
 `,` opens every setting and every key on the session table at the value it has
 now, a `*` beside the ones you have changed. `Enter` changes the row under the
-cursor — a toggle flips, the theme turns to the next one, and a key waits for
-you to press the combination it should move to — and `Backspace` puts it back.
+cursor — a toggle flips, a choice such as the theme turns to the next one (`←`
+and `→` turn it either way), and a key waits for you to press the combination
+it should move to — and `Backspace` puts it back.
 A key another action was on is still taken; the status line says which action
 lost it. `e` opens the file itself in `$VISUAL` or `$EDITOR`, and an edit saved
 there applies at the next keypress.
@@ -613,6 +614,7 @@ tokens, and only what you changed is written:
 ```toml
 [settings]
 theme = "light"          # auto / light / dark / mono
+graph_glyphs = "octant"  # braille / octant / sextant: what the charts are drawn in
 notify = true
 compact_threshold = 90   # context % the agent compacts at
 idle_after = 12          # hours quiet before `I` counts a live session idle
@@ -621,6 +623,11 @@ idle_after = 12          # hours quiet before `I` counts a live session idle
 quit = "x"
 bottom = "shift+down"    # ctrl+, alt+ and shift+ all work
 ```
+
+Octants (Unicode 16) and sextants draw the charts as solid blocks rather than
+braille dots, but only in a font that has them. The `graph_glyphs` row draws a
+sample in each set, so a font without them shows its boxes there, before you
+choose.
 
 Only the session table's keys move. A modal's keys are the letters on its own
 buttons, and inside a pane the keyboard is the agent's.

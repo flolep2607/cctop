@@ -471,6 +471,19 @@ fn settings_lines(
             } else {
                 ValueKind::Text
             };
+            // Each set drawn in itself rather than described: a font without
+            // octants shows boxes here, before they are chosen, rather than
+            // across every chart after.
+            let previews;
+            let what = match name {
+                "graph_glyphs" => {
+                    previews = crate::spark::Glyphs::ALL
+                        .map(|g| format!("{} {}", g.name(), crate::spark::preview(g)))
+                        .join("  ");
+                    previews.as_str()
+                }
+                _ => what,
+            };
             row(
                 &mut lines,
                 at,
