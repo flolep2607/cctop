@@ -1335,6 +1335,25 @@ mod tests {
         key(app, KeyCode::Enter);
     }
 
+    /// The page opens over whatever tab was showing and leaves `tab` on it, so
+    /// a paste must not be taken for one meant for that tab's agent — which
+    /// the page hides, so the paste went nowhere.
+    #[test]
+    fn a_token_pastes_while_the_page_is_over_an_agent_tab() {
+        let mut app = test_app();
+        app.tab = 1;
+        on(&mut app, Row::Token);
+        key(&mut app, KeyCode::Enter);
+        app.on_paste(" tok-123\n");
+        assert_eq!(
+            app.settings_input
+                .as_ref()
+                .map(|i| i.to_string())
+                .as_deref(),
+            Some("tok-123")
+        );
+    }
+
     #[test]
     fn with_nothing_connected_the_section_is_the_ways_in() {
         let app = test_app();

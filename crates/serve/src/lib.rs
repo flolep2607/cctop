@@ -557,26 +557,9 @@ impl Serving {
     }
 }
 
-/// Hand `url` to whatever this desktop opens links with.
-///
-/// Best effort by design: there is no answer worth waiting for and plenty of
-/// machines with no browser to give it to — a headless box, an ssh session, a
-/// container. `false` means nothing was launched, which the caller says on the
-/// status line so the link can be copied instead.
-///
-/// Spawned and forgotten rather than waited on: `xdg-open` on some desktops
-/// does not return until the browser it started exits, and a dashboard frozen
-/// behind somebody's Firefox is not a trade worth making.
-pub fn open_in_browser(url: &str) -> bool {
-    // `xdg-open` is what every freedesktop environment answers to.
-    std::process::Command::new("xdg-open")
-        .arg(url)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .is_ok()
-}
+/// Moved into core so the dashboard, `cctop serve` and `cctop tunnel` open
+/// links the same way; see [`cctop_core::clipboard::open_in_browser`].
+pub use cctop_core::clipboard::open_in_browser;
 
 impl Drop for Serving {
     fn drop(&mut self) {
