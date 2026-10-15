@@ -60,6 +60,17 @@ sandbox?: JsonSandbox | null, account?: JsonAccount | null, model: string | null
  */
 branch?: string | null, 
 /**
+ * The repository: its normalised `origin` URL (`github.com/owner/repo`),
+ * or its directory when it has none. The same for every worktree and
+ * every clone of one origin, which is what makes two sessions in two
+ * paths the same project. Absent outside git, and for a remote session.
+ */
+repo?: string | null, 
+/**
+ * The checkout the session is in: the worktree's or the clone's root.
+ */
+worktree?: string | null, 
+/**
  * How much the session asks before it acts, when its own hooks said.
  * Absent for a session with no cctop hooks installed — nothing in a
  * transcript records this, so it cannot be inferred.

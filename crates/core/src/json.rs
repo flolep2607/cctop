@@ -180,6 +180,17 @@ pub struct JsonSession {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional = nullable))]
     branch: Option<String>,
+    /// The repository: its normalised `origin` URL (`github.com/owner/repo`),
+    /// or its directory when it has none. The same for every worktree and
+    /// every clone of one origin, which is what makes two sessions in two
+    /// paths the same project. Absent outside git, and for a remote session.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional = nullable))]
+    repo: Option<String>,
+    /// The checkout the session is in: the worktree's or the clone's root.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional = nullable))]
+    worktree: Option<String>,
     /// How much the session asks before it acts, when its own hooks said.
     /// Absent for a session with no cctop hooks installed — nothing in a
     /// transcript records this, so it cannot be inferred.
@@ -285,6 +296,7 @@ pub fn sessions(sessions: &[Session], plan: Plan, store: &crate::cache::Store) -
             let data = store.session_data(s);
             let m = &data.metrics;
             let included = s.cost_available && plan.includes(s.provider);
+            let repo = crate::worktree::repo_of(s);
             // The credentials read here are this user's. Another user's
             // session is signed in as whoever they are, and stamping the
             // reader's own email on their row would be a wrong answer where
@@ -341,6 +353,8 @@ pub fn sessions(sessions: &[Session], plan: Plan, store: &crate::cache::Store) -
                 model: (!s.model.is_empty()).then(|| s.model.clone()),
                 harness: (!s.harness.is_empty()).then(|| s.harness.clone()),
                 branch: crate::branch::branch_of(s),
+                repo: repo.as_ref().map(|r| r.key.clone()),
+                worktree: repo.map(|r| r.root.to_string_lossy().into_owned()),
                 permission: s.permission.map(crate::hook::Permission::label),
                 models: data.models.clone(),
                 plan: plan.as_str(),

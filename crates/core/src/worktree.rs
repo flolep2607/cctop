@@ -6,7 +6,10 @@
 //! the server answers. One `git worktree add`, so the two put a branch's
 //! checkout in the same place.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::{LazyLock, Mutex, PoisonError};
+use std::time::{Duration, Instant};
 
 /// A directory's repository: its common git directory and the checkout root.
 pub type Located = Option<(PathBuf, PathBuf)>;
@@ -56,6 +59,158 @@ pub fn repo_dir(common: &Path) -> PathBuf {
         Some(name) if name == ".git" => common.parent().unwrap_or(common).to_path_buf(),
         _ => common.to_path_buf(),
     }
+}
+
+/// A directory's repository, as every surface names it: where it is on disk,
+/// and what makes two copies of it the same repository.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Repo {
+    /// The common git directory, shared by every worktree of one clone.
+    pub common: PathBuf,
+    /// The checkout the directory is in.
+    pub root: PathBuf,
+    /// The repository's identity: its `origin` URL normalised
+    /// (`github.com/owner/repo`), or the repository's directory when it has no
+    /// origin. Equal for every worktree of one clone, because they share one
+    /// config; equal for separate clones of one origin, which share nothing
+    /// else on disk.
+    pub key: String,
+}
+
+impl Repo {
+    /// The key without its host — `o/r` for `github.com/o/r` — which is what
+    /// a search for the repository means. Matching the host would make
+    /// `github` find every repository hosted there. A local path is all path.
+    pub fn path(&self) -> &str {
+        match self.key.starts_with('/') {
+            true => &self.key,
+            false => self.key.split_once('/').map_or(&*self.key, |(_, p)| p),
+        }
+    }
+}
+
+/// How long a directory's repository is trusted. A checkout moves about as
+/// often as a branch, and this is asked per row per refresh.
+const REPO_TTL: Duration = Duration::from_secs(60);
+
+/// Directory -> its repository and when that was read. `None` is an answer
+/// too — not in a repository — and is cached like one.
+type Reading = (Option<Repo>, Instant);
+
+static REPOS: LazyLock<Mutex<HashMap<String, Reading>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// [`locate`] and the origin URL for `dir`, cached.
+///
+/// In core rather than beside the tree view that groups by it, so the
+/// `--json` document, the filter and the launchers resolve a `.git` one way
+/// and from one cache.
+pub fn repo_cached(dir: &str) -> Option<Repo> {
+    if let Some((found, at)) = REPOS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get(dir)
+        && at.elapsed() < REPO_TTL
+    {
+        return found.clone();
+    }
+    // Read with the lock off, for the reason `branch::branch` gives.
+    let found = locate(Path::new(dir)).map(|(common, root)| {
+        let key = origin_url(&common)
+            .map(|u| normalise_url(&u, &repo_dir(&common)))
+            .unwrap_or_else(|| repo_dir(&common).to_string_lossy().into_owned());
+        Repo { common, root, key }
+    });
+    REPOS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .insert(dir.to_string(), (found.clone(), Instant::now()));
+    found
+}
+
+/// [`repo_cached`], as the `(common dir, checkout root)` pair [`locate`] gives.
+pub fn locate_cached(dir: &str) -> Located {
+    repo_cached(dir).map(|r| (r.common, r.root))
+}
+
+/// The repository a session is working in, or `None` when it is in none —
+/// or when this machine cannot say.
+pub fn repo_of(s: &crate::session::Session) -> Option<Repo> {
+    // A remote row's directory is a path on another machine, and a stopped
+    // sandbox's mount is gone: the same two refusals `branch_of` makes, for
+    // the same reason — reading whatever sits at that path here is worse than
+    // no answer.
+    if s.remote.is_some() || (s.sandbox.is_some() && !s.is_running()) {
+        return None;
+    }
+    repo_cached(&s.label_source)
+}
+
+/// `remote.origin.url` from a repository's `config`.
+///
+// ponytail: reads the one file, not `include`/`includeIf` or the global
+// config; an origin set only there reads as none, and the repository falls
+// back to being known by its directory.
+fn origin_url(common: &Path) -> Option<String> {
+    let config = std::fs::read_to_string(common.join("config")).ok()?;
+    let mut in_origin = false;
+    for line in config.lines().map(str::trim) {
+        if line.starts_with('[') {
+            // Section names are case-insensitive, the subsection is not.
+            let header = line.trim_start_matches('[').trim_end_matches(']');
+            in_origin = header
+                .split_once(char::is_whitespace)
+                .is_some_and(|(s, sub)| {
+                    s.eq_ignore_ascii_case("remote") && sub.trim() == "\"origin\""
+                });
+        } else if in_origin
+            && let Some((k, v)) = line.split_once('=')
+            && k.trim().eq_ignore_ascii_case("url")
+        {
+            return Some(v.trim().trim_matches('"').to_string());
+        }
+    }
+    None
+}
+
+/// One spelling for the ways a URL names a repository: `git@host:o/r.git`,
+/// `ssh://git@host:22/o/r` and `https://host/o/r/` are all `host/o/r`.
+///
+/// A local path — `/srv/up`, `file:///srv/up`, `../up` — is the directory it
+/// names, resolved against `base` (the repository's own directory, which is
+/// where git resolves a relative remote) and lexically normalised: so a clone
+/// of `/srv/up` has the key `/srv/up` itself has, and two unrelated repos that
+/// both spell their origin `../up` do not share one.
+fn normalise_url(url: &str, base: &Path) -> String {
+    let (rest, scheme) = match url.split_once("://") {
+        Some((scheme, rest)) => (rest, Some(scheme)),
+        None => (url, None),
+    };
+    // Git's rule: without a scheme, a colon before any slash is `host:path`,
+    // and anything else is a path.
+    let scp = scheme.is_none() && rest.find(':').is_some_and(|c| !rest[..c].contains('/'));
+    if scheme.is_some_and(|s| s.eq_ignore_ascii_case("file")) || (scheme.is_none() && !scp) {
+        let path = rest.trim_end_matches('/');
+        let path = path.strip_suffix("/.git").unwrap_or(path);
+        let base = base.to_string_lossy();
+        return crate::collide::normalise(path, &base);
+    }
+    // Credentials and the ssh user say who is fetching, not what.
+    let rest = match rest.split_once('@') {
+        Some((user, after)) if !user.contains('/') => after,
+        _ => rest,
+    };
+    let (host, path) = rest
+        .split_once(if scp { ':' } else { '/' })
+        .unwrap_or((rest, ""));
+    // A port is how to reach the host, which `git@host:` never spells.
+    let host = host.split(':').next().unwrap_or(host).to_ascii_lowercase();
+    let path = path.trim_matches('/');
+    let path = path
+        .strip_suffix(".git")
+        .unwrap_or(path)
+        .trim_end_matches('/');
+    format!("{host}/{path}")
 }
 
 /// `git -C dir`, and nothing else deciding which repository that is.
@@ -185,6 +340,91 @@ pub fn fork_point(dir: &Path) -> Result<(PathBuf, PathBuf), &'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn origin_urls_normalise_to_one_spelling() {
+        for url in [
+            "git@github.com:o/r.git",
+            "git@GitHub.com:o/r",
+            "https://github.com/o/r",
+            "https://github.com/o/r.git/",
+            "https://user:tok@github.com/o/r.git",
+            "ssh://git@github.com:22/o/r.git",
+        ] {
+            assert_eq!(
+                normalise_url(url, Path::new("/g/repo")),
+                "github.com/o/r",
+                "{url}"
+            );
+        }
+        let base = Path::new("/g/repo");
+        assert_eq!(normalise_url("/srv/git/r.git", base), "/srv/git/r.git");
+        assert_eq!(normalise_url("/srv/git/r/.git", base), "/srv/git/r");
+        assert_eq!(normalise_url("file:///srv/git/r/", base), "/srv/git/r");
+        // `git clone ./up b` stores the path as typed, `.` and all.
+        assert_eq!(normalise_url("/g/./up", base), "/g/up");
+        // Relative to the repository, so the same spelling in two places is
+        // two repositories.
+        assert_eq!(normalise_url("../upstream", base), "/g/upstream");
+        assert_eq!(normalise_url("up", base), "/g/repo/up");
+        assert_ne!(
+            normalise_url("../up", base),
+            normalise_url("../up", Path::new("/elsewhere/repo"))
+        );
+        assert_ne!(
+            normalise_url("git@github.com:o/r", base),
+            normalise_url("git@gitlab.com:o/r", base)
+        );
+    }
+
+    /// One key for every worktree of a repository and every clone of its
+    /// origin; another for an unrelated repository; none outside git.
+    #[test]
+    fn worktrees_and_clones_share_a_repo_key() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let git = |dir: &Path, args: &[&str]| {
+            let out = git_in(dir)
+                .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+                .args(["-c", "commit.gpgsign=false"])
+                .args(args)
+                .output()
+                .expect("git");
+            assert!(
+                out.status.success(),
+                "{args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        let at = |rel: &str| {
+            let dir = tmp.path().join(rel);
+            std::fs::create_dir_all(&dir).expect("dir");
+            dir
+        };
+        let a = at("a");
+        git(&a, &["init", "-q", "-b", "main"]);
+        git(&a, &["commit", "-q", "--allow-empty", "-m", "root"]);
+        git(&a, &["remote", "add", "origin", "git@github.com:o/r.git"]);
+        let wt = add_worktree(&a, &a, "agent-1").expect("worktree");
+        let b = at("b");
+        git(&b, &["init", "-q"]);
+        git(&b, &["remote", "add", "origin", "https://github.com/o/r"]);
+        let lone = at("lone");
+        git(&lone, &["init", "-q"]);
+        let outside = at("outside");
+        // A clone of a local path: git stores the path as given, `./` and all.
+        git(tmp.path(), &["clone", "-q", "./lone", "lone-clone"]);
+        let lone_clone = tmp.path().join("lone-clone");
+
+        let key = |d: &Path| repo_cached(&d.to_string_lossy()).map(|r| r.key);
+        assert_eq!(key(&a).as_deref(), Some("github.com/o/r"));
+        assert_eq!(key(&wt), key(&a), "a worktree of the repository");
+        assert_eq!(key(&b), key(&a), "a clone of the same origin");
+        assert_eq!(key(&lone).as_deref(), Some(&*lone.to_string_lossy()));
+        assert_eq!(key(&outside), None);
+        assert_eq!(key(&lone_clone), key(&lone), "a clone of a local path");
+        let root = |d: &Path| repo_cached(&d.to_string_lossy()).map(|r| r.root);
+        assert_eq!(root(&wt), Some(wt.clone()), "each its own checkout");
+    }
 
     /// Against a real repository, because what is being tested is what git
     /// accepts: a new branch forks, a taken one is refused with git's reason,
