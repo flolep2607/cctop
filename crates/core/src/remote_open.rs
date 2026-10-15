@@ -33,7 +33,8 @@
 //! exist yet: `machine:path` in its `in` field, for a machine on the account,
 //! runs [`bridge_new`] (`cctop mux launch`), which opens the sibling's
 //! [`NEW_ROUTE`]; the sibling runs `cctop mux new` ([`new_here`]), which starts
-//! the agent in its rmux, in that directory, and attaches. What is asked for
+//! the agent in its rmux, in that directory, and attaches — or, asked for a
+//! [`SHELL`], becomes its own user's login shell there. What is asked for
 //! travels as a [`NewAgent`] — words, never an argv — and the far side builds
 //! the command itself. A sibling too old to know the route answers "no such
 //! page", and the tab says to update it.
@@ -105,13 +106,23 @@ pub fn account_ok(name: &str) -> bool {
     name.len() <= 100 && !name.starts_with(['-', '.']) && crate::quota::valid_account_name(name)
 }
 
+/// The word that asks a sibling for a shell rather than an agent.
+///
+/// A word and never a path: the far side starts its own user's login shell
+/// ([`login_shell`]), which it looks up itself — the asker's shell may not
+/// even exist there. Allowed behind the same check as an agent (a link with
+/// full access, on a serve with actions on), because that check already
+/// starts `claude --dangerously-skip-permissions`, which is a shell in all
+/// but name; refusing the honest one bought nothing.
+pub const SHELL: &str = "shell";
+
 /// A new agent to start on a sibling — what the launcher's `machine:path`
 /// asks for when the machine is reached through its Cloudflare tunnel.
 ///
-/// The far side gets words, not a command: the agent's name, a directory, and
-/// the [`Options`](crate::launch_opts::Options) as names for settings. It
-/// checks each one again ([`NewAgent::check`]) and builds the argv itself, so
-/// nothing in the request is ever run as written.
+/// The far side gets words, not a command: the agent's name (or [`SHELL`]),
+/// a directory, and the [`Options`](crate::launch_opts::Options) as names for
+/// settings. It checks each one again ([`NewAgent::check`]) and builds the
+/// argv itself, so nothing in the request is ever run as written.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewAgent {
     pub agent: String,
@@ -139,11 +150,13 @@ pub fn dir_ok(dir: &str) -> bool {
 impl NewAgent {
     /// Every part checked: an agent cctop starts, a directory spelled as one,
     /// settings that agent takes, and an account name for an agent that is
-    /// started under one.
+    /// started under one. A [`SHELL`] takes none of the settings.
     pub fn check(&self) -> Result<(), String> {
-        if !crate::alias::AGENTS
-            .split_whitespace()
-            .any(|known| known == self.agent)
+        let shell = self.agent == SHELL;
+        if !shell
+            && !crate::alias::AGENTS
+                .split_whitespace()
+                .any(|known| known == self.agent)
         {
             return Err(format!("{:?} is not an agent cctop starts", self.agent));
         }
@@ -152,6 +165,17 @@ impl NewAgent {
                 "{:?} is not a directory cctop will pass on",
                 self.dir
             ));
+        }
+        if shell {
+            // Refused rather than dropped: a shell asked for under an account
+            // or in plan mode would start as neither and say nothing.
+            if self.account.is_some() {
+                return Err("a shell starts as that machine's user, not under an account".into());
+            }
+            if self.options != crate::launch_opts::Options::default() {
+                return Err("a shell takes no model or permission setting".into());
+            }
+            return Ok(());
         }
         if let Some(account) = &self.account {
             if !account_ok(account) {
@@ -287,7 +311,7 @@ impl NewAgent {
     /// for it: the agent is not installed here, the directory is not one, or
     /// the account is not one of this machine's.
     pub fn problem_here(&self) -> Option<String> {
-        if !crate::actions::agents().contains(&self.agent) {
+        if self.agent != SHELL && !crate::actions::agents().contains(&self.agent) {
             return Some(format!("{} is not installed on this machine", self.agent));
         }
         let dir = self.dir.trim();
@@ -350,6 +374,17 @@ pub fn new_here(args: &[String]) -> Result<(), String> {
         return Ok(());
     }
     let spec = NewAgent::from_args(args)?;
+    // On this pty rather than in rmux: a shell is cheap to start again, and
+    // in rmux it would sit in this machine's launcher as if it were an agent.
+    // ponytail: a shell ends when its tab's terminal is let go (a drop longer
+    // than the resume grace); put it in rmux if shells need to outlive that.
+    if spec.agent == SHELL {
+        let dir = match spec.dir.trim() {
+            "" => crate::config::HOME.clone(),
+            dir => PathBuf::from(crate::util::untildify(dir)),
+        };
+        return exec_login_shell(&dir);
+    }
     // Asked again here, not only by the route: this is what starts it, and a
     // name the route let through must still be an account by the time it does.
     let profile = spec.profile_here()?;
@@ -645,7 +680,6 @@ fn attach(name: &str) -> Result<(), String> {
 /// Say `why`, then become a login shell in `dir` (or the home, when that is
 /// gone too) — the tab is still somewhere useful on that machine.
 fn shell_in(dir: Option<&Path>, why: &str) -> Result<(), String> {
-    use std::os::unix::process::CommandExt;
     let dir = dir
         .filter(|d| d.is_dir())
         .map(Path::to_path_buf)
@@ -655,15 +689,60 @@ fn shell_in(dir: Option<&Path>, why: &str) -> Result<(), String> {
         "{why}\r\nHere is a shell in {} instead.\r\n",
         crate::util::tildify(&dir.to_string_lossy())
     );
-    let shell = std::env::var("SHELL")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "sh".into());
-    let error = std::process::Command::new(&shell)
-        .arg("-l")
-        .current_dir(&dir)
+    exec_login_shell(&dir)
+}
+
+/// Become this user's login shell in `dir`.
+fn exec_login_shell(dir: &Path) -> Result<(), String> {
+    use std::os::unix::process::CommandExt;
+    let argv = login_shell(passwd_shell(), std::env::var("SHELL").ok());
+    let error = std::process::Command::new(&argv[0])
+        .args(&argv[1..])
+        .current_dir(dir)
         .exec();
-    Err(format!("could not start {shell}: {error}"))
+    Err(format!("could not start {}: {error}", argv[0]))
+}
+
+/// The argv of this user's login shell: the passwd entry's shell, then
+/// `$SHELL`, then `/bin/sh`.
+///
+/// The passwd entry first because this runs under `cctop serve`, whose
+/// environment is whatever started it — a systemd unit, a script — and not
+/// the person's terminal; it is the shell ssh would give them. `$SHELL` covers
+/// a user the passwd file does not hold (a static musl build asks no
+/// directory service). `-l`, as cctop's other fallback shells are started, so
+/// the profile is read and the shell is the one they log in to.
+pub fn login_shell(passwd: Option<String>, env: Option<String>) -> Vec<String> {
+    let shell = [passwd, env]
+        .into_iter()
+        .flatten()
+        .find(|s| !s.is_empty())
+        .unwrap_or_else(|| "/bin/sh".into());
+    vec![shell, "-l".into()]
+}
+
+/// This user's shell, as their passwd entry names it.
+fn passwd_shell() -> Option<String> {
+    let mut entry: libc::passwd = unsafe { std::mem::zeroed() };
+    let mut found: *mut libc::passwd = std::ptr::null_mut();
+    let mut buf = vec![0 as libc::c_char; 16 * 1024];
+    // SAFETY: the `_r` form writes only into `entry` and `buf`, both alive for
+    // the call, and `found` is null or points at `entry`.
+    let rc = unsafe {
+        libc::getpwuid_r(
+            libc::getuid(),
+            &mut entry,
+            buf.as_mut_ptr(),
+            buf.len(),
+            &mut found,
+        )
+    };
+    if rc != 0 || found.is_null() || entry.pw_shell.is_null() {
+        return None;
+    }
+    // SAFETY: a non-null `pw_shell` is a NUL-terminated string inside `buf`.
+    let shell = unsafe { std::ffi::CStr::from_ptr(entry.pw_shell) };
+    shell.to_str().ok().map(str::to_string)
 }
 
 /// How often the bridge says something when the terminal says nothing.
@@ -766,9 +845,10 @@ pub fn bridge_new(args: &[String]) -> Result<(), String> {
         Old {
             // One that knows the plain route but not accounts is too old for
             // the account alone; saying "to start agents" would be wrong.
-            too_old: match spec.account {
-                Some(_) => "to start agents under one of its accounts",
-                None => "to start agents for another machine",
+            too_old: match (&spec.account, spec.agent == SHELL) {
+                (Some(_), _) => "to start agents under one of its accounts",
+                (None, true) => "to open a shell for another machine",
+                (None, false) => "to start agents for another machine",
             },
             again: "start it again",
         },
@@ -1279,15 +1359,22 @@ fn header<'a>(head: &'a str, name: &str) -> Option<&'a str> {
 ///
 /// A sibling that has never heard of the route answers it like any unknown
 /// page, which is the one refusal that means "update that machine" rather
-/// than whatever it says.
+/// than whatever it says. So does one that does not know the agent asked
+/// for — a [`SHELL`], or an agent added since: this side checked the same name
+/// against its own list before sending it, so the far list is the older one.
 fn refusal(machine: &str, status: u16, body: &str, too_old: &str, again: &str) -> String {
     let said = body.lines().next().unwrap_or("").trim();
-    match status {
-        404 if said.ends_with("no such page") || said.is_empty() => format!(
+    let too_old_for_it = match status {
+        404 => said.ends_with("no such page") || said.is_empty(),
+        400 => said.ends_with("is not an agent cctop starts"),
+        _ => false,
+    };
+    match too_old_for_it {
+        true => format!(
             "{machine}'s cctop is too old {too_old} — \
              update it there (cctop --update) and {again}"
         ),
-        _ => format!("{machine} refused: {said}"),
+        false => format!("{machine} refused: {said}"),
     }
 }
 
@@ -2106,6 +2193,98 @@ mod tests {
             assert!(NewAgent::from_route(rest).is_err(), "{rest}");
         }
         assert!(new_argv("-x", Path::new("/usr/bin/cctop"), &spec("claude", "~")).is_err());
+    }
+
+    /// A shell is the one word that is not an agent: it goes by name, with
+    /// none of an agent's settings, and reads back the same.
+    #[test]
+    fn a_shell_survives_its_route_and_takes_no_settings() {
+        let shell = spec(SHELL, "~/src");
+        let route = shell.route();
+        assert_eq!(
+            NewAgent::from_route(route.strip_prefix(NEW_ROUTE).expect("prefix")),
+            Ok(shell.clone())
+        );
+        assert_eq!(NewAgent::from_args(&shell.args()), Ok(shell.clone()));
+        assert!(new_argv("box", Path::new("/usr/bin/cctop"), &shell).is_ok());
+
+        for bad in [
+            NewAgent {
+                account: Some("work".into()),
+                ..shell.clone()
+            },
+            NewAgent {
+                options: crate::launch_opts::Options {
+                    model: Some("opus".into()),
+                    permissions: crate::launch_opts::Permissions::Ask,
+                },
+                ..shell.clone()
+            },
+            NewAgent {
+                options: crate::launch_opts::Options {
+                    model: None,
+                    permissions: crate::launch_opts::Permissions::Bypass,
+                },
+                ..shell.clone()
+            },
+            // The word names the far side's shell; a program never rides in it.
+            spec("/bin/sh", "~"),
+            spec("bash", "~"),
+            spec("shell -c id", "~"),
+            spec("shell;id", "~"),
+        ] {
+            assert!(bad.check().is_err(), "{bad:?}");
+        }
+        for rest in [
+            "shell/bypass/-/-",
+            "shell/ask/6f707573/-",
+            "%2fbin%2fsh/ask/-/-",
+            "2f62696e2f7368/ask/-/-",
+        ] {
+            assert!(NewAgent::from_route(rest).is_err(), "{rest}");
+        }
+        assert!(NewAgent::from_route_as("shell/ask/-/-/776f726b").is_err());
+        let args = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert!(NewAgent::from_args(&args(&["shell", "~", "--account", "work"])).is_err());
+        assert!(NewAgent::from_args(&args(&["shell", "~", "-c", "id"])).is_err());
+    }
+
+    /// The far side's shell is its own user's: the passwd entry, then
+    /// `$SHELL`, then `/bin/sh` — always as a login shell.
+    #[test]
+    fn the_far_side_starts_its_own_users_login_shell() {
+        let s = |v: &str| Some(v.to_string());
+        assert_eq!(
+            login_shell(s("/bin/zsh"), s("/bin/bash")),
+            ["/bin/zsh", "-l"]
+        );
+        assert_eq!(login_shell(None, s("/bin/bash")), ["/bin/bash", "-l"]);
+        assert_eq!(login_shell(s(""), s("/bin/bash")), ["/bin/bash", "-l"]);
+        assert_eq!(login_shell(None, None), ["/bin/sh", "-l"]);
+        assert_eq!(login_shell(s(""), s("")), ["/bin/sh", "-l"]);
+    }
+
+    /// A sibling from before shells refuses the word as an agent it does not
+    /// know; the tab says to update it, not that it was refused.
+    #[test]
+    fn an_old_sibling_asked_for_a_shell_says_to_update_it() {
+        let old = refusal(
+            "pc",
+            400,
+            "400 Bad Request: \"shell\" is not an agent cctop starts\n",
+            "to open a shell for another machine",
+            "start it again",
+        );
+        assert!(old.contains("cctop --update"), "{old}");
+        assert!(old.contains("too old to open a shell"), "{old}");
+        let other = refusal(
+            "pc",
+            400,
+            "400 Bad Request: a shell takes no model or permission setting\n",
+            "x",
+            "y",
+        );
+        assert!(other.starts_with("pc refused:"), "{other}");
     }
 
     /// An account rides last, in hex, on a route of its own — and reads back

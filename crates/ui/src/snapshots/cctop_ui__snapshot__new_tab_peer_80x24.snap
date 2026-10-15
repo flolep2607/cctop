@@ -10,13 +10,13 @@ expression: screen
 │All time         $28.51 $0.00/day this month             Agent mem 592 MB     │
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ╭ Sessions (4) ────────────────────────────────────────────────────────────────╮
-│   LAST▲╭ New tab ───────────────────────────────────────────────────╮JECT    │
-│●    now│   claude                                                   │ the ch…┃
-│●     7m│   codex                                                    │        │
-╰────────│   sh                      needs ssh                        │────────╯
-╭ Info  P│ in computer36:/srv/api (via tunnel)  (c to change)         │ Context╮
-│Root /us│ computer36 starts agents, not sh — that needs ssh          │        │
-│    PID │ ↑/↓  c change folder  Esc cancel                           │        │
+│   LAST▲         $ MODEL          PERM   ! HOST       BRANCH       PROJECT    │
+│●    now╭ New tab ───────────────────────────────────────────────────╮ the ch…┃
+│●     7m│   claude                                                   │        │
+╰────────│   codex                                                    │────────╯
+╭ Info  P│   shell                                                    │ Context╮
+│Root /us│ in computer36:/srv/api (via tunnel)  (c to change)         │        │
+│    PID │ ↑/↓  → options  Enter start  Esc cancel                    │        │
 │   4101 ╰────────────────────────────────────────────────────────────╯        │
 │   4188    2.4%     44.0M  node mcp-server.js                                 │
 │   4290    0.3%      8.0M  bash -c npm test                                   │

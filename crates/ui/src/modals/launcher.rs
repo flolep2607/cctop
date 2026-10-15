@@ -251,11 +251,6 @@ pub(crate) fn draw_launch(
         // other row; the full sentence is under the list when it is picked.
         let blocked = app.launch_blocked(choice);
         let at = match (choice, choice.cwd().is_some()) {
-            // A sibling starts agents and nothing else; what it will not
-            // start is what ssh is for.
-            _ if blocked.is_some() && app.launch_remote.as_ref().is_some_and(|t| t.peer) => {
-                "needs ssh".to_string()
-            }
             _ if blocked.is_some() => {
                 match app.launch_remote.as_ref().and_then(|t| t.problem.as_ref()) {
                     Some(_) if matches!(choice, tabs::Choice::Start(argv) if matches!(super::location::reach_of(argv), super::location::Reach::Sandbox(_))) => {
@@ -287,6 +282,11 @@ pub(crate) fn draw_launch(
         let name = match choice {
             tabs::Choice::Waiting(agent) => app.waiting_label(agent),
             tabs::Choice::Handoff(target) => Some(target.agent.clone()),
+            // On a sibling the shell row is that machine's shell, whose name
+            // this one does not know — so not this one's `zsh`.
+            tabs::Choice::Start(argv) if app.launch_remote.as_ref().is_some_and(|t| t.peer) => {
+                Some(super::location::peer_agent(argv))
+            }
             tabs::Choice::Start(_) => None,
         }
         .unwrap_or_else(|| choice.label());

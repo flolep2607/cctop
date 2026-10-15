@@ -644,22 +644,11 @@ impl App {
             // Reattaching lands wherever that agent already is.
             tabs::Choice::Waiting(_) => None,
             tabs::Choice::Handoff(_) => Some("a handoff starts on this machine".to_string()),
-            // A sibling starts the agents cctop knows, and nothing else: a
-            // shell there is a shell for anyone on the account, which is what
-            // ssh is for.
-            tabs::Choice::Start(argv) if target.peer => {
-                let agent = agent_of(argv);
-                match cctop_core::alias::AGENTS
-                    .split_whitespace()
-                    .any(|a| a == agent)
-                {
-                    true => None,
-                    false => Some(format!(
-                        "{} starts agents, not {agent} — that needs ssh",
-                        target.host
-                    )),
-                }
-            }
+            // A sibling starts the agents cctop knows and its own login shell
+            // ([`peer_agent`]). The shell needs no more than an agent does: the
+            // same link may start `claude --dangerously-skip-permissions`
+            // there, which is a shell already.
+            tabs::Choice::Start(_) if target.peer => None,
             tabs::Choice::Start(argv) => match reach_of(argv) {
                 Reach::No(why) => Some(why),
                 Reach::Shell(_) => None,
@@ -782,7 +771,7 @@ impl App {
         target: &RemoteTarget,
         options: cctop_core::launch_opts::Options,
     ) {
-        let agent = agent_of(argv);
+        let agent = peer_agent(argv);
         let exe = match std::env::current_exe() {
             Ok(exe) => exe,
             Err(error) => {
@@ -839,6 +828,21 @@ impl App {
 
 /// The agent a launcher row starts, by name: `claude` for `env X=1
 /// /usr/bin/claude`.
+/// What a sibling is asked to start for the launcher row `argv`: an agent by
+/// its name, and the one other row — this machine's login shell — as
+/// [`SHELL`](cctop_core::remote_open::SHELL), the sibling's own, which need
+/// not be this one's or even exist there under that path.
+pub(super) fn peer_agent(argv: &[String]) -> String {
+    let agent = agent_of(argv);
+    match cctop_core::alias::AGENTS
+        .split_whitespace()
+        .any(|a| a == agent)
+    {
+        true => agent,
+        false => cctop_core::remote_open::SHELL.to_string(),
+    }
+}
+
 pub(super) fn agent_of(argv: &[String]) -> String {
     tabs::label_of(argv)
         .split_whitespace()
@@ -1245,16 +1249,15 @@ mod tests {
         assert!(target.peer);
         assert_eq!(target.spelled(), "desk:/srv/api");
 
-        // The agents go; the shell, which a sibling does not start, does not.
+        // The agents go, and so does the shell — as the sibling's own.
         let claude = tabs::Choice::Start(vec!["claude".into()]);
         let codex = tabs::Choice::Start(vec!["codex".into()]);
         assert_eq!(app.launch_blocked(&claude), None);
         assert_eq!(app.launch_blocked(&codex), None, "no sandbox needed there");
         let shell = tabs::Choice::Start(vec!["/bin/zsh".into()]);
-        assert!(
-            app.launch_blocked(&shell)
-                .is_some_and(|why| why.contains("needs ssh")),
-        );
+        assert_eq!(app.launch_blocked(&shell), None);
+        assert_eq!(peer_agent(&["/bin/zsh".into()]), "shell");
+        assert_eq!(peer_agent(&["claude".into()]), "claude");
 
         // A path that is neither absolute nor under the home is refused in
         // the field, as the sibling would refuse it.
