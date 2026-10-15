@@ -154,6 +154,8 @@ pub struct Predictor {
     pasting: bool,
     /// The cells painted over on the real terminal, to paint back.
     drawn: Vec<(u16, u16)>,
+    /// Whether a [`Predictor::notice`] is up that nothing has taken back.
+    noticed: std::cell::Cell<bool>,
     lex: Lex,
     /// A CSI's bytes so far, enough of them to tell a kitty push.
     csi: Vec<u8>,
@@ -174,6 +176,7 @@ impl Predictor {
             kitty: false,
             pasting: false,
             drawn: Vec::new(),
+            noticed: std::cell::Cell::new(false),
             lex: Lex::Ground,
             csi: Vec::new(),
         }
@@ -216,6 +219,7 @@ impl Predictor {
     // as a cursor on that column — the far side's next letter lands there
     // rather than on the next line. Rmux redraws place the cursor themselves.
     pub fn notice(&self, text: &str) -> Vec<u8> {
+        self.noticed.set(true);
         let screen = self.shadow.screen();
         let (rows, cols) = screen.size();
         let mut out = Vec::new();
@@ -234,6 +238,7 @@ impl Predictor {
     /// side. Guesses on that row are the caller's to paint again
     /// ([`Predictor::reconnected`] does).
     pub fn unnotice(&self) -> Vec<u8> {
+        self.noticed.set(false);
         let screen = self.shadow.screen();
         let (rows, cols) = screen.size();
         let row = rows.saturating_sub(1);
@@ -269,6 +274,21 @@ impl Predictor {
             }
         }
         self.put_back(&mut out);
+        out
+    }
+
+    /// Whether a notice is up, for whoever has to take it back.
+    pub fn noticed(&self) -> bool {
+        self.noticed.get()
+    }
+
+    /// [`Predictor::unnotice`] while the socket is live: guesses on the
+    /// bottom row, which the repaint wipes, are drawn again over it.
+    pub fn take_notice(&mut self) -> Vec<u8> {
+        let mut out = self.unnotice();
+        let bottom = self.shadow.screen().size().0.saturating_sub(1);
+        self.drawn.retain(|&(row, _)| row != bottom);
+        out.extend(self.render());
         out
     }
 
@@ -912,6 +932,27 @@ mod tests {
                 p.shadow.screen().attributes_formatted()
             );
         }
+    }
+
+    /// A notice taken back on a live socket leaves a guess on the bottom row
+    /// drawn, where the plain repaint would wipe it until its echo.
+    #[test]
+    fn a_notice_taken_back_live_keeps_the_guesses_under_it() {
+        let t = Instant::now();
+        let mut p = Predictor::new(Mode::Always, 5, 80);
+        p.on_output(b"\x1b[2J\x1b[5;1H> \x1b[?25h", t);
+        p.on_key(b"a", t);
+        p.on_output(b"\x1b[5;3Ha", t + 100 * MS);
+        assert!(shown(&p.on_key(b"b", t + 200 * MS), 'b'));
+        let notice = p.notice("box not answering");
+        let back = p.take_notice();
+        assert!(back.starts_with(&p.unnotice()));
+        assert!(shown(&back[p.unnotice().len()..], 'b'));
+        let mut here = vt100::Parser::new(5, 80, 0);
+        here.process(b"\x1b[2J\x1b[5;1H> a");
+        here.process(&notice);
+        here.process(&back);
+        assert_eq!(here.screen().contents_between(4, 0, 4, 80), "> ab");
     }
 
     /// A notice wider than the terminal is cut short of its last column, so

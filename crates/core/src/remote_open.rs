@@ -806,6 +806,7 @@ fn terminal(machine: &str, path: &str, old: Old, reopen: bool) -> Result<(), Str
         conn.size.0,
     );
     let mut opened = std::time::Instant::now();
+    let mut notice = None;
     loop {
         let why = match pump(
             &mut conn.up,
@@ -813,6 +814,8 @@ fn terminal(machine: &str, path: &str, old: Old, reopen: bool) -> Result<(), Str
             conn.size,
             &mut received,
             &mut predictor,
+            machine,
+            notice.take(),
         )? {
             End::Closed(None) => return Ok(()),
             End::Closed(Some(why)) => return Err(format!("{machine} closed the terminal: {why}")),
@@ -825,7 +828,11 @@ fn terminal(machine: &str, path: &str, old: Old, reopen: bool) -> Result<(), Str
                 opened.elapsed().as_secs_f64()
             ),
         );
-        let (again, resumed) = reconnect(
+        let Back {
+            conn: again,
+            resumed,
+            unsent,
+        } = reconnect(
             &peer,
             Lost {
                 machine,
@@ -843,13 +850,23 @@ fn terminal(machine: &str, path: &str, old: Old, reopen: bool) -> Result<(), Str
         if !resumed {
             received = 0;
         }
-        // Guesses whose keys went down with the old socket are painted back.
-        let back = predictor.reconnected(resumed);
+        // The bottom row as the far side left it, whatever `pump` had up
+        // there when the socket went — "not answering", say — which a quick
+        // reconnect would otherwise leave standing. Then guesses whose keys
+        // went down with the old socket are painted back.
+        let mut back = Vec::new();
+        if predictor.noticed() {
+            back = predictor.unnotice();
+        }
+        back.extend(predictor.reconnected(resumed));
         if !back.is_empty() {
             use std::io::Write;
             let mut stdout = std::io::stdout();
             let _ = stdout.write_all(&back);
             let _ = stdout.flush();
+        }
+        if unsent > 0 {
+            notice = Some(unsent_text(machine));
         }
     }
 }
@@ -885,14 +902,72 @@ fn retry_wait(n: u32) -> std::time::Duration {
     std::time::Duration::from_millis(ms).min(RETRY_MAX)
 }
 
-/// The bottom row while getting back takes a while.
+/// The bottom row while getting back takes a while. Keys typed now are
+/// dropped once back (see [`reconnect`]), so it says so before any are.
 fn notice_text(machine: &str, why: &str) -> String {
-    format!(" {machine} lost: {why} · reconnecting ")
+    format!(" {machine} lost: {why} · reconnecting, typing not sent ")
+}
+
+/// The bottom row once back, when keys typed while away were dropped: a
+/// reconnect quick enough to show nothing would otherwise lose them unseen.
+fn unsent_text(machine: &str) -> String {
+    format!(" {machine} back · typing while away not sent ")
+}
+
+/// How long [`unsent_text`] stays up, unless a key takes it down first.
+const UNSENT_FOR: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// What [`reconnect`] got back to.
+struct Back {
+    conn: Conn,
+    /// Whether it carries on the old byte stream, rather than a fresh one.
+    resumed: bool,
+    /// How many bytes typed while away were thrown out.
+    unsent: usize,
+}
+
+/// One try at [`connect`], made on a thread of its own so the tab can say
+/// it is away while the try is still blocked: a network that drops packets
+/// holds a connect for its timeout, then a handshake for its.
+fn try_connect(
+    peer: &std::sync::Arc<crate::peer::Peer>,
+    machine: &str,
+    path: &str,
+    old: Old,
+    resume: Option<(String, u64)>,
+) -> std::sync::mpsc::Receiver<Result<Conn, Failed>> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let (peer, machine, path) = (
+        std::sync::Arc::clone(peer),
+        machine.to_owned(),
+        path.to_owned(),
+    );
+    std::thread::spawn(move || {
+        let asked = resume.as_ref().map(|(token, at)| (token.as_str(), *at));
+        let _ = tx.send(connect(&peer, &machine, &path, old, asked));
+    });
+    rx
+}
+
+/// Throw out what was typed at the tab while it was away, saying how much.
+fn drop_typed() -> usize {
+    let mut queued: libc::c_int = 0;
+    // SAFETY: FIONREAD writes one int, and tcflush on stdin only discards
+    // what is queued on it.
+    unsafe {
+        if libc::ioctl(0, libc::FIONREAD, &mut queued) != 0 {
+            queued = 0;
+        }
+        if libc::tcflush(0, libc::TCIFLUSH) != 0 {
+            return 0;
+        }
+    }
+    usize::try_from(queued).unwrap_or(0)
 }
 
 /// Get back to a sibling after the socket dropped: resume `resume` (its
 /// token, and how much was received) when there is one, and open afresh when
-/// not and the route may be. Says whether it resumed.
+/// not and the route may be.
 ///
 /// Nothing is said for the first [`NOTICE_AFTER`]: most drops are the tunnel
 /// moving, and over before anyone could read a word about them. Past that, a
@@ -904,14 +979,15 @@ fn notice_text(machine: &str, why: &str) -> String {
 ///
 /// Keys typed while the tab was away are dropped, not sent: they were typed
 /// at a screen that was not answering, and would land on one that has moved
-/// on — an Enter meant for a prompt that has since gone.
+/// on — an Enter meant for a prompt that has since gone. How many is
+/// returned, for the tab to say so once back.
 fn reconnect(
-    peer: &crate::peer::Peer,
+    peer: &std::sync::Arc<crate::peer::Peer>,
     lost: Lost,
     mut resume: Option<(String, u64)>,
     predictor: &crate::predict::Predictor,
     screen: &mut dyn std::io::Write,
-) -> Result<(Conn, bool), String> {
+) -> Result<Back, String> {
     let Lost {
         machine,
         path,
@@ -936,16 +1012,33 @@ fn reconnect(
     };
     let trace = |what: std::fmt::Arguments| crate::ws::trace("bridge", what);
     let mut tries = 0u32;
+    let due = since + NOTICE_AFTER;
     loop {
         tries += 1;
-        let asked = resume.as_ref().map(|(token, at)| (token.as_str(), *at));
-        match connect(peer, machine, path, old, asked) {
+        let asking = resume.is_some();
+        let pending = try_connect(peer, machine, path, old, resume.clone());
+        // The notice goes up when it is due, even with the try still out.
+        let got = loop {
+            if said {
+                break pending.recv().ok();
+            }
+            let left = due.saturating_duration_since(std::time::Instant::now());
+            match pending.recv_timeout(left) {
+                Ok(got) => break Some(got),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    draw(predictor.notice(&notice_text(machine, why)));
+                    said = true;
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break None,
+            }
+        };
+        let got = got.unwrap_or_else(|| Err(Failed::Unreached("the try to connect died".into())));
+        match got {
             Ok(conn) => {
                 // A sibling that read the resume answers with its token; one
                 // too old to answers like a fresh open.
-                let resumed = asked.is_some() && conn.token.is_some();
-                // SAFETY: tcflush on stdin only discards what is queued on it.
-                unsafe { libc::tcflush(0, libc::TCIFLUSH) };
+                let resumed = asking && conn.token.is_some();
+                let unsent = drop_typed();
                 if said {
                     draw(predictor.unnotice());
                 }
@@ -955,7 +1048,11 @@ fn reconnect(
                     since.elapsed().as_secs_f64(),
                     if said { ", notice shown" } else { "" },
                 ));
-                return Ok((conn, resumed));
+                return Ok(Back {
+                    conn,
+                    resumed,
+                    unsent,
+                });
             }
             // The far terminal is gone: open afresh at once, which redraws,
             // or — where that would start a second agent — say so.
@@ -996,10 +1093,8 @@ fn reconnect(
                 ));
             }
         }
-        // The notice goes up when it is due, not at the end of a wait that
-        // runs past it.
+        // Nor does a wait between tries hold the notice past its time.
         let next = std::time::Instant::now() + retry_wait(tries);
-        let due = since + NOTICE_AFTER;
         if !said && due < next {
             std::thread::sleep(due.saturating_duration_since(std::time::Instant::now()));
             draw(predictor.notice(&notice_text(machine, why)));
@@ -1206,12 +1301,19 @@ impl Drop for Raw {
 /// unanswered and some slack is a connection that is not coming back.
 const SILENCE: std::time::Duration = std::time::Duration::from_secs(75);
 
+/// How long a ping may go unanswered before the tab says the far side is
+/// not answering — and how long the far side may have said nothing before a
+/// key typed asks it. A live socket's pong is back in well under a second.
+const UNANSWERED: std::time::Duration = std::time::Duration::from_secs(5);
+
 fn pump(
     up: &mut crate::peer::Upstream,
     decoder: &mut crate::ws::Decoder,
     mut size: (u16, u16),
     received: &mut u64,
     predictor: &mut crate::predict::Predictor,
+    machine: &str,
+    notice: Option<String>,
 ) -> Result<End, String> {
     use crate::ws::{Op, frame};
     use std::io::{Read, Write};
@@ -1232,6 +1334,17 @@ fn pump(
     // Sized to this terminal, which may have changed while it was away.
     let back = predictor.resize(size.1, size.0);
     screen.write_all(&back).map_err(|e| e.to_string())?;
+    // A notice from getting back, up for a moment or until the next key.
+    let mut notice_until = None;
+    if let Some(text) = notice {
+        screen
+            .write_all(&predictor.notice(&text))
+            .map_err(|e| e.to_string())?;
+        screen.flush().map_err(|e| e.to_string())?;
+        notice_until = Some(std::time::Instant::now() + UNSENT_FOR);
+    }
+    // Whether the bottom row says the far side is not answering.
+    let mut quiet = false;
     // When the keepalive in flight went out: its pong is a round trip.
     let mut pinged: Option<std::time::Instant> = None;
     // Every frame decoded so far; `Some` once one of them ends the socket.
@@ -1333,6 +1446,25 @@ fn pump(
             screen.write_all(&late).map_err(|e| e.to_string())?;
             screen.flush().map_err(|e| e.to_string())?;
         }
+        if notice_until.is_some_and(|until| std::time::Instant::now() >= until) {
+            notice_until = None;
+            screen
+                .write_all(&predictor.take_notice())
+                .map_err(|e| e.to_string())?;
+            screen.flush().map_err(|e| e.to_string())?;
+        }
+        // A socket dead without a FIN is only given up on at `SILENCE`; until
+        // then, keys typed go nowhere, and the tab says so as soon as a ping
+        // goes unanswered rather than looking alive.
+        if !quiet && pinged.is_some_and(|at| at.elapsed() >= UNANSWERED) {
+            quiet = true;
+            notice_until = None;
+            let text = format!(" {machine} not answering · keys may not arrive ");
+            screen
+                .write_all(&predictor.notice(&text))
+                .map_err(|e| e.to_string())?;
+            screen.flush().map_err(|e| e.to_string())?;
+        }
         if heard.elapsed() >= SILENCE {
             return Ok(End::Dropped(format!(
                 "no answer for {}s",
@@ -1342,11 +1474,26 @@ fn pump(
         if fds[0].revents != 0 {
             match stdin.read(&mut buf) {
                 Ok(n) if n > 0 => {
+                    if notice_until.take().is_some() {
+                        screen
+                            .write_all(&predictor.take_notice())
+                            .map_err(|e| e.to_string())?;
+                        screen.flush().map_err(|e| e.to_string())?;
+                    }
                     let guess = predictor.on_key(&buf[..n], std::time::Instant::now());
                     if let Err(e) = up.write_all(&frame(Op::Binary, &buf[..n], true)) {
                         return Ok(dropped(e));
                     }
                     said = std::time::Instant::now();
+                    // A key into a socket that has said nothing for a while
+                    // asks whether anyone is there, so a dead one is noticed
+                    // in seconds rather than at the next keepalive.
+                    if pinged.is_none() && heard.elapsed() >= UNANSWERED {
+                        if let Err(e) = up.write_all(&frame(Op::Ping, b"", true)) {
+                            return Ok(dropped(e));
+                        }
+                        pinged = Some(said);
+                    }
                     if !guess.is_empty() {
                         screen.write_all(&guess).map_err(|e| e.to_string())?;
                         screen.flush().map_err(|e| e.to_string())?;
@@ -1372,6 +1519,13 @@ fn pump(
             decoder.push(&incoming);
             if let Some(end) = deliver(decoder, up, predictor, &mut pinged)? {
                 return Ok(end);
+            }
+            if quiet && !incoming.is_empty() {
+                quiet = false;
+                screen
+                    .write_all(&predictor.take_notice())
+                    .map_err(|e| e.to_string())?;
+                screen.flush().map_err(|e| e.to_string())?;
             }
             // The socket ended with no close frame: nobody said goodbye, so
             // nobody meant it.
@@ -1585,13 +1739,19 @@ mod tests {
         Upgrade(Option<&'static str>),
         /// The edge's 530 while the sibling's tunnel is away.
         Away,
+        /// An upgrade that takes past [`NOTICE_AFTER`] to come: a try held
+        /// up on a network that drops packets.
+        Late(&'static str),
     }
 
     /// A sibling that answers each request in turn with the next of
     /// `answers`, and reports the `Cctop-Resume` each one asked with.
     fn fake_sibling(
         answers: Vec<Answer>,
-    ) -> (crate::peer::Peer, std::sync::mpsc::Receiver<String>) {
+    ) -> (
+        std::sync::Arc<crate::peer::Peer>,
+        std::sync::mpsc::Receiver<String>,
+    ) {
         use std::io::{BufRead, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -1626,6 +1786,15 @@ mod tests {
                         )
                     }
                     Answer::Away => "HTTP/1.1 530 \r\nContent-Length: 0\r\n\r\n".to_string(),
+                    Answer::Late(token) => {
+                        std::thread::sleep(NOTICE_AFTER + std::time::Duration::from_millis(600));
+                        format!(
+                            "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n\
+                             Connection: Upgrade\r\nSec-WebSocket-Accept: {}\r\n\
+                             Cctop-Resume: {token}\r\n\r\n",
+                            crate::ws::accept_key(&key),
+                        )
+                    }
                     Answer::Upgrade(token) => format!(
                         "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n\
                          Connection: Upgrade\r\nSec-WebSocket-Accept: {}\r\n{}\r\n",
@@ -1636,7 +1805,11 @@ mod tests {
                 stream.write_all(reply.as_bytes()).unwrap();
             }
         });
-        let peer = crate::peer::Peer::fixed("box", &format!("http://127.0.0.1:{port}"), "made-up");
+        let peer = std::sync::Arc::new(crate::peer::Peer::fixed(
+            "box",
+            &format!("http://127.0.0.1:{port}"),
+            "made-up",
+        ));
         (peer, heard)
     }
 
@@ -1647,7 +1820,7 @@ mod tests {
 
     /// [`reconnect`] to "box", drawing on a screen nobody looks at.
     fn back(
-        peer: &crate::peer::Peer,
+        peer: &std::sync::Arc<crate::peer::Peer>,
         path: &str,
         resume: Option<(String, u64)>,
         reopen: bool,
@@ -1662,6 +1835,7 @@ mod tests {
         };
         let predictor = crate::predict::Predictor::new(crate::predict::Mode::Auto, 24, 80);
         reconnect(peer, lost, resume, &predictor, &mut Vec::new())
+            .map(|back| (back.conn, back.resumed))
     }
 
     /// Coming back with a token asks for the bytes after what was received,
@@ -1718,9 +1892,8 @@ mod tests {
         let predictor = crate::predict::Predictor::new(crate::predict::Mode::Auto, 24, 80);
         let mut screen = Vec::new();
         let resume = Some(("id.s1".to_string(), 1));
-        let (_, resumed) =
-            reconnect(&peer, lost_box(), resume, &predictor, &mut screen).expect("back");
-        assert!(resumed);
+        let back = reconnect(&peer, lost_box(), resume, &predictor, &mut screen).expect("back");
+        assert!(back.resumed);
         assert!(screen.is_empty(), "{}", String::from_utf8_lossy(&screen));
     }
 
@@ -1753,6 +1926,21 @@ mod tests {
         let before = here.screen().contents_formatted();
         here.process(&screen);
         assert_eq!(here.screen().contents_formatted(), before);
+    }
+
+    /// A try that is still blocked when the notice is due does not hold it
+    /// back: the tab says it is away while it waits.
+    #[test]
+    fn a_try_held_up_still_shows_the_notice_on_time() {
+        let (peer, _asked) = fake_sibling(vec![Answer::Late("id.s2")]);
+        let predictor = crate::predict::Predictor::new(crate::predict::Mode::Auto, 24, 80);
+        let mut screen = Vec::new();
+        let resume = Some(("id.s1".to_string(), 1));
+        let back = reconnect(&peer, lost_box(), resume, &predictor, &mut screen).expect("back");
+        assert!(back.resumed);
+        let said = String::from_utf8_lossy(&screen);
+        assert!(said.contains("box lost: the connection ended"), "{said}");
+        assert!(screen.ends_with(&predictor.unnotice()));
     }
 
     /// Quick tries while a blip is likeliest to be over, then no more than

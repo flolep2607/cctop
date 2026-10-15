@@ -543,10 +543,17 @@ pub fn trace(side: &str, what: std::fmt::Arguments) {
     }
 }
 
+/// Private, both the file and the directory made for it: the runtime
+/// directory falls back to `~/.cache` where there is no `$XDG_RUNTIME_DIR`
+/// (ssh, `sudo -u`), and a trace names every sibling and terminal route.
 fn trace_to(path: &std::path::Path, side: &str, what: std::fmt::Arguments) {
     use std::io::Write;
+    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
     if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
+        let _ = std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(dir);
     }
     if std::fs::metadata(path).is_ok_and(|m| m.len() > TRACE_CAP) {
         let _ = std::fs::rename(path, path.with_extension("log.old"));
@@ -559,8 +566,12 @@ fn trace_to(path: &std::path::Path, side: &str, what: std::fmt::Arguments) {
     if let Ok(mut file) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
+        .mode(0o600)
         .open(path)
     {
+        // `mode` reaches only a file this call made, and the docs have
+        // people make it with `touch`.
+        let _ = file.set_permissions(std::fs::Permissions::from_mode(0o600));
         let _ = file.write_all(line.as_bytes());
     }
 }
@@ -610,6 +621,22 @@ mod tests {
                 .ends_with("] after\n")
         );
         assert!(path.with_extension("log.old").exists());
+        let mode = |p: &std::path::Path| {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::metadata(p).unwrap().permissions().mode() & 0o777
+        };
+        assert_eq!(mode(&path), 0o600, "after rotation");
+        assert_eq!(mode(path.parent().unwrap()), 0o700);
+        // One made world-readable by hand is made private on the next line.
+        let touched = dir.path().join("touched.log");
+        std::fs::write(&touched, b"").unwrap();
+        std::fs::set_permissions(
+            &touched,
+            std::os::unix::fs::PermissionsExt::from_mode(0o644),
+        )
+        .unwrap();
+        trace_to(&touched, "bridge", format_args!("x"));
+        assert_eq!(mode(&touched), 0o600);
     }
 
     /// The worked example from RFC 6455 section 1.3.
