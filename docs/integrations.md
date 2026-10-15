@@ -314,7 +314,9 @@ footer_command = "date +%H:%M"  # a command; its first line shows, refreshed eve
 `footer_hide` names the badges (`idle`, `age`, `filter`, `cost`, `marked`,
 `follow`, `bell`, `remote`, `conflict`, `provider`, `update`, `quit`, `note`) and the key
 hints (`Move`, `Actions`, `Filter`, `Mark`, `Sort`, `Quit`, …, as labelled),
-and `share` for the corner that publishes the table. `footer_command` runs
+`share` for the corner that publishes the table, and `link` for a remote
+tab's connection beside it (`☁ 118ms · 2↻ · ×4.1`: round trip, reconnects,
+compression; green, amber or red by round trip). `footer_command` runs
 through `timeout 5s sh -c`, in the background: a command that hangs or fails
 simply shows nothing until the next run.
 

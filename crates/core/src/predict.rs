@@ -326,6 +326,12 @@ impl Predictor {
         self.srtt.unwrap_or(UNMEASURED)
     }
 
+    /// The smoothed round trip, once there is a sample — what a remote tab's
+    /// link corner shows (see [`link_health`](crate::link_health)).
+    pub fn srtt(&self) -> Option<Duration> {
+        self.srtt
+    }
+
     /// Whether confirmed guesses are drawn.
     fn shows(&self) -> bool {
         !self.kitty

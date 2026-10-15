@@ -1,0 +1,28 @@
+---
+source: crates/ui/src/snapshot.rs
+expression: screen
+---
+ 1:Dashboard │ ☁︎ 2:desk · Fix the login hint │ + Tab (Alt+n) ───────── Settings
+╭ Overview ────────────────────────────────────────────────────────────────────╮
+│Live rate         $0.04                               ⡀  Models               │
+│Today             $8.97                               ⡀  Sessions  4 · 2 live │
+│This month        $0.00                               ⡀  Agent CPU   3.2%     │
+│All time         $28.51 $0.00/day this month             Agent mem 592 MB     │
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭ desk · Fix the login hint ───────────────────────────────────────────────────╮
+│█                                                                             │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+╰ F12 back · Alt+w close ──────────────────────────────────────────────────────╯
+F12 Dashboard Alt+←→ Tabs Alt+n New Alt+w Close     ⧉ share ☁︎ 118ms · 2↻ · ×4.1
