@@ -643,7 +643,15 @@ fn notification_signal(kind: &str) -> Option<Signal> {
         // either as news about the sender turns the session that is merely
         // watching amber. The session actually blocked reports for itself, over
         // its own hooks, on the row it belongs to.
+        //
+        // `plugin_notification` is any installed plugin saying something, and
+        // `auth_storage_failure` is a credential that could not be saved:
+        // neither holds the turn. Both came out of Claude Code 2.1.300's own
+        // list of types, after a row with plugins installed kept going amber
+        // for no prompt anyone could find.
         "auth_success"
+        | "auth_storage_failure"
+        | "plugin_notification"
         | "computer_use_enter"
         | "computer_use_exit"
         | "elicitation_complete"
@@ -1017,6 +1025,8 @@ mod tests {
         // itself, on its own row.
         for quiet in [
             "auth_success",
+            "auth_storage_failure",
+            "plugin_notification",
             "computer_use_enter",
             "computer_use_exit",
             "elicitation_complete",
