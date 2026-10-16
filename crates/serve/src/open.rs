@@ -455,18 +455,14 @@ const NO_SESSION: &str = "no such session on this machine";
 /// What the pty runs: this binary's `mux open`.
 #[cfg(not(test))]
 fn open_argv(provider: &str, id: &str) -> Vec<String> {
-    let exe = std::env::current_exe()
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_else(|_| "cctop".into());
+    let exe = cctop_core::mux::own_exe().to_string_lossy().into_owned();
     vec![exe, "mux".into(), "open".into(), provider.into(), id.into()]
 }
 
 /// What the pty runs for a new agent: this binary's `mux new`.
 #[cfg(not(test))]
 fn new_argv(spec: &cctop_core::remote_open::NewAgent) -> Vec<String> {
-    let exe = std::env::current_exe()
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_else(|_| "cctop".into());
+    let exe = cctop_core::mux::own_exe().to_string_lossy().into_owned();
     let mut argv = vec![exe, "mux".into(), "new".into()];
     argv.extend(spec.args());
     argv

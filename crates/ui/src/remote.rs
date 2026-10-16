@@ -125,7 +125,7 @@ impl App {
             }
         };
         let provider = session.provider.as_str();
-        let exe = std::env::current_exe().unwrap_or_else(|_| "cctop".into());
+        let exe = cctop_core::mux::own_exe();
         let argv = match remote_open::argv(
             &reach,
             &exe,
