@@ -1,0 +1,43 @@
+---
+source: crates/ui/src/snapshot.rs
+expression: screen
+---
+ 1:Dashboard │ + Tab (t) ───────────────────────────────────────────────────────────────────────────────────── Settings
+
+                                 ━━━━ ━━━━ ━━━━ ━━━━ ──── ──── ──── ──── ──── ──── ────
+
+
+
+
+
+
+
+
+
+                                                 Y O U R    R H Y T H M
+
+                                                   You're a night owl.
+
+                                                    ▀▀█ ▀▀█   █▀█ █▀█
+                                                    █▀▀ █▀▀ ▀ █ █ █ █
+                                                    ▀▀▀ ▀▀▀ ▀ ▀▀▀ ▀▀▀
+
+                                        is when you and your agents were busiest
+
+                                                                                 █
+                                                                                 █ ▅
+                                                         ▅       █ ▂             █ █
+                                                       ▅ █       █ █             █ █
+                                     █                 █ █       █ █             █ █
+                                     █                 █ █       █ █             █ █
+                                     0h          6h          12h         18h
+
+
+
+
+
+
+
+
+
+                                   ←  →  step  ·  [ ]  year  ·  esc  close        4/11

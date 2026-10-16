@@ -740,11 +740,27 @@ fn fold_subagents(
             created,
             updated,
         ) = row;
+        // The row's model column can be NULL — OpenCode leaves it unset on
+        // some subagents — while every message the subagent wrote still names
+        // its model, so the last one speaks for it. An empty name would be
+        // priced as whatever model it matched and charted as a model of its own.
         let model = model_json
             .as_deref()
             .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
             .and_then(|v| v.get("id").and_then(Value::as_str).map(str::to_string))
-            .unwrap_or_default();
+            .filter(|m| !m.is_empty())
+            .or_else(|| {
+                db.query_row(
+                    "SELECT json_extract(data, '$.modelID') FROM message WHERE session_id = ?1 \
+                     AND json_extract(data, '$.role') = 'assistant' \
+                     AND json_extract(data, '$.modelID') <> '' \
+                     ORDER BY time_created DESC, id DESC LIMIT 1",
+                    params![id],
+                    |row| row.get::<_, String>(0),
+                )
+                .ok()
+            })
+            .unwrap_or_else(|| "unknown".to_string());
         let tokens = Tokens {
             input,
             output,
@@ -1085,6 +1101,58 @@ mod tests {
         // The parent's totals now carry the subagent's tokens and spend.
         assert_eq!(data.tokens.input, 300);
         assert!((data.costs.total - 0.15).abs() < 1e-9);
+
+        close_databases();
+        std::fs::remove_file(path).unwrap();
+    }
+
+    /// A subagent row with no model is named by its own messages, not left
+    /// blank: a blank name was charted as a model of its own and priced as
+    /// whichever listing it happened to match.
+    #[test]
+    fn a_subagent_with_no_model_is_named_by_its_messages() {
+        let path = temp_db("subagent-model");
+        let db = Connection::open(&path).unwrap();
+        db.execute_batch(
+            "CREATE TABLE session (
+                id TEXT PRIMARY KEY, parent_id TEXT, agent TEXT, directory TEXT NOT NULL,
+                title TEXT NOT NULL, model TEXT, cost REAL NOT NULL,
+                tokens_input INTEGER NOT NULL, tokens_output INTEGER NOT NULL,
+                tokens_reasoning INTEGER NOT NULL, tokens_cache_read INTEGER NOT NULL,
+                tokens_cache_write INTEGER NOT NULL,
+                time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL
+             );
+             CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, data TEXT);
+             CREATE TABLE part (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, data TEXT);",
+        )
+        .unwrap();
+        let cols = "id,parent_id,agent,directory,title,model,cost,tokens_input,tokens_output,\
+                    tokens_reasoning,tokens_cache_read,tokens_cache_write,time_created,time_updated";
+        db.execute(
+            &format!("INSERT INTO session ({cols}) VALUES ('par',NULL,NULL,'/w','parent',?1,0.10,100,20,0,0,0,1000,2000)"),
+            params![r#"{"id":"claude-x"}"#],
+        )
+        .unwrap();
+        db.execute(
+            &format!("INSERT INTO session ({cols}) VALUES ('kid','par','general','/w','look',NULL,0.05,200,40,0,0,0,1500,1800)"),
+            [],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO message VALUES ('m1','kid',1600,?1)",
+            params![r#"{"role":"assistant","modelID":"kimi-k2.6"}"#],
+        )
+        .unwrap();
+        drop(db);
+
+        let data = extract(&path, "par");
+        assert_eq!(data.subagents[0].model, "kimi-k2.6");
+        assert!(
+            data.costs_by_hour
+                .values()
+                .all(|by_model| !by_model.contains_key("")),
+            "no spend is charted under a blank model"
+        );
 
         close_databases();
         std::fs::remove_file(path).unwrap();

@@ -386,6 +386,35 @@ pub(crate) fn api_act(
     }
 }
 
+/// This machine's tally of `?year=`, for a sibling's year in review — see
+/// [`cctop_core::insight::wrapped`].
+///
+/// Its own rows only, as `/api/sessions` gives a sibling: the machines this one
+/// reads, the asker reads for itself, and counting them here would count them
+/// twice. As expensive as the report, for the same reason — every transcript is
+/// read again for the tool calls the cache drops — and asked for about once a
+/// year.
+pub(crate) fn api_wrapped(shared: &Shared, stream: &mut TcpStream, request: &Request) {
+    use cctop_core::insight::{from_store, wrapped};
+    let Some(year) = request
+        .query
+        .get("year")
+        .and_then(|y| y.parse::<i32>().ok())
+    else {
+        return http::respond_error(stream, Some(request), 400, "?year= wants a year");
+    };
+    let snapshot = current(shared);
+    let own: Vec<Session> = snapshot
+        .sessions
+        .iter()
+        .filter(|s| s.remote.is_none())
+        .cloned()
+        .collect();
+    let found = from_store(&own, &shared.store);
+    let tally = wrapped::tally(year, &own, &found, &wrapped::read_history());
+    json(stream, request, &tally);
+}
+
 /// Build and send one session's report.
 pub(crate) fn api_report(shared: &Shared, stream: &mut TcpStream, request: &Request, id: &str) {
     let snapshot = current(shared);

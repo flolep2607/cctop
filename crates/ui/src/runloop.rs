@@ -776,6 +776,7 @@ fn event_loop(
                     app.insight = Some(text);
                     app.insight_scroll = 0;
                 }
+                Ok(Response::Wrapped(year)) => app.got_wrapped(year),
                 Ok(Response::Chat {
                     key,
                     agent,
@@ -929,6 +930,8 @@ fn event_loop(
         // the conversation view's and the empty table's during the first scan.
         let scanning = !app.loaded && app.tab == 0;
         app.needs_redraw |= app.insight_loading() || app.chat_loading() || scanning;
+        // The recap's spinner, and its headline numbers counting up.
+        app.needs_redraw |= app.wrapped_animating();
 
         // A pulsing tab is the one thing on screen that changes with no event
         // behind it, so the loop has to ask for the frame itself — but only
@@ -994,6 +997,11 @@ fn event_loop(
         let idle_wait = match app.tab {
             0 => Duration::from_millis(200),
             _ => Duration::from_millis(16),
+        };
+        // A count-up is motion, not a spinner, and wants motion's frame rate.
+        let idle_wait = match app.wrapped_animating() {
+            true => idle_wait.min(effects::FRAME),
+            false => idle_wait,
         };
         // A spinner that advances five times a second reads as a stutter. While
         // one is turning the loop wakes at its frame rate instead.
