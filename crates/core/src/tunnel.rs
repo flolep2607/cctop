@@ -616,7 +616,9 @@ impl Drop for Lent {
 // The connected account
 // ---------------------------------------------------------------------------
 
-/// What `cctop tunnel setup` connected: the `[tunnel]` table of `config.toml`.
+/// What `cctop tunnel setup` connected: the `[tunnel]` table of `config.toml`,
+/// and its two credentials, which are sealed in `secrets.enc` instead (see
+/// [`crate::secrets`]).
 ///
 /// `token` is the connector's credential, and all a tunnel needs to run. The
 /// ids beside it are what `cctop tunnel remove` deletes, and are only there
@@ -740,11 +742,17 @@ impl fmt::Debug for Account {
 /// `[tunnel]` table, else none. `CCTOP_TUNNEL_HOSTNAME` names the hostname
 /// over either, for when the edge's pushed configuration is not wanted.
 pub fn account() -> Option<Account> {
-    let file = std::fs::read_to_string(&*config::CONFIG_FILE).ok();
+    // The store's config, which is `config.toml` except under test, where
+    // both are a directory of the test's own and agree with `save_account`.
+    // The secrets before the file, since reading them may move a token out.
+    let store = crate::secrets::Store::current();
+    let stored = store.all();
+    let file = std::fs::read_to_string(&store.config).ok();
     account_from(
         std::env::var("CCTOP_TUNNEL_TOKEN").ok().as_deref(),
         std::env::var("CCTOP_TUNNEL_HOSTNAME").ok().as_deref(),
         file.as_deref(),
+        &stored,
     )
 }
 
@@ -800,11 +808,13 @@ pub fn access_settings_in(text: &str) -> Option<crate::cloudflare::access::Setti
     access_from_table(table).filter(|s| s.usable())
 }
 
-/// [`account`] from its three sources, which is the half worth testing.
+/// [`account`] from its sources, which is the half worth testing: the
+/// environment, the config's text, and the stored secrets.
 pub(crate) fn account_from(
     env_token: Option<&str>,
     env_hostname: Option<&str>,
     file: Option<&str>,
+    stored: &crate::secrets::Secrets,
 ) -> Option<Account> {
     let nonempty = |s: Option<&str>| s.map(str::trim).filter(|s| !s.is_empty()).map(String::from);
     let mut account = match nonempty(env_token) {
@@ -813,7 +823,7 @@ pub(crate) fn account_from(
             from_env: true,
             ..Account::default()
         },
-        None => from_table(file?)?,
+        None => from_table(file?, stored)?,
     };
     if let Some(hostname) = nonempty(env_hostname) {
         account.hostname = Some(hostname);
@@ -821,7 +831,9 @@ pub(crate) fn account_from(
     Some(account)
 }
 
-fn from_table(text: &str) -> Option<Account> {
+/// The `[tunnel]` table, with its credentials from `stored` — or from the
+/// table itself, where one pasted by hand still is until it is moved.
+fn from_table(text: &str, stored: &crate::secrets::Secrets) -> Option<Account> {
     let doc = text.parse::<toml_edit::DocumentMut>().ok()?;
     let table = doc.get("tunnel")?.as_table_like()?;
     let text = |key: &str| {
@@ -832,8 +844,17 @@ fn from_table(text: &str) -> Option<Account> {
             .filter(|v| !v.is_empty())
             .map(String::from)
     };
+    let secret = |leaf: &str, key: &str| {
+        text(leaf).or_else(|| {
+            stored
+                .get(key)
+                .map(|v| v.trim())
+                .filter(|v| !v.is_empty())
+                .map(String::from)
+        })
+    };
     Some(Account {
-        token: text("token")?,
+        token: secret("token", crate::secrets::TUNNEL_TOKEN)?,
         hostname: text("hostname"),
         share_hostname: text("share_hostname"),
         account_id: text("account_id"),
@@ -849,7 +870,7 @@ fn from_table(text: &str) -> Option<Account> {
                     .collect()
             })
             .unwrap_or_default(),
-        api_token: text("api_token"),
+        api_token: secret("api_token", crate::secrets::TUNNEL_API_TOKEN),
         login: table
             .get("login")
             .and_then(|v| v.as_str())
@@ -939,22 +960,35 @@ fn access_from_table(
     })
 }
 
-/// Write `account` as the `[tunnel]` table, replacing any there.
+/// Write `account` as the `[tunnel]` table, replacing any there, with its
+/// credentials sealed in `secrets.enc` rather than in the table.
 pub fn save_account(account: &Account) -> anyhow::Result<()> {
-    save_account_in(&config::CONFIG_FILE, account)
+    save_account_in(&crate::secrets::Store::current(), account)
 }
 
-pub(crate) fn save_account_in(path: &Path, account: &Account) -> anyhow::Result<()> {
-    edit_config(path, |doc| {
+pub(crate) fn save_account_in(
+    store: &crate::secrets::Store,
+    account: &Account,
+) -> anyhow::Result<()> {
+    use crate::secrets::{TUNNEL_API_TOKEN, TUNNEL_TOKEN};
+    // The credentials first: a crash before the table is written leaves the
+    // old table with the new tokens, which is a connected account, where the
+    // other order would leave a table whose token is nowhere.
+    store.update(|secrets| {
+        secrets.insert(TUNNEL_TOKEN.to_string(), account.token.clone());
+        match &account.api_token {
+            Some(api) => secrets.insert(TUNNEL_API_TOKEN.to_string(), api.clone()),
+            None => secrets.remove(TUNNEL_API_TOKEN),
+        };
+    })?;
+    edit_config(&store.config, |doc| {
         let mut table = toml_edit::Table::new();
-        table.insert("token", toml_edit::value(&account.token));
         let optional = [
             ("hostname", &account.hostname),
             ("share_hostname", &account.share_hostname),
             ("account_id", &account.account_id),
             ("zone_id", &account.zone_id),
             ("tunnel_id", &account.tunnel_id),
-            ("api_token", &account.api_token),
         ];
         for (key, value) in optional {
             if let Some(value) = value {
@@ -1026,10 +1060,18 @@ pub(crate) fn save_account_in(path: &Path, account: &Account) -> anyhow::Result<
 /// Remove the `[tunnel]` table, leaving the rest of the file as it was — and
 /// its `protocol`, which is not the account's.
 pub fn clear_account() -> anyhow::Result<()> {
-    clear_account_in(&config::CONFIG_FILE)
+    clear_account_in(&crate::secrets::Store::current())
 }
 
-pub(crate) fn clear_account_in(path: &Path) -> anyhow::Result<()> {
+pub(crate) fn clear_account_in(store: &crate::secrets::Store) -> anyhow::Result<()> {
+    // The credentials first: a table left behind without them is no account,
+    // where credentials left behind without a table are secrets kept for
+    // nothing.
+    store.update(|secrets| {
+        secrets.remove(crate::secrets::TUNNEL_TOKEN);
+        secrets.remove(crate::secrets::TUNNEL_API_TOKEN);
+    })?;
+    let path = &store.config;
     if !path.exists() {
         return Ok(());
     }
@@ -1044,10 +1086,10 @@ pub(crate) fn clear_account_in(path: &Path) -> anyhow::Result<()> {
     })
 }
 
-/// Rewrite `config.toml` through `edit`, the way the account tokens are
-/// written: refused when it does not parse, comments and layout kept by
-/// `toml_edit`, and through a temporary file that is owner-only from the
-/// start — the file holds secrets, and widening it even briefly is a window.
+/// Rewrite `config.toml` through `edit`: refused when it does not parse,
+/// comments and layout kept by `toml_edit`, and through a temporary file that
+/// is owner-only from the start — the secrets are sealed elsewhere now, but a
+/// config from before may still hold one in plain text until it is moved.
 fn edit_config(path: &Path, edit: impl FnOnce(&mut toml_edit::DocumentMut)) -> anyhow::Result<()> {
     let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
@@ -1064,6 +1106,9 @@ fn edit_config(path: &Path, edit: impl FnOnce(&mut toml_edit::DocumentMut)) -> a
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+
+    /// No stored secrets, for the tests about the table's own text.
+    static NONE: crate::secrets::Secrets = crate::secrets::Secrets::new();
 
     fn full() -> Account {
         Account {
@@ -1120,33 +1165,42 @@ mod tests {
     #[test]
     fn the_table_round_trips_and_keeps_the_rest_of_the_file() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.toml");
+        let store = crate::secrets::Store::in_dir(dir.path());
+        let path = store.config.clone();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(
             &path,
-            "# my accounts\n[accounts.work]\ntoken = \"keep-me\" # a comment\n",
+            "# my accounts\n[accounts.work]\nlabel = \"keep-me\" # a comment\n",
         )
         .unwrap();
-        save_account_in(&path, &full()).unwrap();
+        save_account_in(&store, &full()).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.contains("# my accounts"), "{text}");
+        // Neither credential is in the file: both are sealed.
+        assert!(!text.contains("eyJhIjoi-made-up"), "{text}");
+        assert!(!text.contains("made-up-api-token"), "{text}");
         assert!(
             text.contains("[tunnel.share_names.8f14e45f-ceea-467f-a0e6-0d1c6e1b0a11]"),
             "{text}"
         );
-        assert!(text.contains("token = \"keep-me\" # a comment"), "{text}");
+        assert!(text.contains("label = \"keep-me\" # a comment"), "{text}");
         assert!(
             text.contains("\n  { who = \"@example.test\", level = \"read\" },\n]"),
             "{text}"
         );
-        assert_eq!(account_from(None, None, Some(&text)), Some(full()));
+        assert_eq!(
+            account_from(None, None, Some(&text), &store.all()),
+            Some(full())
+        );
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
 
-        clear_account_in(&path).unwrap();
+        clear_account_in(&store).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(!text.contains("[tunnel]"), "{text}");
         assert!(text.contains("keep-me"), "{text}");
-        assert_eq!(account_from(None, None, Some(&text)), None);
+        assert!(store.all().is_empty(), "both credentials are forgotten");
+        assert_eq!(account_from(None, None, Some(&text), &store.all()), None);
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
     }
@@ -1163,43 +1217,50 @@ mod tests {
             Protocol::Auto
         );
         // A protocol alone is not an account.
-        assert_eq!(account_from(None, None, Some(file)), None);
+        assert_eq!(account_from(None, None, Some(file), &NONE), None);
     }
 
     #[test]
     fn saving_and_forgetting_the_account_keep_the_protocol() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.toml");
+        let store = crate::secrets::Store::in_dir(dir.path());
+        let path = store.config.clone();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, "[tunnel]\nprotocol = \"http2\"\n").unwrap();
-        save_account_in(&path, &full()).unwrap();
+        save_account_in(&store, &full()).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
         assert_eq!(protocol_from(None, Some(&text)), Protocol::Http2, "{text}");
-        assert_eq!(account_from(None, None, Some(&text)), Some(full()));
+        assert_eq!(
+            account_from(None, None, Some(&text), &store.all()),
+            Some(full())
+        );
 
-        clear_account_in(&path).unwrap();
+        clear_account_in(&store).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
         assert_eq!(protocol_from(None, Some(&text)), Protocol::Http2, "{text}");
-        assert_eq!(account_from(None, None, Some(&text)), None);
+        assert_eq!(account_from(None, None, Some(&text), &store.all()), None);
         assert!(!text.contains("token"), "{text}");
     }
 
     #[test]
     fn a_file_that_does_not_parse_is_not_rewritten() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.toml");
+        let store = crate::secrets::Store::in_dir(dir.path());
+        let path = store.config.clone();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, "this is [not toml").unwrap();
-        assert!(save_account_in(&path, &full()).is_err());
+        assert!(save_account_in(&store, &full()).is_err());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "this is [not toml");
     }
 
     #[test]
     fn the_environment_wins_over_the_file() {
         let file = "[tunnel]\ntoken = \"from-file\"\nhostname = \"file.example.test\"\n";
-        let from_file = account_from(None, None, Some(file)).unwrap();
+        let from_file = account_from(None, None, Some(file), &NONE).unwrap();
         assert_eq!(from_file.token, "from-file");
         assert!(!from_file.from_env);
 
-        let from_env = account_from(Some("from-env"), None, Some(file)).unwrap();
+        let from_env = account_from(Some("from-env"), None, Some(file), &NONE).unwrap();
         assert_eq!(from_env.token, "from-env");
         assert!(from_env.from_env);
         assert_eq!(
@@ -1207,14 +1268,31 @@ mod tests {
             "the file's hostname is the file's tunnel's"
         );
 
-        let renamed = account_from(None, Some("env.example.test"), Some(file)).unwrap();
+        let renamed = account_from(None, Some("env.example.test"), Some(file), &NONE).unwrap();
         assert_eq!(renamed.token, "from-file");
         assert_eq!(renamed.hostname.as_deref(), Some("env.example.test"));
 
         // No config file at all: the environment alone is enough.
-        assert!(account_from(Some("from-env"), None, None).is_some());
+        assert!(account_from(Some("from-env"), None, None, &NONE).is_some());
         // An empty variable is not set.
-        assert_eq!(account_from(Some("  "), None, None), None);
+        assert_eq!(account_from(Some("  "), None, None, &NONE), None);
+
+        // The sealed token answers for a table that no longer holds one, and
+        // one still pasted into the table wins over it.
+        let stored: crate::secrets::Secrets = [(
+            crate::secrets::TUNNEL_TOKEN.to_string(),
+            "sealed".to_string(),
+        )]
+        .into();
+        let bare = "[tunnel]\nhostname = \"file.example.test\"\n";
+        assert_eq!(
+            account_from(None, None, Some(bare), &stored).unwrap().token,
+            "sealed"
+        );
+        assert_eq!(
+            account_from(None, None, Some(file), &stored).unwrap().token,
+            "from-file"
+        );
     }
 
     #[test]

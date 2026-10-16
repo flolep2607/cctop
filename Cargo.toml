@@ -193,6 +193,14 @@ sha2 = "0.10.9"
 # `alloc` is what RSA needs; the default `dev_urandom_fallback` is not wanted.
 ring = { version = "0.17", default-features = false, features = ["alloc"] }
 base64 = "0.22"
+# The tokens cctop keeps (`cctop_core::secrets`) are sealed with
+# XChaCha20-Poly1305 under a key HKDF derives from a key file and the machine
+# id. Both crates are already in the tree under rmux-server's web crypto, at
+# these versions, so neither adds a crate; both are pure Rust, so the static
+# musl release takes them as they are. Only `alloc`: the default `getrandom`
+# feature is not wanted, since nonces come from ring's `SystemRandom`.
+chacha20poly1305 = { version = "0.10.1", default-features = false, features = ["alloc"] }
+hkdf = "0.12.4"
 tar = "0.4.46"
 tempfile = "3.27.0"
 # How many colours the terminal can show, read from the environment the way

@@ -1012,6 +1012,12 @@ impl App {
         }
         app.settings_file = Some(cctop_core::config::CONFIG_FILE.clone());
         app.reload_settings();
+        // Once, at start: every read after this one fails the same way, many
+        // times a minute, and says nothing — the accounts just ask for their
+        // tokens again, and this is why.
+        if let Some(problem) = cctop_core::secrets::problem() {
+            app.set_status(problem);
+        }
         app
     }
 

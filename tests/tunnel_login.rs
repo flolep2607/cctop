@@ -136,9 +136,16 @@ fn a_browser_login_over_ssh_prints_the_address_and_connects() {
     assert_eq!(files.len(), 1, "{files:?}");
     let text = std::fs::read_to_string(&files[0]).unwrap();
     assert!(text.contains("login = \"browser\""), "{text}");
-    assert!(text.contains(login::TOKEN), "the token is what is kept");
-    let mode = std::fs::metadata(&files[0]).unwrap().permissions().mode() & 0o777;
-    assert_eq!(mode, 0o600);
+    // The token is kept, but sealed beside the config rather than in it, under
+    // a key in the data directory.
+    assert!(!text.contains(login::TOKEN), "{text}");
+    let sealed = std::fs::read(dir.join("config/cctop/secrets.enc")).expect("the token is kept");
+    assert!(!String::from_utf8_lossy(&sealed).contains(login::TOKEN));
+    assert!(dir.join("data/cctop/secret.key").is_file());
+    for path in [&files[0], &dir.join("config/cctop/secrets.enc")] {
+        let mode = std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "{}", path.display());
+    }
 
     // And `remove` forgets it, saying the token itself is the dashboard's to
     // revoke.

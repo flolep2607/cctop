@@ -651,34 +651,18 @@ pub fn claude_login_dir(name: &str) -> PathBuf {
     HOME.join(format!(".claude-{name}"))
 }
 
-/// The names under `[accounts]` in cctop's config that carry a token.
-fn token_account_names() -> Vec<String> {
-    let Ok(text) = std::fs::read_to_string(&*CONFIG_FILE) else {
-        return Vec::new();
-    };
-    account_names_in(&text)
+/// The token accounts: every name with a token stored for it, sealed or still
+/// in plain text in the config (see [`crate::secrets`]).
+pub(crate) fn token_account_names() -> Vec<String> {
+    account_names_in(&crate::secrets::all())
 }
 
-/// The same, from the file's text — the half that is worth testing.
-pub(crate) fn account_names_in(text: &str) -> Vec<String> {
-    let Ok(doc) = text.parse::<toml_edit::DocumentMut>() else {
-        return Vec::new();
-    };
-    let Some(accounts) = doc.get("accounts").and_then(|a| a.as_table_like()) else {
-        return Vec::new();
-    };
-    let mut out: Vec<String> = accounts
-        .iter()
-        .filter(|(_, item)| {
-            // An empty token is a half-finished edit, and an account with none
-            // at all is a table someone opened and did not fill: neither can be
-            // polled, so neither earns a column that would only ever say
-            // "not signed in".
-            item.as_table_like()
-                .and_then(|t| t.get("token"))
-                .and_then(|t| t.as_str())
-                .is_some_and(|t| !t.trim().is_empty())
-        })
+/// The same, from the secrets — the half that is worth testing.
+pub(crate) fn account_names_in(secrets: &crate::secrets::Secrets) -> Vec<String> {
+    // An empty token is a half-finished edit, and cannot be polled, so it
+    // does not earn a column that would only ever say "not signed in";
+    // `account_tokens` leaves those out.
+    let mut out: Vec<String> = crate::secrets::account_tokens(secrets)
         .map(|(name, _)| name.to_string())
         .collect();
     // By name, as `profiles_in` sorts the directories: the limits panel draws a
@@ -688,7 +672,8 @@ pub(crate) fn account_names_in(text: &str) -> Vec<String> {
     out
 }
 
-/// cctop's own config, holding the account tokens a user added by hand.
+/// cctop's own config. The tokens it once held are in `secrets.enc` beside
+/// it now (see [`crate::secrets`]).
 ///
 /// Separate from `CACHE_DIR` on purpose: a cache is something cctop may delete
 /// to recover, and `--clear-cache` does. A token the user typed in is not.
@@ -1705,23 +1690,22 @@ mod tests {
         assert_eq!(default.dir, home.join(".claude"));
     }
 
-    /// The `[accounts]` table names the token-only accounts, and only the ones
-    /// that could actually be polled: an empty token, or a table with none, is
-    /// a half-finished edit rather than a second subscription.
+    /// The stored tokens name the token-only accounts, and only the ones
+    /// that could actually be polled: an empty token is a half-finished edit
+    /// rather than a second subscription, and the tunnel's is no account.
     #[test]
     fn token_accounts_are_the_named_ones_with_a_token() {
-        let text = "\
-            [accounts.work]\n\
-            token = \"sk-ant-oat01-w\"\n\
-            [accounts.blank]\n\
-            token = \"  \"\n\
-            [accounts.empty]\n\
-            [accounts.side]\n\
-            token = \"sk-ant-oat01-s\"\n";
-        assert_eq!(account_names_in(text), ["side", "work"]);
-        assert!(account_names_in("").is_empty());
-        assert!(account_names_in("not = toml [").is_empty());
-        assert!(account_names_in("accounts = 3").is_empty());
+        let secrets: crate::secrets::Secrets = [
+            ("accounts.work.token", "sk-ant-oat01-w"),
+            ("accounts.blank.token", "  "),
+            ("accounts.side.token", "sk-ant-oat01-s"),
+            ("tunnel.token", "eyJhIjoi-t"),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+        assert_eq!(account_names_in(&secrets), ["side", "work"]);
+        assert!(account_names_in(&Default::default()).is_empty());
     }
 
     /// A token account launches through `cctop as <name>`, under the
