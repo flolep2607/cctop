@@ -40,5 +40,5 @@ expression: screen
 │  tree              [ ]              Draw the table as repositories and their checkouts                               │
 │  live_only         [ ]              Only sessions that are running                                                   │
 │  age               default      ↻   Hide sessions quiet for longer than                                              │
-╰ 86   ↑↓ scroll   / filter   Esc back ────────────────────────────────────────────────────────────────────────────────╯
+╰ 87   ↑↓ scroll   / filter   Esc back ────────────────────────────────────────────────────────────────────────────────╯
 / Filter ↵ Change ⌫ Reset e Edit file , Back Alt+←→ Tabs F1 Help F10 Quit                                       ⧉ share

@@ -228,6 +228,7 @@ impl App {
             Mode::Hooks => self.on_key_hooks(key),
             Mode::ProviderStatus => self.on_key_provider_status(key),
             Mode::Insight => self.on_key_insight(key),
+            Mode::Wrapped => self.on_key_wrapped(key),
             Mode::Conversation => self.on_key_conversation(key),
             Mode::Help => self.on_key_help(key),
             Mode::DeleteBlocked | Mode::KillBlocked => self.mode = Mode::List,
@@ -1785,6 +1786,9 @@ impl App {
             // because the question they answer is about the rows underneath.
             KeyCode::Char('o') => self.open_insight("optimize"),
             KeyCode::Char('c') => self.open_insight("compare"),
+            // `Y` for year. Over the table like the two reports, and as
+            // read-only.
+            KeyCode::Char('Y') => self.open_wrapped(chrono::Datelike::year(&chrono::Local::now())),
             // `B` for browser, beside the two keys that are also about reaching
             // this machine from somewhere else. `W` puts one agent's terminal
             // in a browser; this puts the whole table in one.

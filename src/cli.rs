@@ -291,6 +291,13 @@ pub struct Args {
     #[arg(long, requires = "chat", value_name = "AGENT")]
     pub agent: Option<String>,
 
+    /// Print this machine's tally of a year, as JSON, and exit
+    ///
+    /// What `Y` in the table asks each remote for, so the year in review
+    /// counts every machine cctop reads and not only the one it runs on
+    #[arg(long, value_name = "YEAR")]
+    pub wrapped: Option<i32>,
+
     /// Print one session's whole conversation as markdown, and exit
     ///
     /// Every turn, the words verbatim and each tool call on a line, headed by a
@@ -940,6 +947,18 @@ pub fn run_chat(
         None => cctop_core::chat::build(session, before),
     };
     println!("{}", serde_json::to_string(&conversation)?);
+    Ok(())
+}
+
+/// Print this machine's tally of `year` as JSON, and exit.
+///
+/// The same re-read of every transcript `Y` does locally, on the machine that
+/// has them; the caller merges it with its own.
+pub fn run_wrapped(sessions: &[Session], year: i32, loader: &Loader) -> anyhow::Result<()> {
+    use cctop_core::insight::{from_store, wrapped};
+    let found = from_store(sessions, loader.store());
+    let tally = wrapped::tally(year, sessions, &found, &wrapped::read_history());
+    println!("{}", serde_json::to_string(&tally)?);
     Ok(())
 }
 

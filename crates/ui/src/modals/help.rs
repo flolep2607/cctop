@@ -238,6 +238,7 @@ pub(crate) fn draw_help(frame: &mut Frame, area: Rect, app: &mut App) {
         ),
         item("{optimize}", "What was spent and not got back"),
         item("{compare}", "How each model did on the work you gave it"),
+        item("{wrapped}", "Your year with the agents, a card at a time"),
         item("{hooks}  F8", "Agent integration: what reports to cctop"),
         item(
             "{provider_status}",

@@ -34,6 +34,13 @@ pub(super) enum Request {
     Insight {
         which: &'static str,
     },
+    /// Build a year's recap, from this machine and every other one on the
+    /// table. As slow as `Insight`, for the same reason, and on every machine
+    /// at once.
+    Wrapped {
+        year: i32,
+        hosts: Vec<cctop_core::fleet::Host>,
+    },
     /// A window of the open conversation view. `reach` is the machine to ask
     /// when the row is remote; `before` pages backwards through a session
     /// longer than one window.
@@ -138,6 +145,8 @@ pub(super) enum Response {
     },
     /// A finished report, already laid out as text.
     Insight(String),
+    /// A year's recap.
+    Wrapped(Box<cctop_core::insight::wrapped::Wrapped>),
     /// The answer to a [`Request::Location`].
     Location(super::location::Answer),
     /// A conversation read. `key` and `before` echo the request so an answer
@@ -547,6 +556,86 @@ pub(super) fn spawn_worker(
                         }
                     });
                     if tx.send(Response::Insight(text)).is_err() {
+                        break;
+                    }
+                }
+                Request::Wrapped { year, hosts } => {
+                    // The same walk and the same gentle pool as `Insight`; the
+                    // prompt history is one file, read beside it.
+                    let sessions = loader.load(plan);
+                    let store = loader.store();
+                    let arg = year.to_string();
+                    let arg = arg.as_str();
+                    let wrapped = loader.gently(|| {
+                        use cctop_core::insight::wrapped;
+                        // Each remote re-reads its own transcripts while this
+                        // machine reads its own: the work is theirs, and all
+                        // this side spends on them is the wait.
+                        let peers: Vec<_> = cctop_core::peer::known()
+                            .into_iter()
+                            .filter_map(|(machine, _)| cctop_core::peer::find(&machine))
+                            .collect();
+                        let query = format!("year={arg}");
+                        let query = query.as_str();
+                        let tally_of = |json: String| {
+                            serde_json::from_str::<wrapped::Tally>(&json)
+                                .map_err(|e| format!("unreadable answer: {e}"))
+                        };
+                        std::thread::scope(|scope| {
+                            // The ssh hosts, and the other cctops on the
+                            // Cloudflare account: the two ways a machine gets
+                            // onto the table.
+                            let mut asked: Vec<_> = hosts
+                                .iter()
+                                .map(|host| {
+                                    scope.spawn(move || {
+                                        let answer =
+                                            host.run(&["--wrapped", arg]).and_then(tally_of);
+                                        (host.target.clone(), answer)
+                                    })
+                                })
+                                .collect();
+                            asked.extend(peers.iter().map(|peer| {
+                                scope.spawn(move || {
+                                    let answer = peer.get("/api/wrapped", query).and_then(tally_of);
+                                    (peer.machine.clone(), answer)
+                                })
+                            }));
+                            let found = cctop_core::insight::from_store(&sessions, store);
+                            let mut tally =
+                                wrapped::tally(year, &sessions, &found, &wrapped::read_history());
+                            let mut machines = 1;
+                            let mut unreachable = Vec::new();
+                            for handle in asked {
+                                let Ok((target, answer)) = handle.join() else {
+                                    continue;
+                                };
+                                match answer {
+                                    Ok(theirs) => {
+                                        tally.merge(theirs);
+                                        machines += 1;
+                                    }
+                                    // A cctop from before the recap refuses the
+                                    // flag — clap's last line is only a pointer
+                                    // to `--help` — or, served, has no such
+                                    // page; say what either means.
+                                    Err(why)
+                                        if why.contains("--help")
+                                            || why.contains("no such page") =>
+                                    {
+                                        unreachable
+                                            .push((target, "its cctop predates the recap".into()))
+                                    }
+                                    Err(why) => unreachable.push((target, why)),
+                                }
+                            }
+                            let mut w = wrapped::finish(year, tally);
+                            w.machines = machines;
+                            w.unreachable = unreachable;
+                            w
+                        })
+                    });
+                    if tx.send(Response::Wrapped(Box::new(wrapped))).is_err() {
                         break;
                     }
                 }

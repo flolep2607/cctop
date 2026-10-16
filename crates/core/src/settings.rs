@@ -160,7 +160,7 @@ pub const PASTE_DEBOUNCE_MS: u64 = 250;
 /// pane's belong to the agent.
 ///
 // ponytail: dashboard keys only; extend to modals if someone asks to rebind one.
-pub const BINDINGS: [(&str, &str, &str); 51] = [
+pub const BINDINGS: [(&str, &str, &str); 52] = [
     ("quit", "q", "Quit"),
     ("help", "?", "Help"),
     ("settings", ",", "The settings tab, at the end of the bar"),
@@ -217,6 +217,11 @@ pub const BINDINGS: [(&str, &str, &str); 51] = [
     ("serve", "B", "Serve this table to a browser"),
     ("optimize", "o", "What was spent and not got back"),
     ("compare", "c", "How each model did on the work you gave it"),
+    (
+        "wrapped",
+        "Y",
+        "Your year with the agents, a card at a time",
+    ),
     ("hooks", "h", "Agent integration panel"),
     (
         "provider_status",

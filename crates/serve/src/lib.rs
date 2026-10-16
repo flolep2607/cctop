@@ -128,7 +128,7 @@ mod ts_types;
 // the handoff brief, and the actions.
 use api::{
     api_access, api_act, api_chat, api_chat_markdown, api_insight, api_report, api_search, api_tab,
-    find, may_act, provider_status_route,
+    api_wrapped, find, may_act, provider_status_route,
 };
 use cctop_core::actions;
 use cctop_core::fleet;
@@ -1528,6 +1528,7 @@ fn serve_connection(shared: &Shared, stream: &mut TcpStream) {
             );
             http::respond_tagged_unkept(stream, &request, http::JSON, body.as_bytes(), &version);
         }
+        "/api/wrapped" => api_wrapped(shared, stream, &request),
         "/api/hosts" => {
             let snapshot = current(shared);
             // Siblings from the process-wide poller as well as the hosts this
@@ -3210,6 +3211,44 @@ mod tests {
             let status = status_of(&guarded, "GET", target, "");
             assert!(status.contains(" 403 "), "{target}: {status}");
         }
+    }
+
+    /// The year a sibling asks for: behind the same gate as every route, this
+    /// machine's own rows only — a remote row it shows is a machine the asker
+    /// reads for itself — and a tally the asker can merge.
+    #[test]
+    fn the_wrapped_route_tallies_this_machines_own_year() {
+        let mut here = Session::new(cctop_core::pricing::Provider::Claude, "here".into());
+        here.started_at = "2026-05-01T10:00:00Z".into();
+        let mut there = Session::new(cctop_core::pricing::Provider::Claude, "there".into());
+        there.started_at = "2026-05-01T10:00:00Z".into();
+        there.remote = Some(cctop_core::session::Remote {
+            host: "box".into(),
+            ..Default::default()
+        });
+        let guarded = shared("full", "view");
+        *guarded.latest.lock().unwrap() = Arc::new(Snapshot {
+            version: 1,
+            json: "[]".to_string(),
+            rows: Vec::new(),
+            sessions: vec![here, there],
+            host_errors: Vec::new(),
+        });
+        let bearer = "Authorization: Bearer view\r\n";
+
+        let (head, body) = exchange(&guarded, "/api/wrapped?year=2026", bearer);
+        assert!(head.starts_with("HTTP/1.1 200 "), "{head}");
+        let tally: cctop_core::insight::wrapped::Tally =
+            serde_json::from_slice(&body).expect("a tally");
+        assert_eq!(
+            tally.sessions.into_iter().collect::<Vec<_>>(),
+            vec!["here".to_string()]
+        );
+
+        let (no_year, _) = exchange(&guarded, "/api/wrapped", bearer);
+        assert!(no_year.contains(" 400 "), "{no_year}");
+        let (anonymous, _) = exchange(&guarded, "/api/wrapped?year=2026", "");
+        assert!(!anonymous.contains(" 200 "), "{anonymous}");
     }
 
     /// One request through the router, as the head and the undecoded body.

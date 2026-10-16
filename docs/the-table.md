@@ -496,6 +496,7 @@ reach them was to remember which key pressed which one.
 | `t` | New tab: run an agent, a shell, or Claude on an ssh host (see below) |
 | `r` or `F5` | Refresh now |
 | `o`, `c` | What the spend was and not got back (`optimize`), and how each model did (`compare`) — see [what it cost you for](optimize-and-compare.md) |
+| `Y` | Your year with the agents, a full-screen card at a time: hours, streaks, the clock you keep, top models and projects, spend at list price. `←` `→` step, `[` `]` change year. Hours, days and projects reach back through Claude Code's prompt history (`~/.claude/history.jsonl`), which is kept; spend, models and files only as far as the transcripts, which Claude Code deletes after `cleanupPeriodDays` (30 by default) |
 | `B` | Serve this table to a browser while cctop keeps running — see [In a browser](serve.md) |
 | `Esc` | Clear the active filter |
 | `?` or `F1` | Help: every key on one page, as `[keys]` has bound them, with the version and commit on its border; `/` in it narrows the page (see below) |

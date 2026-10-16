@@ -371,6 +371,21 @@ impl Peer {
         }
     }
 
+    /// `GET path?query`, signed: the body of a 200, or why there is none —
+    /// the tunnel's lack of a connector, when the listing says it has none, as
+    /// [`read`](Self::read) puts it.
+    pub fn get(&self, path: &str, query: &str) -> Result<String, String> {
+        let offline = |why: String| match self.up {
+            true => why,
+            false => OFFLINE.into(),
+        };
+        let answer = self.send("GET", path, query, None).map_err(offline)?;
+        match answer.status {
+            200 => String::from_utf8(answer.body).map_err(|_| "its answer was not UTF-8".into()),
+            _ => Err(offline(refusal(&answer))),
+        }
+    }
+
     /// Which cctop this sibling runs, as its last answered poll said —
     /// `None` before one, and for a sibling too old to say. See
     /// [`VERSION_HEADER`].

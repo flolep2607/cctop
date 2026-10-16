@@ -1140,3 +1140,66 @@ fn address_rename() {
     app.mode = Mode::RenameAddress;
     snap("dashboard_rename", &mut app);
 }
+
+/// The year in review: the opening card, the two with charts and ranks to
+/// lay out, and the summary, whose two columns have to line up.
+#[test]
+fn wrapped() {
+    use cctop_core::insight::{Task, wrapped::Wrapped};
+    let day = |m, d| chrono::NaiveDate::from_ymd_opt(2026, m, d);
+    let mut by_hour = [0; 24];
+    for (h, n) in [
+        (9, 40),
+        (10, 55),
+        (14, 60),
+        (15, 48),
+        (22, 90),
+        (23, 70),
+        (0, 30),
+    ] {
+        by_hour[h] = n;
+    }
+    let year = Wrapped {
+        year: 2026,
+        since: day(3, 14),
+        claude_since: day(8, 10),
+        history_since: day(3, 14),
+        sessions: 404,
+        projects: 43,
+        prompts: 2445,
+        cost: 4213.6,
+        tokens: 912_000_000,
+        calls: 48_210,
+        files_edited: 1834,
+        files_one_shot: 1402,
+        hours: 405,
+        days: 163,
+        streak: (21, day(9, 30)),
+        busiest_day: day(8, 31).map(|d| (d, 14)),
+        by_month: [0, 0, 22, 31, 40, 28, 35, 61, 84, 104, 0, 0],
+        by_hour,
+        models: vec![
+            ("opus-5".into(), 2810.0),
+            ("sonnet-5".into(), 980.0),
+            ("fable-5".into(), 312.0),
+        ],
+        top_projects: vec![
+            ("cctop".into(), 212),
+            ("janestreet".into(), 61),
+            ("web".into(), 40),
+        ],
+        tasks: vec![(Task::Coding, 210), (Task::Debugging, 88)],
+        commands: vec![("/clear".into(), 320), ("/model".into(), 84)],
+        biggest: Some(("Split cctop into five crates".into(), 182.0)),
+        machines: 2,
+        unreachable: vec![("gpu-box".into(), "its cctop predates the recap".into())],
+    };
+    let mut app = fixture();
+    app.mode = Mode::Wrapped;
+    app.recap.asked = 2026;
+    app.recap.year = Some(Box::new(year));
+    for (card, name) in [(0, "intro"), (3, "clock"), (5, "models"), (10, "summary")] {
+        app.recap.card = card;
+        snap(&format!("wrapped_{name}"), &mut app);
+    }
+}

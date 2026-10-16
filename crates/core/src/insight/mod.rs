@@ -22,6 +22,7 @@ pub mod inventory;
 pub mod optimize;
 pub mod ship;
 mod unused;
+pub mod wrapped;
 
 use crate::pricing::{Plan, Provider};
 use crate::session::{Session, SessionData, ToolDetail};

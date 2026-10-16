@@ -66,6 +66,7 @@ mod toast;
 mod torn;
 mod tree;
 mod worker;
+mod wrapped;
 
 pub use runloop::{choose_palette, run};
 use share::{Opening, ShareQr};
@@ -135,6 +136,8 @@ pub enum Mode {
     Hooks,
     /// `cctop optimize` or `cctop compare`, drawn over the table.
     Insight,
+    /// The year in review, a full-screen card at a time. See [`wrapped`].
+    Wrapped,
     /// Provider status: what each vendor's status page says is broken, set
     /// against which of the user's sessions are failing. See [`outage`].
     ProviderStatus,
@@ -842,6 +845,8 @@ pub struct App {
     /// Which report was asked for, so the overlay can name itself before the
     /// text arrives.
     pub insight_kind: &'static str,
+    /// The open year in review.
+    pub recap: wrapped::Recap,
     /// The open conversation view. `None` while no overlay is up; the
     /// `Conversation` inside it is `None` while the worker is still reading.
     pub chat: Option<ChatView>,
@@ -1047,6 +1052,7 @@ impl App {
             insight: None,
             insight_scroll: 0,
             insight_kind: "optimize",
+            recap: wrapped::Recap::default(),
             chat: None,
             remote_hosts: Vec::new(),
             host_auto_hidden: false,

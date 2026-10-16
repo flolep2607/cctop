@@ -1,0 +1,43 @@
+---
+source: crates/ui/src/snapshot.rs
+expression: screen
+---
+ 1:Dashboard │ + Tab (t) ───────────────────────────────────────────────────────────────────────────────────── Settings
+
+                                 ━━━━ ━━━━ ━━━━ ━━━━ ━━━━ ━━━━ ━━━━ ━━━━ ━━━━ ━━━━ ━━━━
+
+
+
+
+
+
+
+
+
+                                             M Y    2 0 2 6    W R A P P E D
+
+                                Top models                      Top projects
+                                1 opus-5                        1 cctop
+                                2 sonnet-5                      2 janestreet
+                                3 fable-5                       3 web
+
+                                Hours with agents               Days
+                                405                             163
+
+                                Sessions                        At list price
+                                404                             $4,214
+
+                                Rhythm                          Style
+                                a night owl                     The Builder
+
+                                                  cctop wrapped · 2026
+
+
+
+
+
+
+
+
+
+                                  ←  →  step  ·  [ ]  year  ·  esc  close        11/11
