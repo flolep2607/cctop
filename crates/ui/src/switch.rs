@@ -199,13 +199,11 @@ impl App {
             true => "",
             false => "sudo ",
         };
-        let script = format!(
-            "{sudo}{quoted} --update; s=$?; \
-             if [ $s -eq 0 ]; then printf '\\nDone. If a new version went in, the dashboard's button now says switch (or press V).\\n'; \
-             else printf '\\nThe update exited %s.\\n' \"$s\"; fi; \
-             printf 'Press Enter to close this tab.\\n'; read _"
-        );
-        let argv = vec!["sh".to_string(), "-c".to_string(), script];
+        let argv = vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            update_script(sudo, &quoted),
+        ];
         self.open_command_tab(&argv, &format!("the update to v{version}"), "update");
         if let Some(pid) = self
             .tabs
@@ -253,6 +251,18 @@ impl App {
     }
 }
 
+/// The tab's script. Its messages sit in single quotes, so an apostrophe in
+/// one ends the string early and `sh` refuses the whole line — which is how
+/// the update button once failed in 51ms without running anything.
+fn update_script(sudo: &str, quoted: &str) -> String {
+    format!(
+        "{sudo}{quoted} --update; s=$?; \
+         if [ $s -eq 0 ]; then printf '\\nDone. If a new version went in, the update button now says switch (or press V).\\n'; \
+         else printf '\\nThe update exited %s.\\n' \"$s\"; fi; \
+         printf 'Press Enter to close this tab.\\n'; read _"
+    )
+}
+
 /// Whether this user may create files in `dir`, which is what replacing the
 /// binary in it takes.
 fn writable(dir: &std::path::Path) -> bool {
@@ -267,6 +277,16 @@ fn writable(dir: &std::path::Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn update_script_parses() {
+        let script = update_script("sudo ", "'/usr/local/bin/cctop'");
+        let ok = std::process::Command::new("sh")
+            .args(["-n", "-c", &script])
+            .status()
+            .expect("sh");
+        assert!(ok.success(), "{script}");
+    }
 
     fn app() -> App {
         App::new(
