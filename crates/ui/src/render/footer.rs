@@ -317,29 +317,6 @@ fn footer_badges(app: &App) -> Vec<Span<'static>> {
             Span::styled(format!(" {text} "), super::outage::footer_style(level)),
         ));
     }
-    // Installed beats available: the one thing left to do is switch, and
-    // `--update` would only say it is already done.
-    if let Some((_, version)) = &app.installed.found {
-        badges.push((
-            "update",
-            Span::styled(
-                format!(" v{version} installed — V to switch "),
-                Style::default()
-                    .fg(theme::colors().cost_mid)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ));
-    } else if let Some(version) = &app.update_available {
-        badges.push((
-            "update",
-            Span::styled(
-                format!(" v{version} available — cctop --update "),
-                Style::default()
-                    .fg(theme::colors().cost_mid)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ));
-    }
     badges
         .into_iter()
         .filter(|(name, _)| !app.hidden_footer.iter().any(|h| h == name))
@@ -464,6 +441,7 @@ pub(super) fn draw_footer(frame: &mut Frame, area: Rect, app: &App, layout: &mut
     let area = draw_link(frame, area, app);
     // `footer_hide = "share"` leaves the whole corner off.
     if app.hidden_footer.iter().any(|h| h == "share") {
+        let area = draw_update(frame, area, app, layout);
         draw_footer_keys(frame, area, app, layout);
         return;
     }
@@ -477,7 +455,10 @@ pub(super) fn draw_footer(frame: &mut Frame, area: Rect, app: &App, layout: &mut
         true => width as u16 + 2,
         false => 0,
     };
-    draw_footer_keys(
+    // The update button left of the share corner, which keeps its place
+    // whether or not there is a release to offer: a button that moved when
+    // another appeared would be clicked where it used to be.
+    let keys = draw_update(
         frame,
         Rect {
             width: area.width - reserved,
@@ -486,6 +467,7 @@ pub(super) fn draw_footer(frame: &mut Frame, area: Rect, app: &App, layout: &mut
         app,
         layout,
     );
+    draw_footer_keys(frame, keys, app, layout);
     if reserved == 0 {
         return;
     }
@@ -542,6 +524,45 @@ pub(super) fn draw_footer(frame: &mut Frame, area: Rect, app: &App, layout: &mut
         }
     }
     layout.share_corner = Some((area.y, x, x + width as u16));
+}
+
+/// The update button — `↑ v0.39.3`, then `⟳ v0.39.3 · switch` — in the
+/// cells just left of the share corner, and the footer left of it for the
+/// rest. A button rather than the badge it replaced, which only said to run
+/// `cctop --update`: clicked, it runs it (see [`crate::switch`]).
+/// `footer_hide = "update"` leaves it off, as it left the badge off.
+fn draw_update(frame: &mut Frame, area: Rect, app: &App, layout: &mut Layout) -> Rect {
+    use crate::switch::UpdateCorner;
+    if app.hidden_footer.iter().any(|h| h == "update") {
+        return area;
+    }
+    let Some(corner) = app.update_corner() else {
+        return area;
+    };
+    let label = corner.label();
+    let width = label.chars().count();
+    // A footer's worth of keys still beside it, as the link leaves.
+    if (area.width as usize) < width + 2 + LINK_MIN_HINTS {
+        return area;
+    }
+    let colors = theme::colors();
+    let style = match corner {
+        UpdateCorner::Available(_) => Style::default()
+            .fg(colors.cost_mid)
+            .add_modifier(Modifier::BOLD),
+        UpdateCorner::Updating => theme::dim(),
+        UpdateCorner::Installed(_) => Style::default()
+            .fg(colors.cost_low)
+            .add_modifier(Modifier::BOLD),
+    };
+    // Where the share corner's own one-column margin would put it.
+    let x = area.right() - width as u16 - 1;
+    frame.buffer_mut().set_string(x, area.y, &label, style);
+    layout.update_corner = Some((area.y, x, x + width as u16));
+    Rect {
+        width: x - area.x,
+        ..area
+    }
 }
 
 /// The focused remote tab's link — `☁ 118ms · 2↻ · ×4.1` — in the

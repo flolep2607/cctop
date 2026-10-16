@@ -64,6 +64,8 @@ pub struct Layout {
     /// nothing is being served. A click on it serves on this machine only;
     /// the rest of the corner is the internet.
     pub(super) share_local: Option<(u16, u16, u16)>,
+    /// The footer's update button, beside the share corner, while drawn.
+    pub(super) update_corner: Option<(u16, u16, u16)>,
     /// The rectangle a modal covers while one is up. A click inside it belongs
     /// to the modal, and a click outside it must not reach the dashboard the
     /// modal is sitting on top of.
@@ -246,6 +248,11 @@ impl Layout {
     /// Whether the cursor is on the footer's share link.
     pub fn share_corner_at(&self, col: u16, row: u16) -> bool {
         matches!(self.share_corner, Some((y, a, b)) if row == y && col >= a && col < b)
+    }
+
+    /// Whether the cursor is on the footer's update button.
+    pub fn update_corner_at(&self, col: u16, row: u16) -> bool {
+        matches!(self.update_corner, Some((y, a, b)) if row == y && col >= a && col < b)
     }
 
     /// Whether the cursor is on the armed corner's `⧉ local` half — the side
@@ -2298,6 +2305,7 @@ mod tests {
             workspace_column: false,
             share_corner: Some((24, 50, 78)),
             share_local: None,
+            update_corner: None,
             header_row: 6,
             rows_start: 7,
             rows_end: 12,
