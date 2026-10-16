@@ -773,6 +773,12 @@ fn transport_mark(transport: cctop_core::reach::Transport) -> &'static str {
     }
 }
 
+/// What a remote tab carries after its label while its link is down: being
+/// dialled again, or given up on. Glyphs as well as the cloud's colour, for
+/// whoever cannot tell the amber from the red.
+const RECONNECTING: &str = "↻ ";
+const LOST: &str = "✕ ";
+
 /// What the bar says about each tab, dashboard first: shared by the bar along
 /// the top or bottom and the one down a side, so a tab carries the same marks
 /// wherever it is drawn.
@@ -782,6 +788,8 @@ struct BarParts {
     recording: Vec<bool>,
     markers: Vec<String>,
     remote: Vec<Option<&'static str>>,
+    /// A remote tab's link that is not up — see [`link`](crate::link).
+    down: Vec<Option<cctop_core::link_health::State>>,
     new_tab: &'static str,
 }
 
@@ -809,13 +817,21 @@ fn bar_parts(app: &App) -> BarParts {
     let recording: Vec<bool> = std::iter::once(false)
         .chain(app.tabs.iter().map(tabs::Tab::recording))
         .collect();
+    let down: Vec<Option<cctop_core::link_health::State>> = (0..titles.len())
+        .map(|i| app.tab_down(i.checked_sub(1)?))
+        .collect();
     let markers: Vec<String> = (0..titles.len())
         .map(|i| {
             let tab = i.checked_sub(1).and_then(|t| app.tabs.get(t));
             let zoomed = tab.is_some_and(tabs::Tab::zoomed);
             let done = app.tab_attention(i) == Some(tabs::Attention::Done);
             format!(
-                "{}{}",
+                "{}{}{}",
+                match down[i] {
+                    Some(cctop_core::link_health::State::Lost) => LOST,
+                    Some(cctop_core::link_health::State::Reconnecting) => RECONNECTING,
+                    _ => "",
+                },
                 if done { DONE } else { "" },
                 if zoomed { ZOOM } else { "" }
             )
@@ -837,6 +853,7 @@ fn bar_parts(app: &App) -> BarParts {
         recording,
         markers,
         remote,
+        down,
         new_tab,
     }
 }
@@ -849,6 +866,7 @@ fn draw_workspace_bar(frame: &mut Frame, area: Rect, app: &App, layout: &mut Lay
         recording,
         markers,
         remote,
+        down,
         new_tab,
     } = bar_parts(app);
     let mut spans = Vec::new();
@@ -900,7 +918,7 @@ fn draw_workspace_bar(frame: &mut Frame, area: Rect, app: &App, layout: &mut Lay
         let mut width = 1u16;
         let room = match remote[i] {
             Some(mark) => {
-                spans.push(remote_span(mark, style, hues[i]));
+                spans.push(remote_span(mark, style, hues[i], down[i]));
                 width += 2;
                 cap.saturating_sub(2).max(1)
             }
@@ -989,12 +1007,23 @@ fn draw_workspace_bar(frame: &mut Frame, area: Rect, app: &App, layout: &mut Lay
 /// Dim and never bold: it says where, and the label's own colour is already
 /// saying how the agent is. A painted tab keeps its fill's ink, which dim on
 /// that fill would not be legible against.
-fn remote_span(mark: &str, style: Style, hue: Option<theme::Hue>) -> Span<'static> {
-    let quiet = match hue {
-        Some(_) => style,
-        None => style.fg(theme::colors().dim),
+fn remote_span(
+    mark: &str,
+    style: Style,
+    hue: Option<theme::Hue>,
+    down: Option<cctop_core::link_health::State>,
+) -> Span<'static> {
+    use cctop_core::link_health::State;
+    let colors = theme::colors();
+    // A link that is down is the one thing the mark is loud about, in the
+    // corner's colours for the same states, so the two read alike.
+    let look = match (down, hue) {
+        (Some(State::Lost), _) => style.fg(colors.cost_high).add_modifier(Modifier::BOLD),
+        (Some(State::Reconnecting), _) => style.fg(colors.cost_mid).remove_modifier(Modifier::BOLD),
+        (_, Some(_)) => style.remove_modifier(Modifier::BOLD),
+        _ => style.fg(colors.dim).remove_modifier(Modifier::BOLD),
     };
-    Span::styled(format!("{mark} "), quiet.remove_modifier(Modifier::BOLD))
+    Span::styled(format!("{mark} "), look)
 }
 
 /// A restart is confirmed on the tab that took it, drawn over the label once
@@ -1124,7 +1153,7 @@ fn side_row(app: &App, parts: &BarParts, i: usize, width: usize) -> Line<'static
     let style = tab_style(app, i, parts.hues[i]);
     let mut spans = vec![Span::styled(" ", style)];
     if let Some(mark) = parts.remote[i] {
-        spans.push(remote_span(mark, style, parts.hues[i]));
+        spans.push(remote_span(mark, style, parts.hues[i], parts.down[i]));
     }
     let room = width.saturating_sub(side_cells(parts, i, "")).max(1);
     let title = util::truncate(&parts.titles[i], room);

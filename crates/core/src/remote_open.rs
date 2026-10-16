@@ -945,6 +945,7 @@ fn terminal(machine: &str, path: &str, old: Old, reopen: bool) -> Result<(), Str
                 Err(NotBack::Unreached(away)) => {
                     // Keys typed at the notice are not an answer to this.
                     drop_typed();
+                    link.set_state(crate::link_health::State::Lost);
                     if !try_again(
                         machine,
                         &away,
@@ -954,6 +955,7 @@ fn terminal(machine: &str, path: &str, old: Old, reopen: bool) -> Result<(), Str
                     ) {
                         return Ok(());
                     }
+                    link.set_state(crate::link_health::State::Reconnecting);
                 }
             }
         };

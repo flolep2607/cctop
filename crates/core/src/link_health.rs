@@ -41,6 +41,11 @@ pub const STALE_AFTER: Duration = Duration::from_secs(5);
 pub enum State {
     Connected,
     Reconnecting,
+    /// Dialling again was given up on: the machine is not answering, and the
+    /// tab is waiting to be told to try again or to close. The tab bar marks
+    /// it, because a dead machine's tab otherwise looks like any other until
+    /// it is opened.
+    Lost,
 }
 
 /// What the bridge says about its link.
@@ -239,8 +244,8 @@ impl Writer {
         }
     }
 
-    /// The link is up, or down and being dialled again. Written at once: a
-    /// state change is the one thing worth a write off the beat.
+    /// The link is up, down and being dialled again, or given up on. Written
+    /// at once: a state change is the one thing worth a write off the beat.
     pub fn set_state(&self, state: State) {
         let mut changed = false;
         self.update(|stats| {
