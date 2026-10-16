@@ -60,6 +60,7 @@ pub mod peer;
 pub mod predict;
 pub mod pricing;
 pub mod proc;
+pub mod program_status;
 pub mod provider_status;
 pub mod quota;
 /// How to reach the machine a remote row came from: ssh or a sibling.

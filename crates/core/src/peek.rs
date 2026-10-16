@@ -78,11 +78,32 @@ impl Peek {
     /// for a screen no phrase matched. The caller falls back to hooks, then to
     /// the transcript, in that order.
     pub fn read(&mut self, harness: &str, pid: u32) -> Option<Screened> {
+        self.sweep();
+        // What the agent says of itself comes first, for any harness that
+        // says it: see [`crate::program_status`].
+        if let Some(status) = self
+            .pane(pid)
+            .and_then(|pane| crate::program_status::of_pane(&pane))
+        {
+            let rows = self.screen(pid);
+            return Some(from_status(harness, &status, rows.as_deref()));
+        }
         // Checked before the borrow: a harness with no footer row to match has
         // no screen worth capturing.
         if !crate::screen::screenable(harness) {
             return None;
         }
+        let rows = self.screen(pid)?;
+        finish(harness, &rows)
+    }
+
+    /// The rmux pane holding `pid`, from the last sweep.
+    fn pane(&self, pid: u32) -> Option<String> {
+        crate::inject::pane_in(&self.sys, self.panes.as_deref()?, pid)
+    }
+
+    /// Take the pane list and the process table again, once they are stale.
+    fn sweep(&mut self) {
         if self.swept_at.elapsed() >= SWEEP_STALE {
             self.sys.refresh_processes_specifics(
                 ProcessesToUpdate::All,
@@ -92,8 +113,6 @@ impl Peek {
             self.panes = crate::inject::list_panes();
             self.swept_at = std::time::Instant::now();
         }
-        let rows = self.screen(pid)?;
-        finish(harness, &rows)
     }
 
     /// The screen holding `pid`, as text rows.
@@ -115,9 +134,41 @@ impl Peek {
 /// the exact pane rather than prefix-matching a neighbour. Free of [`Peek`]'s
 /// sweeps because it needs neither.
 pub fn named(name: &str) -> Option<Screened> {
+    if let Some(status) = crate::program_status::of_session(name) {
+        let rows = crate::rmux::capture(name).map(|capture| replay(&capture));
+        return Some(from_status(
+            crate::screen::harness_of(name),
+            &status,
+            rows.as_deref(),
+        ));
+    }
     let capture = crate::rmux::capture(name)?;
     let rows = replay(&capture);
     finish(crate::screen::harness_of(name), &rows)
+}
+
+/// What an agent reported of itself, with the screen read only for what the
+/// report does not carry: the detail of the prompt it is blocked on.
+pub fn from_status(
+    harness: &str,
+    status: &crate::program_status::Status,
+    rows: Option<&[String]>,
+) -> Screened {
+    let signal = status.signal();
+    let asking = signal == crate::hook::Signal::NeedsInput;
+    let rows = rows.filter(|_| asking && crate::screen::screenable(harness));
+    let ask = rows.and_then(|rows| crate::screen::screen_ask(harness, rows));
+    // The report's kind, where it gave one; the screen's reading where not.
+    let question = asking
+        && match status.kind {
+            Some(_) => status.question(),
+            None => rows.is_some_and(|rows| crate::screen::screen_question(harness, rows)),
+        };
+    Screened {
+        signal,
+        ask,
+        question,
+    }
 }
 
 /// The harness name, a recognized screen, and nothing else in the answer.

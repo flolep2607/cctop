@@ -17,6 +17,11 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::theme::Hue;
 
+/// How stale an agent's own report may be before a pane asks rmux again:
+/// fresher than the screen recognizer's still-screen wait, and a round trip a
+/// second per pane rather than sixty.
+const PROGRAM_EVERY: Duration = Duration::from_millis(1000);
+
 /// How long a pane's screen has to sit still before the agent counts as idle.
 ///
 /// An agent that is working repaints constantly — Claude Code's "✻ Baked for
@@ -232,6 +237,11 @@ pub struct Pane {
     /// cannot have a different answer, so the reading is kept and the layout only
     /// redone when the pane has actually moved.
     read: Option<(ScreenPlace, ScreenReading)>,
+    /// What the agent last reported of itself through rmux, and when that was
+    /// asked: see [`cctop_core::program_status`]. Asked at most once per
+    /// [`PROGRAM_EVERY`], because `read_screen` runs every tick and the report
+    /// is a round trip to the daemon.
+    program: Option<(Instant, Option<cctop_core::program_status::Status>)>,
     /// Whether this pane's rmux client holds the window; see [`Fit`].
     pub fit: Fit,
     /// When this pane started its agent. `None` for a pane opened onto an
@@ -338,6 +348,7 @@ impl Pane {
             view: cctop_core::attach::Attach::for_test(),
             drew_at: Instant::now(),
             read: None,
+            program: None,
             fit: Fit::default(),
             started: None,
             exited: None,
@@ -438,7 +449,24 @@ impl Pane {
     /// that has neither.
     pub fn read_screen(&mut self) -> Option<cctop_core::peek::Screened> {
         // A dead agent's last frame is not a turn it is in.
-        if self.dead.is_some() || !cctop_core::screen::screenable(self.harness()) {
+        if self.dead.is_some() {
+            return None;
+        }
+        // The agent's own word, where it gives one, for any harness that does.
+        if let Some(status) = self.program_status() {
+            let screen = self.view.parser.screen();
+            let (_, cols) = screen.size();
+            let rows: Vec<String> = match status.signal() {
+                cctop_core::hook::Signal::NeedsInput => screen.rows(0, cols).collect(),
+                _ => Vec::new(),
+            };
+            return Some(cctop_core::peek::from_status(
+                self.harness(),
+                &status,
+                Some(&rows),
+            ));
+        }
+        if !cctop_core::screen::screenable(self.harness()) {
             return None;
         }
         // Only a screen that has changed since the last reading can have a
@@ -476,6 +504,20 @@ impl Pane {
             ask,
             question,
         })
+    }
+
+    /// The agent's report from rmux, asked again once [`PROGRAM_EVERY`] has
+    /// passed. Only a pane on an rmux session has one to ask for.
+    fn program_status(&mut self) -> Option<cctop_core::program_status::Status> {
+        let name = self.rmux.as_deref()?;
+        match &self.program {
+            Some((at, status)) if at.elapsed() < PROGRAM_EVERY => status.clone(),
+            _ => {
+                let status = cctop_core::program_status::of_session(name);
+                self.program = Some((Instant::now(), status.clone()));
+                status
+            }
+        }
     }
 
     /// Whether the agent has gone quiet long enough to count as waiting for you.
@@ -727,6 +769,7 @@ impl Pane {
             hosted: Some(hosted),
             drew_at: Instant::now(),
             read: None,
+            program: None,
             fit: Fit::default(),
             started,
             exited: None,
@@ -756,6 +799,7 @@ impl Pane {
             view: cctop_core::attach::attach(pid)?,
             drew_at: Instant::now(),
             read: None,
+            program: None,
             fit: Fit::default(),
             started: None,
             exited: None,
@@ -2128,6 +2172,7 @@ Enter to select · ↑/↓ to navigate · Esc to cancel";
             view: cctop_core::attach::Attach::for_test(),
             drew_at: Instant::now() - Duration::from_secs(ago),
             read: None,
+            program: None,
             fit: Fit::default(),
             started: None,
             exited: None,
