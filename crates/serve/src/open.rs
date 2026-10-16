@@ -651,12 +651,18 @@ fn pump(
                             redraw(&term.master);
                         }
                     }
-                    Ok(Some((Op::Binary | Op::Other(_), keys))) => {
+                    // Binary is keys — a fragmented message too, which the
+                    // decoder hands back whole under the opcode it began with.
+                    Ok(Some((Op::Binary, keys))) => {
                         if (&term.master).write_all(&keys).is_err() {
                             let _ = stream.write_all(&frame(Op::Close, b"", false));
                             return Pumped::Ended;
                         }
                     }
+                    // An opcode newer than this build, from a newer tab: not
+                    // known to be keys, and typed into an agent as though it
+                    // were, it could say anything. Passed over.
+                    Ok(Some((Op::Other(_), _))) => {}
                     Ok(None) => break,
                 }
             }
@@ -997,8 +1003,14 @@ mod tests {
             }
         };
         until(&mut up, "opened claude abc 30 100");
-        up.write_all(&frame(Op::Binary, b"hello\r", true)).unwrap();
-        until(&mut up, "got hello");
+        // A data opcode this build has no meaning for is not typed; a
+        // message split in two is, whole.
+        up.write_all(&frame(Op::Other(0x3), b"junk", true)).unwrap();
+        up.write_all(&[0x02, 3, b'h', b'e', b'l']).unwrap();
+        up.write_all(&[0x80, 3, b'l', b'o', b'\r']).unwrap();
+        // Not "got hello": were the junk typed, that line would never come,
+        // and the wait would be the failure. The check is at the end.
+        until(&mut up, "hello");
         up.write_all(&frame(
             Op::Text,
             ws::resize_message(120, 40).as_bytes(),
@@ -1007,6 +1019,8 @@ mod tests {
         .unwrap();
         up.write_all(&frame(Op::Binary, b"\r", true)).unwrap();
         until(&mut up, "now 40 120");
+        assert!(screen.contains("got hello"), "{screen}");
+        assert!(!screen.contains("junk"), "{screen}");
         up.write_all(&frame(Op::Close, b"", true)).unwrap();
         server.join().unwrap();
     }

@@ -329,8 +329,13 @@ pub fn info(
         // is the one thing this line cannot afford.
         let local = cctop_core::update::current_version();
         let skew = match &r.skew {
+            // Only ssh runs `--update` over there; a sibling reached through
+            // its tunnel is told, not offered.
+            Some(cctop_core::fleet::Skew::Older(v)) if via == cctop_core::reach::OVER_SSH => Some(
+                format!("{v} there, {local} here — Enter offers to update it"),
+            ),
             Some(cctop_core::fleet::Skew::Older(v)) => Some(format!(
-                "{v} there, {local} here — Enter offers to update it"
+                "{v} there, {local} here — run cctop --update there"
             )),
             Some(cctop_core::fleet::Skew::Newer(v)) => Some(format!(
                 "{v} there, {local} here — this one is behind; cctop --update"

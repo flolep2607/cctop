@@ -409,6 +409,16 @@ pub fn parse(host: &str, json: &str) -> Result<Vec<Session>, String> {
         .ok_or("output was not the array --json produces")?;
 
     let mut rows: Vec<Session> = list.iter().filter_map(|v| row(host, v)).collect();
+    let unknown = list
+        .iter()
+        .filter(|v| {
+            let word = text(v, "provider");
+            !word.is_empty() && Provider::parse(word).is_none()
+        })
+        .count();
+    if let Ok(mut held) = UNKNOWN_HARNESS.lock() {
+        held.insert(host.to_string(), unknown);
+    }
     // The abbreviation has to be computed over this host's paths as a set —
     // that is what makes it an abbreviation — and separately from the local
     // ones, whose directory tree has nothing to do with this machine's.
@@ -419,10 +429,31 @@ pub fn parse(host: &str, json: &str) -> Result<Vec<Session>, String> {
     Ok(rows)
 }
 
+/// How many rows each host's last answer carried from a harness this build
+/// does not know — dropped by [`row`], and counted here so the drop is not
+/// silent. Read by [`unknown_harness`].
+static UNKNOWN_HARNESS: std::sync::Mutex<std::collections::BTreeMap<String, usize>> =
+    std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+/// How many sessions `host`'s last answer had from a harness this cctop does
+/// not know, and so left out of the table.
+///
+/// A count rather than the rows: the rows cannot be shown honestly (see
+/// [`row`]), but the number is what explains a machine that looks quieter
+/// here than it is — and it is always the far side being newer, so the
+/// version skew's line is where it is said.
+pub fn unknown_harness(host: &str) -> usize {
+    UNKNOWN_HARNESS
+        .lock()
+        .ok()
+        .and_then(|held| held.get(host).copied())
+        .unwrap_or(0)
+}
+
 fn row(host: &str, v: &Value) -> Option<Session> {
     // A provider this build has never heard of: the far side is newer. Dropping
     // the row loses one session; guessing would file it under a harness it is
-    // not and put its cost in the wrong column.
+    // not and put its cost in the wrong column. [`parse`] counts the drops.
     let provider = Provider::parse(text(v, "provider"))?;
     let id = text(v, "session_id");
     if id.is_empty() {
@@ -463,6 +494,14 @@ fn row(host: &str, v: &Value) -> Option<Session> {
         "waiting" => ActivityState::WaitingForInput,
         "asking" => ActivityState::Asking,
         "error" => ActivityState::ApiError,
+        // "working", absent, and a word a newer far side added all land here.
+        // Not because a new word is known to mean working, but because none
+        // of the others is a safer guess: waiting says the turn is over and
+        // nobody need look, asking and error claim the row wants a person —
+        // and an idle-or-unknown variant would be one more state for every
+        // view to draw. Working is also what a row is told by `running`,
+        // which the far side sends separately and which this does not touch:
+        // an ended session reads as ended whatever its state word said.
         _ => ActivityState::Working,
     };
     // What the question is, when a newer peer on the far side recorded one.
@@ -677,6 +716,27 @@ mod tests {
         assert_eq!(rows[0].cost_hour, 0.75);
     }
 
+    /// A subagent from another build — a status this one has no word for, a
+    /// field it never sent — still arrives, with its cost.
+    #[test]
+    fn a_subagent_from_another_build_keeps_its_cost() {
+        let json = r#"[{
+            "provider": "claude", "session_id": "abc",
+            "subagents": [
+                {"agent_id": "a1", "type": "explore", "status": "paused-for-review",
+                 "cost": 0.5, "tool_count": 3},
+                {"agent_id": "a2", "status": "running", "cost": 0.25}
+            ]
+        }]"#;
+        let rows = parse("box-subagents", json).expect("parses");
+        let subs = &rows[0].subagents;
+        assert_eq!(subs.len(), 2, "neither is dropped");
+        assert_eq!(subs[0].status, crate::session::SubagentStatus::Done);
+        assert_eq!(subs[0].description, "", "absent, so empty");
+        assert_eq!(subs[1].status, crate::session::SubagentStatus::Running);
+        assert_eq!(rows[0].subagents_cost, 0.75);
+    }
+
     /// The far side is a different build. A row missing everything optional
     /// still has to arrive, because the alternative is a machine that vanishes
     /// from the table the day it is upgraded.
@@ -687,12 +747,16 @@ mod tests {
             {"provider": "codex"},
             {"provider": "some-future-agent", "session_id": "y"}
         ]"#;
-        let rows = parse("box", json).expect("parses");
+        let rows = parse("box-of-futures", json).expect("parses");
         assert_eq!(
             rows.len(),
             1,
             "no id and no known provider are both dropped"
         );
+        // Only the unknown harness is counted: a row with no id is broken,
+        // not news from a newer build.
+        assert_eq!(unknown_harness("box-of-futures"), 1);
+        assert_eq!(unknown_harness("never-polled"), 0);
         assert_eq!(rows[0].session_id, "x");
         assert!(!rows[0].is_running());
         assert!(crate::branch::branch_of(&rows[0]).is_none());

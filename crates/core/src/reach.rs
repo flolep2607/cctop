@@ -123,6 +123,10 @@ pub fn reach(machine: &str, ssh: Option<&Host>) -> Result<Reach, Unreached> {
     Ok(Reach::Peer(sibling))
 }
 
+/// What [`Reach::via`] says for an ssh host — the one transport that runs a
+/// command over there, which a line offering `--update` has to tell apart.
+pub const OVER_SSH: &str = "over ssh";
+
 impl Reach {
     /// The machine's name, as the HOST column shows it.
     pub fn machine(&self) -> &str {
@@ -143,7 +147,7 @@ impl Reach {
     /// How the answer travels, for a line that says what it is waiting on.
     pub fn via(&self) -> &'static str {
         match self {
-            Reach::Ssh(_) => "over ssh",
+            Reach::Ssh(_) => OVER_SSH,
             Reach::Peer(_) => "through its Cloudflare tunnel",
         }
     }
