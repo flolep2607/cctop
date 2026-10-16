@@ -159,6 +159,7 @@ pub fn run(
     // so reopening the dashboard restores the workspace rather than making the
     // user find and reopen every surviving agent through the launcher.
     app.restore_running_tabs();
+    app.land_after_switch();
 
     // Attach before the first frame: the agent cctop was asked to launch is the
     // reason it is running, so it should be on screen and not behind a keypress.
@@ -893,6 +894,8 @@ fn event_loop(
         // A remote tab's link is written by its bridge, another process, so
         // the corner only learns of it by reading — at most once a second.
         app.needs_redraw |= app.tick_link();
+        // Another process replaces the binary; only a look notices.
+        app.needs_redraw |= app.tick_installed();
         // The footer's own line refreshes on its own clock, and its command
         // answers on a channel nothing polls but this.
         app.needs_redraw |= app.footer_extra.tick();
