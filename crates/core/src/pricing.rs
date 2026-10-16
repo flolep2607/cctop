@@ -441,7 +441,14 @@ fn best_match(
 /// so an exact listing always beats a fuzzy match on either form. Last tier is any
 /// key containing the name, which is what answers for an undated model whose only
 /// listing is dated.
+///
+/// A blank name has no price. Every key contains the empty string, so it would
+/// otherwise fall through to the last tier and take the shortest listing's
+/// rate: $707 of one user's tokens were priced as a model nobody ran.
 fn lookup<'a>(table: &'a HashMap<String, LitellmEntry>, model: &str) -> Option<&'a LitellmEntry> {
+    if model.trim().is_empty() {
+        return None;
+    }
     let stem = model.rsplit('/').next().filter(|s| *s != model);
     let names = || std::iter::once(model).chain(stem);
     table
@@ -1038,6 +1045,9 @@ mod tests {
         // A dated variant still answers for the undated name.
         assert!(lookup(&table, "claude-sonnet-4-5").is_some());
         assert!(lookup(&table, "gpt-nope").is_none());
+        // A blank name is contained in every key; it must not match one.
+        assert!(lookup(&table, "").is_none());
+        assert!(lookup(&table, "  ").is_none());
     }
 
     /// A vendor-prefixed name whose bare form is listed must take the bare price,
