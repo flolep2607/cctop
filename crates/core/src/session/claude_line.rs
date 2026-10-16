@@ -211,6 +211,20 @@ pub(crate) struct Attachment<'a> {
     pub content: Raw<'a>,
 }
 
+/// Whether a transcript line is one of the records Claude Code 2.1.300 began
+/// writing beside each API request — `api-request`, and its `-blob` and
+/// `-shape` — which hold the system prompt, the tools and the parameters, so a
+/// shared transcript can replay the request.
+///
+/// Nothing cctop shows is in them, and they are most of the file: three
+/// quarters of a long session's bytes, each line tens of kilobytes that a full
+/// parse walks only to throw away. Claude Code writes `type` first, so the
+/// prefix is the whole test; a line that put it elsewhere would still parse,
+/// and be ignored by kind as before, only more slowly.
+fn is_request_record(bytes: &[u8]) -> bool {
+    bytes.starts_with(br#"{"type":"api-request"#)
+}
+
 impl<'a> Line<'a> {
     /// Read one line, or `None` when it is not JSON.
     ///
@@ -218,6 +232,9 @@ impl<'a> Line<'a> {
     /// the `Value` walk, and is checked for here: serde's derive would take a
     /// struct positionally from an array.
     pub(crate) fn parse(bytes: &'a [u8]) -> Option<Line<'a>> {
+        if is_request_record(bytes) {
+            return Some(Line::default());
+        }
         if bytes.trim_ascii_start().first() != Some(&b'{') {
             serde_json::from_slice::<IgnoredAny>(bytes).ok()?;
             return Some(Line::default());
@@ -232,6 +249,9 @@ impl<'a> Line<'a> {
     /// [`IgnoredAny`], which walks the JSON without allocating it. Dropping
     /// the line whole silently loses its tokens and their cost.
     pub(crate) fn slim(bytes: &'a [u8]) -> Option<Line<'a>> {
+        if is_request_record(bytes) {
+            return None;
+        }
         #[derive(Default, Deserialize)]
         #[serde(default)]
         struct Slim<'b> {
@@ -499,5 +519,20 @@ mod tests {
         assert!(matches!(message.content, Shape::Other));
         assert!(Line::slim(br#"{"type":"user","message":{"content":"big"}}"#).is_none());
         assert!(Line::slim(br#"{"message":{"usage":{}}}"#).is_none());
+    }
+
+    /// The request records are passed over before parsing, and say nothing;
+    /// a line that only starts like one is not.
+    #[test]
+    fn request_records_are_skipped_unread() {
+        for kind in ["api-request", "api-request-blob", "api-request-shape"] {
+            let line = format!(r#"{{"type":"{kind}","sessionId":"s","body":{{"system":"long"}}}}"#);
+            let read = Line::parse(line.as_bytes()).expect("a line");
+            assert!(read.kind.get().is_none(), "{kind}");
+            assert!(Line::slim(line.as_bytes()).is_none(), "{kind}");
+        }
+        let assistant =
+            br#"{"type":"assistant","message":{"id":"m","model":"x","usage":{"input_tokens":1}}}"#;
+        assert!(Line::parse(assistant).unwrap().kind.get().is_some());
     }
 }
