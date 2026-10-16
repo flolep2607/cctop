@@ -164,11 +164,46 @@ pub fn screen_state(harness: &str, rows: &[String]) -> Option<crate::hook::Signa
     let any = |rules: &[&[&str]]| rules.iter().any(|all| all.iter().all(|p| text.contains(p)));
     if any(footer.asking) {
         Some(Signal::NeedsInput)
-    } else if any(footer.working) {
+    } else if any(footer.working) || (harness == "claude" && claude_spinner(rows)) {
         Some(Signal::Busy)
     } else {
         None
     }
+}
+
+/// How far up from the bottom Claude Code's spinner line can sit: the prompt
+/// box, the status line, the mode hint and a few rows of the subagent list
+/// are drawn below it.
+const SPINNER_ROWS: usize = 16;
+
+/// Whether Claude Code's working line is on screen: `✽ Improvising… (14s · ↓
+/// 1.1k tokens)`.
+///
+/// Its footer used to end `esc to interrupt`, which [`FOOTERS`] matches; by
+/// 2.1.300 it does not, and with subagents running their list is drawn under
+/// the prompt box, so the last two rows say nothing about the turn. What stays
+/// is the spinner line above the box: a spinner glyph, a gerund ending in an
+/// ellipsis, and the elapsed time in brackets. The finished turn's line has no
+/// ellipsis — `✻ Baked for 5s` — and neither does anything else Claude Code
+/// prefixes with those glyphs, so the three together are the turn running.
+/// Captured off a real 2.1.300 screen (#337's tab).
+fn claude_spinner(rows: &[String]) -> bool {
+    const GLYPHS: &[char] = &['✻', '✽', '✶', '✳', '✢', '·', '*', '✺', '✹'];
+    rows.iter()
+        .map(|row| row.trim_matches(|c: char| c == '│' || c.is_whitespace()))
+        .filter(|row| !row.is_empty())
+        .rev()
+        .take(SPINNER_ROWS)
+        .any(|row| {
+            let mut chars = row.chars();
+            let glyph = chars.next().is_some_and(|c| GLYPHS.contains(&c));
+            let rest = chars.as_str();
+            glyph
+                && rest.starts_with(' ')
+                && rest
+                    .split_once("… (")
+                    .is_some_and(|(word, timer)| !word.trim().is_empty() && timer.ends_with(')'))
+        })
 }
 
 /// Whether the prompt on `harness`'s screen is a question with choices — Claude
@@ -293,4 +328,58 @@ pub fn harness_of(name: &str) -> &str {
         .split(['-', ' ', '·', '@'])
         .next()
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Claude Code 2.1.300 no longer ends its footer `esc to interrupt`, and
+    /// with subagents running their list is drawn under the prompt box. The
+    /// spinner line above the box is what says a turn is running; the finished
+    /// turn's line and the background-agents line are not it. Rows off a real
+    /// screen, box edges and all.
+    #[test]
+    fn claude_2_1_300_reads_as_working_by_its_spinner_line() {
+        let screen =
+            |lines: &[&str]| -> Vec<String> { lines.iter().map(|l| l.to_string()).collect() };
+        let working = screen(&[
+            "│✻ Waiting for 3 background agents to finish         │",
+            "│● Agent \"Status audit of remaining items\" finished · 6m 20s │",
+            "│✽ Improvising… (14s · ↓ 1.1k tokens)                 │",
+            "│                                  ◐ medium · /effort  │",
+            "│──────────────────────────────────────────────────────│",
+            "│❯                                                     │",
+            "│──────────────────────────────────────────────────────│",
+            "│  [PONYTAIL]                                          │",
+            "│  ⏵⏵ accept edits on (shift+tab to cycle) · /tasks to see subagents │",
+            "│  ● main                                              │",
+            "│  ◯ general-purpose  Running entity_rebuild selftest   7m 1s · ↓ 103.7k tokens  │",
+        ]);
+        assert_eq!(
+            screen_state("claude", &working),
+            Some(crate::hook::Signal::Busy)
+        );
+
+        let finished = screen(&[
+            "✻ Baked for 5s",
+            "✻ Waiting for 3 background agents to finish",
+            "────────────",
+            "❯",
+            "────────────",
+            "  ⏵⏵ accept edits on (shift+tab to cycle)",
+        ]);
+        assert_eq!(screen_state("claude", &finished), None);
+
+        // A prompt still wins over a spinner left above it.
+        let asking = screen(&[
+            "✽ Improvising… (3s · ↓ 10 tokens)",
+            "Do you want to proceed?",
+            "Esc to cancel · Tab to amend",
+        ]);
+        assert_eq!(
+            screen_state("claude", &asking),
+            Some(crate::hook::Signal::NeedsInput)
+        );
+    }
 }

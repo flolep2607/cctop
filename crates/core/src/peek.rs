@@ -134,17 +134,24 @@ impl Peek {
 /// the exact pane rather than prefix-matching a neighbour. Free of [`Peek`]'s
 /// sweeps because it needs neither.
 pub fn named(name: &str) -> Option<Screened> {
+    named_read(name).flatten()
+}
+
+/// [`named`], telling apart a screen that was read and said nothing — `Some
+/// (None)` — from one that could not be read at all. A read with no prompt on
+/// it is evidence too: that whatever was asked is no longer being asked.
+pub fn named_read(name: &str) -> Option<Option<Screened>> {
     if let Some(status) = crate::program_status::of_session(name) {
         let rows = crate::rmux::capture(name).map(|capture| replay(&capture));
-        return Some(from_status(
+        return Some(Some(from_status(
             crate::screen::harness_of(name),
             &status,
             rows.as_deref(),
-        ));
+        )));
     }
     let capture = crate::rmux::capture(name)?;
     let rows = replay(&capture);
-    finish(crate::screen::harness_of(name), &rows)
+    Some(finish(crate::screen::harness_of(name), &rows))
 }
 
 /// What an agent reported of itself, with the screen read only for what the
