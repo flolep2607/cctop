@@ -317,7 +317,19 @@ fn footer_badges(app: &App) -> Vec<Span<'static>> {
             Span::styled(format!(" {text} "), super::outage::footer_style(level)),
         ));
     }
-    if let Some(version) = &app.update_available {
+    // Installed beats available: the one thing left to do is switch, and
+    // `--update` would only say it is already done.
+    if let Some((_, version)) = &app.installed.found {
+        badges.push((
+            "update",
+            Span::styled(
+                format!(" v{version} installed — V to switch "),
+                Style::default()
+                    .fg(theme::colors().cost_mid)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ));
+    } else if let Some(version) = &app.update_available {
         badges.push((
             "update",
             Span::styled(

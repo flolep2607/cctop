@@ -1762,6 +1762,7 @@ impl App {
             KeyCode::Char('e') => self.toggle_expanded(),
             KeyCode::Char('E') => self.toggle_expanded_all(),
             KeyCode::Char('U') => self.unmark_all(),
+            KeyCode::Char('V') => self.switch_to_installed(),
             KeyCode::Char('D') => self.batch(BatchKind::Delete),
             // In the idle view `K` stops what the view found, skipping what is
             // in use, rather than refusing the batch over one row: the view is

@@ -58,6 +58,7 @@ mod signals;
 mod snapshot;
 pub mod spark;
 mod styled;
+mod switch;
 mod table;
 pub mod tabs;
 pub mod theme;
@@ -69,6 +70,7 @@ mod worker;
 pub use runloop::{choose_palette, run};
 use share::{Opening, ShareQr};
 pub use share::{ServeRequest, Served, StartServer};
+pub use switch::requested as switch_requested;
 use worker::Request;
 
 use cctop_core::cache::UiPrefs;
@@ -696,6 +698,9 @@ pub struct App {
     pub quota: Quota,
     /// Version of a newer published release, when one exists.
     pub update_available: Option<String>,
+    /// A newer cctop installed under this running one, which `V` switches
+    /// to. See [`switch`].
+    pub installed: switch::Installed,
     /// What cctop has said lately, held until each has been up long enough to
     /// read. See [`toast`].
     pub toasts: toast::Toasts,
@@ -1176,6 +1181,7 @@ impl App {
             remote_update: None,
             remote_updating: std::collections::HashSet::new(),
             update_available: None,
+            installed: switch::Installed::default(),
             toasts: toast::Toasts::default(),
             started_at: chrono::Utc::now().to_rfc3339(),
             started: Instant::now(),

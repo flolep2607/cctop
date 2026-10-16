@@ -1395,6 +1395,56 @@ fn relaunch() {
     println!("Could not start the new version ({error}); continuing.");
 }
 
+/// The binary now at this one's path, when it is not this one: `--update`
+/// (or a package manager) put a new file there while this cctop ran.
+///
+/// Replacing a running binary is always a rename over it — writing into it
+/// fails with ETXTBSY — so the kernel names this process's image
+/// `… (deleted)`, and a file at the plain path is the new one. A stat, so a
+/// loop can ask every few seconds.
+pub fn replaced() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    if exe.exists() {
+        return None;
+    }
+    let now = on_disk(exe.clone());
+    (now != exe && now.is_file()).then_some(now)
+}
+
+/// The version `exe` says it is, by running `exe --version`, which every
+/// release answers: `cctop 0.39.2`.
+pub fn version_of(exe: &Path) -> Option<String> {
+    let out = std::process::Command::new(exe)
+        .arg("--version")
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    let text = String::from_utf8(out.stdout).ok()?;
+    let version = text.split_whitespace().nth(1)?;
+    (out.status.success() && version.split('.').all(|n| n.parse::<u32>().is_ok()))
+        .then(|| version.to_string())
+}
+
+/// The variable a switched-to cctop finds the tab it should show in: the
+/// index the old one was on, counting the dashboard as 0.
+pub const SWITCHED_TAB: &str = "CCTOP_SWITCHED_TAB";
+
+/// Become the binary at `exe`, in this terminal, with this run's arguments:
+/// the dashboard's "switch to the version just installed".
+///
+/// Called once the UI has shut down as it does on quit, so every tab's client
+/// has been let go and the terminal is back to normal. Nothing an agent needs
+/// is in this process — they live in the daemon — so the new cctop reattaches
+/// them all the way a fresh start does, and puts the dashboard on `tab`.
+/// Returns only on failure, with why.
+pub fn switch_to(exe: &Path, tab: usize) -> std::io::Error {
+    use std::os::unix::process::CommandExt;
+    let mut command = relaunch_command(exe.to_path_buf(), std::env::args_os().skip(1).collect());
+    command.env(SWITCHED_TAB, tab.to_string());
+    command.exec()
+}
+
 /// Have the binary now at this one's path — the new version, after an update —
 /// bring the hooks in line with the form it writes.
 ///

@@ -553,6 +553,13 @@ fn main() -> anyhow::Result<()> {
         hosted,
         serve_for_dashboard,
     )?;
+    // `V` on the dashboard: the UI is down as on quit, every tab's client let
+    // go, so this becomes the cctop installed under it, which reattaches them.
+    if let Some((exe, tab)) = ui::switch_requested() {
+        let error = cctop_core::update::switch_to(&exe, tab);
+        eprintln!("Could not start {}: {error}", exe.display());
+        std::process::exit(1);
+    }
     // After the UI is down, so the message is not painted over by the alternate
     // screen being restored.
     finish_trace(&args);
