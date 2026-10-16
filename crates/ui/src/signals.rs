@@ -36,6 +36,14 @@ fn stall_view(reports: &cctop_core::hook::Reports, session_id: &str) -> cctop_co
     }
 }
 
+/// A detached sweep's answer: what each screen said, and which of them were
+/// read and showed no prompt, with when.
+#[derive(Default)]
+pub(crate) struct Peeked {
+    pub read: HashMap<u32, cctop_core::peek::Screened>,
+    pub unprompted: HashMap<u32, Instant>,
+}
+
 impl App {
     /// Promote every held permission prompt whose grace has expired, and say
     /// whether any had.
@@ -306,6 +314,18 @@ impl App {
         // Always run, even with nothing new to stamp: `asking_for` is only
         // ever set here, and a row has to lose it when the prompt that named
         // it went away — including by the last report being swept.
+        // Questions a later screen shows were answered: see [`Self::prompt_gone`].
+        let answered: std::collections::HashSet<String> = self
+            .sessions
+            .iter()
+            .filter(|session| {
+                self.reports
+                    .report(&session.session_id)
+                    .is_some_and(|r| r.signal == cctop_core::hook::Signal::NeedsInput)
+                    && session.root_pid().is_some_and(|pid| self.prompt_gone(pid))
+            })
+            .map(|session| session.session_id.clone())
+            .collect();
         let peeked = &self.peeked;
         let screens = &self.screen_read;
         for session in &mut self.sessions {
@@ -317,7 +337,21 @@ impl App {
             let screened = session
                 .root_pid()
                 .and_then(|pid| peeked.get(&pid).or_else(|| screens.get(&pid)));
-            session.apply_reports(self.reports.report(&session.session_id), screened);
+            // What closed it was a screen with no prompt on it, so it goes in
+            // as one: a screen reading outranks the report, and one at work
+            // takes a row out of asking, as a read screen always has.
+            let moved_on =
+                answered
+                    .contains(&session.session_id)
+                    .then_some(cctop_core::peek::Screened {
+                        signal: cctop_core::hook::Signal::Busy,
+                        ask: None,
+                        question: false,
+                    });
+            session.apply_reports(
+                self.reports.report(&session.session_id),
+                screened.or(moved_on.as_ref()),
+            );
             self.reports.stamp_sandbox(session);
         }
         // Here because every rebuild of the rows passes through here, and a
@@ -398,12 +432,26 @@ impl App {
             self.peeked_listing = None;
             return had;
         }
-        let read: HashMap<u32, cctop_core::peek::Screened> = self
-            .tabs
-            .iter_mut()
-            .flat_map(|tab| tab.panes.iter_mut())
-            .filter_map(|pane| Some((pane.agent(), pane.read_screen()?)))
-            .collect();
+        let now = Instant::now();
+        let mut read: HashMap<u32, cctop_core::peek::Screened> = HashMap::new();
+        let mut unprompted: HashMap<u32, Instant> = HashMap::new();
+        for pane in self.tabs.iter_mut().flat_map(|tab| tab.panes.iter_mut()) {
+            let screenable = cctop_core::screen::screenable(pane.harness());
+            match pane.read_screen() {
+                Some(screened) => {
+                    if screened.signal != cctop_core::hook::Signal::NeedsInput {
+                        unprompted.insert(pane.agent(), now);
+                    }
+                    read.insert(pane.agent(), screened);
+                }
+                // A screen in words cctop knows that matched no prompt.
+                None if screenable && pane.dead.is_none() => {
+                    unprompted.insert(pane.agent(), now);
+                }
+                None => {}
+            }
+        }
+        self.unprompted = unprompted;
         // A detached sweep that has landed. Its answers are merged at the lookup
         // rather than copied into `screen_read` every tick: with two panes at
         // 60 Hz that is 120 copies a second of a map nothing has changed, and
@@ -412,10 +460,15 @@ impl App {
         let mut peeked_changed = false;
         if let Some(rx) = &self.peeked_listing {
             match rx.try_recv() {
-                Ok(peeked) => {
+                Ok(Peeked {
+                    read: peeked,
+                    unprompted,
+                }) => {
                     self.peeked_listing = None;
-                    peeked_changed = peeked != self.peeked;
+                    peeked_changed = peeked != self.peeked
+                        || unprompted.keys().ne(self.peeked_unprompted.keys());
                     self.peeked = peeked;
+                    self.peeked_unprompted = unprompted;
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => {}
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => self.peeked_listing = None,
@@ -436,10 +489,26 @@ impl App {
             std::thread::spawn(move || {
                 // Each one is a `capture-pane` subprocess, so the sweep is off
                 // the draw loop: a slow rmux delays the reading, never the frame.
-                let peeked = names
-                    .into_iter()
-                    .filter_map(|(pid, name)| Some((pid, cctop_core::peek::named(&name)?)))
-                    .collect();
+                let mut peeked = Peeked::default();
+                for (pid, name) in names {
+                    let at = Instant::now();
+                    match cctop_core::peek::named_read(&name) {
+                        Some(Some(screened)) => {
+                            if screened.signal != cctop_core::hook::Signal::NeedsInput {
+                                peeked.unprompted.insert(pid, at);
+                            }
+                            peeked.read.insert(pid, screened);
+                        }
+                        Some(None)
+                            if cctop_core::screen::screenable(cctop_core::screen::harness_of(
+                                &name,
+                            )) =>
+                        {
+                            peeked.unprompted.insert(pid, at);
+                        }
+                        _ => {}
+                    }
+                }
                 let _ = tx.send(peeked);
             });
         }
@@ -496,7 +565,10 @@ impl App {
     /// correct in exchange for nothing measurable.
     pub(super) fn pane_signal(&self, pid: u32) -> Option<cctop_core::hook::Signal> {
         let screen = self.screened(pid).map(|read| read.signal);
-        screen.or_else(|| self.reported_by(pid)).or_else(|| {
+        if screen.is_some() {
+            return screen;
+        }
+        let said = self.reported_by(pid).or_else(|| {
             self.sessions
                 .iter()
                 .filter(|session| session.root_pid() == Some(pid))
@@ -513,7 +585,41 @@ impl App {
                         _ => None,
                     }
                 })
-        })
+        });
+        // A question the hooks or the transcript still hold open, on a screen
+        // read since that shows no prompt, has been answered: see
+        // [`Self::prompt_gone`].
+        match said {
+            Some(cctop_core::hook::Signal::NeedsInput) if self.prompt_gone(pid) => None,
+            said => said,
+        }
+    }
+
+    /// Whether `pid`'s screen, read after its last report, showed no prompt.
+    ///
+    /// A subagent's question is closed by that subagent's next hook event, and
+    /// Claude Code sends none when the question is answered: the approved tool
+    /// runs, and only its end is reported. A tool that runs for minutes kept
+    /// the tab blinking at a question already answered for all of them. The
+    /// screen is what shows the prompt went away. Only a reading taken a beat
+    /// after the report counts, so a prompt the hook announced before it was
+    /// drawn is not taken as answered before anyone saw it.
+    pub(super) fn prompt_gone(&self, pid: u32) -> bool {
+        const DRAWN_WITHIN: std::time::Duration = std::time::Duration::from_secs(1);
+        let Some(read_at) = [self.unprompted.get(&pid), self.peeked_unprompted.get(&pid)]
+            .into_iter()
+            .flatten()
+            .max()
+        else {
+            return false;
+        };
+        let asked_at = self
+            .sessions
+            .iter()
+            .filter(|session| session.root_pid() == Some(pid))
+            .find_map(|session| self.reports.report(&session.session_id))
+            .map(|reported| reported.at);
+        asked_at.is_none_or(|asked| *read_at >= asked + DRAWN_WITHIN)
     }
 
     /// What the agent running as `pid` last reported over its own hooks.
@@ -1041,6 +1147,43 @@ mod tests {
             ActivityState::WaitingForInput
         );
         assert_eq!(app.pane_signal(4321), Some(Signal::Idle));
+    }
+
+    /// A subagent's question is answered and its approved tool runs for
+    /// minutes, which Claude Code reports nothing of until it ends: the screen
+    /// read after the question, with no prompt on it, is what closes it — and
+    /// only a reading taken after the question was asked counts.
+    #[test]
+    fn a_question_the_screen_no_longer_shows_has_been_answered() {
+        use cctop_core::hook::Signal;
+        use cctop_core::session::ActivityState;
+        let mut app = test_app();
+        let mut row = session("a", true, "proj");
+        row.process.as_mut().unwrap().process_list = vec![cctop_core::proc::ProcEntry {
+            pid: 4321,
+            is_root: true,
+            ghost: false,
+            cpu: 0.0,
+            memory: 0,
+            args: String::new(),
+        }];
+        app.sessions = vec![row];
+        let asked = std::time::Instant::now();
+        app.apply_hooks(vec![heard(Signal::NeedsInput, Some("sub-1"))]);
+        app.apply_reports();
+        assert_eq!(app.sessions[0].activity_state, ActivityState::Asking);
+        assert_eq!(app.pane_signal(4321), Some(Signal::NeedsInput));
+
+        // A screen read from before the prompt was drawn says nothing about it.
+        app.unprompted.insert(4321, asked);
+        assert_eq!(app.pane_signal(4321), Some(Signal::NeedsInput));
+
+        // Read since, with no prompt on it: answered, and working.
+        app.unprompted
+            .insert(4321, asked + std::time::Duration::from_secs(5));
+        assert_eq!(app.pane_signal(4321), None);
+        app.apply_reports();
+        assert_eq!(app.sessions[0].activity_state, ActivityState::Working);
     }
 
     /// The mode is reported by a live agent but drawn on a row rebuilt by every

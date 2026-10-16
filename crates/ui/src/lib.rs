@@ -815,8 +815,14 @@ pub struct App {
     /// The `capture-pane` sweep asked for on the last due tick, if it has not
     /// answered. A subprocess on a thread of its own, for the same reason as
     /// [`Self::shared_listing`].
-    pub(crate) peeked_listing:
-        Option<std::sync::mpsc::Receiver<HashMap<u32, cctop_core::peek::Screened>>>,
+    pub(crate) peeked_listing: Option<std::sync::mpsc::Receiver<crate::signals::Peeked>>,
+    /// Agents whose screen was read and showed no prompt, by pid, with when
+    /// that reading was taken — attached panes and detached tabs alike. What
+    /// lets a question the hooks still hold open be seen to have been
+    /// answered: see [`App::prompt_gone`].
+    pub(crate) unprompted: HashMap<u32, Instant>,
+    /// The detached half of [`Self::unprompted`], from the last sweep.
+    pub(crate) peeked_unprompted: HashMap<u32, Instant>,
     /// The integration's state, as of the last time the panel was opened.
     ///
     /// Rebuilt on opening and after every action rather than every frame: it
@@ -1210,6 +1216,8 @@ impl App {
             peeked: HashMap::new(),
             peeked_at: None,
             peeked_listing: None,
+            unprompted: HashMap::new(),
+            peeked_unprompted: HashMap::new(),
             hooks: None,
             listener: None,
             launch_cursor: 0,
