@@ -2462,11 +2462,18 @@ mod tests {
         let exe = dir.path().join("cctop");
         std::fs::copy("/bin/sleep", &exe).unwrap();
         let mut child = std::process::Command::new(&exe).arg("5").spawn().unwrap();
+        // spawn returns once the vfork parent is released, which the kernel
+        // does before the child's new mm is installed: for a moment its
+        // /proc exe still names this test binary.
+        let proc_exe = format!("/proc/{}/exe", child.id());
+        crate::test_wait::eventually_true("the child to exec", || {
+            std::fs::read_link(&proc_exe).is_ok_and(|p| p == exe)
+        });
 
         let staged = dir.path().join("cctop.new");
         std::fs::copy("/bin/sleep", &staged).unwrap();
         std::fs::rename(&staged, &exe).unwrap();
-        let seen = std::fs::read_link(format!("/proc/{}/exe", child.id())).unwrap();
+        let seen = std::fs::read_link(&proc_exe).unwrap();
         let _ = child.kill();
         let _ = child.wait();
 
