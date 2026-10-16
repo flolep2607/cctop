@@ -616,7 +616,16 @@ fn remotes(hosts: &[String]) -> Section {
         .iter()
         .map(|host| match host.poll() {
             cctop_core::fleet::Snapshot::Rows(rows) => {
-                let read = format!("{} session(s) via `{}`", rows.len(), host.command);
+                let mut read = format!("{} session(s) via `{}`", rows.len(), host.command);
+                // Rows from a harness this build does not know are left out of
+                // the table; said here so a quiet machine is not mistaken for
+                // an idle one.
+                let dropped = cctop_core::fleet::unknown_harness(&host.target);
+                if dropped > 0 {
+                    read.push_str(&format!(
+                        " (+{dropped} from a harness this cctop does not know)"
+                    ));
+                }
                 // A host that reads fine but runs an older cctop is the case the
                 // table used to be silent about, so doctor names the version.
                 let probe = host.probe();
@@ -635,6 +644,12 @@ fn remotes(hosts: &[String]) -> Section {
                         host.target.clone(),
                         format!("{read}{theirs}, newer than this {local}"),
                         "this machine's cctop is behind: run `cctop --update` here",
+                    ),
+                    _ if dropped > 0 => warn(
+                        host.target.clone(),
+                        format!("{read}{theirs}"),
+                        "this machine's cctop does not know a harness that one runs: \
+                         run `cctop --update` here",
                     ),
                     _ => ok(host.target.clone(), format!("{read}{theirs}")),
                 }

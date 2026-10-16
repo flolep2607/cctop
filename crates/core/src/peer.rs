@@ -133,7 +133,24 @@ pub struct Answer {
     pub status: u16,
     pub content_type: String,
     pub body: Vec<u8>,
+    /// What its [`VERSION_HEADER`] said, when it sent one.
+    pub version: Option<String>,
 }
+
+/// The response header a sibling's `/api/sessions` answer names its cctop
+/// version in.
+///
+/// A header on the poll rather than a call to `/api/config`, which already
+/// says the version: the poll is made every few seconds anyway, so the
+/// version rides along for nothing, and is never staler than the rows it came
+/// with — a sibling updated in place is seen at its next poll, with no second
+/// cadence to keep. Nor is it put in the body, a bare array that every older
+/// cctop reading a newer one would fail to parse if it became an object.
+///
+/// A sibling from before this header sends none, and that is read as not
+/// known rather than as old: nothing is shown for it, as for an ssh host
+/// whose `--version` could not be read (see [`fleet::skew`]).
+pub const VERSION_HEADER: &str = "Cctop-Version";
 
 /// Where a sibling's token comes from: the account's API, or — in a test — a
 /// fixed string.
@@ -165,6 +182,8 @@ pub struct Peer {
     /// Why the last poll failed, or `None` when it answered — for a page's
     /// offline dot, whoever is serving it.
     last_error: Mutex<Option<String>>,
+    /// The cctop version its last answered poll named, if it named one.
+    version: Mutex<Option<String>>,
 }
 
 impl Peer {
@@ -178,6 +197,7 @@ impl Peer {
             source: Source::Fixed,
             token: Mutex::new(Some(secret.to_string())),
             last_error: Mutex::new(None),
+            version: Mutex::new(None),
         }
     }
 
@@ -272,6 +292,11 @@ impl Peer {
             .and_then(|v| v.to_str().ok())
             .unwrap_or("application/octet-stream")
             .to_string();
+        let version = response
+            .headers()
+            .get(VERSION_HEADER)
+            .and_then(|v| v.to_str().ok())
+            .and_then(fleet::parse_version);
         let body = response
             .body_mut()
             .with_config()
@@ -282,6 +307,7 @@ impl Peer {
             status,
             content_type,
             body,
+            version,
         })
     }
 
@@ -345,17 +371,28 @@ impl Peer {
         }
     }
 
+    /// Which cctop this sibling runs, as its last answered poll said —
+    /// `None` before one, and for a sibling too old to say. See
+    /// [`VERSION_HEADER`].
+    pub fn version(&self) -> Option<String> {
+        self.version.lock().ok()?.clone()
+    }
+
     fn ask_sessions(&self) -> Snapshot {
-        match self.send("GET", "/api/sessions", "", None) {
-            Ok(answer) if answer.status == 200 => match String::from_utf8(answer.body) {
-                Ok(json) => match fleet::parse(&self.machine, &json) {
-                    Ok(rows) => Snapshot::Rows(rows),
-                    Err(why) => Snapshot::Failed(why),
-                },
-                Err(_) => Snapshot::Failed("its answer was not UTF-8".into()),
+        let answer = match self.send("GET", "/api/sessions", "", None) {
+            Ok(answer) if answer.status == 200 => answer,
+            Ok(answer) => return Snapshot::Failed(refusal(&answer)),
+            Err(why) => return Snapshot::Failed(why),
+        };
+        if let Ok(mut held) = self.version.lock() {
+            *held = answer.version;
+        }
+        match String::from_utf8(answer.body) {
+            Ok(json) => match fleet::parse(&self.machine, &json) {
+                Ok(rows) => Snapshot::Rows(rows),
+                Err(why) => Snapshot::Failed(why),
             },
-            Ok(answer) => Snapshot::Failed(refusal(&answer)),
-            Err(why) => Snapshot::Failed(why),
+            Err(_) => Snapshot::Failed("its answer was not UTF-8".into()),
         }
     }
 
@@ -795,6 +832,17 @@ pub mod fake {
     /// refuse an unsigned one with 401, and record each request's target.
     /// Returns the origin to hand [`Peer::fixed`](super::Peer::fixed).
     pub fn sibling(status: u16, body: &'static str) -> (String, Arc<Mutex<Vec<String>>>) {
+        sibling_at(status, body, None)
+    }
+
+    /// [`sibling`], answering as cctop `version` in the
+    /// [`VERSION_HEADER`](super::VERSION_HEADER) — or, with `None`, as one
+    /// from before the header.
+    pub fn sibling_at(
+        status: u16,
+        body: &'static str,
+        version: Option<&'static str>,
+    ) -> (String, Arc<Mutex<Vec<String>>>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         let seen: Arc<Mutex<Vec<String>>> = Arc::default();
@@ -831,9 +879,12 @@ pub mod fake {
                     false => (401, "unsigned"),
                 };
                 let mut stream = reader.into_inner();
+                let said = version
+                    .map(|v| format!("{}: {v}\r\n", super::VERSION_HEADER))
+                    .unwrap_or_default();
                 let _ = write!(
                     stream,
-                    "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\n{said}Connection: close\r\n\r\n{body}",
                     body.len()
                 );
             }
@@ -896,6 +947,7 @@ fn discover(
             },
             token: Mutex::new(token),
             last_error: Mutex::new(None),
+            version: Mutex::new(None),
         }));
     }
     Ok(found)
@@ -1071,6 +1123,22 @@ mod tests {
         flaky.ask_accounts();
         assert_eq!(accounts("acct-flaky", "claude"), ["default", "work"]);
         assert!(accounts("acct-never", "claude").is_empty());
+    }
+
+    /// A sibling's version is read off its poll's answer, and one too old to
+    /// send it is not known rather than taken for old.
+    #[test]
+    fn a_siblings_version_rides_on_its_poll() {
+        let (url, _) = fake::sibling_at(200, "[]", Some("0.40.1"));
+        let peer = Peer::fixed("versioned", &url, fake::SECRET);
+        assert_eq!(peer.version(), None, "nothing before a poll");
+        assert!(matches!(peer.poll(), Snapshot::Rows(_)));
+        assert_eq!(peer.version().as_deref(), Some("0.40.1"));
+
+        let (url, _) = fake::sibling_at(200, "[]", None);
+        let old = Peer::fixed("unversioned", &url, fake::SECRET);
+        assert!(matches!(old.poll(), Snapshot::Rows(_)));
+        assert_eq!(old.version(), None);
     }
 
     #[test]

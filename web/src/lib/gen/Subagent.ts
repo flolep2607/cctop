@@ -2,6 +2,14 @@
 import type { ContextUsage } from "./ContextUsage";
 import type { SubagentStatus } from "./SubagentStatus";
 
+/**
+ * One subagent of a session.
+ *
+ * Every field has a default because it is read from another build of cctop
+ * — a remote's `--json`, an older cache — where a field this build added
+ * is absent. Missing one costs that field, not the subagent and its share of
+ * the session's cost.
+ */
 export type Subagent = { agent_id: string, type: string, description: string, model: string, started_at: string | null, last_active: string | null, duration_ms: number, status: SubagentStatus, cost: number, tool_count: number, 
 /**
  * Replies in the agent's own transcript: one per API request that said

@@ -1937,27 +1937,51 @@ pub struct Metrics {
     pub api_duration_ms: u64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub enum SubagentStatus {
     Running,
+    /// Also what a status this build has no word for reads as, and a missing
+    /// one. A subagent arrives from a remote cctop's `--json` and from the
+    /// cache, both possibly another build's, and a status that failed to
+    /// parse used to drop the whole subagent and its cost with it. Done
+    /// rather than running because running is the claim — a live dot, an
+    /// alert that waits on it to finish — and a word this build cannot read
+    /// is not evidence of either.
+    #[default]
+    #[serde(other)]
     Done,
 }
 
+/// One subagent of a session.
+///
+/// Every field has a default because it is read from another build of cctop
+/// — a remote's `--json`, an older cache — where a field this build added
+/// is absent. Missing one costs that field, not the subagent and its share of
+/// the session's cost.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct Subagent {
+    #[serde(default)]
     pub agent_id: String,
-    #[serde(rename = "type")]
+    #[serde(rename = "type", default)]
     pub agent_type: String,
+    #[serde(default)]
     pub description: String,
+    #[serde(default)]
     pub model: String,
+    #[serde(default)]
     pub started_at: Option<String>,
+    #[serde(default)]
     pub last_active: Option<String>,
+    #[serde(default)]
     pub duration_ms: i64,
+    #[serde(default)]
     pub status: SubagentStatus,
+    #[serde(default)]
     pub cost: f64,
+    #[serde(default)]
     pub tool_count: u64,
     /// Replies in the agent's own transcript: one per API request that said
     /// or called something, as the conversation view draws them.
@@ -1970,9 +1994,12 @@ pub struct Subagent {
     /// never handed back is shown with.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_text: Option<String>,
+    #[serde(default)]
     pub tool_use_id: Option<String>,
+    #[serde(default)]
     pub context: Option<ContextUsage>,
     /// The on-disk transcript was purged; only parent-side metadata survives.
+    #[serde(default)]
     pub ghost: bool,
 }
 

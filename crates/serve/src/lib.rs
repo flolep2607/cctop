@@ -1517,7 +1517,16 @@ fn serve_connection(shared: &Shared, stream: &mut TcpStream) {
                 }
                 false => snapshot.json.as_str(),
             };
-            http::respond_tagged_unkept(stream, &request, http::JSON, body.as_bytes());
+            // The version, for a sibling to compare with its own: see
+            // `peer::VERSION_HEADER` for why here and not in the body or
+            // a call of its own. Only on this route, behind the same guard,
+            // so a stranger is not told which cctop to look for holes in.
+            let version = format!(
+                "{}: {}\r\n",
+                cctop_core::peer::VERSION_HEADER,
+                cctop_core::update::current_version()
+            );
+            http::respond_tagged_unkept(stream, &request, http::JSON, body.as_bytes(), &version);
         }
         "/api/hosts" => {
             let snapshot = current(shared);
@@ -2130,6 +2139,22 @@ mod tests {
         // the content policy, which allows no URL at all.
         assert!(!page.contains(" src=\"/assets/"));
         assert!(!page.contains("<link rel=\"stylesheet\""));
+    }
+
+    /// The table names this cctop's version in a header, for a sibling to
+    /// compare with its own; a refusal names nothing.
+    #[test]
+    fn the_session_table_says_which_cctop_answered() {
+        let guarded = shared("full", "view");
+        let (head, _) = exchange(&guarded, "/api/sessions?t=view", "");
+        assert!(head.starts_with("HTTP/1.1 200 "), "{head}");
+        assert_eq!(
+            header(&head, cctop_core::peer::VERSION_HEADER),
+            Some(cctop_core::update::current_version())
+        );
+        let (head, _) = exchange(&guarded, "/api/sessions", "");
+        assert!(!head.starts_with("HTTP/1.1 200 "), "{head}");
+        assert_eq!(header(&head, cctop_core::peer::VERSION_HEADER), None);
     }
 
     /// Each link is told its own credential and nothing more, whichever way it

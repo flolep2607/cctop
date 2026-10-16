@@ -88,7 +88,13 @@ impl App {
             .filter_map(|pane| {
                 let session = pane.rmux.as_deref()?;
                 let state = link_health::read(session)?.state;
-                (state != link_health::State::Connected).then(|| (session.to_string(), state))
+                // Only the states the bar has a mark for: one from a newer
+                // bridge is not known to be down, and a mark would say it is.
+                matches!(
+                    state,
+                    link_health::State::Reconnecting | link_health::State::Lost
+                )
+                .then(|| (session.to_string(), state))
             })
             .collect();
         let changed = states != self.down.states;
@@ -188,6 +194,12 @@ pub fn label(seen: &Seen) -> Option<(String, Tone)> {
             parts.push("unreachable".to_string());
             Tone::Bad
         }
+        // A newer bridge's word for its link: the counts below still read,
+        // and the state is a question rather than a guess.
+        link_health::State::Unknown => {
+            parts.push("?".to_string());
+            Tone::Unknown
+        }
         link_health::State::Connected => match stats.rtt_ms {
             Some(ms) => {
                 parts.push(format!("{ms}ms"));
@@ -262,6 +274,15 @@ mod tests {
         let (text, tone) = peer(stats(State::Lost, Some(20), 3)).unwrap();
         assert_eq!(text, "☁\u{FE0E} unreachable · 3↻ · ×4.1");
         assert_eq!(tone, Tone::Bad);
+    }
+
+    /// A state from a newer bridge is a question, with the counts it still
+    /// carries.
+    #[test]
+    fn a_state_this_build_has_no_word_for_is_a_question() {
+        let (text, tone) = peer(stats(State::Unknown, Some(20), 3)).unwrap();
+        assert_eq!(text, "☁\u{FE0E} ? · 3↻ · ×4.1");
+        assert_eq!(tone, Tone::Unknown);
     }
 
     #[test]

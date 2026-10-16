@@ -855,7 +855,7 @@ pub fn respond_revalidated(
     content_type: &str,
     body: &[u8],
 ) {
-    respond_tagged(stream, request, content_type, body, REVALIDATE);
+    respond_tagged(stream, request, content_type, body, REVALIDATE, "");
 }
 
 /// A body tagged like [`respond_revalidated`]'s but never kept: `no-store`, so
@@ -867,13 +867,16 @@ pub fn respond_revalidated(
 /// the browser's disk cache as every transcript-bearing route does; the page
 /// holds the copy it already parsed, and an unchanged table costs it a `304`
 /// rather than the whole body again.
+///
+/// `extra` is more headers, each ending in CRLF, sent on a `304` too.
 pub fn respond_tagged_unkept(
     stream: &mut TcpStream,
     request: &Request,
     content_type: &str,
     body: &[u8],
+    extra: &str,
 ) {
-    respond_tagged(stream, request, content_type, body, NO_STORE);
+    respond_tagged(stream, request, content_type, body, NO_STORE, extra);
 }
 
 fn respond_tagged(
@@ -882,10 +885,11 @@ fn respond_tagged(
     content_type: &str,
     body: &[u8],
     cache: &str,
+    extra: &str,
 ) {
     let etag = etag_of(body);
     if request.holds(&etag) {
-        return not_modified(stream, request, &etag, cache, "");
+        return not_modified(stream, request, &etag, cache, extra);
     }
     let worth = body.len() >= COMPRESS_FROM && compressible(content_type);
     let packed = (worth && request.accepts_gzip())
@@ -897,7 +901,7 @@ fn respond_tagged(
         etag: Some(&etag),
         encoding: packed.as_ref().map(|_| Encoding::Gzip),
         vary: worth,
-        extra: "",
+        extra,
         policy: None,
     };
     let sent = packed.as_deref().unwrap_or(body);

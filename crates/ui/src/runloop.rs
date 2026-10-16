@@ -106,12 +106,36 @@ pub fn run(
     // arriving as the same `Remote` responses an ssh host's poller sends.
     {
         let tx = res_tx.clone();
+        let mut told: HashMap<String, String> = HashMap::new();
         cctop_core::peer::spawn(move |machine, snapshot| {
-            tx.send(Response::Remote {
-                host: machine.to_string(),
-                snapshot,
-            })
-            .is_ok()
+            let answered = matches!(snapshot, cctop_core::fleet::Snapshot::Rows(_));
+            if tx
+                .send(Response::Remote {
+                    host: machine.to_string(),
+                    snapshot,
+                })
+                .is_err()
+            {
+                return false;
+            }
+            // The version came with the rows (`peer::VERSION_HEADER`), so it
+            // costs no round trip of its own, and goes the way an ssh host's
+            // probe does — once per version, not once per poll. A sibling
+            // too old to name one sends nothing here: not known is not
+            // older, and gets no marker.
+            if let Some(version) = answered
+                .then(|| cctop_core::peer::find(machine))
+                .flatten()
+                .and_then(|peer| peer.version())
+                && told.get(machine) != Some(&version)
+            {
+                told.insert(machine.to_string(), version.clone());
+                let _ = tx.send(Response::RemoteVersion {
+                    host: machine.to_string(),
+                    probe: cctop_core::fleet::Probe::Version(version),
+                });
+            }
+            true
         });
     }
 
