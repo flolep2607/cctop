@@ -146,6 +146,7 @@ pub fn run(args: &[String]) -> i32 {
         pricing(),
         parsers(),
         cache(),
+        secrets(),
         hooks(),
         typing(),
         remotes(hosts),
@@ -475,6 +476,92 @@ fn cache() -> Section {
     }
     Section {
         title: "Cache",
+        checks,
+    }
+}
+
+/// Where the tokens are kept, and whether they can be read.
+///
+/// Looked at, never changed: a plain-text token still in the config is
+/// reported rather than moved, since the doctor is what someone runs to find
+/// out what state things are in. Every value is shown redacted — doctor
+/// output is meant to be pasted into an issue.
+fn secrets() -> Section {
+    use cctop_core::secrets::{Store, redact};
+    let store = Store::current();
+    let status = store.status();
+    let at = |p: &Path| cctop_core::util::tildify(&p.to_string_lossy());
+    let wide = |mode: u32| mode & 0o077 != 0;
+    let mut checks = vec![ok(
+        "kept in",
+        format!("{}, key {}", at(&store.enc), at(&store.key)),
+    )];
+
+    checks.push(match status.key_mode {
+        None if status.enc_mode.is_some() => fail(
+            "key",
+            format!("{} is missing", at(&store.key)),
+            "the saved tokens cannot be read without it; add them again",
+        ),
+        None => ok("key", "none yet · made with the first token saved"),
+        Some(mode) if wide(mode) => warn(
+            "key",
+            format!("{} is mode {mode:o}, readable by others", at(&store.key)),
+            &format!("chmod 600 {}", at(&store.key)),
+        ),
+        Some(_) => ok("key", "present, owner-only"),
+    });
+
+    match &status.sealed {
+        Ok(sealed) => {
+            checks.push(match status.enc_mode {
+                None => ok("tokens", "none saved"),
+                Some(mode) if wide(mode) => warn(
+                    "tokens",
+                    format!("{} is mode {mode:o}", at(&store.enc)),
+                    &format!("chmod 600 {}", at(&store.enc)),
+                ),
+                Some(_) => ok(
+                    "tokens",
+                    format!("{} encrypted", plural(sealed.len(), "token")),
+                ),
+            });
+            for (key, value) in sealed {
+                checks.push(ok(format!("  {key}"), redact(value)));
+            }
+        }
+        Err(why) => checks.push(fail(
+            "tokens",
+            format!("{} does not open: {why}", at(&store.enc)),
+            "add the tokens again; the old file is moved aside then, and kept",
+        )),
+    }
+
+    if !status.machine_id {
+        checks.push(warn(
+            "machine id",
+            "no /etc/machine-id, so the key alone opens the file",
+            "the two files copied together would open on another machine",
+        ));
+    }
+
+    if !status.plaintext.is_empty() {
+        let found: Vec<String> = status
+            .plaintext
+            .iter()
+            .map(|(key, value)| format!("{key} {}", redact(value)))
+            .collect();
+        checks.push(warn(
+            "plain text",
+            format!("in {}: {}", at(&store.config), found.join(", ")),
+            match status.sealed {
+                Ok(_) => "start cctop: it moves them into the encrypted file",
+                Err(_) => "left there while the encrypted file does not open",
+            },
+        ));
+    }
+    Section {
+        title: "Secrets",
         checks,
     }
 }

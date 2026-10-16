@@ -325,29 +325,14 @@ fn classify(token: &str) -> Credential {
     }
 }
 
-/// The token stored for `profile` in cctop's own config, if any.
+/// The token stored for `profile`, if any: sealed in `secrets.enc`, or still in
+/// plain text in the config when that will not open (see [`crate::secrets`]).
 ///
 /// Keyed by profile name so it reads as the same list of accounts everything
-/// else shows — `[accounts.work]` is the token for the `work` profile, the one
-/// the PROFILE column and the limits panel already call `work`.
-fn pick_token(text: &str, profile: &str) -> Option<String> {
-    let doc = text.parse::<toml_edit::DocumentMut>().ok()?;
-    let tok = doc
-        .get("accounts")?
-        .as_table_like()?
-        .get(profile)?
-        .as_table_like()?
-        .get("token")?
-        .as_str()?
-        .trim();
-    (!tok.is_empty()).then(|| tok.to_string())
-}
-
+/// else shows — `accounts.work.token` is the token for the `work` profile, the
+/// one the PROFILE column and the limits panel already call `work`.
 fn stored_token(profile: &str) -> Option<String> {
-    pick_token(
-        &std::fs::read_to_string(&*config::CONFIG_FILE).ok()?,
-        profile,
-    )
+    crate::secrets::get(&crate::secrets::account_token_key(profile))
 }
 
 /// Add one or more Claude accounts, starting with `first`.
@@ -634,8 +619,8 @@ fn describe_token(status: &ProviderStatus) -> String {
 fn store_token(profile: &str, token: &str) -> anyhow::Result<()> {
     save_token(profile, token)?;
     eprintln!(
-        "Stored a token for profile '{profile}' in {}.",
-        config::CONFIG_FILE.display()
+        "Stored a token for profile '{profile}', encrypted, in {}.",
+        crate::secrets::Store::current().enc.display()
     );
 
     if !is_api_key(token) && !token.starts_with("sk-ant-oat") {
@@ -655,44 +640,14 @@ fn store_token(profile: &str, token: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Store `token` as `profile`'s in cctop's config, printing nothing — the TUI
-/// calls this with the terminal in raw mode, where a stray line is garbage on
-/// the dashboard.
+/// Store `token` as `profile`'s, sealed in `secrets.enc` rather than in the
+/// config, printing nothing — the TUI calls this with the terminal in raw
+/// mode, where a stray line is garbage on the dashboard.
+///
+/// The config is not written: an account's name is the key it is stored
+/// under, and [`config::refresh_launchable`] finds it there.
 pub fn save_token(profile: &str, token: &str) -> anyhow::Result<()> {
-    let path = &*config::CONFIG_FILE;
-    let text = match std::fs::read_to_string(path) {
-        Ok(text) => text,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
-        Err(e) => return Err(e.into()),
-    };
-    // Same refusal as the harness config writers: a file cctop cannot parse is
-    // one it must not rewrite, and `toml_edit` keeps the comments and layout of
-    // a file the user is expected to open. The refusal names the line and never
-    // quotes it — this file holds the account tokens.
-    let mut doc = parse_toml(path, &text)?;
-    // Built as real tables rather than by indexing straight through, which
-    // toml_edit renders as a single inline `accounts = { work = { … } }` line.
-    if !doc.contains_key("accounts") {
-        let mut table = toml_edit::Table::new();
-        table.set_implicit(true);
-        doc.insert("accounts", toml_edit::Item::Table(table));
-    }
-    let accounts = doc["accounts"]
-        .as_table_like_mut()
-        .ok_or_else(|| anyhow::anyhow!("`accounts` in {} is not a table", path.display()))?;
-    if accounts.get(profile).is_none() {
-        accounts.insert(profile, toml_edit::Item::Table(toml_edit::Table::new()));
-    }
-    accounts
-        .get_mut(profile)
-        .and_then(|a| a.as_table_like_mut())
-        .ok_or_else(|| anyhow::anyhow!("account '{profile}' in {} is not a table", path.display()))?
-        .insert("token", toml_edit::value(token));
-
-    // Written through a temporary file so an interrupted write cannot truncate
-    // the config, and created unreadable to anyone else from the start:
-    // widening a file that already holds a secret is a window, however short.
-    crate::util::write_atomic(path, doc.to_string().as_bytes(), true)?;
+    crate::secrets::set(&crate::secrets::account_token_key(profile), token.trim())?;
     // Launchable at once, and polled at once, rather than after a restart and
     // after the next interval: the account was added to be used.
     config::refresh_launchable();
@@ -811,6 +766,11 @@ pub fn run_as(args: &[String]) -> anyhow::Result<i32> {
         return Err(anyhow::anyhow!("could not run {command}: {}", cmd.exec()));
     }
     let Some(token) = stored_token(name) else {
+        // The likelier story when the sealed file will not open: the account
+        // is there, and its token cannot be read.
+        if let Some(problem) = crate::secrets::problem() {
+            anyhow::bail!("no token for '{name}'. {problem}");
+        }
         anyhow::bail!("no account named '{name}'; add one with `+ account` in cctop");
     };
     cmd.env("CLAUDE_CODE_OAUTH_TOKEN", token)
@@ -836,21 +796,20 @@ pub fn run_as(args: &[String]) -> anyhow::Result<i32> {
 /// for each, since none of them names an account this machine can launch.
 pub fn token_account_of(pid: u32) -> Option<String> {
     let environ = std::fs::read(format!("/proc/{pid}/environ")).ok()?;
-    let text = std::fs::read_to_string(&*config::CONFIG_FILE).ok()?;
-    token_account_in(&environ, &text)
+    token_account_in(&environ, &crate::secrets::all())
 }
 
-/// [`token_account_of`], on an environment block and a config file's text.
-fn token_account_in(environ: &[u8], config_text: &str) -> Option<String> {
+/// [`token_account_of`], on an environment block and the stored secrets.
+fn token_account_in(environ: &[u8], secrets: &crate::secrets::Secrets) -> Option<String> {
     let token = environ
         .split(|b| *b == 0)
         .find_map(|var| var.strip_prefix(b"CLAUDE_CODE_OAUTH_TOKEN="))
         .and_then(|v| std::str::from_utf8(v).ok())
         .map(str::trim)
         .filter(|v| !v.is_empty())?;
-    config::account_names_in(config_text)
-        .into_iter()
-        .find(|name| pick_token(config_text, name).as_deref() == Some(token))
+    crate::secrets::account_tokens(secrets)
+        .find(|(_, held)| held.trim() == token)
+        .map(|(name, _)| name.to_string())
 }
 
 /// Parse `text` as the TOML of `path`, or say where it broke.
@@ -1369,8 +1328,15 @@ mod tests {
     #[test]
     fn a_process_names_its_token_account_by_the_token_it_holds() {
         use super::token_account_in;
-        let config = "[accounts.work]\ntoken = \"sk-ant-oat01-work\"\n\
-                      [accounts.spare]\ntoken = \"sk-ant-oat01-spare\"\n";
+        let config: crate::secrets::Secrets = [
+            ("accounts.work.token", "sk-ant-oat01-work"),
+            ("accounts.spare.token", "sk-ant-oat01-spare"),
+            ("tunnel.token", "sk-ant-oat01-other"),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+        let config = &config;
         let env = b"HOME=/home/x\0CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-spare\0TERM=xterm\0";
         assert_eq!(token_account_in(env, config).as_deref(), Some("spare"));
         // A token cctop does not hold names no account it could launch.
@@ -1814,14 +1780,26 @@ mod tests {
     }
 
     #[test]
-    fn a_stored_token_is_read_for_the_profile_it_names() {
-        let text = "# mine\n[accounts.work]\ntoken = \"sk-ant-oat01-w\"\n\n[accounts.blank]\ntoken = \"  \"\n";
-        assert_eq!(pick_token(text, "work").as_deref(), Some("sk-ant-oat01-w"));
+    fn a_token_account_is_saved_sealed_and_not_into_the_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let _store = crate::secrets::claim_test_dir(dir.path());
+        let store = crate::secrets::Store::current();
+        std::fs::create_dir_all(store.config.parent().unwrap()).unwrap();
+        std::fs::write(&store.config, "# mine\n[settings]\nread_screen = true\n").unwrap();
+        save_token("work", "sk-ant-oat01-made-up-work\n").unwrap();
+
+        assert_eq!(
+            stored_token("work").as_deref(),
+            Some("sk-ant-oat01-made-up-work")
+        );
         // Another profile's token is never handed out as this one's.
-        assert_eq!(pick_token(text, "default"), None);
-        assert_eq!(pick_token(text, "blank"), None);
-        assert_eq!(pick_token("", "work"), None);
-        assert_eq!(pick_token("not = toml [", "work"), None);
+        assert_eq!(stored_token("default"), None);
+        assert_eq!(
+            std::fs::read_to_string(&store.config).unwrap(),
+            "# mine\n[settings]\nread_screen = true\n"
+        );
+        assert!(!String::from_utf8_lossy(&std::fs::read(&store.enc).unwrap()).contains("made-up"));
+        assert_eq!(config::token_account_names(), ["work"]);
     }
 
     #[test]

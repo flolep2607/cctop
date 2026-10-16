@@ -31,8 +31,9 @@
 //! drawn, with a QR code) and the user opens it wherever they are: the store
 //! is polled from here either way, which is why cloudflared works over ssh.
 //!
-//! Only the token is kept, in `config.toml`'s `[tunnel]` table, owner-only like
-//! the pasted ones and removed with it. The certificate itself is never written
+//! Only the token is kept, sealed in `secrets.enc` as `tunnel.api_token` like
+//! a pasted one (see [`crate::secrets`]), and removed with the `[tunnel]`
+//! table. The certificate itself is never written
 //! to disk or logged; the URL carries the key that fetches it, so it is shown
 //! to the user and nowhere else.
 

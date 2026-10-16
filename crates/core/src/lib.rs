@@ -73,6 +73,7 @@ pub mod report;
 pub mod rmux;
 pub mod sandbox;
 pub mod screen;
+pub mod secrets;
 pub mod session;
 pub mod settings;
 pub mod shim;

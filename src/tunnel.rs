@@ -92,11 +92,16 @@ fn status() -> i32 {
     let Some(account) = tunnel::account() else {
         println!("tunnel     none · quick tunnel, new address each run");
         println!("           `cctop tunnel setup` for one that stays");
+        // "None" is the wrong answer to act on when the account is there and
+        // its token is what cannot be read.
+        if let Some(problem) = cctop_core::secrets::problem() {
+            eprintln!("cctop: {problem}");
+        }
         return 0;
     };
     let from = match account.from_env {
         true => "CCTOP_TUNNEL_TOKEN",
-        false => "config.toml",
+        false => "config.toml, token in secrets.enc",
     };
     match &account.hostname {
         Some(host) => println!("dashboard  https://{host}  ({from})"),
@@ -157,6 +162,9 @@ fn invite_lines(invites: &[Invite]) -> Vec<String> {
 fn writable() -> Option<(Account, Api)> {
     if tunnel::account().is_none() {
         eprintln!("cctop: no Cloudflare account is connected; `cctop tunnel setup` first.");
+        if let Some(problem) = cctop_core::secrets::problem() {
+            eprintln!("cctop: {problem}");
+        }
         return None;
     }
     match cloudflare::connected() {
