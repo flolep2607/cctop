@@ -657,8 +657,31 @@ pub fn capture_from(
 /// binary as an rmux client, creating the session first when `create` gives
 /// the agent to put in it.
 ///
-/// The binary by its path, not `/proc/self/exe`: the pane's command may be run
-/// by something other than this process, and `self` would then be that.
+/// This binary, for a command line that this process or the daemon will run.
+///
+/// Its path, while there is a file at it. Once `cctop --update` has put a new
+/// binary there, `current_exe` answers `/usr/local/bin/cctop (deleted)`, a
+/// path with no file at it, and every tab the old cctop opened after that
+/// failed to start its client until cctop was restarted. The new binary at the
+/// plain path will not do either: it may speak another wire version, and so
+/// look for its sessions under a daemon of its own (see [`dir`]), where the
+/// running cctop's sessions are not.
+///
+/// So then `/proc/self/exe`, which the kernel resolves for whoever execs it:
+/// a pane's client forked from this cctop runs this cctop's binary, and a
+/// command the daemon runs, the daemon's — the two that speak to each other,
+/// for the reason [`start`] starts the daemon the same way. Not while the file
+/// is there, because then the path is what a person reads in `ps` and what a
+/// later cctop could run again.
+pub fn own_exe() -> PathBuf {
+    match std::env::current_exe() {
+        Ok(exe) if exe.exists() => exe,
+        _ => PathBuf::from("/proc/self/exe"),
+    }
+}
+
+/// The command a tab's pane runs to sit on session `name`: this binary's
+/// `mux attach`, by [`own_exe`].
 pub fn attach_argv(name: &str, create: Option<(&[String], Option<&Path>)>) -> Vec<String> {
     #[cfg(any(test, feature = "test-support"))]
     if in_test_harness() {
@@ -667,10 +690,7 @@ pub fn attach_argv(name: &str, create: Option<(&[String], Option<&Path>)>) -> Ve
         // what a pane whose client cannot run reports.
         return vec!["/nonexistent/cctop-mux-in-a-test-binary".to_string()];
     }
-    let exe = std::env::current_exe()
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_else(|_| "cctop".to_string());
-    attach_argv_of(exe, name, create)
+    attach_argv_of(own_exe().to_string_lossy().into_owned(), name, create)
 }
 
 fn attach_argv_of(
@@ -1087,6 +1107,15 @@ mod tests {
     /// A test binary is not cctop, and running it as `cctop mux` would run its
     /// own tests in a pane: the guard is what keeps a test that opens a tab
     /// without a daemon of its own from doing that.
+    /// While the binary is where it was started from, a command line names
+    /// it by that path, as `ps` shows it; once it is not, by
+    /// `/proc/self/exe`, which is still this binary to whatever forks from it.
+    #[test]
+    fn own_exe_is_the_path_while_the_file_is_there() {
+        let exe = std::env::current_exe().expect("exe");
+        assert_eq!(own_exe(), exe);
+    }
+
     #[test]
     fn a_test_binary_never_runs_itself_as_the_daemon() {
         assert!(in_test_harness());

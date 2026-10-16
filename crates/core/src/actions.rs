@@ -517,8 +517,7 @@ pub fn launch_remote(
     if let Some(why) = problem() {
         return Err((400, why));
     }
-    let exe = std::env::current_exe()
-        .map_err(|e| (503, format!("could not find cctop's own binary: {e}")))?;
+    let exe = crate::mux::own_exe();
     // The flags after the location, as the agent arguments `cctop sandbox`
     // hands on, and the account as the environment the sandbox inherits —
     // how the terminal's launcher carries both to an ssh host.

@@ -694,13 +694,7 @@ impl App {
             }
             Reach::Shell(name) => (name, shell_argv(&target.host, &target.path)),
             Reach::Sandbox(agent) => {
-                let exe = match std::env::current_exe() {
-                    Ok(exe) => exe,
-                    Err(error) => {
-                        self.set_status(format!("Could not find cctop's own binary: {error}"));
-                        return;
-                    }
-                };
+                let exe = cctop_core::mux::own_exe();
                 let mut argv = sandbox_argv(&exe, &agent, &target.host, &target.path);
                 // The model and the permission setting, as the agent arguments
                 // `cctop sandbox` hands on after the location.
@@ -772,13 +766,7 @@ impl App {
         options: cctop_core::launch_opts::Options,
     ) {
         let agent = peer_agent(argv);
-        let exe = match std::env::current_exe() {
-            Ok(exe) => exe,
-            Err(error) => {
-                self.set_status(format!("Could not find cctop's own binary: {error}"));
-                return;
-            }
-        };
+        let exe = cctop_core::mux::own_exe();
         let account = Self::profile_provider(std::slice::from_ref(&agent))
             .and_then(|provider| self.peer_account_to_send(&target.host, provider));
         let spec = cctop_core::remote_open::NewAgent {
