@@ -228,14 +228,24 @@ impl App {
             return;
         }
         let local = cctop_core::update::current_version();
+        let unknown = match cctop_core::fleet::unknown_harness(&host) {
+            0 => String::new(),
+            n => format!(
+                " (it sent {n} session{} from a harness this one does not know)",
+                if n == 1 { "" } else { "s" }
+            ),
+        };
         self.set_status(match skew {
-            Skew::Older(v) => format!(
+            Skew::Older(v) if self.updates_over_ssh(&host) => format!(
                 "{host} runs cctop {v}, older than this {local} — Enter on one of its rows \
                  offers to update it"
             ),
+            Skew::Older(v) => {
+                format!("{host} runs cctop {v}, older than this {local} — run cctop --update there")
+            }
             Skew::Newer(v) => format!(
-                "{host} runs cctop {v}, newer than this {local} — `cctop --update` here \
-                 to catch up"
+                "{host} runs cctop {v}, newer than this {local}{unknown} — `cctop --update` \
+                 here to catch up"
             ),
             Skew::Missing => format!(
                 "{host} has no cctop where ssh looks — install it there, or name the binary \
@@ -257,7 +267,13 @@ impl App {
             return Some(format!("an update of {host} is already under way"));
         }
         match self.skew_of(host) {
-            Some(Skew::Older(_)) => None,
+            Some(Skew::Older(_)) if self.updates_over_ssh(host) => None,
+            // A sibling's version is known from its poll, but `--update` is a
+            // command run over ssh, which a machine reached through its tunnel
+            // may not take — so it is told, not done.
+            Some(Skew::Older(v)) => Some(format!(
+                "{host} runs {v}, older than this cctop — run cctop --update there"
+            )),
             Some(Skew::Newer(v)) => Some(format!(
                 "{host} runs {v}, newer than this cctop — update this one instead"
             )),
@@ -314,6 +330,12 @@ impl App {
         machine: &str,
     ) -> Result<cctop_core::reach::Reach, cctop_core::reach::Unreached> {
         cctop_core::reach::reach(machine, self.remote_host(machine))
+    }
+
+    /// Whether `host` is one `cctop --update` can be run on from here: an ssh
+    /// host, which is the only transport that runs a command over there.
+    pub fn updates_over_ssh(&self, host: &str) -> bool {
+        matches!(self.reach_of(host), Ok(cctop_core::reach::Reach::Ssh(_)))
     }
 
     /// How a remote row's machine is read, for the lines that say so. A
@@ -570,6 +592,42 @@ mod tests {
         let last = app.toasts.iter().next().expect("a toast").text.clone();
         assert!(last.contains("only root can write"), "{last}");
         assert!(last.contains("ssh -t box sudo cctop --update"), "{last}");
+    }
+
+    /// A sibling behind this cctop is marked like an ssh host, but `--update`
+    /// is not offered: it is a command run over ssh, and a sibling is reached
+    /// through its tunnel. Its unknown version shows nothing.
+    #[test]
+    fn an_older_sibling_is_marked_and_told_not_updated() {
+        use cctop_core::fleet::Probe;
+        cctop_core::peer::add_known(std::sync::Arc::new(cctop_core::peer::Peer::fixed(
+            "skew-sibling",
+            "http://127.0.0.1:9",
+            "x",
+        )));
+        let mut app = test_app();
+        let mut s = session("away", true, "/srv/work");
+        s.remote = Some(cctop_core::session::Remote {
+            host: "skew-sibling".into(),
+            ..Default::default()
+        });
+        app.remotes.insert("skew-sibling".into(), vec![s]);
+        app.merge_remotes();
+        assert_eq!(app.skew_of("skew-sibling"), None, "not known is not older");
+
+        app.got_remote_version("skew-sibling".into(), Probe::Version("0.0.1".into()));
+        app.merge_remotes();
+        let said = app.toasts.iter().next().expect("a toast").text.clone();
+        assert!(said.contains("run cctop --update there"), "{said}");
+        assert!(!said.contains("Enter"), "{said}");
+        app.selected = 0;
+        let row = app.selected_session().expect("the row").clone();
+        let cell = columns::render_cell(ColumnId::Host, &row, &chrono::Utc::now());
+        assert_eq!(cell, "↑skew-sibling");
+        let why = app
+            .remote_update_refusal("skew-sibling")
+            .expect("not run from here");
+        assert!(why.contains("cctop --update there"), "{why}");
     }
 
     /// A remote that is ahead means this machine is the stale one.

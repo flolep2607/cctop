@@ -1451,6 +1451,12 @@ fn header<'a>(head: &'a str, name: &str) -> Option<&'a str> {
 /// than whatever it says. So does one that does not know the agent asked
 /// for — a [`SHELL`], or an agent added since: this side checked the same name
 /// against its own list before sending it, so the far list is the older one.
+///
+/// A launch that its route could not parse — a permission word it has no
+/// such setting for, a segment count it does not expect — is likelier the
+/// far side being older than anything else, since this side built the route
+/// from its own lists; but a bad route from here would read the same. So its
+/// own words are kept, and the update is suggested rather than declared.
 fn refusal(machine: &str, status: u16, body: &str, too_old: &str, again: &str) -> String {
     let said = body.lines().next().unwrap_or("").trim();
     let too_old_for_it = match status {
@@ -1458,12 +1464,19 @@ fn refusal(machine: &str, status: u16, body: &str, too_old: &str, again: &str) -
         400 => said.ends_with("is not an agent cctop starts"),
         _ => false,
     };
-    match too_old_for_it {
-        true => format!(
+    let maybe_older = status == 400
+        && (said.ends_with("not a launch this cctop understands")
+            || said.ends_with("is not a permission setting"));
+    match (too_old_for_it, maybe_older) {
+        (true, _) => format!(
             "{machine}'s cctop is too old {too_old} — \
              update it there (cctop --update) and {again}"
         ),
-        false => format!("{machine} refused: {said}"),
+        (false, true) => format!(
+            "{machine} refused: {said} — its cctop may be older than this one; \
+             update it there (cctop --update) and {again}"
+        ),
+        (false, false) => format!("{machine} refused: {said}"),
     }
 }
 
@@ -1574,7 +1587,12 @@ fn pump(
                     let over = predictor.on_output(&payload, std::time::Instant::now());
                     stdout.write_all(&over).map_err(|e| e.to_string())?;
                 }
-                Op::Text | Op::Other(_) => {
+                // An opcode newer than this build: not known to be output,
+                // and written to the terminal it could be anything. Passed
+                // over. A fragmented message is not one of these — the
+                // decoder hands it back whole under the opcode it began with.
+                Op::Other(_) => {}
+                Op::Text => {
                     stdout.write_all(&payload).map_err(|e| e.to_string())?;
                     let over = predictor.on_output(&payload, std::time::Instant::now());
                     stdout.write_all(&over).map_err(|e| e.to_string())?;
@@ -2409,6 +2427,26 @@ mod tests {
             "y",
         );
         assert!(other.starts_with("pc refused:"), "{other}");
+    }
+
+    /// A launch the sibling's route could not parse keeps its words, and
+    /// says the sibling may be the older one.
+    #[test]
+    fn a_launch_the_sibling_cannot_parse_suggests_updating_it() {
+        for said in [
+            "400 Bad Request: \"auto\" is not a permission setting\n",
+            "400 Bad Request: not a launch this cctop understands\n",
+        ] {
+            let why = refusal("pc", 400, said, "x", "start it again");
+            assert!(why.starts_with("pc refused: "), "{why}");
+            assert!(
+                why.contains(said.trim().split(": ").nth(1).unwrap()),
+                "{why}"
+            );
+            assert!(why.contains("may be older"), "{why}");
+            assert!(why.contains("cctop --update"), "{why}");
+            assert!(why.ends_with("start it again"), "{why}");
+        }
     }
 
     /// An account rides last, in hex, on a route of its own — and reads back

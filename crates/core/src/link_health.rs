@@ -46,6 +46,16 @@ pub enum State {
     /// it, because a dead machine's tab otherwise looks like any other until
     /// it is opened.
     Lost,
+    /// A state a newer bridge wrote that this build has no word for.
+    ///
+    /// The file is shared between builds: a bridge started by one cctop is
+    /// read by whichever dashboard is open, which `cctop --update` may have
+    /// moved on — or not yet. Without this, one new state made the whole file
+    /// unreadable, and the corner lost its round trip and byte counts with
+    /// it. With it, the rest still reads, and the state itself is drawn as
+    /// not known: no mark on the tab, `?` in the corner.
+    #[serde(other)]
+    Unknown,
 }
 
 /// What the bridge says about its link.
@@ -361,6 +371,17 @@ mod tests {
         for bad in ["", "../etc/passwd", "a/b", "a.b", "a b"] {
             assert_eq!(path_in(base, bad), None, "{bad:?}");
         }
+    }
+
+    /// A state a newer bridge added still reads, as not known, with the rest
+    /// of the file intact.
+    #[test]
+    fn a_state_from_a_newer_bridge_still_reads() {
+        let mut v = serde_json::to_value(stats()).unwrap();
+        v["state"] = "something-new".into();
+        let read: Stats = serde_json::from_value(v).expect("still reads");
+        assert_eq!(read.state, State::Unknown);
+        assert_eq!((read.rtt_ms, read.reconnects), (Some(118), 2));
     }
 
     #[test]

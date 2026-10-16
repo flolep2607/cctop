@@ -57,8 +57,10 @@ pub enum Op {
     Close,
     Ping,
     Pong,
-    /// A data opcode newer than this file: carried as data. Never a
-    /// continuation, which [`Decoder`] folds into the message it continues.
+    /// An opcode newer than this file. Never a continuation, which
+    /// [`Decoder`] folds into the message it continues and returns under the
+    /// opcode it began with; so neither end reads this as terminal bytes, and
+    /// both pass it over rather than type or draw what it might not be.
     Other(u8),
 }
 
