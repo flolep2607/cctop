@@ -1146,6 +1146,16 @@ mod tests {
         pid
     }
 
+    /// The one stale socket in `dir`, waited for. A process another test is
+    /// spawning holds a copy of every fd this one has until it execs, a
+    /// dropped listener included, so for that moment a dead socket still
+    /// accepts connections.
+    fn stale_once(dir: &std::path::Path) -> (PathBuf, Stamp) {
+        crate::test_wait::eventually("one stale socket", || {
+            <[_; 1]>::try_from(stale_sockets(dir)).ok().map(|[one]| one)
+        })
+    }
+
     /// The sweep's three cases side by side: only a socket whose agent is gone
     /// *and* that refuses connections goes. A live listener stays whatever its
     /// name says, and so does a dead one whose pid now belongs to someone else.
@@ -1173,11 +1183,14 @@ mod tests {
         let plain = dir.path().join(format!("{}.sock", dead_pid()));
         std::fs::write(&plain, "").expect("plain file");
 
-        let stale: Vec<PathBuf> = stale_sockets(dir.path())
-            .into_iter()
-            .map(|(path, _)| path)
-            .collect();
-        assert_eq!(stale, vec![dead]);
+        // Waited for, not asked once: see `stale_once`.
+        crate::test_wait::eventually_true("the dead socket alone to be stale", || {
+            let stale: Vec<PathBuf> = stale_sockets(dir.path())
+                .into_iter()
+                .map(|(path, _)| path)
+                .collect();
+            stale == [dead.clone()]
+        });
         assert!(live.exists() && reused.exists() && named.exists() && plain.exists());
     }
 
@@ -1189,7 +1202,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("temp dir");
         let path = dir.path().join(format!("{}.sock", dead_pid()));
         drop(UnixListener::bind(&path).expect("bind dead"));
-        let [(judged, stamp)] = <[_; 1]>::try_from(stale_sockets(dir.path())).expect("one stale");
+        let (judged, stamp) = stale_once(dir.path());
 
         // A new shim's socket in its place. Bound beside it and renamed over,
         // rather than `listen`'s unlink-then-bind, so the two cannot share an
