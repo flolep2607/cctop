@@ -834,6 +834,24 @@ impl App {
         );
     }
 
+    /// A tab of cctop's own running `argv`, titled `label`: a command run for
+    /// the person, like the update the footer's button starts.
+    pub(super) fn open_command_tab(&mut self, argv: &[String], what: &str, label: &str) {
+        self.open_tab(
+            argv,
+            NewTab {
+                cwd: None,
+                what,
+                own: tabs::Own::Cctop,
+                verb: "Started",
+                resumed: None,
+                label: Some(label.into()),
+                profile: None,
+                transport: None,
+            },
+        );
+    }
+
     /// Start `argv` in a new tab, reporting what happened either way.
     ///
     /// `resumed` names the session the tab is going back to, when it is going

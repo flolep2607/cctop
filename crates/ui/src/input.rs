@@ -2233,6 +2233,10 @@ impl App {
                 self.on_share_corner(armed, on_local);
                 return;
             }
+            if layout.update_corner_at(ev.column, ev.row) {
+                self.on_update_corner();
+                return;
+            }
         }
 
         // The settings page is asked for by name, as it is for the keyboard:

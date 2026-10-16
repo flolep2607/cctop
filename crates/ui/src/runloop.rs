@@ -896,6 +896,7 @@ fn event_loop(
         app.needs_redraw |= app.tick_link();
         // Another process replaces the binary; only a look notices.
         app.needs_redraw |= app.tick_installed();
+        app.needs_redraw |= app.tick_available();
         // The footer's own line refreshes on its own clock, and its command
         // answers on a channel nothing polls but this.
         app.needs_redraw |= app.footer_extra.tick();
