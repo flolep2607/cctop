@@ -612,6 +612,7 @@ impl Store {
             }
             crate::pricing::Provider::Gemini => crate::session::gemini::extract(file),
             crate::pricing::Provider::Pi => crate::session::pi::extract(file),
+            crate::pricing::Provider::Vibe => crate::session::vibe::extract(file),
             crate::pricing::Provider::Windsurf => {
                 crate::session::windsurf::extract(file, &session.session_id)
             }

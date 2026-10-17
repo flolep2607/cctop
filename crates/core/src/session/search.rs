@@ -477,6 +477,15 @@ pub fn find_query(session: &Target, query: &Query) -> Option<Hit> {
         Provider::Codex | Provider::Cursor | Provider::Devin | Provider::Gemini | Provider::Pi => {
             scan_file(file, &mut progress);
         }
+        // `meta.json` is the session's title and stats; the conversation is
+        // beside it, in one file or spread over the snapshot's chunks.
+        Provider::Vibe => {
+            for path in super::vibe::conversation_files(file) {
+                if scan_file(&path, &mut progress) {
+                    break;
+                }
+            }
+        }
         // One database holds every session, so scanning the file would report a
         // hit for all of them whenever any one matched.
         Provider::OpenCode => scan_opencode(file, &session.session_id, &mut progress),

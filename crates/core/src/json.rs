@@ -310,6 +310,7 @@ pub fn sessions(sessions: &[Session], plan: Plan, store: &crate::cache::Store) -
                 | Provider::Gemini
                 | Provider::OpenCode
                 | Provider::Pi
+                | Provider::Vibe
                 | Provider::Windsurf => None,
             }
             .map(|a| JsonAccount {

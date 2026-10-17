@@ -123,6 +123,8 @@ pub struct Palette {
     pub cursor: Color,
     pub opencode: Color,
     pub pi: Color,
+    /// Mistral's orange.
+    pub vibe: Color,
     pub gemini: Color,
     pub windsurf: Color,
     /// Open-weight vendors seen through custom providers. Chosen to stay clear
@@ -203,6 +205,7 @@ const DARK: Palette = Palette {
     cursor: Color::Indexed(141),
     opencode: Color::Indexed(117),
     pi: Color::Indexed(150),
+    vibe: Color::Indexed(208),
     gemini: Color::Indexed(74),
     windsurf: Color::Indexed(80),
     glm: Color::Indexed(108),
@@ -284,6 +287,7 @@ const LIGHT: Palette = Palette {
     cursor: Color::Indexed(91),
     opencode: Color::Indexed(31),
     pi: Color::Indexed(64),
+    vibe: Color::Indexed(202),
     gemini: Color::Indexed(26),
     windsurf: Color::Indexed(30),
     // Darkened counterparts of the dark palette's vendor hues, kept clear of
@@ -365,6 +369,7 @@ const MONO: Palette = {
         cursor: r,
         opencode: r,
         pi: r,
+        vibe: r,
         gemini: r,
         windsurf: r,
         glm: r,
@@ -426,6 +431,7 @@ impl Palette {
             cursor: f(self.cursor),
             opencode: f(self.opencode),
             pi: f(self.pi),
+            vibe: f(self.vibe),
             gemini: f(self.gemini),
             windsurf: f(self.windsurf),
             glm: f(self.glm),

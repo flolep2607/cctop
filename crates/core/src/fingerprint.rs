@@ -225,6 +225,7 @@ fn provider_roots(provider: Provider) -> Vec<PathBuf> {
         Provider::Gemini => config::gemini_chats_roots(),
         Provider::OpenCode => config::opencode_data_roots(),
         Provider::Pi => config::pi_sessions_roots(),
+        Provider::Vibe => config::vibe_sessions_roots(),
         Provider::Windsurf => config::windsurf_workspace_roots(),
     }
 }

@@ -2,7 +2,7 @@
 
 [← back to the README](../../README.md)
 
-Eight harnesses, eight pages. Each one says where that harness's sessions live,
+Nine harnesses, nine pages. Each one says where that harness's sessions live,
 what shape they are in, which columns cctop can fill from them, and — the part
 worth writing down — where the format says something other than what it appears
 to say.
@@ -19,17 +19,18 @@ should be traceable to a function you can open.
 | [Cursor](cursor.md) | `crates/core/src/session/cursor.rs` | `~/.cursor/projects/*/agent-transcripts/<id>/<id>.jsonl` |
 | [Devin](devin.md) | `crates/core/src/session/devin.rs` | `~/.local/share/devin/cli/{sessions.db,transcripts/}` |
 | [Gemini CLI](gemini-cli.md) | `crates/core/src/session/gemini.rs` | `~/.gemini/tmp/<project>/chats/session-*.json{,l}` |
+| [Mistral Vibe](vibe.md) | `crates/core/src/session/vibe.rs` | `~/.vibe/logs/session/{session_*,unified/*}/` |
 | [OpenCode](opencode.md) | `crates/core/src/session/opencode.rs` | `~/.local/share/opencode/opencode*.db` |
 | [Pi](pi.md) | `crates/core/src/session/pi.rs` | `~/.pi/agent/sessions/**/*.jsonl` |
 | [Windsurf](windsurf.md) | `crates/core/src/session/windsurf.rs` | `<Windsurf User>/workspaceStorage/*/state.vscdb` |
 
 And [adding a harness](adding-a-harness.md), which is the list of places a
-ninth one has to be registered before it works — derived from what the eight
+tenth one has to be registered before it works — derived from what the nine
 already touch, not from a design.
 
 ## Why this is not `docs/harnesses/`
 
-[`docs/harnesses/`](../harnesses/) is a **mirror**: seven of these eight
+[`docs/harnesses/`](../harnesses/) is a **mirror**: seven of these nine
 projects' own documentation, pulled wholesale by `pull.sh` and overwritten
 wholesale on the next pull. Nothing in it is edited by hand, because the next
 refresh would delete the edit — and its value is precisely that it does not

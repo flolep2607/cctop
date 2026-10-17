@@ -400,6 +400,7 @@ pub fn page_for(provider: Provider, model: &str) -> Option<Page> {
         | Provider::Gemini
         | Provider::OpenCode
         | Provider::Pi
+        | Provider::Vibe
         | Provider::Windsurf => None,
     }
 }

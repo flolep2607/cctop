@@ -606,6 +606,7 @@ fn read_tail(s: &Session, want_context: bool) -> TailRead {
             Provider::Gemini => session::gemini::extract_last_tool(s),
             Provider::OpenCode => session::opencode::extract_last_tool(s),
             Provider::Pi => session::pi::extract_last_tool(s),
+            Provider::Vibe => session::vibe::extract_last_tool(s),
         },
     };
     let context = want_context
@@ -618,6 +619,7 @@ fn read_tail(s: &Session, want_context: bool) -> TailRead {
                 Provider::Gemini => session::gemini::extract_context(s),
                 Provider::OpenCode => session::opencode::extract_context(s),
                 Provider::Pi => session::pi::extract_context(s),
+                Provider::Vibe => session::vibe::extract_context(s),
                 Provider::Cursor => session::cursor::extract_context(s),
                 Provider::Windsurf => None,
             }
@@ -721,6 +723,7 @@ fn default_harness(session: &Session) -> &'static str {
             Provider::Gemini => "Gemini",
             Provider::OpenCode => "OpenCode",
             Provider::Pi => "Pi",
+            Provider::Vibe => "Vibe",
             Provider::Windsurf => "Windsurf",
         },
     }
@@ -740,6 +743,7 @@ pub struct Stats {
     pub total_gemini: usize,
     pub total_opencode: usize,
     pub total_pi: usize,
+    pub total_vibe: usize,
     pub total_windsurf: usize,
     pub active_1h: usize,
     pub active_24h: usize,
@@ -763,6 +767,7 @@ pub struct Stats {
     pub spend_gemini: f64,
     pub spend_opencode: f64,
     pub spend_pi: f64,
+    pub spend_vibe: f64,
     /// Always zero: Windsurf records no local accounting. Kept so the
     /// per-provider breakdown stays exhaustive rather than silently skipping a
     /// provider that might start reporting cost later.
@@ -832,6 +837,7 @@ pub fn compute_stats(sessions: &[Session]) -> Stats {
             Provider::Gemini => st.total_gemini += 1,
             Provider::OpenCode => st.total_opencode += 1,
             Provider::Pi => st.total_pi += 1,
+            Provider::Vibe => st.total_vibe += 1,
             Provider::Windsurf => st.total_windsurf += 1,
         }
         if let Some(la) = util::parse_ts(&s.last_active) {
@@ -866,6 +872,7 @@ pub fn compute_stats(sessions: &[Session]) -> Stats {
                 Provider::Gemini => st.spend_gemini += cost,
                 Provider::OpenCode => st.spend_opencode += cost,
                 Provider::Pi => st.spend_pi += cost,
+                Provider::Vibe => st.spend_vibe += cost,
                 Provider::Windsurf => st.spend_windsurf += cost,
             }
             st.spend_per_min += s.cost_per_min;
@@ -927,6 +934,7 @@ pub fn compute_stats(sessions: &[Session]) -> Stats {
         + st.spend_gemini
         + st.spend_opencode
         + st.spend_pi
+        + st.spend_vibe
         + st.spend_windsurf;
     st.spend_calendar_month = st.monthly_daily.iter().sum();
     st.top_today = descending(today_by_project);
