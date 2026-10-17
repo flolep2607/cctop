@@ -760,6 +760,16 @@ pub static DEVIN_SESSIONS_DB: LazyLock<PathBuf> =
 pub static DEVIN_TRANSCRIPTS_DIR: LazyLock<PathBuf> =
     LazyLock::new(|| DEVIN_CLI_DIR.join("transcripts"));
 
+/// `$VIBE_HOME`, falling back to `~/.vibe`: Mistral Vibe keeps its config,
+/// logs and sessions all under the one directory.
+pub static VIBE_HOME: LazyLock<PathBuf> =
+    LazyLock::new(|| env_dir("VIBE_HOME").unwrap_or_else(|| HOME.join(".vibe")));
+
+/// Vibe's session root, holding both of its layouts: a `session_*` directory
+/// per session from the Python CLI, and `unified/<id>` from the newer store.
+pub static VIBE_SESSIONS_ROOT: LazyLock<PathBuf> =
+    LazyLock::new(|| VIBE_HOME.join("logs").join("session"));
+
 /// Where OpenCode reads its own configuration and global plugins, which is the
 /// *config* directory rather than the data one its sessions live in.
 pub static OPENCODE_CONFIG_DIR: LazyLock<PathBuf> = LazyLock::new(|| {
@@ -1267,6 +1277,12 @@ pub fn gemini_chats_roots() -> Vec<PathBuf> {
 /// half database row and half transcript and both halves live in it.
 pub fn devin_cli_dirs() -> Vec<PathBuf> {
     roots_across_homes(&DEVIN_CLI_DIR, |h| data_dir_in(h).join("devin").join("cli"))
+}
+
+pub fn vibe_sessions_roots() -> Vec<PathBuf> {
+    roots_across_homes(&VIBE_SESSIONS_ROOT, |h| {
+        h.join(".vibe").join("logs").join("session")
+    })
 }
 
 /// The data directory *for another home*, which `dirs::data_dir` can only

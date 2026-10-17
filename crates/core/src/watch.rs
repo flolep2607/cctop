@@ -145,7 +145,28 @@ fn note(pending: &Mutex<HashMap<PathBuf, Instant>>, event: &notify::Event) {
 /// has. Its own discovery and the fingerprint both skip that directory for the
 /// same reason, so the watch does too rather than paying for it.
 fn is_noise(path: &Path) -> bool {
-    path.components().any(|c| c.as_os_str() == "tool-outputs")
+    path.components().any(|c| c.as_os_str() == "tool-outputs") || is_vibe_noise(path)
+}
+
+/// Anything inside a Vibe session but its `meta.json`.
+///
+/// Vibe's unified store is Gemini's case again: every step of a turn creates
+/// chunks, a journal segment or a generation, none of which is ever a
+/// session's file, so each would hold a re-walk open for [`PENDING_FOR`]. A
+/// session arrives as its directory and its `meta.json`, which is all that is
+/// let through.
+fn is_vibe_noise(path: &Path) -> bool {
+    static ROOTS: std::sync::LazyLock<Vec<PathBuf>> =
+        std::sync::LazyLock::new(crate::config::vibe_sessions_roots);
+    ROOTS.iter().any(|root| {
+        let Ok(rest) = path.strip_prefix(root) else {
+            return false;
+        };
+        // `session_*` is one level down, `unified/<id>` two.
+        let session_depth = if rest.starts_with("unified") { 2 } else { 1 };
+        let depth = rest.components().count();
+        !(depth <= session_depth || depth == session_depth + 1 && path.ends_with("meta.json"))
+    })
 }
 
 /// Every provider's session root that is present on this machine.
@@ -201,6 +222,7 @@ fn provider_roots(provider: Provider) -> Vec<PathBuf> {
         Provider::Gemini => config::gemini_chats_roots(),
         Provider::OpenCode => config::opencode_data_roots(),
         Provider::Pi => config::pi_sessions_roots(),
+        Provider::Vibe => config::vibe_sessions_roots(),
         Provider::Windsurf => Vec::new(),
     }
 }
@@ -209,6 +231,31 @@ fn provider_roots(provider: Provider) -> Vec<PathBuf> {
 mod tests {
     use super::*;
     use crate::test_wait::waits_for;
+
+    /// A Vibe session is let through as its directory and its `meta.json`;
+    /// what its store writes on every step is not, in either layout.
+    #[test]
+    fn only_a_vibe_sessions_own_files_are_news() {
+        let root = &*crate::config::VIBE_SESSIONS_ROOT;
+        for news in [
+            "unified/abc",
+            "unified/abc/meta.json",
+            "session_20260515_1_x",
+            "session_20260515_1_x/meta.json",
+        ] {
+            assert!(!is_noise(&root.join(news)), "{news} should be news");
+        }
+        for noise in [
+            "unified/abc/chunks/f00.json",
+            "unified/abc/journal/0000000000000300.jsonl",
+            "unified/abc/generations/0000000000000299/manifest.json",
+            "session_20260515_1_x/messages.jsonl",
+            "active/abc.lock",
+        ] {
+            assert!(is_noise(&root.join(noise)), "{noise} should be noise");
+        }
+        assert!(!is_noise(Path::new("/elsewhere/chunks/f00.json")));
+    }
 
     /// Devin is watched where a new session is a create — its `transcripts/`
     /// directories — and never at the CLI directory itself, whose `sessions.db`

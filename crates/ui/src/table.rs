@@ -52,6 +52,7 @@ fn provider_root(provider: Provider) -> &'static std::path::Path {
         Provider::Gemini => &config::GEMINI_CHATS_ROOT,
         Provider::OpenCode => &config::OPENCODE_DATA_DIR,
         Provider::Pi => &config::PI_SESSIONS_ROOT,
+        Provider::Vibe => &config::VIBE_SESSIONS_ROOT,
         Provider::Windsurf => &config::WINDSURF_USER_DIR,
     }
 }
@@ -61,9 +62,13 @@ fn provider_root(provider: Provider) -> &'static std::path::Path {
 /// cctop cannot see a tool it can in fact read.
 fn provider_is_listed(p: cctop_core::pricing::Provider) -> bool {
     let listed = provider_search_paths();
-    listed
-        .iter()
-        .any(|(name, _)| name.to_ascii_lowercase().starts_with(p.as_str()))
+    // A word of the name rather than its start: "Mistral Vibe" is how its
+    // vendor writes it, and the key is the second word.
+    listed.iter().any(|(name, _)| {
+        name.to_ascii_lowercase()
+            .split_whitespace()
+            .any(|word| word == p.as_str())
+    })
 }
 
 /// What to say when there is nothing to draw.

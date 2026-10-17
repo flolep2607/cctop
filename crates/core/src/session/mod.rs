@@ -21,6 +21,7 @@ pub(crate) mod opencode_line;
 pub mod pi;
 pub(crate) mod pi_line;
 pub mod search;
+pub mod vibe;
 pub mod windsurf;
 
 use crate::pricing::Provider;
@@ -128,6 +129,7 @@ impl Surface {
             (_, Provider::Gemini) => "Gemini",
             (_, Provider::OpenCode) => "OpenCode",
             (_, Provider::Pi) => "Pi",
+            (_, Provider::Vibe) => "Vibe",
             (_, Provider::Windsurf) => "Windsurf",
         }
     }
@@ -768,6 +770,7 @@ impl Session {
             Provider::Devin => vec!["devin", "--resume", &self.session_id],
             Provider::OpenCode => vec!["opencode", "--session", &self.session_id],
             Provider::Pi => vec!["pi", "--session", &self.session_id],
+            Provider::Vibe => vec!["vibe", "--resume", &self.session_id],
             Provider::Cursor | Provider::Gemini | Provider::Windsurf => {
                 return None;
             }
@@ -925,6 +928,11 @@ pub fn live_state(session: &Session) -> (ActivityState, Option<crate::hook::Perm
     // conversation's newest node in the database says the same thing faster.
     if session.provider == crate::pricing::Provider::Devin {
         return devin::live_state(session);
+    }
+    // Vibe's state is in its journal or its last message, either way a read
+    // of its own rather than this walk.
+    if session.provider == crate::pricing::Provider::Vibe {
+        return vibe::live_state(session);
     }
     let Some(text) = crate::util::read_tail(file, 65_536) else {
         return (ActivityState::Working, None);
@@ -1120,9 +1128,11 @@ fn is_waiting_for_input_event(
         // OpenCode keeps no transcript to tail, and Windsurf's conversation blob
         // is one SQLite value rewritten wholesale rather than a growing log, so
         // neither has a "newest event" this walk could read. Devin never gets
-        // here — live_state hands it to its own database read first.
+        // here — live_state hands it to its own database read first, as it
+        // does Vibe to its journal.
         crate::pricing::Provider::OpenCode
         | crate::pricing::Provider::Devin
+        | crate::pricing::Provider::Vibe
         | crate::pricing::Provider::Windsurf => false,
     }
 }
@@ -1357,6 +1367,10 @@ mod tests {
         assert_eq!(
             argv(Provider::Pi),
             Some(vec!["pi".into(), "--session".into(), "sid".into()])
+        );
+        assert_eq!(
+            argv(Provider::Vibe),
+            Some(vec!["vibe".into(), "--resume".into(), "sid".into()])
         );
         for provider in [Provider::Cursor, Provider::Gemini, Provider::Windsurf] {
             assert_eq!(argv(provider), None, "{provider:?} has no resume command");
@@ -1783,27 +1797,32 @@ impl FallbackRates {
             .0
             .entry(model.to_string())
             .or_insert_with(|| crate::pricing::resolve_generic(model)))?;
-        let per_m = |count: u64, rate: f64| count as f64 * rate / 1e6;
-        let costs = Costs {
-            input: per_m(tokens.input, p.input),
-            // Reasoning is reported alongside output, not on top of it, so it is
-            // deliberately not billed again.
-            output: per_m(tokens.output, p.output),
-            cache_read: per_m(tokens.cache_read, p.cache_read),
-            cache_write_5m: per_m(tokens.cache_write_5m, p.cache_write),
-            cache_write_1h: per_m(tokens.cache_write_1h, p.cache_write),
-            cached_input: per_m(tokens.cached_input, p.cache_read),
-            total: 0.0,
-        };
-        Some(Costs {
-            total: costs.input
-                + costs.output
-                + costs.cache_read
-                + costs.cache_write_5m
-                + costs.cache_write_1h
-                + costs.cached_input,
-            ..costs
-        })
+        Some(costs_at(p, tokens))
+    }
+}
+
+/// What `tokens` cost at the rates `p`.
+pub fn costs_at(p: crate::pricing::GenericPricing, tokens: &Tokens) -> Costs {
+    let per_m = |count: u64, rate: f64| count as f64 * rate / 1e6;
+    let costs = Costs {
+        input: per_m(tokens.input, p.input),
+        // Reasoning is reported alongside output, not on top of it, so it is
+        // deliberately not billed again.
+        output: per_m(tokens.output, p.output),
+        cache_read: per_m(tokens.cache_read, p.cache_read),
+        cache_write_5m: per_m(tokens.cache_write_5m, p.cache_write),
+        cache_write_1h: per_m(tokens.cache_write_1h, p.cache_write),
+        cached_input: per_m(tokens.cached_input, p.cache_read),
+        total: 0.0,
+    };
+    Costs {
+        total: costs.input
+            + costs.output
+            + costs.cache_read
+            + costs.cache_write_5m
+            + costs.cache_write_1h
+            + costs.cached_input,
+        ..costs
     }
 }
 
@@ -2577,7 +2596,7 @@ impl SessionData {
 /// All sessions from every known provider and surface, newest first.
 pub fn list_all() -> Vec<Session> {
     let _span = crate::trace::span("discover");
-    let ((mut codex, claude), ((opencode, pi), (cursor, (gemini, (windsurf, devin))))) =
+    let ((mut codex, claude), ((opencode, pi), (cursor, (gemini, (windsurf, (devin, vibe)))))) =
         rayon::join(
             || rayon::join(codex::list_sessions, claude::list_sessions),
             || {
@@ -2586,7 +2605,9 @@ pub fn list_all() -> Vec<Session> {
                     || {
                         rayon::join(cursor::list_sessions, || {
                             rayon::join(gemini::list_sessions, || {
-                                rayon::join(windsurf::list_sessions, devin::list_sessions)
+                                rayon::join(windsurf::list_sessions, || {
+                                    rayon::join(devin::list_sessions, vibe::list_sessions)
+                                })
                             })
                         })
                     },
@@ -2600,6 +2621,7 @@ pub fn list_all() -> Vec<Session> {
     codex.extend(gemini);
     codex.extend(windsurf);
     codex.extend(devin);
+    codex.extend(vibe);
     let mut sessions = codex;
     // Whose row this is, decided once here rather than in seven discovery
     // functions: the transcript's path already says it, and every provider
@@ -2781,6 +2803,8 @@ pub fn effective_mtime_ms(session: &Session) -> u64 {
         Provider::Codex | Provider::Devin | Provider::Gemini | Provider::Pi => {
             crate::config::file_mtime_ms(f)
         }
+        // A Vibe session is a directory written in three places.
+        Provider::Vibe => vibe::mtime_ms(f),
         // Every OpenCode session shares one WAL-backed database, as every
         // Windsurf conversation in a workspace shares one `state.vscdb`. Using
         // the file mtime would invalidate hundreds of unchanged sessions

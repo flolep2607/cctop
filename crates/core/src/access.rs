@@ -329,6 +329,14 @@ fn layout(session: &Session, root: &Path) -> Layout {
                  `.devin/global_rules.md` does not, so it is not listed",
             );
         }
+        Provider::Vibe => {
+            instructions.extend(project("AGENTS.md"));
+            configs.push((crate::config::VIBE_HOME.join("config.toml"), "user"));
+            if !session.label_source.is_empty() {
+                configs.push((cwd.join(".vibe").join("config.toml"), "project"));
+            }
+            skills = vec![crate::config::VIBE_HOME.join("skills")];
+        }
         Provider::Cursor => {
             instructions.extend(project(".cursorrules"));
             note = Some(
@@ -561,7 +569,10 @@ fn mcp_servers(session: &Session, root: &Path) -> Vec<McpServer> {
                 out.extend(mcp_from_config(path, "mcpServers", scope));
             }
         }
-        Provider::Cursor | Provider::Windsurf => {}
+        // ponytail: Vibe lists its servers as an array of tables
+        // (`[[mcp_servers]]`, each with a `name`), which `mcp_from_toml`'s
+        // Codex-shaped reader does not take; none are listed until one does.
+        Provider::Cursor | Provider::Vibe | Provider::Windsurf => {}
     }
     out
 }
@@ -715,7 +726,7 @@ fn harness_for(provider: Provider) -> Option<hook::Harness> {
         // Devin has its own hooks.v1.json, but `cctop hook` does not speak its
         // event dialect yet — registering it would install hooks that decode
         // nothing, which is worse than installing none.
-        Provider::Devin | Provider::Pi | Provider::Windsurf => None,
+        Provider::Devin | Provider::Pi | Provider::Vibe | Provider::Windsurf => None,
     }
 }
 

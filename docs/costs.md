@@ -42,6 +42,16 @@ the `$` column would be indistinguishable from one. `--plan max` counts Devin as
 bundled, but that changes nothing on screen: `incl` stands for a figure cctop
 computed and then withheld, and a Devin row has no figure to withhold.
 
+Mistral Vibe is estimated: its token totals at Mistral's published API rates
+(docs.mistral.ai/inference/pricing), built into cctop because LiteLLM lists
+Mistral's models only through resellers and under other names. A model that
+table does not carry falls back to LiteLLM, and to nothing after that. Vibe's
+Python CLI wrote a `session_cost` of its own, but priced from whatever rates the
+user's Vibe config carries, and its newer session store writes none, so cctop
+uses neither and prices both layouts the same way. Vibe records no time on
+any message, so a session's cost counts toward "today" and the month on the day
+it was last active.
+
 Subscription plans — Claude Max, Pro, Team — are flat-rate or bundle tokens
 differently, so these numbers will not match your invoice. Treat the `$` column
 as a measure of resource consumption, not as billing. Use `--plan max` or
@@ -71,11 +81,12 @@ percentages.
 | Devin | `~/.local/share/devin/cli/sessions.db` (platform data directory), with `transcripts/<id>.json` beside it |
 | OpenCode | `~/.local/share/opencode/opencode*.db` (platform data directory) |
 | Pi | `~/.pi/agent/sessions/**/*.jsonl` |
+| Mistral Vibe | `~/.vibe/logs/session/{session_*,unified/*}/meta.json` |
 | Windsurf | `<Windsurf User dir>/workspaceStorage/*/state.vscdb` |
 
 `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `CURSOR_HOME`, `GEMINI_DIR`,
-`OPENCODE_DATA_DIR`, `PI_CODING_AGENT_DIR`, `PI_CODING_AGENT_SESSION_DIR`, and
-`WINDSURF_USER_DIR` are honoured, along with `OPENCODE_CONFIG_DIR` for the
+`OPENCODE_DATA_DIR`, `PI_CODING_AGENT_DIR`, `PI_CODING_AGENT_SESSION_DIR`,
+`VIBE_HOME` and `WINDSURF_USER_DIR` are honoured, along with `OPENCODE_CONFIG_DIR` for the
 plugin `--install-hooks` writes. `CHISEL_SESSION_DB` moves Devin's, and is the
 only one that names a **file** rather than a directory: cctop takes the parent
 of the database it points at, because the transcript has to sit beside it.

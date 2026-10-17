@@ -542,6 +542,12 @@ fn read_main(session: &Session, before: Option<usize>, limits: Limits) -> Conver
         Provider::Cursor => extract::for_each_jsonl(path, |item| sink.cursor(item)),
         Provider::Gemini => gemini::for_each_record(path, |item| sink.gemini(item)),
         Provider::Pi => extract::for_each_jsonl(path, |item| sink.pi(item)),
+        Provider::Vibe => {
+            for message in crate::session::vibe::messages(path) {
+                sink.vibe(&message);
+            }
+            Ok(())
+        }
         _ => {
             return unsupported(&format!(
                 "cctop cannot read {} {} conversation yet — it keeps the whole \

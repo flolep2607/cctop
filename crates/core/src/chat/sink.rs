@@ -895,6 +895,106 @@ impl Sink {
             _ => {}
         }
     }
+
+    // --- Vibe ---
+
+    /// One Vibe message, in either of its layouts' shapes.
+    ///
+    /// The unified store keeps `content` as typed parts — `text`, `reasoning`
+    /// (whose own `content` is text parts), `tool_call` with its `arguments`
+    /// already parsed under `value` — and says how a call ended in the tool
+    /// message's `outcome`. The Python CLI wrote OpenAI's chat shape: string
+    /// content, `reasoning_content` beside it, `tool_calls` whose arguments are
+    /// a JSON document in a string, and no outcome at all. Neither stamps a
+    /// time on a message.
+    pub(super) fn vibe(&mut self, message: &Value) {
+        let id_of = |v: &Value, key: &str| v.get(key).and_then(Value::as_str).map(str::to_string);
+        match message.get("role").and_then(Value::as_str) {
+            Some("tool") => {
+                let Some(id) = id_of(message, "tool_call_id") else {
+                    return;
+                };
+                let body = flatten_content(message.get("content"));
+                let failed = message.get("outcome").and_then(Value::as_str) == Some("failure");
+                self.resolve(&id, Some(body), failed, None);
+            }
+            Some(role @ ("user" | "assistant")) => {
+                if message.get("injected").and_then(Value::as_bool) == Some(true) {
+                    return;
+                }
+                let mut text = String::new();
+                let mut thinking = String::new();
+                let mut calls = Vec::new();
+                if let Some(t) = message.get("reasoning_content").and_then(Value::as_str) {
+                    push_text(&mut thinking, t);
+                }
+                match message.get("content") {
+                    Some(Value::String(s)) => push_text(&mut text, s),
+                    Some(Value::Array(parts)) => {
+                        for part in parts {
+                            match part.get("type").and_then(Value::as_str) {
+                                Some("text") => {
+                                    if let Some(t) = part.get("text").and_then(Value::as_str) {
+                                        push_text(&mut text, t);
+                                    }
+                                }
+                                Some("reasoning") => {
+                                    push_text(&mut thinking, &flatten_content(part.get("content")))
+                                }
+                                Some("tool_call") => {
+                                    let name =
+                                        part.get("name").and_then(Value::as_str).unwrap_or("tool");
+                                    let args = part
+                                        .pointer("/arguments/value")
+                                        .cloned()
+                                        .unwrap_or(Value::Null);
+                                    calls.push((
+                                        id_of(part, "id"),
+                                        call_tool(name, &args, Outcome::Running),
+                                    ));
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+                for call in message
+                    .get("tool_calls")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                {
+                    let name = call
+                        .pointer("/function/name")
+                        .and_then(Value::as_str)
+                        .unwrap_or("tool");
+                    let args = call
+                        .pointer("/function/arguments")
+                        .and_then(Value::as_str)
+                        .and_then(|a| serde_json::from_str(a).ok())
+                        .unwrap_or(Value::Null);
+                    calls.push((id_of(call, "id"), call_tool(name, &args, Outcome::Running)));
+                }
+                if !thinking.trim().is_empty() {
+                    let mut turn = Turn::new("assistant", "reasoning", "");
+                    turn.set_text(&thinking, self.limits.text);
+                    self.push(turn);
+                }
+                if text.trim().is_empty() && calls.is_empty() {
+                    return;
+                }
+                let role = if role == "user" { "user" } else { "assistant" };
+                let mut turn = Turn::new(role, "message", "");
+                turn.set_text(&tidy_harness_text(&text), self.limits.text);
+                let seq = self.push(turn);
+                for (id, call) in calls {
+                    self.add_tool(seq, id.as_deref(), call);
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 /// The id a Pi tool call is answered by, if it gave one.
@@ -1632,6 +1732,54 @@ mod tests {
         ]);
         assert!(chat.turns[0].tools[0].failed);
         assert_eq!(chat.turns[0].tools[0].result.as_deref(), Some("boom"));
+    }
+
+    fn sink_vibe(lines: &[&str]) -> Conversation {
+        let mut sink = Sink::default();
+        for line in lines {
+            sink.vibe(&serde_json::from_str(line).unwrap());
+        }
+        sink.finish()
+    }
+
+    /// The unified store's parts: reasoning is a turn of its own, a call's
+    /// arguments are already parsed, and the tool message's `outcome` says it
+    /// failed.
+    #[test]
+    fn a_vibe_checkpoint_exchange_reads_the_same_way() {
+        let chat = sink_vibe(&[
+            r#"{"role":"user","content":[{"type":"text","text":"why 429?"}]}"#,
+            r#"{"role":"assistant","content":[{"type":"reasoning","content":[{"type":"text","text":"grep it"}]},{"type":"tool_call","id":"k1","name":"bash","arguments":{"raw":"{}","value":{"command":"grep -r 429"}}}]}"#,
+            r#"{"role":"tool","name":"bash","tool_call_id":"k1","outcome":"failure","content":[{"type":"text","text":"exit 2"}]}"#,
+            r#"{"role":"assistant","content":[{"type":"text","text":"Rate limits."}]}"#,
+        ]);
+        assert_eq!(chat.turns.len(), 4);
+        assert_eq!(chat.turns[0].text, "why 429?");
+        assert_eq!(chat.turns[1].kind, "reasoning");
+        let tool = &chat.turns[2].tools[0];
+        assert_eq!(tool.name, "bash");
+        assert!(tool.failed);
+        assert_eq!(tool.result.as_deref(), Some("exit 2"));
+        assert_eq!(chat.turns[3].text, "Rate limits.");
+    }
+
+    /// The Python CLI's OpenAI shape: arguments as a JSON string, reasoning
+    /// beside the content, and an injected message the person never typed.
+    #[test]
+    fn a_vibe_python_exchange_reads_the_same_way() {
+        let chat = sink_vibe(&[
+            r#"{"role":"user","content":"Hello","injected":false}"#,
+            r#"{"role":"user","content":"<system reminder>","injected":true}"#,
+            r#"{"role":"assistant","reasoning_content":"say hi","tool_calls":[{"id":"U6","function":{"name":"read_file","arguments":"{\"path\": \"/x\"}"}}]}"#,
+            r#"{"role":"tool","content":"path: /x","tool_call_id":"U6"}"#,
+        ]);
+        assert_eq!(chat.turns.len(), 3);
+        assert_eq!(chat.turns[0].text, "Hello");
+        assert_eq!(chat.turns[1].kind, "reasoning");
+        let tool = &chat.turns[2].tools[0];
+        assert_eq!(tool.name, "read_file");
+        assert_eq!(tool.result.as_deref(), Some("path: /x"));
+        assert!(!tool.failed);
     }
 
     /// An editor's arguments are the patch, whichever harness spelled the tool

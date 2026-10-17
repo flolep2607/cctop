@@ -280,6 +280,7 @@ fn environment() -> Section {
         "OPENCODE_DATA_DIR",
         "PI_CODING_AGENT_DIR",
         "PI_CODING_AGENT_SESSION_DIR",
+        "VIBE_HOME",
         "WINDSURF_USER_DIR",
         "CCTOP_ALL_USERS",
         "CCTOP_HOMES",
@@ -326,6 +327,7 @@ pub(crate) fn sessions_root(provider: Provider) -> std::path::PathBuf {
         Provider::Gemini => config::GEMINI_CHATS_ROOT.clone(),
         Provider::OpenCode => config::OPENCODE_DATA_DIR.clone(),
         Provider::Pi => config::PI_SESSIONS_ROOT.clone(),
+        Provider::Vibe => config::VIBE_SESSIONS_ROOT.clone(),
         Provider::Windsurf => config::WINDSURF_USER_DIR.clone(),
     }
 }

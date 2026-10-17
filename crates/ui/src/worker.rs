@@ -504,6 +504,8 @@ pub(super) fn spawn_worker(
                             .map_err(|error| error.to_string()),
                         Provider::Pi => cctop_core::session::pi::delete(&session)
                             .map_err(|error| error.to_string()),
+                        Provider::Vibe => cctop_core::session::vibe::delete(&session)
+                            .map_err(|error| error.to_string()),
                         Provider::Windsurf => cctop_core::session::windsurf::delete(&session)
                             .map_err(|error| error.to_string()),
                     };

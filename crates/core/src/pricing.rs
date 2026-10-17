@@ -102,6 +102,55 @@ static CODEX_TABLE: LazyLock<HashMap<&'static str, CodexPricing>> = LazyLock::ne
     ])
 });
 
+/// Mistral's own API rates, from docs.mistral.ai/inference/pricing (standard
+/// tier, USD), under every name Mistral Vibe calls a model by: its API name,
+/// and the alias its `config.toml` gives it.
+///
+/// Built in because LiteLLM lists these only through resellers, under names
+/// none of Vibe's match — `mistral-medium-3.5` and `zai-glm-5-3` fuzzy-match a
+/// reseller's row at best, which is somebody else's price.
+///
+/// ponytail: Mistral Large 4 is left out while it is on sale, since a sale
+/// price written down here outlives the sale. Devstral is out because the
+/// pricing page no longer lists it; both fall through to LiteLLM.
+static MISTRAL_TABLE: LazyLock<HashMap<&'static str, GenericPricing>> = LazyLock::new(|| {
+    let rate = |input: f64, cached: f64, output: f64| GenericPricing {
+        input,
+        cache_read: cached,
+        cache_write: input,
+        output,
+    };
+    let medium_3_5 = rate(1.5, 0.15, 7.5);
+    let large_3 = rate(0.5, 0.05, 1.5);
+    let small_4 = rate(0.15, 0.015, 0.6);
+    let codestral = rate(0.3, 0.03, 0.9);
+    let glm_5_3 = rate(1.4, 0.14, 4.4);
+    HashMap::from([
+        ("mistral-medium-3.5", medium_3_5),
+        ("mistral-medium-3-5", medium_3_5),
+        // Vibe's own name for Medium 3.5, aliased to it in its default config.
+        ("mistral-vibe-cli-latest", medium_3_5),
+        ("mistral-large-3", large_3),
+        ("mistral-large-2512", large_3),
+        ("mistral-small-4", small_4),
+        ("mistral-small-2603", small_4),
+        ("codestral-2508", codestral),
+        ("codestral-latest", codestral),
+        // Z.ai's model, as Mistral hosts and prices it.
+        ("zai-glm-5-3", glm_5_3),
+        ("glm-5-3", glm_5_3),
+    ])
+});
+
+/// Rates for a model Mistral Vibe ran: Mistral's published price, else
+/// whatever LiteLLM lists.
+pub fn resolve_mistral(model: &str) -> Option<GenericPricing> {
+    MISTRAL_TABLE
+        .get(model)
+        .copied()
+        .or_else(|| resolve_generic(model))
+}
+
 // ---------------------------------------------------------------------------
 // LiteLLM fallback
 // ---------------------------------------------------------------------------
@@ -554,6 +603,7 @@ pub fn listing(provider: Provider, model: &str) -> Listing {
     let built_in = match provider {
         Provider::Claude => CLAUDE_TABLE.contains_key(model),
         Provider::Codex | Provider::Gemini => CODEX_TABLE.contains_key(model),
+        Provider::Vibe => MISTRAL_TABLE.contains_key(model),
         _ => false,
     };
     if built_in {
@@ -616,6 +666,7 @@ pub enum Provider {
     Gemini,
     OpenCode,
     Pi,
+    Vibe,
     Windsurf,
 }
 
@@ -627,7 +678,7 @@ impl Provider {
     /// sessions were already priced into every figure `optimize` printed,
     /// because the names accepted there were a copy nobody had to keep in step.
     /// Everything that wants all of them iterates this instead.
-    pub const ALL: [Provider; 8] = [
+    pub const ALL: [Provider; 9] = [
         Provider::Claude,
         Provider::Codex,
         Provider::Cursor,
@@ -635,6 +686,7 @@ impl Provider {
         Provider::Gemini,
         Provider::OpenCode,
         Provider::Pi,
+        Provider::Vibe,
         Provider::Windsurf,
     ];
 
@@ -653,6 +705,7 @@ impl Provider {
             Provider::Gemini => "Gemini CLI",
             Provider::OpenCode => "OpenCode",
             Provider::Pi => "Pi",
+            Provider::Vibe => "Mistral Vibe",
             Provider::Windsurf => "Windsurf",
         }
     }
@@ -673,6 +726,7 @@ impl Provider {
             Provider::Gemini => "extract.gemini",
             Provider::OpenCode => "extract.opencode",
             Provider::Pi => "extract.pi",
+            Provider::Vibe => "extract.vibe",
             Provider::Windsurf => "extract.windsurf",
         }
     }
@@ -688,6 +742,7 @@ impl Provider {
             Provider::Gemini => "tails.gemini",
             Provider::OpenCode => "tails.opencode",
             Provider::Pi => "tails.pi",
+            Provider::Vibe => "tails.vibe",
             Provider::Windsurf => "tails.windsurf",
         }
     }
@@ -706,7 +761,8 @@ impl Provider {
             | Provider::Devin
             | Provider::Gemini
             | Provider::OpenCode
-            | Provider::Pi => true,
+            | Provider::Pi
+            | Provider::Vibe => true,
             Provider::Cursor | Provider::Windsurf => false,
         }
     }
@@ -736,6 +792,7 @@ impl Provider {
             "gemini" => Provider::Gemini,
             "opencode" => Provider::OpenCode,
             "pi" => Provider::Pi,
+            "vibe" => Provider::Vibe,
             "windsurf" => Provider::Windsurf,
             _ => return None,
         })
@@ -750,6 +807,7 @@ impl Provider {
             Provider::Gemini => "gemini",
             Provider::OpenCode => "opencode",
             Provider::Pi => "pi",
+            Provider::Vibe => "vibe",
             Provider::Windsurf => "windsurf",
         }
     }
@@ -824,7 +882,8 @@ mod provider_lists {
             Provider::Gemini => 4,
             Provider::OpenCode => 5,
             Provider::Pi => 6,
-            Provider::Windsurf => 7,
+            Provider::Vibe => 7,
+            Provider::Windsurf => 8,
         }
     }
 

@@ -100,8 +100,8 @@ The usual causes, in order of how often they turn out to be it:
 
 - **An environment override.** `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `CURSOR_HOME`,
   `GEMINI_DIR`, `OPENCODE_DATA_DIR`, `PI_CODING_AGENT_DIR`,
-  `PI_CODING_AGENT_SESSION_DIR`, `WINDSURF_USER_DIR` and `CHISEL_SESSION_DB` all
-  move where cctop looks. `doctor` lists the ones it knows about that are set —
+  `PI_CODING_AGENT_SESSION_DIR`, `VIBE_HOME`, `WINDSURF_USER_DIR` and
+  `CHISEL_SESSION_DB` all move where cctop looks. `doctor` lists the ones it knows about that are set —
   everything above but `CHISEL_SESSION_DB`, which it does not report, so check it
   yourself with `env | grep CHISEL` if a Devin install is not showing up. That one
   is the odd shape of the set: it names Devin's database *file*, and the

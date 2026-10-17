@@ -375,6 +375,7 @@ pub fn info(
         Provider::Gemini => "gemini, then /chat resume".to_string(),
         Provider::OpenCode => format!("opencode --session {}", session.session_id),
         Provider::Pi => format!("pi --session {}", session.session_id),
+        Provider::Vibe => format!("vibe --resume {}", session.session_id),
         Provider::Windsurf => "Open from Windsurf history".to_string(),
     };
     lines.push(field("Cmd", cmd));
@@ -647,6 +648,7 @@ pub(super) fn provider_color(session: &Session) -> ratatui::style::Color {
             Provider::Gemini => theme::colors().gemini,
             Provider::OpenCode => theme::colors().opencode,
             Provider::Pi => theme::colors().pi,
+            Provider::Vibe => theme::colors().vibe,
             Provider::Windsurf => theme::colors().windsurf,
         },
     }
@@ -2079,6 +2081,32 @@ pub fn config(session: &Session) -> Vec<Line<'static>> {
             for (path, scope) in &files.legacy_mcp_files {
                 lines.extend(mcp_from_config(path, "mcpServers", scope));
             }
+        }
+        Provider::Vibe => {
+            lines.push(Line::from(Span::styled(
+                "── Instructions ──".to_string(),
+                theme::title(),
+            )));
+            if !session.label_source.is_empty() {
+                match file_section(&cwd.join("AGENTS.md"), "./AGENTS.md", 40) {
+                    Some(block) => lines.extend(block),
+                    None => lines.push(missing("./AGENTS.md not found".into())),
+                }
+            }
+            lines.push(Line::from(Span::styled(
+                "── Config ──".to_string(),
+                theme::title(),
+            )));
+            let config = cctop_core::config::VIBE_HOME.join("config.toml");
+            match file_section(&config, &util::tildify(&config.to_string_lossy()), 30) {
+                Some(block) => lines.extend(block),
+                None => lines.push(missing(format!("{} not found", config.display()))),
+            }
+            lines.push(Line::from(Span::styled(
+                "── Skills ──".to_string(),
+                theme::title(),
+            )));
+            lines.extend(skill_list(&cctop_core::config::VIBE_HOME.join("skills")));
         }
         Provider::Windsurf => {
             // Windsurf's global rules live in the editor's own settings UI, not

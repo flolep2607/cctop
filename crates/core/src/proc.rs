@@ -338,6 +338,8 @@ fn could_be_agent(name: &str, argv0: Option<&str>) -> bool {
         // Devin's ACP backend, spawned per session by the CLI and by editor
         // integrations.
         | "devin"
+        // Mistral Vibe's frontend, which the `vibe` launcher execs into.
+        | "vibe-rs"
     ) || is_codex_binary(name)
         || argv0.is_some_and(is_claude_argv0)
 }
@@ -606,12 +608,28 @@ impl Collector {
             // subcommand (`auth`, `mcp`, `models`, …) is a short-lived tool
             // that must not become a phantom session row.
             let is_devin = snap.name == "devin" && snap.tokens.iter().any(|t| t == "acp");
+            // `vibe-rs` is the session; the Python app server it spawns is its
+            // child. Its `mcp` and `update` subcommands are short-lived tools.
+            //
+            // ponytail: matched to a session by working directory, so two Vibe
+            // sessions in one directory share the newest row. The store's
+            // `active/<id>.lock.json` names each session's app-server pid, which
+            // would attribute them exactly. The Python-only CLI runs as a
+            // `python` process and is not matched at all.
+            let is_vibe = snap.name == "vibe-rs"
+                && !snap
+                    .tokens
+                    .iter()
+                    .skip(1)
+                    .any(|t| matches!(t.as_str(), "mcp" | "update" | "help"));
             if is_opencode {
                 Some(crate::pricing::Provider::OpenCode)
             } else if is_pi {
                 Some(crate::pricing::Provider::Pi)
             } else if is_devin {
                 Some(crate::pricing::Provider::Devin)
+            } else if is_vibe {
+                Some(crate::pricing::Provider::Vibe)
             } else if is_codex {
                 Some(crate::pricing::Provider::Codex)
             } else if is_claude {
