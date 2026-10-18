@@ -280,6 +280,8 @@ cctop --update        # update now, rather than at the next start
 
 ## Documentation
 
+All of it, searchable, at **[flolep2607.github.io/cctop](https://flolep2607.github.io/cctop/)**.
+
 - [Reading the table](docs/the-table.md): every column, the status dot,
   filtering, settings and the full key list
 - [Driving agents](docs/driving-agents.md): typing into sessions, resuming,
