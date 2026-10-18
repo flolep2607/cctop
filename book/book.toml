@@ -1,0 +1,25 @@
+# The documentation site, flolep2607.github.io/cctop. The pages are the
+# README and docs/ as they are in the repository; build.py copies them into
+# src/ with the repository's layout, so every relative link that works on
+# GitHub works here too. See build.py for why nothing is moved.
+[book]
+title = "cctop"
+description = "htop for your AI coding agents"
+authors = ["Florian Leprat"]
+language = "en"
+src = "src"
+
+[build]
+build-dir = "out"
+create-missing = false
+
+[output.html]
+default-theme = "light"
+preferred-dark-theme = "navy"
+git-repository-url = "https://github.com/flolep2607/cctop"
+edit-url-template = "https://github.com/flolep2607/cctop/edit/main/{path}"
+site-url = "/cctop/"
+no-section-label = true
+
+[output.html.search]
+limit-results = 20

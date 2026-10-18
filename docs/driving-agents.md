@@ -353,7 +353,7 @@ more than no link, and a link that silently reaches nothing is worth less than
 either.
 
 rmux ships six tunnel providers of its own and deliberately not this one: a
-`trycloudflare.com` hostname, [its docs say](../rmux/docs/web-share.md), "can
+`trycloudflare.com` hostname, [its docs say](rmux/docs/web-share.md), "can
 take an unpredictable amount of time to become reachable" and carries no uptime
 guarantee — so it points anyone who wants one at `--tunnel-url`, which is the
 door cctop comes through. Expect a link to 502 for a moment after it is minted,
