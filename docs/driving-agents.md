@@ -82,6 +82,8 @@ that have been quiet for `idle_after` hours (6 by default), biggest first, with
 the total a stop would give back; `K` there stops them — the marked ones, or all
 of them — after a confirmation that names each, its idle time and its memory.
 
+![Stopping idle sessions: one is stopped, the busy one is left running](assets/frames/idle_reclaim.png)
+
 It skips any session that is working, asking a question, or still using CPU, and
 says which and why. The stop is SIGTERM, so each agent exits cleanly and `R`
 brings it back whenever it is wanted again. See [idle
@@ -92,6 +94,8 @@ sessions](the-table.md#idle-sessions-and-the-memory-they-hold) for the details.
 The session table is tab 1. `t` opens another: pick an agent — whichever of
 `claude`, `codex`, `devin`, `opencode` and `pi` you have installed — or your
 shell, and it starts on a pty cctop owns and draws in the window.
+
+![A new tab: the agent, its model, permissions and worktree, and the command it will run](assets/frames/launch_options.png)
 
 The launcher says where the agent will start, and `c` makes that line editable:
 type or paste a path, `~` included, `Enter` to take it and `Esc` to keep the one
@@ -249,6 +253,8 @@ nothing to install — and what cctop hosts is only the rmux client. Quitting
 cctop detaches: the agent does not notice and carries on. On the way out cctop
 says how many it left behind.
 
+![Tabs along the top, two of them on other machines](assets/frames/remote_tabs.png)
+
 Opening cctop again restores those tabs automatically, with their scrollback
 intact — and, since a tab's shape is recorded on its sessions, a **split comes
 back as the one tab it was**: same panes, same order, divided the same way. A
@@ -315,6 +321,8 @@ reaches off this machine, `W` also opens a panel with the link as a QR code and
 the pairing code under it, for pointing a phone at; any key closes it. The code
 is the link — the panel says so — and on a terminal too small to hold it the
 panel says that instead.
+
+![Sharing a terminal: a link, a QR code and a pairing code](assets/frames/share_address.png)
 
 The link reaches this machine through a Cloudflare tunnel of cctop's, handed to
 rmux as `--tunnel-url` rather than letting it raise one through a provider of
@@ -576,6 +584,8 @@ page already argues against.
 puts the *same* agent back on the *same* transcript, a handoff carries what the
 session was doing over to a different agent entirely — the one thing no harness
 can do for itself, since each can only read its own transcripts.
+
+![Handing a session's context to another agent](assets/frames/handoff_picker.png)
 
 cctop writes a markdown brief, opens the launcher, and starts whichever agent you
 pick with a line pointing it at the file. Where the harness takes an opening

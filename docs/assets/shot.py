@@ -109,6 +109,13 @@ def cells(text):
                         else:
                             bg = palette(args[j + 2])
                         j += 2
+                    elif a in (38, 48) and j + 4 < len(args) and args[j + 1] == 2:
+                        rgb = "#%02x%02x%02x" % tuple(args[j + 2:j + 5])
+                        if a == 38:
+                            fg = rgb
+                        else:
+                            bg = rgb
+                        j += 4
                     j += 1
                 i = m.end()
                 continue

@@ -39,6 +39,8 @@ of the keys below — `CCTOP_COLUMNS_HIDE=tok_rate,mem`.
 | `BRANCH` | `branch` | Branch checked out in the working directory, `@<commit>` when detached, `─` when not a repository |
 | `PROJECT` | `project` | The session's title if it has one, otherwise its working directory |
 
+![The sort list, F6: every column, and what the status dot means](assets/frames/sort.png)
+
 ## The status dot
 
 The left status dot is green while an agent is working, amber after its latest
@@ -251,6 +253,8 @@ cell that matched is underlined, so it is clear *why* a row survived the filter.
 `n` and `N` step through matches, `Esc` clears, and `↑`/`↓` inside the prompt
 bring back a search you ran before — the last twenty are remembered across runs.
 
+![Filtering the table: typing "ap" leaves one session of four](assets/frames/search_typing.png)
+
 `user:<name>` narrows to one person's sessions when cctop is
 [watching every user](integrations.md#every-user-on-the-machine), without the
 name also matching every title that happens to contain it. Part of a name is
@@ -349,6 +353,8 @@ hundred megabytes, and an MCP server it started is often another hundred. On a
 shared machine that is where the RAM goes — twenty sessions a few days old is
 ten gigabytes that nobody is typing into.
 
+![The idle view: sessions untouched for six hours, and the memory they hold](assets/frames/idle_view.png)
+
 `I` narrows the table to those: sessions that still have a process but have
 written nothing for `idle_after` hours (6 unless `,` says otherwise). They are
 sorted by the memory of their process tree, the root and every child — the
@@ -391,6 +397,8 @@ know they exist first, and a key that quietly declines — because the row is on
 another machine, or is a subagent, or has no process left to signal — teaches
 nothing about why.
 
+![The row menu on a running session, with each action's key](assets/frames/row_menu.png)
+
 `Enter` on a row opens everything you can do to it:
 
 ```
@@ -425,6 +433,8 @@ of the workspace bar. `,` goes there, clicking **Settings** goes there, and
 `Alt+←`/`Alt+→` step onto it like any other tab. It is not a popup: it is a tab,
 so it holds the whole frame below the bar rather than a small box over the
 table, and the bar stays clickable while you are on it.
+
+![The Settings tab](assets/frames/settings.png)
 
 It is in three parts, because the values live in three places:
 
@@ -501,6 +511,8 @@ reach them was to remember which key pressed which one.
 | `Esc` | Clear the active filter |
 | `?` or `F1` | Help: every key on one page, as `[keys]` has bound them, with the version and commit on its border; `/` in it narrows the page (see below) |
 | `q` or `F10` | Quit |
+
+![The help screen, ?](assets/frames/help.png)
 
 Tabs and splits, from anywhere including inside a running agent:
 
