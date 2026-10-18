@@ -437,7 +437,18 @@ python3 docs/assets/shot.py docs/assets/demo.gif --record docs/assets/demo.cast 
         --size 128x30 --scale 1 $R
 ```
 
-The script drives a real cctop through tmux and rasterises the captured screen
+The pictures in the docs pages (`docs/assets/frames/`) are not captures: they
+are the snapshot tests' fixture, the same made-up sessions the `.snap` files
+pin, rendered in colour. After a change to what the TUI draws, accept the
+snapshots and redraw them all with:
+
+```bash
+python3 docs/assets/frames.py
+```
+
+A new one is a snapshot name in its `FRAMES` list and an image link.
+
+`shot.py` drives a real cctop through tmux and rasterises the captured screen
 itself, so the images carry whatever is on the machine that made them.
 
 **It scrubs email addresses unconditionally**, because cctop reads the signed-in

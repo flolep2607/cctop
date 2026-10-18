@@ -393,6 +393,8 @@ cctop is otherwise a monitor of one computer, which is the wrong shape if the
 agents are not all on it — a laptop in front of you and a devbox doing the heavy work,
 each with its own idea of what today cost.
 
+![Sessions from other machines in the same table, in tabs of their own](assets/frames/remote_tabs.png)
+
 ```bash
 cctop --host devbox --host flo@builder
 CCTOP_HOSTS=devbox,flo@builder cctop     # the same, from the environment

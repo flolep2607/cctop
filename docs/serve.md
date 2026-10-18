@@ -14,6 +14,11 @@ plus what the terminal has no room for: per session, the conversation itself,
 what it edited, what it can reach, a report that says where an afternoon's money
 went, and each account's rate-limit windows at `/api/quota`.
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/readme/web-dark.png">
+  <img alt="cctop serve in a browser: the session list with project, title, model, cost and context per row" src="assets/readme/web-light.png">
+</picture>
+
 **It can also answer an agent.** A page that tells you a session has been waiting
 twenty minutes and cannot do anything about it has shown you a problem and
 withheld the fix, so the page can send a prompt to a live session, resume a dead
@@ -156,6 +161,12 @@ calls by wall time, the full tool table, and the files the session wrote.
 The default bind is `127.0.0.1`, so out of the box nothing but this machine can
 open it. Two ways to go further, in the order you should prefer them:
 
+<p align="center">
+  <img alt="The same page at phone width, in the dark and the light theme" src="assets/readme/web-phone.png" width="560">
+</p>
+
+![The dashboard link as a QR code, to scan from a phone](assets/frames/settings_tunnel_qr.png)
+
 **A tunnel you already have.** Tailscale, or plain ssh:
 
 ```bash
@@ -221,6 +232,8 @@ for anything you keep. Cloudflare documents its limits: **no Server-Sent
 Events** (the live table is one, so it works unsupported and can stall), **at
 most 200 requests in flight**, **no uptime promise**, and **a new hostname every
 run**, so a bookmark or a home-screen shortcut dies with the process.
+
+![The tunnel rows in Settings: login, token, and whether it is connected](assets/frames/settings_tunnel.png)
 
 A named tunnel on your own free Cloudflare account has none of those: Server-Sent
 Events are supported, there is no request cap, and the hostname is yours and

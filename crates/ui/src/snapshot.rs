@@ -344,13 +344,83 @@ fn styles(buffer: &Buffer) -> String {
     format!("{}\n\n{legend}", grid.join("\n"))
 }
 
+/// One SGR parameter list for a colour, `base` being 30 for the foreground
+/// and 40 for the background.
+fn sgr_colour(colour: Color, base: u8) -> Option<String> {
+    let bright = base + 60;
+    Some(match colour {
+        Color::Reset => return None,
+        Color::Black => format!("{base}"),
+        Color::Red => format!("{}", base + 1),
+        Color::Green => format!("{}", base + 2),
+        Color::Yellow => format!("{}", base + 3),
+        Color::Blue => format!("{}", base + 4),
+        Color::Magenta => format!("{}", base + 5),
+        Color::Cyan => format!("{}", base + 6),
+        Color::Gray => format!("{}", base + 7),
+        Color::DarkGray => format!("{bright}"),
+        Color::LightRed => format!("{}", bright + 1),
+        Color::LightGreen => format!("{}", bright + 2),
+        Color::LightYellow => format!("{}", bright + 3),
+        Color::LightBlue => format!("{}", bright + 4),
+        Color::LightMagenta => format!("{}", bright + 5),
+        Color::LightCyan => format!("{}", bright + 6),
+        Color::White => format!("{}", bright + 7),
+        Color::Indexed(i) => format!("{};5;{i}", base + 8),
+        Color::Rgb(r, g, b) => format!("{};2;{r};{g};{b}", base + 8),
+    })
+}
+
+/// The frame as a terminal would print it, escape codes and all.
+///
+/// Not a snapshot: the documentation's pictures of the TUI are these frames,
+/// rasterised by `docs/assets/frames.py`, so they show the fixture's made-up
+/// sessions rather than whatever is on the machine taking them.
+fn ansi(buffer: &Buffer) -> String {
+    let area = buffer.area;
+    let mut out = String::new();
+    for y in area.top()..area.bottom() {
+        let mut last = None;
+        for x in area.left()..area.right() {
+            let cell = &buffer[(x, y)];
+            let key = (cell.fg, cell.bg, cell.modifier.contains(Modifier::BOLD));
+            if last != Some(key) {
+                let mut codes = vec!["0".to_string()];
+                codes.extend(key.2.then(|| "1".to_string()));
+                codes.extend(sgr_colour(key.0, 30));
+                codes.extend(sgr_colour(key.1, 40));
+                out.push_str(&format!("\x1b[{}m", codes.join(";")));
+                last = Some(key);
+            }
+            out.push_str(cell.symbol());
+        }
+        out.push_str("\x1b[0m\n");
+    }
+    out
+}
+
 /// Snapshot `app` at both sizes, named `<name>_<cols>x<rows>`.
+///
+/// With `CCTOP_FRAMES` set to a directory, the large frame is also written
+/// there in colour as `<name>.ansi`, for the documentation's pictures.
 fn snap(name: &str, app: &mut App) {
     for size in [LARGE, SMALL] {
         // The build on the help's border changes with every commit, which
         // no snapshot can hold; the same width of placeholder keeps the frame.
         let label = super::modals::build_label();
-        let screen = text(&draw(app, size)).replace(
+        let buffer = draw(app, size);
+        if let (Some(dir), true) = (std::env::var_os("CCTOP_FRAMES"), size == LARGE) {
+            let frame = ansi(&buffer).replace(
+                &label,
+                &format!("{:<w$}", "cctop VERSION", w = label.chars().count()),
+            );
+            std::fs::write(
+                std::path::Path::new(&dir).join(format!("{name}.ansi")),
+                frame,
+            )
+            .expect("write frame");
+        }
+        let screen = text(&buffer).replace(
             &label,
             &format!("{:<w$}", "cctop VERSION", w = label.chars().count()),
         );

@@ -90,6 +90,8 @@ A downloaded binary has no package manager behind it, so `cctop --update`
 fetches the newest release for your architecture and replaces the running
 executable in place:
 
+![cctop --update in a terminal: it downloads the new archive, checks its signature and prints what changed](assets/readme/update.png)
+
 ```bash
 cctop --update
 ```
