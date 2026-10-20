@@ -107,13 +107,26 @@ fn stamp(meta: &Value, key: &str) -> Option<i64> {
         .map(|t| t.timestamp_millis())
 }
 
-/// When the session last did anything. `end_time` is the end of the last
-/// finished turn, so a turn in flight is newer than it; the files say when
-/// anything last happened.
+/// When the session last had a message, which is not when its files last
+/// changed: a background process finishing hours later writes the journal, a
+/// snapshot rewrites `meta.json`, and neither is the conversation moving.
+///
+/// No message carries a time in either layout, so it is the newest of what
+/// does: the turn stamps in `meta.json` (`end_time` lags the turn that set
+/// `unseen_at`), the Python layout's `messages.jsonl`, which is only ever
+/// appended a message, and the journal while a turn is in flight — a segment
+/// holds one turn and an empty one has been opened after it, so a segment with
+/// anything in it is the turn being written.
 fn last_active_ms(meta: &Value, meta_path: &Path) -> i64 {
-    stamp(meta, "end_time")
-        .unwrap_or(0)
-        .max(mtime_ms(meta_path) as i64)
+    let dir = meta_path.parent().unwrap_or(meta_path);
+    let messages = config::file_mtime_ms(&dir.join("messages.jsonl"));
+    let in_flight = newest_segment(dir)
+        .filter(|s| std::fs::metadata(s).is_ok_and(|m| m.len() > 0))
+        .map_or(0, |s| config::file_mtime_ms(&s));
+    ["end_time", "unseen_at"]
+        .into_iter()
+        .filter_map(|key| stamp(meta, key))
+        .fold(messages.max(in_flight) as i64, i64::max)
 }
 
 fn is_unified(dir: &Path) -> bool {
@@ -731,6 +744,37 @@ mod tests {
         let mut s = session_in(meta.parent().unwrap()).unwrap();
         s.data_file = Some(meta.to_path_buf());
         s
+    }
+
+    /// LAST is the last turn, not the last write: every file here was written
+    /// just now, the way a background process finishing hours later writes them.
+    #[test]
+    fn last_active_is_the_last_turn_not_the_last_write() {
+        let last = |meta: &Path| session(meta).last_active;
+
+        // The newest segment is empty: the turn is over.
+        let (_tmp, meta) = unified(&[]);
+        assert!(
+            last(&meta).starts_with("2026-10-17T22:33:34"),
+            "{}",
+            last(&meta)
+        );
+
+        // `unseen_at` is set by a turn `end_time` has not caught up with.
+        write(
+            &meta,
+            r#"{"session_id":"sid","end_time":"2026-10-17T22:33:34+00:00",
+               "unseen_at":"2026-10-17T23:10:00+00:00"}"#,
+        );
+        assert!(
+            last(&meta).starts_with("2026-10-17T23:10:00"),
+            "{}",
+            last(&meta)
+        );
+
+        // A segment with records in it is a turn being written now.
+        let (_tmp, meta) = unified(&[envelope_line("running", 20)]);
+        assert!(last(&meta).as_str() > "2026-10-18", "{}", last(&meta));
     }
 
     #[test]

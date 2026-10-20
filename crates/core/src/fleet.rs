@@ -472,8 +472,15 @@ fn row(host: &str, v: &Value) -> Option<Session> {
         "desktop-cowork" => Surface::DesktopCowork,
         _ => Surface::Cli,
     };
-    s.started_at = text(v, "started_at").to_string();
-    s.last_active = text(v, "last_active").to_string();
+    // In UTC, whatever offset the far side wrote them in: its clock may be set
+    // to another zone than this one, and these are sorted as strings beside
+    // the local rows' UTC stamps.
+    let utc = |key| {
+        let raw = text(v, key);
+        util::parse_ts(raw).map_or_else(|| raw.to_string(), |t| t.to_rfc3339())
+    };
+    s.started_at = utc("started_at");
+    s.last_active = utc("last_active");
     s.label_source = text(v, "project").to_string();
     s.model = text(v, "model").to_string();
     s.harness = text(v, "harness").to_string();
@@ -648,6 +655,18 @@ mod tests {
             })
         );
         assert_eq!(Host::parse("   "), None);
+    }
+
+    /// A far side in Auckland and one in UTC, ten minutes apart: compared as
+    /// written, `+13:00` would sort a day out of place.
+    #[test]
+    fn a_remote_in_another_zone_is_read_in_utc() {
+        let json = r#"[{"provider":"claude","session_id":"a",
+            "started_at":"2026-10-20T08:00:00+13:00","last_active":"2026-10-20T08:50:00+13:00"}]"#;
+        let s = &parse("box", json).expect("parses")[0];
+        assert_eq!(s.started_at, "2026-10-19T19:00:00+00:00");
+        assert_eq!(s.last_active, "2026-10-19T19:50:00+00:00");
+        assert!(s.last_active.as_str() < "2026-10-19T20:00:00Z");
     }
 
     /// A full row survives the wire: the figures the columns show, the state
