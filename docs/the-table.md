@@ -817,7 +817,9 @@ from every login appear in the table, the PROFILE column says which one each cam
 from, the limits panel reports each subscription's own 5h and weekly figures, and
 `R` resumes a session under the account whose directory the transcript lives in —
 without which a resumed Codex session would come back blank, its id being unknown
-to any other home.
+to any other home. A tab launched or resumed under one names it on the bar —
+`claude (work)` — so two agents on two subscriptions are not the same label twice;
+the default account is the one left unqualified, as it is everywhere else.
 
 An account whose limits cctop cannot read from its directory can be given a
 token instead. `claude setup-token` prints a long-lived one, and
