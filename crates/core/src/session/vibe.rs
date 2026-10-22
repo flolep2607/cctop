@@ -197,8 +197,24 @@ fn chunk_paths(dir: &Path, manifest: &Value, part: &str) -> Vec<PathBuf> {
         .into_iter()
         .flatten()
         .filter_map(Value::as_str)
+        .filter(|c| is_a_plain_name(c))
         .map(|c| dir.join("chunks").join(format!("{c}.json")))
         .collect()
+}
+
+/// Whether `name` is one path component and nothing else.
+///
+/// The chunk names come out of a JSON file in the session's own directory and
+/// are joined onto it, so a name with a separator in it — or one that is
+/// absolute — would read a file from somewhere else on the machine entirely.
+/// Only a plain name is a chunk.
+fn is_a_plain_name(name: &str) -> bool {
+    !name.is_empty()
+        && name != "."
+        && name != ".."
+        && !name.contains('/')
+        && !name.contains('\\')
+        && !name.contains('\0')
 }
 
 /// The files the conversation's text is in, for search to scan:
@@ -358,7 +374,7 @@ fn envelope(dir: &Path, tail: &JournalTail) -> Option<Value> {
 fn usage_tokens(usage: &Value) -> Tokens {
     let n = |k: &str| usage.get(k).and_then(Value::as_u64).unwrap_or(0);
     Tokens {
-        total: n("inputTokens") + n("outputTokens"),
+        total: n("inputTokens").saturating_add(n("outputTokens")),
         ..Tokens::from_prompt(n("inputTokens"), n("cachedInputTokens"), n("outputTokens"))
     }
 }
@@ -531,7 +547,7 @@ fn extract_legacy(dir: &Path, meta: &Value, data: &mut SessionData) {
         stat("session_completion_tokens"),
     );
     data.tokens = Tokens {
-        total: prompt + completion,
+        total: prompt.saturating_add(completion),
         ..Tokens::from_prompt(prompt, 0, completion)
     };
     data.metrics.tool_errors = stat("tool_calls_failed");
@@ -686,6 +702,31 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::TempDir;
+
+    /// The chunk names come out of a JSON file in the session's directory and
+    /// are joined onto it. A name that is absolute, or that walks out with
+    /// `..`, would read a file from anywhere on the machine — so only a plain
+    /// name is a chunk.
+    #[test]
+    fn a_chunk_name_may_not_be_a_path() {
+        let dir = Path::new("/srv/session");
+        let manifest = serde_json::json!({
+            "checkpoint": {"chunks": [
+                "0001",
+                "../../../../etc/passwd",
+                "/etc/passwd",
+                "..",
+                "",
+                "a/b",
+            ]}
+        });
+        let paths = chunk_paths(dir, &manifest, "checkpoint");
+        assert_eq!(
+            paths,
+            [dir.join("chunks").join("0001.json")],
+            "only the plain name is a chunk"
+        );
+    }
 
     fn write(path: &Path, body: &str) {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
