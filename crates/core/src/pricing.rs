@@ -500,13 +500,22 @@ fn lookup<'a>(table: &'a HashMap<String, LitellmEntry>, model: &str) -> Option<&
     }
     let stem = model.rsplit('/').next().filter(|s| *s != model);
     let names = || std::iter::once(model).chain(stem);
-    table
+    // The two exact matches, kept aside: a model listed under its own name is
+    // not a guess, and it is how a model the table carries at no cost is
+    // found at all.
+    let exact = table
         .get(model)
-        .or_else(|| table.get(&format!("anthropic.{model}")))
+        .or_else(|| table.get(&format!("anthropic.{model}")));
+    exact
+        .filter(|e| priced(e))
         // A stem is already a guess, so it has to land on a real rate to count.
         .or_else(|| names().find_map(|n| table.get(n).filter(|e| priced(e))))
         .or_else(|| names().find_map(|n| best_match(table, |k| names_model(k, n))))
         .or_else(|| names().find_map(|n| best_match(table, |k| k.contains(n))))
+        // Nothing anywhere carries a rate, so the exact match is the answer —
+        // a model listed with both rates at zero is a free one, and saying
+        // otherwise would cost the table its one honest zero.
+        .or(exact)
 }
 
 fn litellm_entry(model: &str) -> Option<LitellmEntry> {
@@ -614,6 +623,38 @@ pub fn listing(provider: Provider, model: &str) -> Listing {
         Some(_) => Listing::Free,
         None => Listing::Unlisted,
     }
+}
+
+/// Whether a model costs nothing, as far as anyone can tell.
+///
+/// Two ways to be free and no other: the table lists the model with both
+/// rates at zero, or the model's own name says so — a gateway's `:free`
+/// tier, which has no rate to list because it costs nothing.
+///
+/// The third answer, `Unlisted`, is not free: nobody has a rate for that
+/// model, which is a missing price rather than a zero one, and the two must
+/// not be shown the same way.
+pub fn is_free(provider: Provider, model: &str) -> bool {
+    match listing(provider, model) {
+        Listing::Free => true,
+        Listing::Unlisted => named_free(model),
+        Listing::Priced => false,
+    }
+}
+
+/// Whether a model's own name says it is free, as gateways spell their free
+/// tiers: OpenRouter's `:free`, OpenCode Zen's `-free`.
+///
+/// Those tiers are exactly what LiteLLM does not list — there is no rate to
+/// list — so without this every one of them would be reported as unpriced,
+/// on every run, to someone who chose it because it costs nothing.
+///
+/// ponytail: trusts the name. A paid model whose name ends in `-free` would be
+/// missed, but
+/// a vendor naming a paid model that way would be misleading its own buyers.
+pub fn named_free(model: &str) -> bool {
+    let lower = model.to_ascii_lowercase();
+    lower.ends_with(":free") || lower.ends_with("-free")
 }
 
 // ---------------------------------------------------------------------------
@@ -920,6 +961,55 @@ mod tests {
                 )
             })
             .collect()
+    }
+
+    /// A row that records a route's context window and leaves both costs at
+    /// zero is not a price, and matching one of them is no better than not
+    /// matching at all: it hides the real listing further down the ladder.
+    ///
+    /// The table keeps such rows on purpose, so the lookup has to see past
+    /// them.
+    #[test]
+    fn a_route_only_row_does_not_hide_a_real_price() {
+        let mut table = table(&[("openai/gpt-x", 1.0)]);
+        // The bare name is a route: a context window, and no cost at all.
+        table.insert(
+            "gpt-x".to_string(),
+            LitellmEntry {
+                max_input_tokens: Some(128_000),
+                ..Default::default()
+            },
+        );
+        let found = lookup(&table, "gpt-x").expect("a rate");
+        assert_eq!(found.input_cost_per_token, 1.0, "the priced row wins");
+    }
+
+    /// A model the table carries at no cost is found by its exact name, and
+    /// its zero is the one honest zero the table has. Dropping it would make
+    /// a free model read as an unpriced one.
+    #[test]
+    fn a_free_model_is_still_found_by_its_own_name() {
+        let table = table(&[("gpt-free", 0.0)]);
+        let found = lookup(&table, "gpt-free").expect("the free row");
+        assert_eq!(found.input_cost_per_token, 0.0);
+        assert!(!priced(found));
+    }
+
+    /// A model nobody has a rate for is not a free model, and the two must not
+    /// be shown the same way: one costs nothing, the other is missing a
+    /// price.
+    #[test]
+    fn free_is_a_claim_the_table_has_to_back() {
+        assert_eq!(listing(Provider::Claude, "claude-opus-5"), Listing::Priced);
+        // A gateway's free tier has no rate to list, so its own name says so.
+        assert!(is_free(Provider::OpenCode, "some/model:free"));
+        assert!(is_free(Provider::OpenCode, "some/model-free"));
+        // A model nobody has heard of is missing a price, not free.
+        assert_eq!(
+            listing(Provider::OpenCode, "no-such-model-anywhere"),
+            Listing::Unlisted
+        );
+        assert!(!is_free(Provider::OpenCode, "no-such-model-anywhere"));
     }
 
     /// The regression this replaced: the epoch was the fetch timestamp, so the
