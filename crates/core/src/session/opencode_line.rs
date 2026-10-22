@@ -127,7 +127,10 @@ impl Message<'_> {
             cache_read: read,
             cache_write_5m: write,
             reasoning_output: n(&t.reasoning),
-            total: input + output + read + write,
+            total: input
+                .saturating_add(output)
+                .saturating_add(read)
+                .saturating_add(write),
             ..Default::default()
         }
     }

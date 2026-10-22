@@ -574,11 +574,13 @@ pub fn extract(path: &Path) -> SessionData {
                 g(&last.cached_input_tokens),
                 g(&last.output_tokens),
             );
-            totals.input_total += inp;
-            totals.cached_input += cached;
-            totals.output += out;
-            totals.reasoning_output += g(&last.reasoning_output_tokens);
-            totals.total += g(&last.total_tokens);
+            totals.input_total = totals.input_total.saturating_add(inp);
+            totals.cached_input = totals.cached_input.saturating_add(cached);
+            totals.output = totals.output.saturating_add(out);
+            totals.reasoning_output = totals
+                .reasoning_output
+                .saturating_add(g(&last.reasoning_output_tokens));
+            totals.total = totals.total.saturating_add(g(&last.total_tokens));
 
             if let Some(dt) = util::parse_ts(ts) {
                 for (map, key) in [
@@ -586,14 +588,14 @@ pub fn extract(path: &Path) -> SessionData {
                     (&mut by_hour, util::local_hour_key(&dt)),
                 ] {
                     let b = map.entry(key).or_default();
-                    b.input += inp;
-                    b.cached_input += cached;
-                    b.output += out;
+                    b.input = b.input.saturating_add(inp);
+                    b.cached_input = b.cached_input.saturating_add(cached);
+                    b.output = b.output.saturating_add(out);
                 }
                 let b = by_minute.entry(super::unix_minute(&dt)).or_default();
-                b.input += inp;
-                b.cached_input += cached;
-                b.output += out;
+                b.input = b.input.saturating_add(inp);
+                b.cached_input = b.cached_input.saturating_add(cached);
+                b.output = b.output.saturating_add(out);
             }
         }
 

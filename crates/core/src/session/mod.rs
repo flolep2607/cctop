@@ -1154,6 +1154,26 @@ fn is_input_request_tool(name: &str) -> bool {
 mod tests {
     use super::*;
 
+    /// The sums are over numbers read out of a file any process on the
+    /// machine can write, so they saturate rather than overflow: a transcript
+    /// claiming `u64::MAX` tokens panicked every debug build and wrapped to
+    /// a nonsense total in a release one.
+    #[test]
+    fn the_token_sums_saturate_rather_than_overflow() {
+        let huge = Tokens {
+            input: u64::MAX,
+            output: u64::MAX,
+            total: u64::MAX,
+            ..Default::default()
+        };
+        let mut sum = Tokens::default();
+        sum.add(&huge);
+        sum.add(&huge);
+        assert_eq!(sum.input, u64::MAX);
+        assert_eq!(sum.output, u64::MAX);
+        assert_eq!(sum.total, u64::MAX);
+    }
+
     #[test]
     fn an_effort_switch_is_read_only_from_the_commands_own_output() {
         let out = |level: &str| {
@@ -1745,16 +1765,21 @@ impl Tokens {
     /// Add `other` into this, every field: one sum shared by every reader, so
     /// a field one provider fills is never summed by one copy and dropped by
     /// another.
+    ///
+    /// Saturating, for the reason the Claude parser gives at its own sums:
+    /// these are numbers read out of a file any process on the machine can
+    /// write, and one transcript claiming `u64::MAX` tokens would overflow
+    /// every debug build and wrap to a nonsense cost in a release one.
     pub fn add(&mut self, other: &Tokens) {
-        self.input += other.input;
-        self.output += other.output;
-        self.cache_read += other.cache_read;
-        self.cache_write_5m += other.cache_write_5m;
-        self.cache_write_1h += other.cache_write_1h;
-        self.input_total += other.input_total;
-        self.cached_input += other.cached_input;
-        self.reasoning_output += other.reasoning_output;
-        self.total += other.total;
+        self.input = self.input.saturating_add(other.input);
+        self.output = self.output.saturating_add(other.output);
+        self.cache_read = self.cache_read.saturating_add(other.cache_read);
+        self.cache_write_5m = self.cache_write_5m.saturating_add(other.cache_write_5m);
+        self.cache_write_1h = self.cache_write_1h.saturating_add(other.cache_write_1h);
+        self.input_total = self.input_total.saturating_add(other.input_total);
+        self.cached_input = self.cached_input.saturating_add(other.cached_input);
+        self.reasoning_output = self.reasoning_output.saturating_add(other.reasoning_output);
+        self.total = self.total.saturating_add(other.total);
     }
 }
 
