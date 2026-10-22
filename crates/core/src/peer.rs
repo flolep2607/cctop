@@ -78,6 +78,16 @@ const OFFLINE: &str = "offline — its tunnel has no connector";
 /// The prefix `cctop tunnel setup` names every machine's tunnel with.
 const TUNNEL_PREFIX: &str = "cctop-";
 
+/// The machine a tunnel's name names: the name less the prefix every one of
+/// them carries.
+///
+/// The name on the account is `cctop-<machine>`, and the machine is what the
+/// table shows — so a name read off the account is put through here before
+/// it is shown.
+pub fn machine_of(tunnel: &str) -> &str {
+    tunnel.strip_prefix(TUNNEL_PREFIX).unwrap_or(tunnel)
+}
+
 /// Sign a request to a sibling whose tunnel token is `secret`: the whole
 /// `Authorization` value.
 pub fn sign(secret: &str, ts: u64, method: &str, path: &str) -> String {
@@ -823,6 +833,15 @@ pub fn set_known(peers: Vec<Arc<Peer>>) {
     }
 }
 
+/// Stand `skipped` in as the tunnels the last listing could not read — for a
+/// test of whoever names them.
+#[cfg(any(test, feature = "test-support"))]
+pub fn set_skipped(skipped: Vec<Skipped>) {
+    if let Ok(mut held) = SKIPPED.lock() {
+        *held = skipped;
+    }
+}
+
 /// Add `peer` to the known siblings, in place of one by the same name — for
 /// a test that shares the process's list with others running beside it.
 #[cfg(any(test, feature = "test-support"))]
@@ -908,13 +927,33 @@ pub mod fake {
     }
 }
 
+/// A tunnel on the account that names a cctop but cannot be read as one.
+///
+/// The account's tunnels *are* the list of machines, so a tunnel that is named
+/// for a cctop and then left out is a machine that never appears in the table
+/// — with nothing on screen to say so, which is the one thing a missing
+/// machine must not be. So each of them is kept, with the reason, and
+/// [`skipped`] and `cctop doctor` name them.
+///
+/// A tunnel that is not named for a cctop is not one: an account may carry
+/// tunnels for anything at all, and listing those here would fill the report
+/// with machines that do not exist.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Skipped {
+    /// The tunnel's name, as the account lists it.
+    pub name: String,
+    /// Why this one is not a machine here.
+    pub why: String,
+}
+
 /// The account's other cctops: every `cctop-*` tunnel but this machine's own,
 /// at the hostname its ingress lists first — or at that one's `-link`
 /// sibling when it has one, since that is the hostname outside Cloudflare
 /// Access when Access fronts the page, and a server has nobody to log in.
 ///
 /// A tunnel whose ingress cannot be read is left out rather than failing the
-/// rest: one machine's oddity is not every machine's.
+/// rest: one machine's oddity is not every machine's. It is *named*, though,
+/// in the second half of the answer — see [`Skipped`].
 ///
 /// ponytail: a sibling whose page is behind Access with public token links
 /// off has no hostname outside Access, and its poll fails at the edge with
@@ -924,19 +963,38 @@ fn discover(
     account_id: &str,
     own_tunnel: Option<&str>,
     held: &[Arc<Peer>],
-) -> Result<Vec<Arc<Peer>>, crate::cloudflare::Error> {
+) -> Result<(Vec<Arc<Peer>>, Vec<Skipped>), crate::cloudflare::Error> {
     let mut found = Vec::new();
+    let mut skipped = Vec::new();
     for tunnel in api.tunnels(account_id)? {
         let Some(machine) = tunnel.name.strip_prefix(TUNNEL_PREFIX) else {
             continue;
         };
-        if Some(tunnel.id.as_str()) == own_tunnel || machine.is_empty() {
+        if Some(tunnel.id.as_str()) == own_tunnel {
             continue;
         }
-        let Ok(hosts) = api.ingress_hostnames(account_id, &tunnel.id) else {
+        if machine.is_empty() {
+            skipped.push(Skipped {
+                name: tunnel.name.clone(),
+                why: "its name is `cctop-` with no machine name after it".into(),
+            });
             continue;
+        }
+        let hosts = match api.ingress_hostnames(account_id, &tunnel.id) {
+            Ok(hosts) => hosts,
+            Err(why) => {
+                skipped.push(Skipped {
+                    name: tunnel.name.clone(),
+                    why: format!("its ingress could not be read: {why}"),
+                });
+                continue;
+            }
         };
         let Some(page) = hosts.first() else {
+            skipped.push(Skipped {
+                name: tunnel.name.clone(),
+                why: "its ingress names no hostname".into(),
+            });
             continue;
         };
         let link = crate::cloudflare::link_hostname(page);
@@ -965,7 +1023,7 @@ fn discover(
             version: Mutex::new(None),
         }));
     }
-    Ok(found)
+    Ok((found, skipped))
 }
 
 /// What it takes to list the account's tunnels: the API, the account, and
@@ -981,9 +1039,15 @@ fn account_api() -> Option<(Arc<Api>, String, Option<String>)> {
     else {
         return None;
     };
+    // The tunnel to leave out: this machine's own, so it does not read itself
+    // as a sibling. The token's own copy first, since it is what the tunnel
+    // is running, and the account's recorded id as the fallback — a token
+    // that cannot be decoded would otherwise leave this machine in its own
+    // table, under its own name, as though it were somewhere else.
     let own = cctop_tunnel::cloudflare::Credentials::from_token(&account.token)
         .ok()
-        .map(|c| c.tunnel_id.to_string());
+        .map(|c| c.tunnel_id.to_string())
+        .or_else(|| account.tunnel_id.clone());
     let auth = match account.login {
         true => Auth::Login(api_token),
         false => Auth::Pasted(api_token),
@@ -1004,9 +1068,59 @@ pub fn lookup(machine: &str) -> Result<Arc<Peer>, String> {
     )?;
     discover(&api, &account_id, own.as_deref(), &[])
         .map_err(|e| format!("could not list the account's machines: {e}"))?
+        .0
         .into_iter()
         .find(|p| p.machine == machine)
         .ok_or_else(|| format!("no machine called {machine} on this Cloudflare account"))
+}
+
+/// The tunnels on the account that name a cctop and could not be read as one,
+/// with the reason for each.
+///
+/// Held from the last listing, so the dashboard, a server and `cctop doctor`
+/// can all say the same thing about a machine that never appears.
+static SKIPPED: Mutex<Vec<Skipped>> = Mutex::new(Vec::new());
+
+/// The tunnels on the account that name a cctop and could not be read as one.
+pub fn skipped() -> Vec<Skipped> {
+    SKIPPED.lock().map(|s| s.clone()).unwrap_or_default()
+}
+
+/// Why the account's machines could not be listed.
+///
+/// Two, and they need different fixes: a machine that cannot be found
+/// because there is no account is a thing to set up, and one that cannot be
+/// found because the account's tunnels could not be read is a thing to fix.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FleetError {
+    /// This machine has no Cloudflare account to find its siblings with.
+    NoAccount,
+    /// The account is there, but its tunnels could not be listed.
+    List(String),
+}
+
+impl std::fmt::Display for FleetError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FleetError::NoAccount => f.write_str(
+                "this machine has no Cloudflare account to find its siblings with — \
+                 `cctop tunnel setup --browser`",
+            ),
+            FleetError::List(why) => {
+                write!(f, "could not list the account's machines: {why}")
+            }
+        }
+    }
+}
+
+/// The account's machines, as one listing: the siblings that can be read and
+/// the tunnels that name a cctop but could not be read as one.
+///
+/// For `cctop doctor`, which is the one place that can afford to make the
+/// round trip — a dashboard polls on its own cadence and says nothing.
+pub fn fleet() -> Result<(Vec<Arc<Peer>>, Vec<Skipped>), FleetError> {
+    let (api, account_id, own) = account_api().ok_or(FleetError::NoAccount)?;
+    discover(&api, &account_id, own.as_deref(), &[]).map_err(|e| FleetError::List(e.to_string()))
 }
 
 /// Find and poll this account's other cctops on a thread of their own, for as
@@ -1034,7 +1148,7 @@ pub fn spawn(mut report: impl FnMut(&str, Snapshot) -> bool + Send + 'static) ->
                 if listed.is_none_or(|at| at.elapsed() >= REDISCOVER) {
                     let held = KNOWN.lock().map(|k| k.clone()).unwrap_or_default();
                     match discover(&api, &account_id, own.as_deref(), &held) {
-                        Ok(found) => {
+                        Ok((found, skipped)) => {
                             for gone in held
                                 .iter()
                                 .filter(|p| !found.iter().any(|f| f.machine == p.machine))
@@ -1050,6 +1164,12 @@ pub fn spawn(mut report: impl FnMut(&str, Snapshot) -> bool + Send + 'static) ->
                             }
                             if let Ok(mut known) = KNOWN.lock() {
                                 *known = found;
+                            }
+                            // A tunnel that names a cctop and cannot be read is
+                            // a machine that never appears; keeping the reason
+                            // is what lets anything say so.
+                            if let Ok(mut held) = SKIPPED.lock() {
+                                *held = skipped;
                             }
                         }
                         Err(why) => crate::elog::event(
@@ -1257,7 +1377,7 @@ mod tests {
             ),
         });
         let api = Arc::new(Api::fake(&base, "made-up-api-token"));
-        let found = discover(&api, "acct1", Some("t-own"), &[]).expect("lists");
+        let (found, skipped) = discover(&api, "acct1", Some("t-own"), &[]).expect("lists");
         let seen: Vec<(&str, &str, bool)> = found
             .iter()
             .map(|p| (p.machine.as_str(), p.url.as_str(), p.up))
@@ -1273,5 +1393,76 @@ mod tests {
         );
         // A tunnel with no connector is offline without a request being made.
         assert!(matches!(found[1].poll(), Snapshot::Failed(why) if why.starts_with("offline")));
+        // The tunnel that is not a cctop's is not a machine, and is not named
+        // as one that could not be read.
+        assert!(
+            skipped.is_empty(),
+            "a tunnel that is not named for a cctop is not a missing machine: {skipped:?}"
+        );
+    }
+
+    /// A tunnel that names a cctop and cannot be read is a machine that never
+    /// appears in the table, and nothing on screen says so. The reason is
+    /// kept, so the doctor can name it.
+    #[test]
+    fn a_tunnel_that_names_a_cctop_and_cannot_be_read_is_named_with_its_reason() {
+        use crate::cloudflare::fake::{api as fake_api, ok};
+        use serde_json::json;
+        let (base, _seen) = fake_api(|_method, path, _body| match path {
+            p if p.starts_with("/accounts/acct1/cfd_tunnel?") => ok(json!([
+                {"id": "t-own", "name": "cctop-here", "status": "healthy"},
+                // Named for a machine, with an ingress that names nothing.
+                {"id": "t-bare", "name": "cctop-bare", "status": "healthy"},
+                // Named for a machine, with an ingress that cannot be read.
+                {"id": "t-broken", "name": "cctop-broken", "status": "healthy"},
+                // Named for a machine, with no ingress at all.
+                {"id": "t-gone", "name": "cctop-gone", "status": "healthy"},
+                // Not a cctop's tunnel at all: not a missing machine.
+                {"id": "t-media", "name": "media-stack", "status": "healthy"},
+            ])),
+            "/accounts/acct1/cfd_tunnel/t-bare/configurations" => {
+                ok(json!({"config": {"ingress": [{"service": "http_status:404"}]}}))
+            }
+            "/accounts/acct1/cfd_tunnel/t-broken/configurations" => (
+                403,
+                json!({"success": false, "errors": [{"code": 9109, "message": "not allowed"}]}),
+            ),
+            _ => (
+                404,
+                json!({"success": false, "errors": [{"code": 7003, "message": "no route"}]}),
+            ),
+        });
+        let api = Arc::new(Api::fake(&base, "made-up-api-token"));
+        let (found, skipped) = discover(&api, "acct1", Some("t-own"), &[]).expect("lists");
+        assert!(
+            found.is_empty(),
+            "none of them could be read: {:?}",
+            found.iter().map(|p| &p.machine).collect::<Vec<_>>()
+        );
+        let named: Vec<(&str, &str)> = skipped
+            .iter()
+            .map(|s| (s.name.as_str(), s.why.as_str()))
+            .collect();
+        assert_eq!(named.len(), 3, "{named:?}");
+        assert!(
+            named
+                .iter()
+                .any(|(n, why)| *n == "cctop-bare" && why.contains("names no hostname")),
+            "{named:?}"
+        );
+        assert!(
+            named
+                .iter()
+                .any(|(n, why)| *n == "cctop-broken" && why.contains("could not be read")),
+            "{named:?}"
+        );
+        assert!(
+            named
+                .iter()
+                .any(|(n, why)| *n == "cctop-gone" && why.contains("could not be read")),
+            "{named:?}"
+        );
+        // The tunnel that is nobody's cctop is not in the list at all.
+        assert!(!named.iter().any(|(n, _)| *n == "media-stack"), "{named:?}");
     }
 }

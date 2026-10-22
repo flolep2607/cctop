@@ -181,6 +181,56 @@ impl App {
         hosts
     }
 
+    /// The machines on this Cloudflare account that name a cctop and could
+    /// not be read, refreshed from the account's last listing.
+    ///
+    /// Said once when the list changes: a machine that is on the account but
+    /// unreadable never reaches the table, the footer's dots or any list of
+    /// places to start an agent, so without this it would simply not be
+    /// there. The footer's badge keeps it visible after the saying.
+    pub fn refresh_unreadable_machines(&mut self) {
+        let found: Vec<(String, String)> = cctop_core::peer::skipped()
+            .into_iter()
+            .map(|s| (cctop_core::peer::machine_of(&s.name).to_string(), s.why))
+            .collect();
+        if found == self.unreadable_machines {
+            return;
+        }
+        let was_empty = self.unreadable_machines.is_empty();
+        self.unreadable_machines = found;
+        if self.unreadable_machines.is_empty() {
+            return;
+        }
+        // Only when it is news: the list is read on every refresh, and a
+        // message repeated every few seconds is a message nobody reads.
+        if !was_empty {
+            return;
+        }
+        let why = self
+            .unreadable_machines
+            .first()
+            .map(|(_, why)| why.as_str())
+            .unwrap_or("");
+        let names: Vec<&str> = self
+            .unreadable_machines
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect();
+        self.set_status(format!(
+            "{} on this Cloudflare account could not be read: {why} — \
+             `cctop doctor` says why",
+            names.join(", ")
+        ));
+    }
+
+    /// The machines on the account that could not be read, by name.
+    pub fn unreadable_machines(&self) -> Vec<String> {
+        self.unreadable_machines
+            .iter()
+            .map(|(name, _)| name.clone())
+            .collect()
+    }
+
     /// What one session collides with, with its peers named the way the table
     /// names them.
     pub fn clash_of(&self, session: &Session) -> Option<panels::Clash> {
@@ -491,6 +541,33 @@ mod tests {
         app.remote_errors
             .insert("box".into(), "Permission denied".into());
         assert_eq!(app.remote_presence(), [("box".to_string(), false)]);
+    }
+
+    /// A machine on the account that names a cctop and cannot be read is a
+    /// machine that never appears in the table, and the footer's dot cannot
+    /// say it either — nothing ever heard of it. It is named here, and said
+    /// once, so "my other machine never appeared" has an answer.
+    #[test]
+    fn a_machine_that_cannot_be_read_is_named_rather_than_missing() {
+        use cctop_core::peer::Skipped;
+        let mut app = test_app();
+        assert!(app.unreadable_machines().is_empty());
+
+        // The account's listing, as the peer poller leaves it.
+        cctop_core::peer::set_skipped(vec![Skipped {
+            name: "cctop-desktop".into(),
+            why: "its ingress could not be read".into(),
+        }]);
+        app.refresh_unreadable_machines();
+        // The machine's name, without the prefix every tunnel carries.
+        assert_eq!(app.unreadable_machines(), ["desktop"]);
+        // And it is said once, not on every refresh.
+        let said = app.status().expect("it was said").to_string();
+        assert!(said.contains("desktop"), "{said:?}");
+        app.refresh_unreadable_machines();
+        assert_eq!(app.status(), Some(said.as_str()), "said once: {said:?}");
+
+        cctop_core::peer::set_skipped(Vec::new());
     }
 
     /// One dot per machine: green while it answers, red once it does not.
