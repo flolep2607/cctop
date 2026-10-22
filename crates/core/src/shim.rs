@@ -61,9 +61,9 @@ pub fn run_in(
     );
 
     // Bind before entering raw mode: a failure here should print normally.
-    let listener = listen(pid)?;
+    let (listener, path) = listen(pid)?;
     // Held to the end of the function, so every `?` below unlinks it too.
-    let _socket = Bound(socket_path(pid));
+    let _socket = Bound(Some(path.clone()));
 
     let raw = crossterm::terminal::enable_raw_mode().is_ok();
     // Backgrounded (`setsid cctop claude </dev/null >/dev/null &`), there is no
@@ -75,6 +75,7 @@ pub fn run_in(
         false => (0, 0),
     };
     let fan = Arc::new(Mutex::new(Fanout::new(master.try_clone()?, local)));
+    let stop = Arc::new(AtomicBool::new(false));
     {
         let (master, fan) = (master.try_clone()?, Arc::clone(&fan));
         std::thread::spawn(move || pump_output(master, fan, Echo::Yes));
@@ -87,8 +88,14 @@ pub fn run_in(
         let fan = Arc::clone(&fan);
         std::thread::spawn(move || watch_resize(fan));
     }
-    let control = master.try_clone()?;
-    std::thread::spawn(move || serve(listener, control, fan));
+    let listener = Arc::new(listener);
+    {
+        let (listener, fan, stop) = (Arc::clone(&listener), Arc::clone(&fan), Arc::clone(&stop));
+        std::thread::spawn(move || serve(listener, fan, stop));
+    }
+    // The shim's teardown, so the thread waiting for connections and the
+    // control socket go with the agent rather than outliving it.
+    let shim = Shim { stop, fan, path };
 
     let status = child.wait();
     crate::elog::event(
@@ -102,6 +109,9 @@ pub fn run_in(
     if raw {
         let _ = crossterm::terminal::disable_raw_mode();
     }
+    // The shim's teardown, so the thread waiting for connections and the
+    // control socket go with the agent rather than outliving it.
+    shim.end();
     Ok(status?.code().unwrap_or(1))
 }
 
@@ -117,6 +127,9 @@ pub struct Hosted {
     /// What to call it on screen until its own session row shows up.
     pub label: String,
     child: std::process::Child,
+    /// The shim's own teardown: the thread waiting for connections, the
+    /// control socket and the pty master all go with the agent.
+    shim: Shim,
     /// Dropped after [`Hosted::drop`] has reaped the agent, so the socket goes
     /// once nothing can be typed through it.
     _socket: Bound,
@@ -146,6 +159,46 @@ impl Drop for Hosted {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
+        // The shim's teardown: the thread waiting for connections, the
+        // control socket and the pty master all go with the agent, rather
+        // than being left for the next one to trip over.
+        self.shim.end();
+    }
+}
+
+/// The threads and the descriptors one shim holds, and the teardown that ends
+/// them.
+///
+/// A hosted agent's shim belongs to the agent: when the agent ends, the
+/// thread that waits for connections ends with it, and so do the control
+/// socket it was listening on and the pty master it was holding. Without
+/// this, every agent that ended left a thread blocked in `accept` for ever,
+/// with the control socket open and the pty master in its hand — a thread
+/// and three descriptors per agent, for as long as cctop ran.
+struct Shim {
+    /// Set when the shim is over, so the thread waiting for a connection can
+    /// notice and end.
+    stop: Arc<AtomicBool>,
+    /// The fanout, which holds the pty master and the live connections: both
+    /// are hung up when the agent ends.
+    fan: Arc<Mutex<Fanout>>,
+    /// Where the control socket is, to wake the accept loop.
+    path: PathBuf,
+}
+
+impl Shim {
+    /// End the shim: wake the accept loop, hang up the clients, and let the
+    /// pty go.
+    fn end(&self) {
+        self.stop.store(true, Ordering::Relaxed);
+        // The accept loop is parked in `accept`, and a closed listener is
+        // what a parked `accept` needs to come back: a connection to the
+        // socket is that, and the loop sees the flag and ends without
+        // serving it.
+        let _ = UnixStream::connect(&self.path);
+        // The clients are hung up rather than left waiting: a watcher that is
+        // not told the agent is gone waits for output that will never come.
+        locked(&self.fan).hangup();
     }
 }
 
@@ -194,16 +247,21 @@ pub fn host(
         "spawn",
         serde_json::json!({ "mode": "host", "pid": pid, "cmd": argv.join(" ") }),
     );
-    let listener = listen(pid)?;
-    let socket = Bound(socket_path(pid));
+    let (listener, path) = listen(pid)?;
+    let socket = Bound(Some(path.clone()));
 
     // No window here at all, so the panel that attaches sets the size alone.
     let fan = Arc::new(Mutex::new(Fanout::new(master.try_clone()?, (0, 0))));
+    let stop = Arc::new(AtomicBool::new(false));
     {
         let (master, fan) = (master.try_clone()?, Arc::clone(&fan));
         std::thread::spawn(move || pump_output(master, fan, Echo::No));
     }
-    std::thread::spawn(move || serve(listener, master, fan));
+    let listener = Arc::new(listener);
+    {
+        let (listener, fan, stop) = (Arc::clone(&listener), Arc::clone(&fan), Arc::clone(&stop));
+        std::thread::spawn(move || serve(listener, fan, stop));
+    }
     // The command as typed, minus any path, which is what the user called it.
     let label = argv
         .iter()
@@ -214,6 +272,7 @@ pub fn host(
         pid,
         label,
         child,
+        shim: Shim { stop, fan, path },
         _socket: socket,
     })
 }
@@ -402,7 +461,11 @@ fn unlink_unchanged(path: &std::path::Path, stamp: Stamp) -> bool {
     Stamp::of(path) == Some(stamp) && std::fs::remove_file(path).is_ok()
 }
 
-fn listen(pid: u32) -> anyhow::Result<std::os::unix::net::UnixListener> {
+/// Bind the control socket for the agent running as `pid`.
+///
+/// The path comes back with the listener, because the shim needs it later to
+/// wake its own accept loop when the agent ends.
+fn listen(pid: u32) -> anyhow::Result<(std::os::unix::net::UnixListener, PathBuf)> {
     let path = socket_path(pid).ok_or_else(|| anyhow::anyhow!("no runtime or cache directory"))?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
@@ -414,8 +477,9 @@ fn listen(pid: u32) -> anyhow::Result<std::os::unix::net::UnixListener> {
     }
     // A shim that died without cleaning up leaves a file that would block bind.
     let _ = std::fs::remove_file(&path);
-    std::os::unix::net::UnixListener::bind(&path)
-        .map_err(|e| anyhow::anyhow!("could not bind {}: {e}", path.display()))
+    let listener = std::os::unix::net::UnixListener::bind(&path)
+        .map_err(|e| anyhow::anyhow!("could not bind {}: {e}", path.display()))?;
+    Ok((listener, path))
 }
 
 /// First bytes of a connection that wants to *watch* the agent, not just type
@@ -443,6 +507,13 @@ struct Fanout {
     master: File,
     recent: Vec<u8>,
     subs: Vec<Sub>,
+    /// The clients this shim is serving, as the descriptors their connections
+    /// are on.
+    ///
+    /// Held so they can be hung up when the agent ends: a thread blocked
+    /// reading a client holds the pty master, and a watcher that is not told
+    /// the agent is gone waits for output that will never come.
+    conns: Vec<std::os::fd::RawFd>,
     next_id: u64,
     /// The window `cctop run` was started in, which is a viewer like any other
     /// and the only one when nobody has attached.
@@ -457,10 +528,31 @@ impl Fanout {
         Self {
             recent: Vec::new(),
             subs: Vec::new(),
+            conns: Vec::new(),
             next_id: 0,
             local,
             applied: pty_size(&master),
             master,
+        }
+    }
+
+    /// Another handle on the pty master, for a thread that has to write to the
+    /// agent.
+    fn master(&self) -> Option<File> {
+        self.master.try_clone().ok()
+    }
+
+    /// Hang up every client.
+    ///
+    /// The threads serving them are parked in a read, and a read on a hung-up
+    /// socket ends — which is what lets them go, and with them the pty master
+    /// they were holding.
+    fn hangup(&mut self) {
+        for fd in self.conns.drain(..) {
+            // SAFETY: a descriptor of a connected socket. The thread serving
+            // it holds the connection open and takes it off this list before
+            // it closes, so the number is still that socket's.
+            unsafe { libc::shutdown(fd, libc::SHUT_RDWR) };
         }
     }
 
@@ -557,9 +649,21 @@ fn locked(fan: &Mutex<Fanout>) -> std::sync::MutexGuard<'_, Fanout> {
 ///
 /// Deliberately unauthenticated: the socket sits in an owner-only directory, so
 /// anyone who can reach it can already type into the terminal by other means.
-fn serve(listener: std::os::unix::net::UnixListener, master: File, fan: Arc<Mutex<Fanout>>) {
+///
+/// The loop ends when the shim does: `stop` is set by the shim's teardown,
+/// and the connection that wakes the loop out of `accept` is how it is told.
+fn serve(
+    listener: Arc<std::os::unix::net::UnixListener>,
+    fan: Arc<Mutex<Fanout>>,
+    stop: Arc<AtomicBool>,
+) {
     for stream in listener.incoming().flatten() {
-        let Ok(master) = master.try_clone() else {
+        // The shim is over. This connection is the one that woke the loop, and
+        // it is not served: the thread ends here, and the listener with it.
+        if stop.load(Ordering::Relaxed) {
+            break;
+        }
+        let Some(master) = locked(&fan).master() else {
             continue;
         };
         let fan = Arc::clone(&fan);
@@ -571,6 +675,11 @@ fn serve(listener: std::os::unix::net::UnixListener, master: File, fan: Arc<Mute
 
 fn converse(mut stream: UnixStream, mut master: File, fan: Arc<Mutex<Fanout>>) {
     use crate::attach::frame;
+
+    // The connection is on the fanout's list while it is served, so the shim
+    // can hang it up when the agent ends.
+    let fd = stream.as_raw_fd();
+    locked(&fan).conns.push(fd);
 
     let mut buf = [0u8; 4096];
     let mut first = true;
@@ -639,6 +748,9 @@ fn converse(mut stream: UnixStream, mut master: File, fan: Arc<Mutex<Fanout>>) {
         }
     }
 
+    // Off the fanout's list before the connection is closed, so the number in
+    // it is never one that has been given to something else.
+    locked(&fan).conns.retain(|&open| open != fd);
     // Drop the subscription now rather than when the next chunk finds it dead:
     // this watcher may be the one keeping the pty small, and the window the
     // agent runs in should come back the moment it detaches.
@@ -650,24 +762,29 @@ fn converse(mut stream: UnixStream, mut master: File, fan: Arc<Mutex<Fanout>>) {
 
 /// Send this client the recent output and everything that follows, and return
 /// the id its size is tracked under.
+///
+/// The replay is written to the client *outside* the lock. Writing it under
+/// the lock held the lock for as long as the client took to read it, and the
+/// agent's own output waits on that lock — so a client that stopped reading
+/// froze the agent's terminal, which is the one thing a watcher is not
+/// allowed to do.
 fn subscribe(stream: &UnixStream, fan: &Arc<Mutex<Fanout>>) -> Option<u64> {
     use crate::attach::frame;
 
     let mut out = stream.try_clone().ok()?;
     let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(256);
-    let id = {
-        // Held across the replay write so no chunk slips in between the replay
-        // and the subscription, which would reorder the client's screen.
+    // The replay is taken under the lock, and the subscription is made under
+    // the same lock, so no chunk slips in between the two: what the replay
+    // holds is everything before the subscription, and what the channel
+    // carries is everything after it.
+    let (id, header, replay) = {
         let mut fan = locked(fan);
         let (cols, rows) = fan.applied;
         // Size first: the replay is drawn for these dimensions, so a watcher
         // that folded it into a differently sized screen would wrap every line
         // in the wrong place.
         let header = frame::size(frame::SIZE, cols, rows);
-        let replay = frame::encode(frame::OUTPUT, &fan.recent);
-        if out.write_all(&header).is_err() || out.write_all(&replay).is_err() {
-            return None;
-        }
+        let replay = fan.recent.clone();
         let id = fan.next_id;
         fan.next_id += 1;
         // No size yet: a watcher has no say until it asks for one, so attaching
@@ -682,9 +799,17 @@ fn subscribe(stream: &UnixStream, fan: &Arc<Mutex<Fanout>>) -> Option<u64> {
             "watch",
             serde_json::json!({ "sub": id, "subs": fan.subs.len() }),
         );
-        id
+        (id, header, replay)
     };
+    // The writer sends the replay and then whatever comes through the
+    // channel, in that order: the replay is what came before the
+    // subscription, and the channel carries what came after it, so the
+    // client's screen is put together in the order the agent produced it.
     std::thread::spawn(move || {
+        let replay = frame::encode(frame::OUTPUT, &replay);
+        if out.write_all(&header).is_err() || out.write_all(&replay).is_err() {
+            return;
+        }
         while let Ok(chunk) = rx.recv() {
             if out.write_all(&chunk).is_err() {
                 break;
@@ -863,7 +988,7 @@ pub fn test_session(argv: &[&str], local: (u16, u16)) -> (std::process::Child, u
     let argv: Vec<String> = argv.iter().map(|s| (*s).to_string()).collect();
     let (child, master) = spawn_on_pty(&argv, None).expect("pty child");
     let pid = child.id();
-    let listener = listen(pid).expect("control socket");
+    let (listener, _path) = listen(pid).expect("control socket");
     let fan = Arc::new(Mutex::new(Fanout::new(
         master.try_clone().expect("master"),
         local,
@@ -873,7 +998,12 @@ pub fn test_session(argv: &[&str], local: (u16, u16)) -> (std::process::Child, u
         let (master, fan) = (master.try_clone().expect("master"), Arc::clone(&fan));
         std::thread::spawn(move || pump_output(master, fan, Echo::No));
     }
-    std::thread::spawn(move || serve(listener, master, fan));
+    let stop = Arc::new(AtomicBool::new(false));
+    let listener = Arc::new(listener);
+    {
+        let (listener, fan, stop) = (Arc::clone(&listener), Arc::clone(&fan), Arc::clone(&stop));
+        std::thread::spawn(move || serve(listener, fan, stop));
+    }
     (child, pid)
 }
 
@@ -1134,6 +1264,138 @@ mod tests {
     use super::*;
     use crate::test_wait::{PATIENCE, wait_until, waits_for};
 
+    /// The thread that waits for connections ends with the shim.
+    ///
+    /// It used to be parked in `accept` for ever: the control socket stayed
+    /// open and the pty master stayed in its hand, so every agent that ended
+    /// left a thread and three descriptors behind for as long as cctop ran.
+    #[test]
+    fn the_thread_waiting_for_connections_ends_with_the_shim() {
+        let (mut child, master) =
+            spawn_on_pty(&["sh".into(), "-c".into(), "sleep 30".into()], None).expect("a pty");
+        let pid = child.id();
+        let (listener, path) = listen(pid).expect("a control socket");
+        let fan = Arc::new(Mutex::new(Fanout::new(
+            master.try_clone().expect("a master"),
+            (80, 24),
+        )));
+        let stop = Arc::new(AtomicBool::new(false));
+        let served = {
+            let (listener, fan, stop) = (Arc::new(listener), Arc::clone(&fan), Arc::clone(&stop));
+            std::thread::spawn(move || serve(listener, fan, stop))
+        };
+
+        // The shim ends, the way a hosted agent's does.
+        Shim {
+            stop: Arc::clone(&stop),
+            fan: Arc::clone(&fan),
+            path: path.clone(),
+        }
+        .end();
+
+        assert!(
+            waits_for(|| served.is_finished()),
+            "the accept loop is still parked in accept"
+        );
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A watcher is told the agent is gone.
+    ///
+    /// It was not: the connection stayed open and the watcher waited for
+    /// output that would never come, and the thread serving it held the pty
+    /// master with it.
+    #[test]
+    fn a_watcher_is_told_the_agent_is_gone() {
+        let hosted = host(
+            &["sh".to_string(), "-c".to_string(), "sleep 30".to_string()],
+            None,
+            (80, 24),
+        )
+        .expect("a hosted agent");
+        let pid = hosted.pid;
+        let watching = crate::attach::attach(pid).expect("an attach connection");
+        assert!(!watching.closed(), "it hung up on a live agent");
+
+        drop(hosted);
+
+        assert!(
+            waits_for(|| watching.closed()),
+            "the watcher was never told the agent is gone"
+        );
+    }
+
+    /// A client that stops reading does not freeze the agent.
+    ///
+    /// The replay was written to the client with the fanout locked, so a
+    /// client that would not read held the lock for as long as it took — and
+    /// the agent's own output waits on that lock. A watcher was allowed to
+    /// stop the agent's terminal by accident, and did.
+    #[test]
+    fn a_client_that_stops_reading_does_not_freeze_the_agent() {
+        let (mut child, master) = spawn_on_pty(
+            &[
+                "sh".into(),
+                "-c".into(),
+                // More than the pty's own buffer holds, so the agent cannot
+                // finish unless something keeps reading it.
+                "head -c 2000000 /dev/zero | tr '\\0' 'x'".into(),
+            ],
+            None,
+        )
+        .expect("a pty");
+        let pid = child.id();
+        let (listener, path) = listen(pid).expect("a control socket");
+        let fan = Arc::new(Mutex::new(Fanout::new(
+            master.try_clone().expect("a master"),
+            (80, 24),
+        )));
+        // A full replay, so the write that blocks is a big one.
+        locked(&fan).recent = vec![b'x'; REPLAY_BYTES];
+        {
+            let (master, fan) = (master.try_clone().expect("a master"), Arc::clone(&fan));
+            std::thread::spawn(move || pump_output(master, fan, Echo::No));
+        }
+        let stop = Arc::new(AtomicBool::new(false));
+        {
+            let (listener, fan, stop) = (Arc::new(listener), Arc::clone(&fan), Arc::clone(&stop));
+            std::thread::spawn(move || serve(listener, fan, stop));
+        }
+
+        // A client that will not read: a receive buffer of nothing, and a
+        // socket nobody drains.
+        let mut client = UnixStream::connect(&path).expect("a connection");
+        let small: libc::c_int = 2048;
+        // SAFETY: a live socket, and a buffer size the kernel takes as it is.
+        unsafe {
+            libc::setsockopt(
+                client.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_RCVBUF,
+                (&small as *const libc::c_int).cast(),
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            );
+        }
+        client.write_all(ATTACH_MAGIC).expect("the magic");
+        // Waited for with a sleep rather than with the lock: with the old
+        // code the lock is what the blocked write holds, and a test that
+        // asked for it would wait for ever — which is the bug, not a
+        // failure of the test.
+        std::thread::sleep(std::time::Duration::from_millis(250));
+
+        // The agent finishes: something kept reading the pty all along.
+        let finished = wait_until(PATIENCE, || child.try_wait().ok().flatten());
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = std::fs::remove_file(&path);
+        assert!(
+            finished.is_some(),
+            "the agent stopped writing: the client froze it"
+        );
+    }
+
     /// A pid nothing runs as: a child that has been reaped.
     fn dead_pid() -> u32 {
         let mut child = Command::new("true").spawn().expect("spawn true");
@@ -1293,12 +1555,18 @@ mod tests {
         )
         .unwrap();
         let pid = child.id();
-        let listener = listen(pid).unwrap();
+        let (listener, _path) = listen(pid).unwrap();
         let fan = Arc::new(Mutex::new(Fanout::new(
             master.try_clone().unwrap(),
             (80, 24),
         )));
-        std::thread::spawn(move || serve(listener, master, fan));
+        let stop = Arc::new(AtomicBool::new(false));
+        let listener = Arc::new(listener);
+        {
+            let (listener, fan, stop) =
+                (Arc::clone(&listener), Arc::clone(&fan), Arc::clone(&stop));
+            std::thread::spawn(move || serve(listener, fan, stop));
+        }
 
         // Through the public entry point, so the socket lookup is covered too.
         let sent = crate::inject::send_line(pid, "continue");
@@ -1334,18 +1602,21 @@ mod tests {
         )
         .unwrap();
         let pid = child.id();
-        let listener = listen(pid).unwrap();
+        let (listener, _path) = listen(pid).unwrap();
         let fan = Arc::new(Mutex::new(Fanout::new(
             master.try_clone().unwrap(),
             (80, 24),
         )));
+        let stop = Arc::new(AtomicBool::new(false));
+        let listener = Arc::new(listener);
         for spawn in [0, 1] {
             let (master, fan) = (master.try_clone().unwrap(), Arc::clone(&fan));
             match spawn {
                 0 => std::thread::spawn(move || pump_output(master, fan, Echo::No)),
                 _ => {
-                    let listener = listener.try_clone().unwrap();
-                    std::thread::spawn(move || serve(listener, master, fan))
+                    let (listener, fan, stop) =
+                        (Arc::clone(&listener), Arc::clone(&fan), Arc::clone(&stop));
+                    std::thread::spawn(move || serve(listener, fan, stop))
                 }
             };
         }
@@ -1402,7 +1673,7 @@ mod tests {
         )
         .unwrap();
         let pid = child.id();
-        let listener = listen(pid).unwrap();
+        let (listener, _path) = listen(pid).unwrap();
         let local = (100u16, 40u16);
         let fan = Arc::new(Mutex::new(Fanout::new(master.try_clone().unwrap(), local)));
         locked(&fan).fit();
@@ -1410,9 +1681,12 @@ mod tests {
             let (master, fan) = (master.try_clone().unwrap(), Arc::clone(&fan));
             std::thread::spawn(move || pump_output(master, fan, Echo::No));
         }
+        let stop = Arc::new(AtomicBool::new(false));
+        let listener = Arc::new(listener);
         {
-            let (master, fan) = (master.try_clone().unwrap(), Arc::clone(&fan));
-            std::thread::spawn(move || serve(listener, master, fan));
+            let (listener, fan, stop) =
+                (Arc::clone(&listener), Arc::clone(&fan), Arc::clone(&stop));
+            std::thread::spawn(move || serve(listener, fan, stop));
         }
 
         let settled = |want: (u16, u16)| waits_for(|| pty_size(&master) == want);
