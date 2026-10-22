@@ -744,11 +744,17 @@ fn event_loop(
                     Err(error) => app.set_status(error),
                 },
                 Ok(Response::Remote { host, snapshot }) => {
+                    // The account's own listing is read here rather than on a
+                    // timer of its own: a machine that names a cctop and
+                    // cannot be read has to be said once, and this is the
+                    // beat it is said on.
+                    app.refresh_unreadable_machines();
                     match snapshot {
                         cctop_core::fleet::Snapshot::Rows(rows) => {
                             if !rows.is_empty() && std::mem::take(&mut app.host_auto_hidden) {
                                 app.hidden_columns.retain(|c| *c != ColumnId::Host);
                             }
+                            app.remote_down_told.remove(&host);
                             app.remote_errors.remove(&host);
                             app.remotes.insert(host, rows);
                         }
@@ -757,6 +763,14 @@ fn event_loop(
                         // and an empty machine is a stronger claim than a stale
                         // one. The footer says the reading is old.
                         cctop_core::fleet::Snapshot::Failed(why) => {
+                            // Said once, because the reason for a machine
+                            // being down is otherwise never on screen: a
+                            // machine with no rows has no row to open, and
+                            // the footer's dot says that it is down without
+                            // saying why.
+                            if app.remote_down_told.insert(host.clone()) {
+                                app.set_status(format!("{host} is not answering: {why}"));
+                            }
                             app.remote_errors.insert(host, why);
                         }
                     }

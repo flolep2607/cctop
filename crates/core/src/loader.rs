@@ -647,12 +647,22 @@ fn annotate(s: &mut Session, data: &SessionData, plan: Plan) {
     s.ultracode_at = data.ultracode_at.clone();
     s.ultracode_off_at = data.ultracode_off_at.clone();
     s.total_cost = (s.cost_available && !plan.includes(s.provider)).then_some(data.costs.total);
-    s.cost_is_free = s.cost_available
-        && data.costs.total == 0.0
-        && data.tokens.all_input() + data.tokens.output > 0;
     if !data.last_model.is_empty() {
         s.model = data.last_model.clone();
     }
+    // "Free" is a statement about the model's price, so it needs the table's
+    // answer to back it: a model nobody has a rate for also costs $0.00, and
+    // calling that free says something false about it. The doctor's parsers
+    // section says which of the two a zero is; this is the same question, and
+    // it is asked here because the table is only consulted once.
+    //
+    // A bundled plan is not free either — it is included — and its rows say
+    // so, so the flag stays off and the column reads `incl`.
+    s.cost_is_free = s.cost_available
+        && !plan.includes(s.provider)
+        && data.costs.total == 0.0
+        && data.tokens.all_input() + data.tokens.output > 0
+        && crate::pricing::is_free(s.provider, &s.model);
     if s.title.is_none() {
         s.title = data.title.clone();
     }

@@ -290,7 +290,7 @@ pub(super) fn zero_checks(
         match listing(z.provider, &z.model) {
             // Worth knowing and not worth fixing: the one zero that is true.
             Listing::Free => checks.push(ok("free model", format!("{what}, listed as free"))),
-            Listing::Unlisted if named_free(&z.model) => {
+            Listing::Unlisted if cctop_core::pricing::named_free(&z.model) => {
                 checks.push(ok("free model", format!("{what}, named as free")))
             }
             // The compare bug's shape: a rate exists and the figure did not
@@ -333,20 +333,6 @@ pub(super) fn zero_checks(
         });
     }
     checks
-}
-
-/// Whether a model's own name says it is free, as gateways spell their free
-/// tiers: OpenRouter's `:free`, OpenCode Zen's `-free`.
-///
-/// Those tiers are exactly what LiteLLM does not list — there is no rate to
-/// list — so without this every one of them would be reported as unpriced,
-/// on every run, to someone who chose it because it costs nothing.
-// ponytail: trusts the name. A paid model whose name ends in `-free` would be
-// missed, but
-// a vendor naming a paid model that way would be misleading its own buyers.
-fn named_free(model: &str) -> bool {
-    let lower = model.to_ascii_lowercase();
-    lower.ends_with(":free") || lower.ends_with("-free")
 }
 
 /// A model name as the reader will search for it.

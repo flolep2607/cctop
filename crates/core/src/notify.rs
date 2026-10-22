@@ -205,7 +205,11 @@ impl Notifier {
         // One bell for the refresh, no matter how many sessions finished in it:
         // three bells in a row is noise, and the count says the same thing.
         let extra = crossed.len() - 1;
-        let rang = crossed.swap_remove(0);
+        // Taken off the front, not swapped out of it: `swap_remove` leaves the
+        // last crossing in the first place, so the queue below would read
+        // A, C, B for three crossings that happened A, B, C — and `b` walks
+        // that queue to find the agent that rang.
+        let rang = crossed.remove(0);
         self.pending.push(crossing_text(&rang, extra));
         // Every crossing is remembered, not only the one the bell named:
         // each still needs finding, which is what the marker and `b` are for.
@@ -661,6 +665,37 @@ mod tests {
         // that could carry anything.
         assert_eq!(super::origin_of("not a url"), "(unparseable)");
         assert_eq!(super::origin_of(""), "(unparseable)");
+    }
+
+    /// The queue `b` walks is the crossings in the order they happened.
+    ///
+    /// It is a queue and not a set: pressing `b` twice is meant to take you
+    /// to the first agent that rang, then the second. Swapping the first
+    /// crossing out of the middle of the list left the third one in its
+    /// place, so `b` went to the wrong agent.
+    #[test]
+    fn the_rings_are_queued_in_the_order_they_happened() {
+        let mut n = Notifier {
+            enabled: true,
+            ..Default::default()
+        };
+        let busy = |id: &str| session(id, true, ActivityState::Working);
+        let waiting = |id: &str| session(id, true, ActivityState::WaitingForInput);
+        n.observe(&[busy("a"), busy("b"), busy("c")]);
+        // All three cross at once, and the queue holds all three.
+        n.observe(&[waiting("a"), waiting("b"), waiting("c")]);
+        let order: Vec<&str> = n.recent.iter().map(|r| r.key.as_str()).collect();
+        assert_eq!(order, ["claude:a", "claude:b", "claude:c"], "oldest first");
+
+        // And `b` walks it: the first ringing agent, then the next.
+        let first = n.unanswered(None).expect("one rang").key.clone();
+        assert_eq!(first, "claude:a");
+        let second = n
+            .unanswered(Some(&first))
+            .expect("another rang")
+            .key
+            .clone();
+        assert_eq!(second, "claude:b");
     }
 
     /// The complaint this split exists for: before it, an agent holding a

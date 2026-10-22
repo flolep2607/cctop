@@ -115,11 +115,15 @@ pub(crate) struct Cost {
 
 impl Usage {
     /// What the request was given, cached or not: the window it filled.
+    ///
+    /// Saturating: these are numbers out of a file any process on the
+    /// machine can write, and a plain sum of them overflows a debug build
+    /// and wraps to a nonsense window in a release one.
     pub(crate) fn window(&self) -> u64 {
         [&self.input, &self.cache_read, &self.cache_write]
             .iter()
             .filter_map(|n| n.value())
-            .sum()
+            .fold(0u64, |sum, n| sum.saturating_add(n))
     }
 }
 

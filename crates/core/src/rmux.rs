@@ -737,9 +737,21 @@ pub fn mouse_wanted(name: &str) -> bool {
     // resolve against a session name. Asking every pane and matching the name
     // here is the form that answers at all.
     const FORMAT: &str = "#{session_name} #{mouse_any_flag}";
-    let listing = crate::mux::list_all_panes(FORMAT).unwrap_or_default();
-    let want = format!("{name} 1");
-    listing.lines().any(|line| line == want)
+    // Asked within a deadline: this is asked on a click, on the thread that
+    // draws, and the daemon's own timeouts are five seconds to connect and
+    // fifteen to read — a right-click on a wedged daemon would freeze the
+    // screen that long. A daemon that has not answered by then is treated as
+    // one that does not want the mouse.
+    let Ok(socket) = crate::mux::socket() else {
+        return false;
+    };
+    let name = name.to_string();
+    crate::mux::within(crate::mux::ANSWER_DEADLINE, move || {
+        let listing = crate::mux::list_all_panes_at(&socket, FORMAT).unwrap_or_default();
+        let want = format!("{name} 1");
+        listing.lines().any(|line| line == want)
+    })
+    .unwrap_or(false)
 }
 
 /// End a session, taking the agent inside it with it.
@@ -1000,9 +1012,36 @@ fn in_tab_order(newest_first: Vec<Running>) -> Vec<Running> {
 /// the top of the history. End is the composer's while nothing is scrolled
 /// back, and only in copy-mode means the live screen.
 pub fn scroll_key(name: &str, code: crossterm::event::KeyCode) -> bool {
+    use crossterm::event::KeyCode;
+    // Only three keys can scroll, and the question of whether the pane is
+    // scrolled is asked of the daemon — a round trip. Asking it for every
+    // keystroke put one on every key pressed in a pane, and the daemon's own
+    // timeouts are five seconds to connect and fifteen to read, so a
+    // keystroke on a wedged daemon froze the screen that long. A key that
+    // cannot scroll is answered without asking.
+    if !matches!(code, KeyCode::PageUp | KeyCode::Home | KeyCode::End) {
+        return false;
+    }
+    // And the three that can are asked within a deadline, so a daemon that is
+    // slow rather than wedged costs a quarter of a second and not fifteen.
+    // The key goes to the agent when the answer does not come: scrolling the
+    // agent's own history is what the key would have done anyway.
+    let Ok(socket) = crate::mux::socket() else {
+        return false;
+    };
+    let name = name.to_string();
+    crate::mux::within(crate::mux::ANSWER_DEADLINE, move || {
+        scroll_key_now(&socket, &name, code)
+    })
+    .unwrap_or(false)
+}
+
+/// [`scroll_key`], without the deadline: the answer asked for in full.
+fn scroll_key_now(socket: &std::path::Path, name: &str, code: crossterm::event::KeyCode) -> bool {
     use crate::mux::Scroll;
     use crossterm::event::KeyCode;
-    let Some(state) = crate::mux::display(name, "#{alternate_on} #{pane_in_mode}") else {
+    let Some(state) = crate::mux::display_at(socket, name, "#{alternate_on} #{pane_in_mode}")
+    else {
         return false;
     };
     let scrolled = match state.trim() {
@@ -1013,14 +1052,14 @@ pub fn scroll_key(name: &str, code: crossterm::event::KeyCode) -> bool {
     let how = match (code, scrolled) {
         (KeyCode::PageUp, false) => Scroll::PageUp,
         (KeyCode::Home, false) => {
-            return crate::mux::scroll(name, Scroll::Enter)
-                && crate::mux::scroll(name, Scroll::Command("history-top"));
+            return crate::mux::scroll_at(socket, name, Scroll::Enter)
+                && crate::mux::scroll_at(socket, name, Scroll::Command("history-top"));
         }
         (KeyCode::Home, true) => Scroll::Command("history-top"),
         (KeyCode::End, true) => Scroll::Command("cancel"),
         _ => return false,
     };
-    crate::mux::scroll(name, how)
+    crate::mux::scroll_at(socket, name, how)
 }
 
 /// One cctop-owned rmux session, and the agent living in it.
@@ -1612,6 +1651,54 @@ fn capture_bytes(raw: &[u8]) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crossterm::event::KeyCode;
+
+    /// A key that cannot scroll is answered without asking the daemon.
+    ///
+    /// The question of whether the pane is scrolled is a round trip, and it
+    /// used to be asked for every key pressed in a pane — a keystroke on a
+    /// wedged daemon froze the screen for the client's own twenty seconds.
+    #[test]
+    fn a_key_that_cannot_scroll_is_answered_without_asking_the_daemon() {
+        let _daemon = crate::mux::SilentDaemon::new("rmux-silent-key");
+        let started = std::time::Instant::now();
+        for key in [
+            KeyCode::Char('a'),
+            KeyCode::Char('Z'),
+            KeyCode::Enter,
+            KeyCode::Tab,
+            KeyCode::Backspace,
+            KeyCode::Up,
+        ] {
+            assert!(!scroll_key("any-session", key), "{key:?} cannot scroll");
+        }
+        // Generous, and still a thousandth of what the round trip cost: the
+        // daemon here accepts the connection and never answers it, so a
+        // caller that asked would wait out the client's read timeout.
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "the keys waited {:?} for a daemon that does not answer",
+            started.elapsed()
+        );
+    }
+
+    /// A key that can scroll is asked within a deadline, so a daemon that
+    /// does not answer costs a moment rather than the client's twenty
+    /// seconds. The key goes to the agent instead: scrolling the agent's own
+    /// history is what it would have done anyway.
+    #[test]
+    fn a_scroll_key_against_a_daemon_that_does_not_answer_does_not_wait_for_it() {
+        let _daemon = crate::mux::SilentDaemon::new("rmux-silent-scroll");
+        let started = std::time::Instant::now();
+        assert!(!scroll_key("any-session", KeyCode::PageUp));
+        let took = started.elapsed();
+        assert!(
+            took < std::time::Duration::from_secs(2),
+            "the key waited {took:?} for a daemon that does not answer"
+        );
+    }
+
     /// Closing or restarting a tab whose agent already ended is the end that
     /// was asked for; only a kill that left the session standing failed.
     #[test]
@@ -2038,7 +2125,6 @@ mod tests {
         assert_eq!(answer, "101", "the upgrade did not survive the tunnel");
     }
 
-    use super::*;
     use crate::test_wait::{PATIENCE, wait_asking, wait_every};
 
     /// The pane's command attaches-or-creates by exact name, through this

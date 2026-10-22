@@ -295,6 +295,22 @@ fn footer_badges(app: &App) -> Vec<Span<'static>> {
             Span::styled(format!(" ● {host} "), Style::default().fg(color)),
         ));
     }
+    // A machine on the account that names a cctop and could not be read: it
+    // is not in the table, not in the dots above, and not in any list of
+    // places to start an agent. Without a mark here it would simply not
+    // exist, and "my other machine never appeared" would have no answer on
+    // screen.
+    for machine in app.unreadable_machines() {
+        badges.push((
+            "unreadable",
+            Span::styled(
+                format!(" ⚠ {machine} "),
+                Style::default()
+                    .fg(theme::colors().cost_high)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ));
+    }
     // Two agents writing one file is the only thing here that is a fault rather
     // than a state, so it sits with the bell rather than among the badges.
     if let Some(clash) = app.conflict_footer() {

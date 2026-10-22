@@ -113,9 +113,12 @@ impl<'a> Step<'a> {
 
 /// Prompt, completion and cached counts as cctop's [`super::Tokens`], with the
 /// cached part split out of the prompt the way Codex's and Gemini's are.
+///
+/// Saturating, like every other sum over a file any process on the machine
+/// can write: see the Claude parser for why.
 fn tokens(prompt: u64, completion: u64, cached: u64) -> super::Tokens {
     super::Tokens {
-        total: prompt + completion,
+        total: prompt.saturating_add(completion),
         ..super::Tokens::from_prompt(prompt, cached, completion)
     }
 }

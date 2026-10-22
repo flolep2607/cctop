@@ -150,6 +150,7 @@ pub fn run(args: &[String]) -> i32 {
         hooks(),
         typing(),
         remotes(hosts),
+        fleet(),
     ];
 
     let tty = std::io::stdout().is_terminal();
@@ -753,6 +754,127 @@ fn remotes(hosts: &[String]) -> Section {
         checks,
     }
 }
+
+/// The other machines on this machine's Cloudflare account.
+///
+/// The question this answers is the one the doctor was written for: "the
+/// other machine never appeared". A machine that is missing is either not on
+/// the account, or on it and unreadable, and the two need different fixes —
+/// which is why the account's tunnels are listed rather than only the
+/// siblings that answered.
+///
+/// No account, or an account whose tunnels cannot be listed, means there is
+/// nothing to check and nothing to call: the first is a thing to set up, and
+/// the second is said as it is.
+fn fleet() -> Section {
+    let mut checks = Vec::new();
+    let (peers, skipped) = match cctop_core::peer::fleet() {
+        Ok(found) => found,
+        Err(cctop_core::peer::FleetError::NoAccount) => {
+            checks.push(ok(
+                "account",
+                "not connected — no other machine can appear in this table",
+            ));
+            return Section {
+                title: "Cloudflare fleet",
+                checks,
+            };
+        }
+        Err(cctop_core::peer::FleetError::List(why)) => {
+            checks.push(fail(
+                "account",
+                why,
+                "the account is connected but its tunnels could not be listed — \
+                 check the API token's permissions",
+            ));
+            return Section {
+                title: "Cloudflare fleet",
+                checks,
+            };
+        }
+    };
+
+    checks.push(ok(
+        "account",
+        format!(
+            "{} machine(s) on it, besides this one",
+            peers.len() + skipped.len()
+        ),
+    ));
+
+    for peer in &peers {
+        let name = peer.machine.clone();
+        match peer.poll() {
+            cctop_core::fleet::Snapshot::Rows(rows) => {
+                let dropped = cctop_core::fleet::unknown_harness(&name);
+                let read = match dropped {
+                    0 => format!("{} session(s)", rows.len()),
+                    n => format!(
+                        "{} session(s) (+{n} from a harness this cctop does not know)",
+                        rows.len()
+                    ),
+                };
+                let theirs = match peer.version() {
+                    Some(v) => format!(", cctop {v}"),
+                    None => String::new(),
+                };
+                checks.push(ok(name, format!("{read}{theirs}")));
+            }
+            // A machine that is asleep is a state, not a fault: it is what a
+            // closed laptop looks like, and a doctor that failed on it could
+            // not be used in a script to mean "is this installation sound".
+            cctop_core::fleet::Snapshot::Failed(why) if is_asleep(&why) => {
+                checks.push(warn(name, why.clone(), fleet_hint(&why)));
+            }
+            cctop_core::fleet::Snapshot::Failed(why) => {
+                checks.push(fail(name, why.clone(), fleet_hint(&why)));
+            }
+        }
+    }
+
+    // A tunnel that names a cctop and could not be read is a machine that
+    // never appears at all — not even as a dot in the footer, since nothing
+    // ever heard of it. Naming it is the whole point of this section.
+    for gone in &skipped {
+        checks.push(fail(gone.name.clone(), gone.why.clone(), FLEET_FIX));
+    }
+
+    Section {
+        title: "Cloudflare fleet",
+        checks,
+    }
+}
+
+/// Whether a machine on the account is asleep rather than broken.
+///
+/// The tunnel with no connector is what a closed laptop looks like from
+/// here: the machine is fine, it is just not running cctop right now. That
+/// is a state, and the doctor's rule is that a state is not a failure.
+fn is_asleep(why: &str) -> bool {
+    why.contains("no connector")
+}
+
+/// The fix to suggest for a machine on the account that did not answer.
+fn fleet_hint(why: &str) -> &'static str {
+    let lower = why.to_ascii_lowercase();
+    if lower.contains("no connector") {
+        return "its tunnel has no connector: cctop is not serving on that machine — \
+                run `cctop serve --tunnel` there, or press B then t in its dashboard";
+    }
+    if lower.contains("403") || lower.contains("forbidden") {
+        return "the tunnel token was refused: run `cctop tunnel setup --browser` \
+                there again so both machines hold the same account";
+    }
+    if lower.contains("timed out") || lower.contains("could not reach") {
+        return "its page did not answer: check that cctop is serving on that machine";
+    }
+    "run `cctop doctor` on that machine: it says what its own side is doing"
+}
+
+/// The fix for a tunnel that names a cctop and could not be read at all.
+const FLEET_FIX: &str = "run `cctop tunnel setup --browser` on that machine, \
+                         then `cctop tunnel remove` and set it up again if its \
+                         tunnel is still misconfigured";
 
 /// The fix to suggest for one host's failure.
 ///

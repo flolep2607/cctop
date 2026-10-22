@@ -742,12 +742,23 @@ pub struct App {
     /// Shown rather than logged. A host that has quietly dropped out is worse
     /// than one that was never added: the totals still look complete.
     pub remote_errors: HashMap<String, String>,
+    /// The machines on this Cloudflare account that name a cctop and could
+    /// not be read at all, with the reason for each.
+    ///
+    /// Kept because a machine that is missing from the table, from the
+    /// footer's dots and from every list is a machine nobody knows is
+    /// missing — the one thing a missing machine must not be. Named here, and
+    /// said once when it changes.
+    pub unreadable_machines: Vec<(String, String)>,
     /// What each host's `cctop --version` said, asked once per connection.
     pub remote_versions: HashMap<String, cctop_core::fleet::Probe>,
     /// Hosts whose version skew has been toasted this run. Once per host: the
     /// news is the same every poll, and a toast that comes back every fifteen
     /// seconds is one people learn to stop reading.
     pub remote_skew_told: std::collections::HashSet<String>,
+    /// The machines whose being down has already been said, so the reason is
+    /// said once and not on every refresh.
+    pub remote_down_told: std::collections::HashSet<String>,
     /// The host an update is being confirmed for, in `RemoteUpdateConfirm`.
     /// Held by name rather than read off the selection, which the table's
     /// next refresh is free to move.
@@ -1194,8 +1205,10 @@ impl App {
             collisions: cctop_core::collide::Map::new(),
             remotes: HashMap::new(),
             remote_errors: HashMap::new(),
+            unreadable_machines: Vec::new(),
             remote_versions: HashMap::new(),
             remote_skew_told: std::collections::HashSet::new(),
+            remote_down_told: std::collections::HashSet::new(),
             remote_update: None,
             remote_updating: std::collections::HashSet::new(),
             update_available: None,

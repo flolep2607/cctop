@@ -481,6 +481,22 @@ fn percent_decode(s: &str) -> String {
     decode_path(&s.replace('+', " "))
 }
 
+/// Escape a path so it can be written into a request line as it stands.
+///
+/// The inverse of [`decode_path`], and needed wherever a decoded path is put
+/// back on the wire: a raw CR or LF in it would end the request line and
+/// start another one. Everything outside the unreserved set goes, so what is
+/// written is a path and nothing else.
+pub(crate) fn encode_path(path: &str) -> String {
+    const UNRESERVED: &percent_encoding::AsciiSet = &percent_encoding::NON_ALPHANUMERIC
+        .remove(b'-')
+        .remove(b'_')
+        .remove(b'.')
+        .remove(b'~')
+        .remove(b'/');
+    percent_encoding::utf8_percent_encode(path, UNRESERVED).to_string()
+}
+
 /// The reason phrase for the statuses this server actually sends.
 fn reason(status: u16) -> &'static str {
     match status {
