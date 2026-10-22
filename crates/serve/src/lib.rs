@@ -1695,7 +1695,14 @@ fn serve_connection(shared: &Shared, stream: &mut TcpStream) {
         _ if path.starts_with("/api/report/") => {
             api_report(shared, stream, &request, &path["/api/report/".len()..]);
         }
-        _ if path.starts_with("/api/chat/") && path.ends_with("/markdown") => {
+        // The id is between the two ends, and there has to be one between
+        // them: `/api/chat/markdown` is the prefix and the suffix with
+        // nothing in between, and slicing it as if there were would ask for
+        // a range that starts after it ends.
+        _ if path.starts_with("/api/chat/")
+            && path.ends_with("/markdown")
+            && path.len() > "/api/chat/".len() + "/markdown".len() =>
+        {
             let id = &path["/api/chat/".len()..path.len() - "/markdown".len()];
             api_chat_markdown(shared, stream, &request, id);
         }
@@ -1973,6 +1980,46 @@ fn relay_terminal(
     relay_socket(stream, request, port, &format!("/{tail}"));
 }
 
+/// The handshake bytes cctop writes to rmux's listener.
+///
+/// Split out of [`relay_socket`] so what goes on the wire can be read in a
+/// test: the two things it must not carry are a raw CR or LF, which would
+/// split the request, and this server's own credential, which rmux has no
+/// business holding.
+fn relay_head(path: &str, query: &str, port: u16, headers: &[(String, String)]) -> String {
+    // The query is the raw one, less this server's own credential: the token
+    // is a thing that can type at a live agent, and rmux is not the one that
+    // needs it. The peer relay has always dropped it; the local one did not.
+    let query = match query {
+        "" => String::new(),
+        q => match remote::without_token(q) {
+            rest if rest.is_empty() => String::new(),
+            rest => format!("?{rest}"),
+        },
+    };
+    // The path is escaped rather than pasted in. It came off the wire
+    // percent-decoded, and a raw CR or LF in it would end the request line and
+    // start another one — a request split, aimed at a service this one
+    // forwards to. Escaped, it is a path and nothing else.
+    let mut head = format!(
+        "GET {}{query} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n",
+        http::encode_path(path)
+    );
+    for (name, value) in headers {
+        // The browser's own headers, and none of its credentials: the cookie
+        // and the bearer are this server's, and rmux does not need them.
+        if name.eq_ignore_ascii_case("host")
+            || name.eq_ignore_ascii_case("cookie")
+            || name.eq_ignore_ascii_case("authorization")
+        {
+            continue;
+        }
+        head.push_str(&format!("{name}: {value}\r\n"));
+    }
+    head.push_str("\r\n");
+    head
+}
+
 /// Pass a WebSocket handshake to rmux's listener on loopback `port` at
 /// `path`, and pump bytes both ways until either side closes.
 ///
@@ -1989,17 +2036,7 @@ fn relay_socket(stream: &mut TcpStream, request: &Request, port: u16, path: &str
             "the terminal's share has closed",
         );
     };
-    let query = match request.raw_query() {
-        "" => String::new(),
-        q => format!("?{q}"),
-    };
-    let mut head = format!("GET {path}{query} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n");
-    for (name, value) in request.headers() {
-        if !name.eq_ignore_ascii_case("host") {
-            head.push_str(&format!("{name}: {value}\r\n"));
-        }
-    }
-    head.push_str("\r\n");
+    let head = relay_head(path, request.raw_query(), port, request.headers());
     if upstream.write_all(head.as_bytes()).is_err() {
         return http::respond_error(
             stream,
@@ -2691,6 +2728,53 @@ mod tests {
         let mut raw = String::new();
         client.read_to_string(&mut raw).unwrap();
         raw
+    }
+
+    /// `/api/chat/markdown` is the route's prefix and its suffix with
+    /// nothing in between. Slicing it as if an id were there asked for a
+    /// range that starts after it ends, which panicked — a crash on a URL a
+    /// browser could be made to ask for. It is a missing session now, which
+    /// is what it is.
+    #[test]
+    fn the_chat_markdown_route_with_no_id_answers_rather_than_panics() {
+        let shared = shared("full", "view");
+        for target in ["/api/chat/markdown", "/api/chat/markdown?t=full"] {
+            let status = status_of(&shared, "GET", target, &bearer_line("full"));
+            assert!(status.starts_with("HTTP/1.1 404"), "{target}: {status}");
+        }
+    }
+
+    /// What goes on the wire to rmux: a path and nothing else, and none of
+    /// this server's own credentials.
+    ///
+    /// The path came off the wire percent-decoded, and a raw CR or LF in it
+    /// ends the request line and starts another one — a request split aimed
+    /// at the service this one forwards to. The token is a thing that can type
+    /// at a live agent, and rmux is not the one that needs it.
+    #[test]
+    fn the_relay_writes_a_path_and_no_credentials() {
+        let head = relay_head(
+            "/x\r\nInjected: yes",
+            "t=secret&keep=1",
+            4321,
+            &[
+                ("Host".to_string(), "example.test".to_string()),
+                ("Cookie".to_string(), "cctop_access_7777=secret".to_string()),
+                ("Authorization".to_string(), "Bearer secret".to_string()),
+                ("Upgrade".to_string(), "websocket".to_string()),
+            ],
+        );
+        // One request line, and the CR and LF are escaped into the path.
+        assert!(
+            head.starts_with("GET /x%0D%0AInjected%3A%20yes?keep=1 HTTP/1.1\r\n"),
+            "{head}"
+        );
+        assert_eq!(head.matches("\r\n").count(), 4, "{head}");
+        assert!(
+            !head.contains("secret"),
+            "the token left the process: {head}"
+        );
+        assert!(head.contains("Upgrade: websocket"), "{head}");
     }
 
     /// The export route end to end: behind the same token as its neighbours,
