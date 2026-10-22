@@ -281,8 +281,16 @@ pub fn start() -> Result<(), String> {
 
 /// A connection to cctop's daemon, or `None` when it is not running.
 fn connect() -> Option<rmux_client::Connection> {
-    let socket = socket().ok()?;
-    match rmux_client::connect_or_absent(&socket) {
+    connect_at(&socket().ok()?)
+}
+
+/// [`connect`], to a socket already resolved.
+///
+/// The socket is a parameter so that a caller which works on a thread of its
+/// own reaches the same daemon: the path is computed once, on the thread
+/// that knows where it is, and the work happens wherever it happens to run.
+fn connect_at(socket: &Path) -> Option<rmux_client::Connection> {
+    match rmux_client::connect_or_absent(socket) {
         Ok(rmux_client::ConnectResult::Connected(connection)) => Some(connection),
         _ => None,
     }
@@ -458,7 +466,19 @@ fn panes_of(
 /// one of panes for each, over a single connection. A session that ends between
 /// the two is skipped rather than failing the lot.
 pub fn list_all_panes(format: &str) -> Option<String> {
-    let mut connection = connect()?;
+    let Ok(socket) = socket() else {
+        return None;
+    };
+    list_all_panes_at(&socket, format)
+}
+
+/// [`list_all_panes`], against a socket already resolved.
+///
+/// The socket is a parameter so that a caller which works on a thread of its
+/// own reaches the same daemon: the path is computed once, on the thread
+/// that knows where it is, and the work happens wherever it happens to run.
+pub fn list_all_panes_at(socket: &Path, format: &str) -> Option<String> {
+    let mut connection = connect_at(socket)?;
     let sessions = exchange(
         &mut connection,
         &Request::ListSessions(ListSessionsRequest {
@@ -499,7 +519,16 @@ pub fn pane_target(text: &str) -> Option<PaneTarget> {
 
 /// `display-message -p` against a session's first pane.
 pub fn display(name: &str, format: &str) -> Option<String> {
-    let mut connection = connect()?;
+    display_at(&socket().ok()?, name, format)
+}
+
+/// [`display`], against a socket already resolved.
+///
+/// The socket is a parameter so that a caller which works on a thread of its
+/// own reaches the same daemon: the path is computed once, on the thread
+/// that knows where it is, and the work happens wherever it happens to run.
+pub fn display_at(socket: &Path, name: &str, format: &str) -> Option<String> {
+    let mut connection = connect_at(socket)?;
     let pane = first_pane(&mut connection, name)?;
     let response = exchange(
         &mut connection,
@@ -547,6 +576,37 @@ pub fn list_clients(name: &str, format: &str) -> Option<String> {
     Some(printed(&response))
 }
 
+/// How long a caller on the draw loop waits for the daemon.
+///
+/// The rmux client's own bounds are five seconds to connect and fifteen to
+/// read, and a caller that waits those out is a caller that has stopped
+/// drawing: the keystroke would be pressed on a frozen screen, and `q` would
+/// not answer either. The daemon is a process on this machine answering over
+/// a unix socket, so it answers in microseconds when it is well; a quarter
+/// of a second is a long time for that and short enough that nothing on
+/// screen waits for it.
+pub const ANSWER_DEADLINE: Duration = Duration::from_millis(250);
+
+/// Run `work` on a thread of its own, and take its answer if it comes within
+/// `limit`.
+///
+/// The thread is not abandoned: it ends when the daemon answers, or when the
+/// client's own timeout expires, so nothing is left running for long. What
+/// is given up is the answer — a caller that waited out its deadline takes
+/// the question as unanswered, which for the paths that use this is the
+/// safe answer: the key goes to the agent instead of the screen, and the
+/// page says nothing rather than something false.
+pub fn within<T: Send + 'static>(
+    limit: Duration,
+    work: impl FnOnce() -> T + Send + 'static,
+) -> Option<T> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(work());
+    });
+    rx.recv_timeout(limit).ok()
+}
+
 /// How a scroll key reaches a session's first pane: see `rmux::scroll_key`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Scroll {
@@ -560,7 +620,19 @@ pub enum Scroll {
 
 /// Apply one [`Scroll`] to a session's first pane.
 pub fn scroll(name: &str, how: Scroll) -> bool {
-    let Some(mut connection) = connect() else {
+    let Ok(socket) = socket() else {
+        return false;
+    };
+    scroll_at(&socket, name, how)
+}
+
+/// [`scroll`], against a socket already resolved.
+///
+/// The socket is a parameter so that a caller which works on a thread of its
+/// own reaches the same daemon: the path is computed once, on the thread
+/// that knows where it is, and the work happens wherever it happens to run.
+pub fn scroll_at(socket: &Path, name: &str, how: Scroll) -> bool {
+    let Some(mut connection) = connect_at(socket) else {
         return false;
     };
     let Some(pane) = first_pane(&mut connection, name) else {
@@ -1024,6 +1096,73 @@ impl Drop for TestDaemon {
         {
             let _ = connection.kill_server();
         }
+        TEST_SOCKET.with(|s| *s.borrow_mut() = self.previous.take());
+        if let Some(dir) = self.socket.parent() {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+}
+
+/// A socket that accepts connections and never answers them, for a test of
+/// what a caller does when the daemon does not reply.
+///
+/// The rmux client's own bounds are five seconds to connect and fifteen to
+/// read, so a caller that waits for the daemon waits twenty seconds. This is
+/// the socket that makes that visible.
+#[cfg(any(test, feature = "test-support"))]
+pub struct SilentDaemon {
+    socket: PathBuf,
+    _runtime: crate::config::RuntimeBase,
+    previous: Option<PathBuf>,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl SilentDaemon {
+    /// A silent socket for the test calling it. `name` is only a label for
+    /// the directory, and must be unique to the test.
+    pub fn new(name: &str) -> SilentDaemon {
+        let runtime = crate::config::claim_test_runtime_base(name);
+        let dir = std::env::temp_dir().join(format!("cs{}-{:x}", std::process::id(), {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            name.hash(&mut h);
+            h.finish() as u32
+        }));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a socket directory for this test");
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+        let socket = dir.join("s");
+        let listener =
+            std::os::unix::net::UnixListener::bind(&socket).expect("a socket to listen on");
+        std::thread::spawn(move || {
+            // Every connection is accepted and held, and none is answered:
+            // a caller waits for its own timeout, which is the point.
+            let mut held = Vec::new();
+            for stream in listener.incoming() {
+                let Ok(stream) = stream else { return };
+                held.push(stream);
+            }
+        });
+        let previous = TEST_SOCKET.with(|s| s.replace(Some(socket.clone())));
+        SilentDaemon {
+            socket,
+            _runtime: runtime,
+            previous,
+        }
+    }
+
+    /// The socket this test's daemon listens on.
+    pub fn socket(&self) -> &Path {
+        &self.socket
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl Drop for SilentDaemon {
+    fn drop(&mut self) {
+        // No shutting down: there is no daemon to shut down, and asking one
+        // would wait for the very timeout this test is about.
         TEST_SOCKET.with(|s| *s.borrow_mut() = self.previous.take());
         if let Some(dir) = self.socket.parent() {
             let _ = std::fs::remove_dir_all(dir);
