@@ -1255,8 +1255,15 @@ impl Tab {
     }
 
     /// What the tab bar calls this tab.
+    ///
+    /// A tab on an account worth naming says which: two `claude` tabs are the
+    /// same command on two subscriptions, and the bar is the only place that
+    /// tells them apart — the pane border already shows the right account's
+    /// limits, but never names the account it read them from. The Limits pane
+    /// qualifies only the accounts beyond the first, so the default is left
+    /// unqualified here too.
     pub fn title(&self) -> String {
-        match self.panes.len() {
+        let label = match self.panes.len() {
             0 | 1 => self
                 .panes
                 .first()
@@ -1264,7 +1271,27 @@ impl Tab {
                 .or_else(|| self.shared.as_ref().map(|s| s.label.clone()))
                 .unwrap_or_default(),
             n => format!("{} +{}", self.panes[0].label, n - 1),
+        };
+        match self.account() {
+            Some(account) => format!("{label} ({account})"),
+            None => label,
         }
+    }
+
+    /// The account this tab's agent runs under, when it is one worth naming.
+    ///
+    /// The first pane's, since that is the pane [`title`](Self::title) names
+    /// the tab after — a split is titled after its first pane with a count of
+    /// the rest, and a split opened one way runs on one account. The shared
+    /// session carries the same field across the detach that leaves no pane,
+    /// so a tab keeps its account while nobody is attached to it.
+    fn account(&self) -> Option<&str> {
+        let profile = self
+            .panes
+            .first()
+            .and_then(|p| p.profile.as_deref())
+            .or_else(|| self.shared.as_ref().and_then(|s| s.profile.as_deref()))?;
+        (profile != "default").then_some(profile)
     }
 
     /// How this tab reaches another machine, if it is on one — the bar's mark
@@ -2029,6 +2056,39 @@ Enter to select · ↑/↓ to navigate · Esc to cancel";
         // A command that merely happens to be called `env` keeps its name.
         assert_eq!(label_of(&["env".to_string()]), "env");
         assert_eq!(label_of(&["claude".to_string()]), "claude");
+    }
+
+    /// A tab on a named account says which, the way the Limits pane qualifies
+    /// a second account: two `claude` tabs are the same command on two
+    /// subscriptions, and the label is the only place that tells them apart.
+    /// The default account is not named — it is the one the bar would show
+    /// either way, and a qualifier that never varies tells nobody anything.
+    #[test]
+    fn a_tab_on_a_named_account_says_which() {
+        assert_eq!(Tab::new(Pane::for_test("claude")).title(), "claude");
+
+        let mut pane = Pane::for_test("claude");
+        pane.profile = Some("work2".into());
+        assert_eq!(Tab::new(pane).title(), "claude (work2)");
+
+        let mut pane = Pane::for_test("claude");
+        pane.profile = Some("default".into());
+        assert_eq!(Tab::new(pane).title(), "claude");
+
+        // Detached, the shared session carries the account across, so the tab
+        // keeps its name while no pane is there to hold it.
+        let mut tab = Tab::new(Pane::for_test("claude"));
+        tab.shared = Some(Shared {
+            name: "cctop-claude".into(),
+            label: "claude".into(),
+            pid: None,
+            activity: None,
+            profile: Some("work2".into()),
+            transport: None,
+            state: None,
+        });
+        tab.panes.clear();
+        assert_eq!(tab.title(), "claude (work2)");
     }
     use super::*;
 
