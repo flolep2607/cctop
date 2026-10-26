@@ -393,11 +393,13 @@ pub fn info(
 
     // Whose session this is, when it is not the reader's — and the reason the
     // account below is then left off: those credentials are this user's, and
-    // another user's session is signed in as somebody else.
+    // another user's session is signed in as somebody else. Another machine's
+    // session is the same case: the account is read from this machine's
+    // `~/.claude.json`, and the far side may be signed in as anyone.
     if let Some(owner) = &session.owner {
         lines.push(field("User", owner.clone()));
     }
-    if session.owner.is_none() {
+    if session.owner.is_none() && session.remote.is_none() {
         for line in account_lines(session.provider) {
             lines.push(line);
         }
@@ -2719,6 +2721,25 @@ mod tests {
             .collect();
         assert!(text.contains("new"));
         assert!(!text.contains("old"));
+    }
+
+    /// Whatever account this machine is signed in as, a row read from another
+    /// machine must not claim it.
+    #[test]
+    fn info_leaves_this_machines_account_off_a_remote_row() {
+        let mut s = Session::new(Provider::Claude, "x".into());
+        s.remote = Some(cctop_core::session::Remote {
+            host: "box".into(),
+            ..Default::default()
+        });
+        let lines = info(&s, None, Plan::Retail, None, "over ssh");
+        let text: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
+            .collect();
+        assert!(text.contains("box"), "{text}");
+        assert!(!text.contains("Account"), "{text}");
+        assert!(!text.contains("Org "), "{text}");
     }
 
     #[test]
