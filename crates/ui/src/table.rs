@@ -97,7 +97,19 @@ fn empty_lines(app: &App) -> Vec<Line<'static>> {
             theme::dim(),
         ))];
     }
-    if !app.search.is_empty() || app.age_filter.is_some() || app.cost_floor > 0.0 {
+    if let crate::machine::Machine::Host(h) = &app.machine
+        && !app.remotes.contains_key(h)
+    {
+        return vec![Line::from(Span::styled(
+            format!("{h} is no longer on the account. m or Esc shows the other machines."),
+            theme::dim(),
+        ))];
+    }
+    if !app.search.is_empty()
+        || app.age_filter.is_some()
+        || app.cost_floor > 0.0
+        || app.machine != crate::machine::Machine::All
+    {
         return vec![Line::from(Span::styled(
             "No sessions match the current filters. Esc clears them, one at a time.",
             theme::dim(),
@@ -121,6 +133,37 @@ fn empty_lines(app: &App) -> Vec<Line<'static>> {
 
 fn pad(text: &str, width: u16, right: bool) -> String {
     util::pad(text, width.into(), right)
+}
+
+/// The machine selector, on the top border after the title.
+///
+/// Drawn over the border rather than folded into the title string, because
+/// each chip needs its own style and its own click span. Chips that do not fit
+/// are left off whole — half a host name is a chip nobody can read and a click
+/// that lands on the border — and the ones that do are still a working
+/// selector, with `m` reaching the rest.
+fn draw_machine_chips(frame: &mut Frame, area: Rect, title: &str, app: &App, layout: &mut Layout) {
+    layout.machine_spans.clear();
+    // One column for the corner, then the title as `panel_block` pads it.
+    let mut x = area.x + 1 + Span::raw(format!(" {title} ")).width() as u16;
+    let end = area.right().saturating_sub(1);
+    for (span, machine) in app.machine_chips() {
+        let w = span.width() as u16;
+        if x + w + 1 > end {
+            break;
+        }
+        frame.render_widget(
+            Paragraph::new(Line::from(span)),
+            Rect {
+                x,
+                y: area.y,
+                width: w,
+                height: 1,
+            },
+        );
+        layout.machine_spans.push((area.y, x, x + w, machine));
+        x += w + 1;
+    }
 }
 
 pub(super) fn draw_table(frame: &mut Frame, area: Rect, app: &mut App, layout: &mut Layout) {
@@ -156,6 +199,7 @@ pub(super) fn draw_table(frame: &mut Frame, area: Rect, app: &mut App, layout: &
     let block = panel_block(&title);
     let inner = block.inner(area);
     frame.render_widget(block, area);
+    draw_machine_chips(frame, area, &title, app, layout);
 
     if inner.height == 0 {
         return;

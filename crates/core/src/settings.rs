@@ -160,7 +160,7 @@ pub const PASTE_DEBOUNCE_MS: u64 = 250;
 /// pane's belong to the agent.
 ///
 // ponytail: dashboard keys only; extend to modals if someone asks to rebind one.
-pub const BINDINGS: [(&str, &str, &str); 52] = [
+pub const BINDINGS: [(&str, &str, &str); 53] = [
     ("quit", "q", "Quit"),
     ("help", "?", "Help"),
     ("settings", ",", "The settings tab, at the end of the bar"),
@@ -209,6 +209,7 @@ pub const BINDINGS: [(&str, &str, &str); 52] = [
     ("sort", "S", "Sort by a column"),
     ("cost_floor", "#", "Only sessions costing at least $X"),
     ("running_only", "`", "Show only running sessions"),
+    ("machine", "m", "Next machine in the table's title"),
     ("idle", "I", "Live sessions left idle, biggest first"),
     ("new_tab", "t", "New tab"),
     ("open_hosted", "A", "Open the agent this cctop launched"),

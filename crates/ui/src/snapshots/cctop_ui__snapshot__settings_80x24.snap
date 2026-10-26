@@ -24,5 +24,5 @@ expression: screen
 │  alert_cost        0                Alert when a session's cost passes $X    │
 │  alert_burn        0                Alert when a session burns over $X an ho…│
 │  alert_today       0                Alert when today's spend passes $X       │
-╰ 87   ↑↓ scroll   / filter   Esc back ────────────────────────────────────────╯
+╰ 88   ↑↓ scroll   / filter   Esc back ────────────────────────────────────────╯
 / Filter ↵ Change ⌫ Reset e Edit file , Back Alt+←→ Tabs F1 Help        ⧉ share

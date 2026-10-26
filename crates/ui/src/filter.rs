@@ -105,6 +105,9 @@ impl App {
                 if self.live_only && !s.is_running() {
                     return false;
                 }
+                if !self.machine.admits(s) {
+                    return false;
+                }
                 if self.idle_only && !self.is_idle(s, now_ms) {
                     return false;
                 }
@@ -419,6 +422,7 @@ impl App {
             || self.cost_floor > 0.0
             || self.live_only
             || self.age_filter.is_some()
+            || self.machine != super::machine::Machine::All
             || self.tool_tab != 0
             || self.tool_live_only
     }
@@ -439,6 +443,11 @@ impl App {
         } else if self.age_filter.is_some() {
             self.age_filter = None;
             "Age filter cleared"
+        } else if self.machine != super::machine::Machine::All {
+            // After the filters that narrow within a machine: a search typed
+            // while looking at one box is about that box's rows.
+            self.machine = super::machine::Machine::All;
+            "Showing every machine"
         } else if self.tool_tab != 0 || self.tool_live_only {
             // The Tool Activity sidebar filters a panel rather than the table,
             // so it comes last: it is the layer the user is least likely to

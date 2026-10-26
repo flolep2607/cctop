@@ -45,6 +45,9 @@ pub struct Layout {
     pub(super) bottom_start: u16,
     /// `(start_col, end_col, column)` spans in the table header.
     pub(super) column_spans: Vec<(u16, u16, ColumnId)>,
+    /// `(row, start_col, end_col, machine)` for each chip of the machine
+    /// selector in the table's title.
+    pub(super) machine_spans: Vec<(u16, u16, u16, crate::machine::Machine)>,
     /// `(start_col, end_col, tab_index)` spans in the bottom tab bar.
     pub(super) tab_spans: Vec<(u16, u16, usize)>,
     /// `(start, end, workspace_index)` spans in the workspace bar: columns of
@@ -147,6 +150,14 @@ impl Layout {
                     .map(|(_, i)| *i)
             })
             .flatten()
+    }
+
+    /// The machine chip under the cursor, if the table's title is drawing one.
+    pub fn machine_at(&self, col: u16, row: u16) -> Option<crate::machine::Machine> {
+        self.machine_spans
+            .iter()
+            .find(|(r, a, b, _)| *r == row && col >= *a && col < *b)
+            .map(|(_, _, _, m)| m.clone())
     }
 
     pub fn header_column_at(&self, col: u16, row: u16) -> Option<ColumnId> {
@@ -2314,6 +2325,7 @@ mod tests {
             bottom_start: 20,
             column_spans: vec![(0, 5, ColumnId::Status), (5, 12, ColumnId::Cost)],
             tab_spans: vec![(2, 6, 0), (8, 19, 1)],
+            machine_spans: vec![(5, 20, 25, crate::machine::Machine::Local)],
             tool_sidebar: Some((18, 21, 0, 3)),
             tool_log: Some((19, 21, 4)),
             table_track: None,
@@ -2398,6 +2410,12 @@ mod tests {
         assert_eq!(layout.row_at(12), None);
         assert_eq!(layout.header_column_at(6, 6), Some(ColumnId::Cost));
         assert_eq!(layout.header_column_at(6, 7), None);
+        assert_eq!(
+            layout.machine_at(20, 5),
+            Some(crate::machine::Machine::Local)
+        );
+        assert_eq!(layout.machine_at(25, 5), None);
+        assert_eq!(layout.machine_at(20, 6), None);
         // The Subagents panel's header answers only its own row, and each
         // column only its own span of it.
         assert_eq!(

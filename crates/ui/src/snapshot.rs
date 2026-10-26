@@ -687,6 +687,33 @@ fn filter_active() {
     snap("filter_active", &mut app);
 }
 
+/// Two other machines on the account put the selector in the table's title,
+/// and picking one narrows the table to its rows.
+#[test]
+fn machine_selector() {
+    let mut app = fixture();
+    for (host, id) in [("desktop", "d1"), ("procdb", "p1"), ("procdb", "p2")] {
+        let mut s = session(
+            id,
+            "/srv/api",
+            "claude-sonnet-4-5",
+            Age::minutes(3),
+            Age::minutes(120),
+        );
+        s.remote = Some(cctop_core::session::Remote {
+            host: host.into(),
+            ..Default::default()
+        });
+        app.remotes.entry(host.into()).or_default().push(s);
+    }
+    app.merge_remotes();
+    app.pick_machine(crate::machine::Machine::Host("procdb".into()));
+    // Off Info, which a remote row falls back to, for the reason the fixture
+    // is: it names the account signed in on whatever machine runs the test.
+    app.bottom_tab = tab("Cost");
+    snap("machine_selector", &mut app);
+}
+
 /// The search box open mid-typing, over the table it is narrowing.
 #[test]
 fn search_typing() {
