@@ -706,7 +706,12 @@ fn machine_selector() {
         });
         app.remotes.entry(host.into()).or_default().push(s);
     }
+    // Merging recomputes the totals, and the CPU share is over this
+    // machine's cores; the fixture's figure keeps the frame the same on every
+    // machine.
+    let cpu = app.stats.total_cpu;
     app.merge_remotes();
+    app.stats.total_cpu = cpu;
     app.pick_machine(crate::machine::Machine::Host("procdb".into()));
     // Off Info, which a remote row falls back to, for the reason the fixture
     // is: it names the account signed in on whatever machine runs the test.
