@@ -33,6 +33,7 @@ mod launch_cwd;
 mod line_edit;
 mod link;
 mod location;
+mod machine;
 mod markdown;
 pub mod menu;
 mod modals;
@@ -415,6 +416,8 @@ pub struct App {
     pub age_filter: Option<AgeFilter>,
     pub age_cursor: usize,
     pub live_only: bool,
+    /// Which machine's sessions the table shows — see [`machine`].
+    pub machine: machine::Machine,
     /// The idle view: only live sessions quiet for `idle_after`, biggest
     /// first. See the `idle` module.
     pub idle_only: bool,
@@ -1101,6 +1104,7 @@ impl App {
             age_filter,
             age_cursor,
             live_only: prefs.live_only,
+            machine: machine::Machine::All,
             idle_only: false,
             idle_sort: None,
             marked: HashSet::new(),

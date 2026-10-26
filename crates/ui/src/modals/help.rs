@@ -111,6 +111,7 @@ pub(crate) fn draw_help(frame: &mut Frame, area: Rect, app: &mut App) {
         item("F7", "Filter by age (1d / 1w / 1mo)"),
         item("{cost_floor}", "Cost floor: only sessions costing ≥ $X"),
         item("{running_only}", "Show only running sessions"),
+        item("{machine}  M", "All machines / this one / each other one"),
         item("{tree}", "Tree view: group by repository and worktree"),
         item(
             "{worktree}",

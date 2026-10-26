@@ -1823,6 +1823,8 @@ impl App {
                 self.refilter();
                 self.save_prefs();
             }
+            KeyCode::Char('m') => self.step_machine(true),
+            KeyCode::Char('M') => self.step_machine(false),
 
             // `h` rather than `H`, which already sorts by harness.
             KeyCode::Char('h') | KeyCode::F(8) => self.open_hooks(),
@@ -2401,6 +2403,8 @@ impl App {
                     self.bottom_tab = tab;
                     self.save_prefs();
                     self.needs_redraw = true;
+                } else if let Some(machine) = layout.machine_at(ev.column, ev.row) {
+                    self.pick_machine(machine);
                 } else if let Some(col) = layout.header_column_at(ev.column, ev.row) {
                     self.set_sort(col);
                 } else if let Some(row) = layout.row_at(ev.row) {
