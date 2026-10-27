@@ -121,6 +121,7 @@ struct Wire {
     call: Lenient<crate::yolo_log::Call>,
     pids: Lenient<Vec<Lenient<u64>>>,
     sandbox: Lenient<String>,
+    waiting_on: Lenient<u64>,
 }
 
 /// A value that is dropped, not fatal, when it is not a `T`.
@@ -158,6 +159,16 @@ pub(super) fn parse(line: &str) -> Option<Event> {
     }
     let event = wire.event.0?;
     let agent = wire.agent_id.0.filter(|id| !id.is_empty());
+    // A turn that ended with a workflow or a subagent still out is a session
+    // that will carry on by itself — see `client::waiting_on`. Absent from a
+    // hook older than the field, which reads as nothing waiting, as before.
+    let signal = match signal_of(
+        &event,
+        wire.notification_type.0.as_deref().unwrap_or_default(),
+    )? {
+        Signal::Idle if wire.waiting_on.0.unwrap_or(0) > 0 => Signal::Busy,
+        signal => signal,
+    };
     Some(Event {
         session_id,
         pids: wire
@@ -180,10 +191,7 @@ pub(super) fn parse(line: &str) -> Option<Event> {
             // one worth holding: an MCP elicitation and a plain notification
             // are questions for a person however long you wait.
             provisional: matches!(event.as_str(), "PermissionRequest" | "permission.asked"),
-            signal: signal_of(
-                &event,
-                wire.notification_type.0.as_deref().unwrap_or_default(),
-            )?,
+            signal,
             cwd: wire.cwd.0.unwrap_or_default(),
             permission: wire
                 .permission_mode
@@ -201,6 +209,32 @@ pub(super) fn parse(line: &str) -> Option<Event> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A Stop with a workflow or a subagent still running is the session
+    /// pausing, not finishing; one with only a shell left running is done.
+    #[test]
+    fn a_stop_with_a_workflow_out_is_still_working() {
+        let stop = |tasks: &str| {
+            let raw = format!(
+                r#"{{"session_id":"s","hook_event_name":"Stop","cwd":"/w","background_tasks":{tasks}}}"#
+            );
+            let line = envelope("", raw.as_bytes(), &[]).expect("envelope");
+            parse(std::str::from_utf8(&line).unwrap())
+                .expect("parse")
+                .reported
+                .signal
+        };
+        let workflow =
+            r#"[{"id":"t1","type":"workflow","status":"running","name":"codeless-lines-plan"}]"#;
+        assert_eq!(stop(workflow), Signal::Busy);
+        let agent = r#"[{"id":"t2","type":"subagent","status":"running","agent_type":"Explore"}]"#;
+        assert_eq!(stop(agent), Signal::Busy);
+        let shell = r#"[{"id":"t3","type":"shell","status":"running","command":"tail -f /var/log/syslog"}]"#;
+        assert_eq!(stop(shell), Signal::Idle);
+        assert_eq!(stop("[]"), Signal::Idle);
+        // An older Claude Code sends no field at all.
+        assert_eq!(stop("null"), Signal::Idle);
+    }
 
     /// The whole point of the field: the pids the hook walked survive the wire
     /// and come back out of `parse` as the chain that was sent.

@@ -883,10 +883,41 @@ pub(super) fn envelope(name: &str, payload: &[u8], pids: &[u32]) -> Option<Vec<u
         // it: inherited from the launch, and nothing the payload could say.
         // An environment read, so it costs the deadline nothing.
         "sandbox": std::env::var(crate::sandbox::ENV_SANDBOX).unwrap_or_default(),
+        // How much background work a `Stop` leaves running that will take the
+        // next turn by itself: see [`waiting_on`].
+        "waiting_on": waiting_on(&body),
     });
     let mut line = serde_json::to_vec(&event).ok()?;
     line.push(b'\n');
     Some(line)
+}
+
+/// How many of a Stop's `background_tasks` Claude Code will wake the session
+/// for when they finish.
+///
+/// Since 2.1.145 `Stop` carries the session's in-flight tasks, so that a hook
+/// can tell "done" from "paused until its background work comes back". A
+/// workflow, a subagent, a teammate or a cloud session reports back and
+/// Claude takes the next turn without anyone typing: the session is working.
+/// A shell, a monitor and an MCP task are different — the docs' own example
+/// is a `tail -f`, and a dev server left running would otherwise keep a
+/// session that is waiting on its person marked as busy for good.
+/// `session_crons` are left out for the same reason: a `/loop` waiting for
+/// its next tick is a session at rest.
+fn waiting_on(body: &serde_json::Value) -> usize {
+    const WAKES: &[&str] = &["workflow", "subagent", "teammate", "cloud session"];
+    body.get("background_tasks")
+        .and_then(|v| v.as_array())
+        .map_or(0, |tasks| {
+            tasks
+                .iter()
+                .filter(|t| {
+                    t.get("type")
+                        .and_then(|v| v.as_str())
+                        .is_some_and(|kind| WAKES.contains(&kind))
+                })
+                .count()
+        })
 }
 
 /// The longest [`ask_of`] summary kept: enough for a command line or a path,
