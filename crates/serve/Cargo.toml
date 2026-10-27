@@ -2,7 +2,7 @@
 name = "cctop-serve"
 # Its own version, not the release's: bumped only in a release that changes
 # this crate. release-plz bumps it; the rules are in release-plz.toml.
-version = "0.33.6"
+version = "0.33.7"
 edition.workspace = true
 rust-version.workspace = true
 description = "Internal to cctop: the web server. No stable API; use the cctop binary."
