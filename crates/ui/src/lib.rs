@@ -829,6 +829,9 @@ pub struct App {
     pub(crate) peeked: HashMap<u32, cctop_core::peek::Screened>,
     /// When `peeked` was last rebuilt. `None` until the first detached read.
     pub(crate) peeked_at: Option<Instant>,
+    /// When a pass with no hook events last looked for an answered question;
+    /// see [`App::apply_hooks`].
+    pub(crate) answered_at: Option<Instant>,
     /// The `capture-pane` sweep asked for on the last due tick, if it has not
     /// answered. A subprocess on a thread of its own, for the same reason as
     /// [`Self::shared_listing`].
@@ -1244,6 +1247,7 @@ impl App {
             screen_read: HashMap::new(),
             peeked: HashMap::new(),
             peeked_at: None,
+            answered_at: None,
             peeked_listing: None,
             unprompted: HashMap::new(),
             peeked_unprompted: HashMap::new(),

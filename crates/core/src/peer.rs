@@ -1143,6 +1143,9 @@ pub fn spawn(mut report: impl FnMut(&str, Snapshot) -> bool + Send + 'static) ->
     std::thread::Builder::new()
         .name("cctop-peers".into())
         .spawn(move || {
+            // Parsing every sibling's rows is the table's refresh, not anyone's
+            // work. It starts nothing that outlives a request.
+            crate::priority::background();
             let mut listed: Option<Instant> = None;
             loop {
                 if listed.is_none_or(|at| at.elapsed() >= REDISCOVER) {

@@ -342,19 +342,89 @@ struct Shared {
 /// One publish of the whole table.
 struct Snapshot {
     version: u64,
-    /// The `--json` document, already serialised — every SSE client sends the
-    /// same bytes, so they are rendered once per refresh rather than once per
-    /// client.
-    json: String,
-    /// Each row of `json` on its own, by session id, for a stream that follows
-    /// one session — see [`events`]. `json` is these joined, so the two cannot
-    /// disagree.
-    rows: Vec<(String, String)>,
+    /// The `--json` document of `sessions`, built when first read.
+    doc: Doc,
     /// The rows behind it, kept so the report route can find its session
     /// without re-walking the disk.
     sessions: Vec<Session>,
     /// Hosts named with `--host` that could not be read, and why.
     host_errors: Vec<(String, String)>,
+}
+
+/// A snapshot's `--json` document, serialised the first time anyone asks.
+///
+/// Built on demand because a dashboard publishes on every refresh and on
+/// every hook event, and most of those snapshots are never read: no page is
+/// open, and a sibling asks every fifteen seconds. Serialising every row of a
+/// 1666-row table each time was megabytes of JSON a second, on the thread
+/// that draws the table. Now the first reader builds it, on its own thread,
+/// once — every SSE client then sends the same bytes.
+struct Doc {
+    plan: Plan,
+    /// The cache the rows were read through, when it is not the server's own.
+    store: Option<Arc<cctop_core::cache::Store>>,
+    built: std::sync::OnceLock<Built>,
+}
+
+struct Built {
+    /// The whole document.
+    json: String,
+    /// Each row of `json` on its own, by session id, for a stream that follows
+    /// one session — see [`events`]. `json` is these joined, so the two cannot
+    /// disagree.
+    rows: Vec<(String, String)>,
+}
+
+impl Doc {
+    fn lazy(plan: Plan, store: Option<Arc<cctop_core::cache::Store>>) -> Doc {
+        Doc {
+            plan,
+            store,
+            built: std::sync::OnceLock::new(),
+        }
+    }
+
+    /// A document given rather than built: the empty one a server starts
+    /// with, and the fixtures tests publish.
+    fn ready(json: String, rows: Vec<(String, String)>) -> Doc {
+        let doc = Doc::lazy(Plan::Retail, None);
+        let _ = doc.built.set(Built { json, rows });
+        doc
+    }
+}
+
+impl Snapshot {
+    /// The document, built from `sessions` by the first caller to ask.
+    /// `store` is the server's, used unless the publish named another.
+    fn built(&self, store: &cctop_core::cache::Store) -> &Built {
+        let store = self.doc.store.as_deref().unwrap_or(store);
+        self.doc.built.get_or_init(|| {
+            // The same document `--json` prints and `--host` parses, from
+            // the same builder: a browser being shown different figures than
+            // the terminal is a bug nobody would think to look for. See
+            // [`cctop_core::json::sessions`].
+            let document = cctop_core::json::sessions(&self.sessions, self.doc.plan, store);
+            // Serialised a row at a time and joined, which is byte for byte
+            // what the whole array would serialise to — so the dashboard's
+            // document is unchanged, and a session page's stream can send its
+            // one row of it.
+            let rows: Vec<(String, String)> = document
+                .iter()
+                .filter_map(|row| {
+                    let text = serde_json::to_string(row).ok()?;
+                    Some((row.session_id.clone(), text))
+                })
+                .collect();
+            let json = format!(
+                "[{}]",
+                rows.iter()
+                    .map(|(_, r)| r.as_str())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            );
+            Built { json, rows }
+        })
+    }
 }
 
 /// Remote rows, written by the host pollers and read by the refresh thread.
@@ -550,7 +620,7 @@ impl Serving {
             &self.remotes,
             sessions,
             self.plan,
-            &self.shared.store,
+            None,
             &mut version,
             Some(quota),
         );
@@ -661,8 +731,7 @@ pub fn start(options: Options) -> anyhow::Result<Serving> {
         plan: options.plan,
         latest: Mutex::new(Arc::new(Snapshot {
             version: 0,
-            json: "[]".to_string(),
-            rows: Vec::new(),
+            doc: Doc::ready("[]".to_string(), Vec::new()),
             sessions: Vec::new(),
             host_errors: Vec::new(),
         })),
@@ -1512,10 +1581,10 @@ fn serve_connection(shared: &Shared, stream: &mut TcpStream) {
             let local;
             let body = match from_peer {
                 true => {
-                    local = own_rows(&snapshot);
+                    local = own_rows(&snapshot, &shared.store);
                     local.as_str()
                 }
-                false => snapshot.json.as_str(),
+                false => snapshot.built(&shared.store).json.as_str(),
             };
             // The version, for a sibling to compare with its own: see
             // `peer::VERSION_HEADER` for why here and not in the body or
@@ -1841,7 +1910,7 @@ fn launch_offer(sessions: &[Session], agents: &[String]) -> serde_json::Value {
 }
 
 /// The table document with this machine's own rows only.
-fn own_rows(snapshot: &Snapshot) -> String {
+fn own_rows(snapshot: &Snapshot, store: &cctop_core::cache::Store) -> String {
     let remote: std::collections::HashSet<&str> = snapshot
         .sessions
         .iter()
@@ -1849,6 +1918,7 @@ fn own_rows(snapshot: &Snapshot) -> String {
         .map(|s| s.session_id.as_str())
         .collect();
     let rows: Vec<&str> = snapshot
+        .built(store)
         .rows
         .iter()
         .filter(|(id, _)| !remote.contains(id.as_str()))
@@ -2123,6 +2193,36 @@ mod tests {
         Session::new(cctop_core::pricing::Provider::Claude, id.into())
     }
 
+    /// A publish costs the rows, not their JSON: nothing is serialised until
+    /// something reads the snapshot, and then once for every reader after.
+    /// Another machine's row carries no account — this machine's sign-in is
+    /// not what it runs under.
+    #[test]
+    fn a_snapshot_is_serialised_when_read_and_only_once() {
+        let mut away = session("away");
+        away.remote = Some(cctop_core::session::Remote {
+            host: "box".into(),
+            ..Default::default()
+        });
+        let snapshot = Snapshot {
+            version: 1,
+            doc: Doc::lazy(Plan::Retail, None),
+            sessions: vec![session("here"), away],
+            host_errors: Vec::new(),
+        };
+        assert!(snapshot.doc.built.get().is_none(), "built at publish");
+        let store = cctop_core::cache::Store::new();
+        let first: *const Built = snapshot.built(&store);
+        assert!(std::ptr::eq(first, snapshot.built(&store)), "built twice");
+        let rows = &snapshot.built(&store).rows;
+        assert_eq!(
+            rows.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>(),
+            ["here", "away"]
+        );
+        let away: serde_json::Value = serde_json::from_str(&rows[1].1).unwrap();
+        assert!(away.get("account").is_none(), "{away}");
+    }
+
     #[test]
     fn a_token_matches_only_itself() {
         let token = new_token();
@@ -2323,8 +2423,7 @@ mod tests {
             plan: Plan::Retail,
             latest: Mutex::new(Arc::new(Snapshot {
                 version: 0,
-                json: "[]".to_string(),
-                rows: Vec::new(),
+                doc: Doc::ready("[]".to_string(), Vec::new()),
                 sessions: Vec::new(),
                 host_errors: Vec::new(),
             })),
@@ -2796,8 +2895,7 @@ mod tests {
         let guarded = shared("full", "view");
         *guarded.latest.lock().unwrap() = Arc::new(Snapshot {
             version: 1,
-            json: "[]".to_string(),
-            rows: Vec::new(),
+            doc: Doc::ready("[]".to_string(), Vec::new()),
             sessions: vec![s],
             host_errors: Vec::new(),
         });
@@ -2866,8 +2964,7 @@ mod tests {
         let guarded = shared("full", "view");
         *guarded.latest.lock().unwrap() = Arc::new(Snapshot {
             version: 1,
-            json: "[]".to_string(),
-            rows: Vec::new(),
+            doc: Doc::ready("[]".to_string(), Vec::new()),
             sessions: vec![s],
             host_errors: Vec::new(),
         });
@@ -3138,8 +3235,7 @@ mod tests {
         s.abbrev_label = "web".into();
         *shared.latest.lock().unwrap() = Arc::new(Snapshot {
             version: 1,
-            json: "[]".to_string(),
-            rows: Vec::new(),
+            doc: Doc::ready("[]".to_string(), Vec::new()),
             sessions: vec![s],
             host_errors: Vec::new(),
         });
@@ -3313,8 +3409,7 @@ mod tests {
         let guarded = shared("full", "view");
         *guarded.latest.lock().unwrap() = Arc::new(Snapshot {
             version: 1,
-            json: "[]".to_string(),
-            rows: Vec::new(),
+            doc: Doc::ready("[]".to_string(), Vec::new()),
             sessions: vec![here, there],
             host_errors: Vec::new(),
         });
@@ -3608,15 +3703,16 @@ mod tests {
         });
         *shared.latest.lock().unwrap() = Arc::new(Snapshot {
             version: 1,
-            json: r#"[{"session_id":"own-row"},{"session_id":"read-row","host":"elsewhere"}]"#
-                .into(),
-            rows: vec![
-                ("own-row".into(), r#"{"session_id":"own-row"}"#.into()),
-                (
-                    "read-row".into(),
-                    r#"{"session_id":"read-row","host":"elsewhere"}"#.into(),
-                ),
-            ],
+            doc: Doc::ready(
+                r#"[{"session_id":"own-row"},{"session_id":"read-row","host":"elsewhere"}]"#.into(),
+                vec![
+                    ("own-row".into(), r#"{"session_id":"own-row"}"#.into()),
+                    (
+                        "read-row".into(),
+                        r#"{"session_id":"read-row","host":"elsewhere"}"#.into(),
+                    ),
+                ],
+            ),
             sessions: vec![own, read],
             host_errors: Vec::new(),
         });

@@ -718,8 +718,7 @@ mod tests {
         let mut s = shared("full", "ro");
         *s.latest.lock().unwrap() = Arc::new(Snapshot {
             version: 1,
-            json: "[]".into(),
-            rows: Vec::new(),
+            doc: crate::Doc::ready("[]".into(), Vec::new()),
             sessions: vec![session("abc")],
             host_errors: Vec::new(),
         });
@@ -942,8 +941,7 @@ mod tests {
         });
         *s.latest.lock().unwrap() = Arc::new(Snapshot {
             version: 1,
-            json: "[]".into(),
-            rows: Vec::new(),
+            doc: crate::Doc::ready("[]".into(), Vec::new()),
             sessions: vec![session("abc")],
             host_errors: Vec::new(),
         });
@@ -1035,8 +1033,7 @@ mod tests {
         });
         *s.latest.lock().unwrap() = Arc::new(Snapshot {
             version: 1,
-            json: "[]".into(),
-            rows: Vec::new(),
+            doc: crate::Doc::ready("[]".into(), Vec::new()),
             sessions: ids.iter().map(|id| session(id)).collect(),
             host_errors: Vec::new(),
         });

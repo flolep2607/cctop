@@ -59,6 +59,7 @@ pub mod peer;
 /// Predictive local echo for a remote tab.
 pub mod predict;
 pub mod pricing;
+pub mod priority;
 pub mod proc;
 pub mod program_status;
 pub mod provider_status;

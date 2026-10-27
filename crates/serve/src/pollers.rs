@@ -159,6 +159,7 @@ pub(crate) fn spawn_refresher(
     delay: Duration,
 ) {
     std::thread::spawn(move || {
+        cctop_core::priority::background();
         // Blocking, once, before the first snapshot: a dashboard whose first
         // frame shows every cost as zero is worse than one that appears a
         // second later with the truth.
@@ -195,7 +196,7 @@ pub(crate) fn spawn_refresher(
             &remotes,
             &rows,
             plan,
-            loader.store(),
+            Some(loader.store_shared()),
             &mut version,
             None,
         );
@@ -242,7 +243,7 @@ pub(crate) fn spawn_refresher(
                 &remotes,
                 &rows,
                 plan,
-                loader.store(),
+                Some(loader.store_shared()),
                 &mut version,
                 None,
             );
@@ -281,15 +282,16 @@ pub(crate) fn stamp(
 }
 
 /// Render one snapshot and wake everyone waiting on it.
-/// `loader` is the refresh thread's own, and has to be: the document is built
-/// by reading each row's cached extraction, and a fresh loader would have an
-/// empty cache and re-parse every transcript on disk once per refresh.
+/// `store` is the refresh thread's loader's, and has to be: the document is
+/// built by reading each row's cached extraction, and the server's own store
+/// would be an empty cache that re-parses every transcript on disk. `None`
+/// for a dashboard, whose rows were read through the server's store already.
 pub(crate) fn publish(
     shared: &Shared,
     remotes: &Mutex<Remotes>,
     local: &[Session],
     plan: Plan,
-    store: &cctop_core::cache::Store,
+    store: Option<Arc<cctop_core::cache::Store>>,
     version: &mut u64,
     usage: Option<&cctop_core::quota::Quota>,
 ) {
@@ -314,29 +316,6 @@ pub(crate) fn publish(
     // merge happened to put them.
     sessions.sort_by(|a, b| b.last_active.cmp(&a.last_active));
 
-    // The same document `--json` prints and `--host` parses, from the same
-    // builder: a browser being shown different figures than the terminal is a
-    // bug nobody would think to look for. See [`cctop_core::json::sessions`].
-    let document = cctop_core::json::sessions(&sessions, plan, store);
-    // Serialised a row at a time and joined, which is byte for byte what the
-    // whole array would serialise to — so the dashboard's document is
-    // unchanged, and a session page's stream can send its one row of it.
-    let rows: Vec<(String, String)> = document
-        .iter()
-        .filter_map(|row| {
-            let value = serde_json::to_value(row).ok()?;
-            let id = value.get("session_id")?.as_str()?.to_string();
-            Some((id, value.to_string()))
-        })
-        .collect();
-    let json = format!(
-        "[{}]",
-        rows.iter()
-            .map(|(_, r)| r.as_str())
-            .collect::<Vec<_>>()
-            .join(",")
-    );
-
     // Written through the same lock as the snapshot, so the page's quota panel
     // can never be newer than the rows it sits beside.
     if let Some(usage) = usage
@@ -349,8 +328,7 @@ pub(crate) fn publish(
     *version += 1;
     let snapshot = Arc::new(Snapshot {
         version: *version,
-        json,
-        rows,
+        doc: crate::Doc::lazy(plan, store),
         sessions,
         host_errors,
     });

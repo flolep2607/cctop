@@ -580,11 +580,10 @@ fn event_loop(
         loop {
             match res_rx.try_recv() {
                 Ok(Response::Discovered(sessions)) => {
-                    app.sessions = sessions;
+                    app.adopt_local(sessions);
                     app.loaded = true;
                     app.stats = cctop_core::loader::compute_stats(&app.sessions);
                     app.refilter();
-                    app.merge_remotes();
                     rows_changed = true;
                 }
                 Ok(Response::Annotated(session)) => {
@@ -610,10 +609,9 @@ fn event_loop(
                 }
                 Ok(Response::Sessions(payload)) => {
                     let (sessions, stats) = *payload;
-                    app.sessions = sessions;
+                    app.adopt_local(sessions);
                     app.loaded = true;
-                    app.stats = stats;
-                    app.merge_remotes();
+                    app.adopt_stats(stats);
                     app.push_history();
                     app.refilter();
                     cctop_core::elog::event(

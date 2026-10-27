@@ -141,7 +141,7 @@ pub struct JsonSession {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional = nullable))]
     yolo: Option<crate::yolo::Entry>,
-    session_id: String,
+    pub session_id: String,
     /// The machine a remote row is on — an ssh target, or a sibling on the
     /// Cloudflare account ([`crate::peer`]). Absent for this machine's own
     /// rows, so a peer reading this document can keep to those.
@@ -301,9 +301,12 @@ pub fn sessions(sessions: &[Session], plan: Plan, store: &crate::cache::Store) -
             // session is signed in as whoever they are, and stamping the
             // reader's own email on their row would be a wrong answer where
             // no answer is the true one.
+            // Another machine's session likewise: these are read from this
+            // machine's files, and the far side may be signed in as anyone.
+            let mine = s.owner.is_none() && s.remote.is_none();
             let account = match s.provider {
-                Provider::Claude if s.owner.is_none() => claude_account.as_ref(),
-                Provider::Codex if s.owner.is_none() => codex_account.as_ref(),
+                Provider::Claude if mine => claude_account.as_ref(),
+                Provider::Codex if mine => codex_account.as_ref(),
                 Provider::Claude | Provider::Codex => None,
                 Provider::Cursor
                 | Provider::Devin
