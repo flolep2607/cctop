@@ -95,24 +95,25 @@ pub(crate) fn events_every(
         if snapshot.version > sent {
             let frame = match &only {
                 None => match &last_table {
-                    None => Some(("sessions", snapshot.json.clone())),
+                    None => Some(("sessions", snapshot.built(&shared.store).json.clone())),
                     Some(before) => match fine {
-                        true => table_patch(&before.rows, &snapshot.rows),
-                        false => table_delta(&before.rows, &snapshot.rows),
+                        true => table_patch(
+                            &before.built(&shared.store).rows,
+                            &snapshot.built(&shared.store).rows,
+                        ),
+                        false => table_delta(
+                            &before.built(&shared.store).rows,
+                            &snapshot.built(&shared.store).rows,
+                        ),
                     }
                     .map(|delta| ("rows", delta)),
                 },
                 Some(id) => {
-                    let row = snapshot
-                        .rows
+                    let rows = &snapshot.built(&shared.store).rows;
+                    let row = rows
                         .iter()
                         .find(|(sid, _)| sid == id)
-                        .or_else(|| {
-                            snapshot
-                                .rows
-                                .iter()
-                                .find(|(sid, _)| sid.starts_with(id.as_str()))
-                        })
+                        .or_else(|| rows.iter().find(|(sid, _)| sid.starts_with(id.as_str())))
                         .map(|(_, r)| r.clone());
                     // Only when it moved: a refresh that changed some other
                     // row is nothing to this page.
@@ -134,7 +135,7 @@ pub(crate) fn events_every(
             // The conversation moved: the page refetches it on this rather than
             // polling `/api/chat` on a timer of its own.
             if let Some(id) = &only {
-                let mark = chat_mark(&snapshot, id);
+                let mark = chat_mark(&snapshot, &shared.store, id);
                 if mark.is_some() && mark != last_chat {
                     let body = serde_json::to_string(&mark).unwrap_or_default();
                     if sse.send("chat", &body).is_err() {
@@ -177,7 +178,11 @@ pub(crate) fn events_every(
 /// file per refresh, for a stream a session page holds open. For a remote row,
 /// whose files are on another machine, the row itself: its activity time and
 /// counts move when its transcript does.
-pub(crate) fn chat_mark(snapshot: &Snapshot, id: &str) -> Option<String> {
+pub(crate) fn chat_mark(
+    snapshot: &Snapshot,
+    store: &cctop_core::cache::Store,
+    id: &str,
+) -> Option<String> {
     let session = find(&snapshot.sessions, id)?;
     match (&session.remote, &session.data_file) {
         (None, Some(main)) => Some(
@@ -190,6 +195,7 @@ pub(crate) fn chat_mark(snapshot: &Snapshot, id: &str) -> Option<String> {
         _ => {
             use std::hash::{Hash, Hasher};
             let row = snapshot
+                .built(store)
                 .rows
                 .iter()
                 .find(|(sid, _)| *sid == session.session_id)?;
@@ -460,8 +466,7 @@ pub(crate) mod tests {
         );
         *shared.latest.lock().unwrap() = Arc::new(Snapshot {
             version,
-            json,
-            rows,
+            doc: crate::Doc::ready(json, rows),
             sessions: Vec::new(),
             host_errors: Vec::new(),
         });
@@ -601,8 +606,7 @@ pub(crate) mod tests {
         let publish = |version: u64| {
             *shared.latest.lock().unwrap() = Arc::new(Snapshot {
                 version,
-                json: "[{}]".into(),
-                rows: vec![("abc".into(), "{}".into())],
+                doc: crate::Doc::ready("[{}]".into(), vec![("abc".into(), "{}".into())]),
                 sessions: vec![s.clone()],
                 host_errors: Vec::new(),
             });

@@ -472,6 +472,11 @@ impl Reports {
         }
     }
 
+    /// Whether any session's hook last said it is waiting on the person.
+    pub fn any_waiting(&self) -> bool {
+        self.hooked.values().any(|r| r.signal == Signal::NeedsInput)
+    }
+
     /// The report `session_id`'s hooks last made, however old, if they made one.
     pub fn report(&self, session_id: &str) -> Option<&Reported> {
         if let Some(reported) = self.hooked.get(session_id) {

@@ -44,6 +44,11 @@ pub(crate) struct Peeked {
     pub unprompted: HashMap<u32, Instant>,
 }
 
+/// How often a waiting question is checked for an answer the screen has
+/// shown when no hook event has arrived. Under the second the check itself
+/// waits for, so it adds at most a quarter of one.
+const ANSWERED_EVERY: std::time::Duration = std::time::Duration::from_millis(250);
+
 impl App {
     /// Promote every held permission prompt whose grace has expired, and say
     /// whether any had.
@@ -243,7 +248,25 @@ impl App {
     /// changed — one that has just started or just ended is a row to go and
     /// find or forget now, rather than at the next poll.
     pub(super) fn apply_hooks(&mut self, events: Vec<cctop_core::hook::Event>) -> (bool, bool) {
-        let changed = !events.is_empty();
+        // The run loop drains the listener on every pass, sixty a second with
+        // a tab open, and nearly every drain is empty. Restamping every row
+        // for nothing heard was most of the dashboard's CPU on a table of
+        // 1666 rows. Nothing an event changes has moved, so only the one thing
+        // the clock changes is redone: a question the screen has since shown
+        // answered — see [`Self::prompt_gone`] — and only while a hook says
+        // some session is waiting on one.
+        if events.is_empty() {
+            if self.reports.any_waiting()
+                && self
+                    .answered_at
+                    .is_none_or(|at| at.elapsed() >= ANSWERED_EVERY)
+            {
+                self.answered_at = Some(Instant::now());
+                self.apply_reports();
+            }
+            return (false, false);
+        }
+        let changed = true;
         let mut lifecycle = false;
         let mut moved = false;
         for event in events {
@@ -806,6 +829,44 @@ mod tests {
             sandbox: None,
             agent: agent.map(str::to_string),
         }
+    }
+
+    /// A pass that heard nothing leaves the rows as the last event left them,
+    /// unless a question is waiting — and then only a few times a second.
+    #[test]
+    fn an_empty_drain_restamps_nothing_unless_a_question_waits() {
+        use cctop_core::hook::Signal::{Busy, NeedsInput};
+        let mut app = test_app();
+        let mut row = crate::tests::session("a", true, "/w/proj");
+        row.activity_state = cctop_core::session::ActivityState::Working;
+        app.sessions = vec![row];
+        // Planted where only `apply_reports` would clear it, so whether it
+        // survives says whether the rows were walked.
+        let plant = |app: &mut App| app.sessions[0].asking_for = Some("stale".into());
+
+        app.apply_hooks(vec![heard(Busy, None)]);
+        plant(&mut app);
+        assert_eq!(app.apply_hooks(Vec::new()), (false, false));
+        assert!(
+            app.sessions[0].asking_for.is_some(),
+            "an empty drain walked the rows"
+        );
+
+        app.apply_hooks(vec![heard(NeedsInput, None)]);
+        app.sessions[0].activity_state = cctop_core::session::ActivityState::Working;
+        plant(&mut app);
+        app.answered_at = None;
+        app.apply_hooks(Vec::new());
+        assert!(
+            app.sessions[0].asking_for.is_none(),
+            "a waiting question was not rechecked"
+        );
+        plant(&mut app);
+        app.apply_hooks(Vec::new());
+        assert!(
+            app.sessions[0].asking_for.is_some(),
+            "rechecked again inside the quarter second"
+        );
     }
 
     /// The bug: two subagents running side by side, one stopped on a

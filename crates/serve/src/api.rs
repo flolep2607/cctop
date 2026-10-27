@@ -537,8 +537,7 @@ mod tests {
         let shared = shared("", "");
         *shared.latest.lock().unwrap() = Arc::new(Snapshot {
             version: 1,
-            json: "[]".to_string(),
-            rows: Vec::new(),
+            doc: crate::Doc::ready("[]".to_string(), Vec::new()),
             sessions: vec![s],
             host_errors: Vec::new(),
         });
@@ -559,8 +558,7 @@ mod tests {
         *guarded.provider_status.lock().unwrap() = status;
         *guarded.latest.lock().unwrap() = Arc::new(Snapshot {
             version: 1,
-            json: "[]".to_string(),
-            rows: Vec::new(),
+            doc: crate::Doc::ready("[]".to_string(), Vec::new()),
             sessions,
             host_errors: Vec::new(),
         });

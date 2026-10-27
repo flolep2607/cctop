@@ -158,7 +158,8 @@ pub fn route(shared: &Shared, stream: &mut TcpStream, request: &Request, rest: &
                 "sessions": snapshot.sessions.len(),
                 "running": snapshot.sessions.iter().filter(|s| s.is_running()).count(),
                 "host_errors": snapshot.host_errors,
-                "json_bytes": snapshot.json.len(),
+                // Zero until something has read it: asking must not build it.
+                "json_bytes": snapshot.doc.built.get().map_or(0, |b| b.json.len()),
                 "actions": shared.actions,
                 "tokenless": shared.token.is_empty(),
                 "plan": format!("{:?}", shared.plan),

@@ -10,7 +10,7 @@ use super::*;
 use cctop_core::loader::Loader;
 use cctop_core::loader::Stats;
 use std::sync::Arc;
-use std::sync::mpsc::Receiver;
+use std::sync::mpsc::{Receiver, Sender, channel};
 
 pub(super) enum Request {
     Refresh,
@@ -383,6 +383,27 @@ fn skippable(
     }
 }
 
+/// Starts threads at the priority the worker had before it lowered itself.
+struct Spawner(Sender<Box<dyn FnOnce() + Send>>);
+
+impl Spawner {
+    fn spawn(&self, job: impl FnOnce() + Send + 'static) {
+        let _ = self.0.send(Box::new(job));
+    }
+}
+
+/// A thread that only starts others, so they begin at its priority rather
+/// than the worker's. It ends with the worker, when the sender is dropped.
+fn spawner() -> Spawner {
+    let (tx, rx) = channel::<Box<dyn FnOnce() + Send>>();
+    std::thread::spawn(move || {
+        for job in rx {
+            std::thread::spawn(job);
+        }
+    });
+    Spawner(tx)
+}
+
 /// Owns the `Loader` and does all filesystem and parsing work off the UI thread,
 /// so a slow scan can never stall input or rendering.
 pub(super) fn spawn_worker(
@@ -391,6 +412,12 @@ pub(super) fn spawn_worker(
     tx: Sender<Response>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
+        // Started while this thread is still at the UI's priority, because
+        // what it starts inherits that: an ssh master the launcher opens is
+        // what a remote tab's typing goes through later. See
+        // `cctop_core::priority`.
+        let spawner = spawner();
+        cctop_core::priority::background();
         let mut loader = Loader::new();
         let mut sent_initial_discovery = false;
         // The last full walk's rows, kept so a light refresh has something to
@@ -717,7 +744,7 @@ pub(super) fn spawn_worker(
                 // worker is what answers the keyboard's refresh meanwhile.
                 Request::UpdateRemote(host) => {
                     let tx = tx.clone();
-                    std::thread::spawn(move || {
+                    spawner.spawn(move || {
                         let result = host.update();
                         let updated = result.is_ok();
                         let _ = tx.send(Response::RemoteUpdated {
@@ -737,7 +764,7 @@ pub(super) fn spawn_worker(
                 // hold up neither the next keystroke's work nor another host.
                 Request::Location(ask) => {
                     let tx = tx.clone();
-                    std::thread::spawn(move || {
+                    spawner.spawn(move || {
                         let connect =
                             |host: &str| cctop_core::ssh_master::connect(host).map(|_| ());
                         let answer =

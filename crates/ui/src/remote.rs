@@ -70,6 +70,22 @@ impl App {
         self.refilter();
     }
 
+    /// Take a walk's rows as this machine's, keeping the other machines' rows
+    /// that are already in the table.
+    ///
+    /// Moved across rather than put back by [`merge_remotes`](Self::merge_remotes):
+    /// a walk lands every couple of seconds and a sibling's snapshot every
+    /// fifteen, so re-cloning every remote row on each walk — 1564 of them on
+    /// one three-machine account — copied rows that had not changed since the
+    /// last walk did the same. `merge_remotes` is for when they have.
+    pub(super) fn adopt_local(&mut self, sessions: Vec<Session>) {
+        let old = std::mem::replace(&mut self.sessions, sessions);
+        if !self.remotes.is_empty() {
+            self.sessions
+                .extend(old.into_iter().filter(|s| s.remote.is_some()));
+        }
+    }
+
     /// Take the worker's totals, unless remote rows mean they are not the whole
     /// picture. The worker only ever sees this machine.
     pub(super) fn adopt_stats(&mut self, stats: Stats) {
@@ -595,6 +611,39 @@ mod tests {
                 ("box".to_string(), false),
             ]
         );
+    }
+
+    /// A walk replaces this machine's rows and leaves the other machines' as
+    /// they were merged — stamp included — rather than copying them back in.
+    #[test]
+    fn a_walk_keeps_the_other_machines_rows() {
+        let mut app = test_app();
+        let mut away = session("away", false, "/srv/work");
+        away.remote = Some(cctop_core::session::Remote {
+            host: "box".into(),
+            ..Default::default()
+        });
+        app.remotes.insert("box".into(), vec![away]);
+        app.sessions = vec![session("old", false, "/home/x/a")];
+        app.merge_remotes();
+        // Marked on the row in the table only, so a re-clone from `remotes`
+        // would lose it.
+        let kept = |app: &App| {
+            app.sessions
+                .iter()
+                .find(|s| s.session_id == "away")
+                .map(|s| s.title.clone())
+        };
+        app.sessions
+            .iter_mut()
+            .find(|s| s.session_id == "away")
+            .unwrap()
+            .title = Some("merged".into());
+
+        app.adopt_local(vec![session("new", false, "/home/x/b")]);
+        let ids: Vec<&str> = app.sessions.iter().map(|s| s.session_id.as_str()).collect();
+        assert_eq!(ids, ["new", "away"]);
+        assert_eq!(kept(&app), Some(Some("merged".into())));
     }
 
     /// A server left behind the laptop: said once, marked on its rows, and
