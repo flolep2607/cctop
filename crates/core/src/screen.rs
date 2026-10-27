@@ -164,7 +164,9 @@ pub fn screen_state(harness: &str, rows: &[String]) -> Option<crate::hook::Signa
     let any = |rules: &[&[&str]]| rules.iter().any(|all| all.iter().all(|p| text.contains(p)));
     if any(footer.asking) {
         Some(Signal::NeedsInput)
-    } else if any(footer.working) || (harness == "claude" && claude_spinner(rows)) {
+    } else if any(footer.working)
+        || (harness == "claude" && (claude_spinner(rows) || claude_waiting(rows)))
+    {
         Some(Signal::Busy)
     } else {
         None
@@ -203,6 +205,33 @@ fn claude_spinner(rows: &[String]) -> bool {
                 && rest
                     .split_once("… (")
                     .is_some_and(|(word, timer)| !word.trim().is_empty() && timer.ends_with(')'))
+        })
+}
+
+/// Whether Claude Code is waiting on work it started in the background:
+/// `✻ Waiting for 1 dynamic workflow to finish`, or `… for 3 background
+/// agents …`.
+///
+/// The turn is over — the Stop hook has fired and the spinner line is gone —
+/// but the session is not: Claude Code takes the next turn by itself when
+/// they finish. Reading that as done put a session with a workflow still
+/// running under the finished bell. The line stays up exactly as long as it
+/// waits, so it is read as the session working.
+fn claude_waiting(rows: &[String]) -> bool {
+    const GLYPHS: &[char] = &['✻', '✽', '✶', '✳', '✢', '·', '*', '✺', '✹'];
+    rows.iter()
+        .map(|row| row.trim_matches(|c: char| c == '│' || c.is_whitespace()))
+        .filter(|row| !row.is_empty())
+        .rev()
+        .take(SPINNER_ROWS)
+        .any(|row| {
+            let mut chars = row.chars();
+            chars.next().is_some_and(|c| GLYPHS.contains(&c))
+                && chars
+                    .as_str()
+                    .trim_start()
+                    .strip_prefix("Waiting for ")
+                    .is_some_and(|rest| rest.ends_with(" to finish"))
         })
 }
 
@@ -337,8 +366,7 @@ mod tests {
     /// Claude Code 2.1.300 no longer ends its footer `esc to interrupt`, and
     /// with subagents running their list is drawn under the prompt box. The
     /// spinner line above the box is what says a turn is running; the finished
-    /// turn's line and the background-agents line are not it. Rows off a real
-    /// screen, box edges and all.
+    /// turn's line is not. Rows off a real screen, box edges and all.
     #[test]
     fn claude_2_1_300_reads_as_working_by_its_spinner_line() {
         let screen =
@@ -363,13 +391,36 @@ mod tests {
 
         let finished = screen(&[
             "✻ Baked for 5s",
-            "✻ Waiting for 3 background agents to finish",
             "────────────",
             "❯",
             "────────────",
             "  ⏵⏵ accept edits on (shift+tab to cycle)",
         ]);
         assert_eq!(screen_state("claude", &finished), None);
+
+        // The turn is over but what it started is not: Claude Code takes the
+        // next turn itself when they finish. Off a real screen, a workflow
+        // running under an ended turn.
+        for waiting in [
+            "│✻ Waiting for 1 dynamic workflow to finish          │",
+            "✻ Waiting for 3 background agents to finish",
+        ] {
+            let screen = screen(&[
+                "✻ Baked for 5s",
+                waiting,
+                "│──────────────────────────────────────────────────── ultracode ─│",
+                "│❯                                                     │",
+                "│──────────────────────────────────────────────────────│",
+                "│  [PONYTAIL]                                          │",
+                "│  ⏵⏵ auto mode on (shift+tab to cycle)                │",
+                "│  ◯ codeless-lines-plan  ▱▱▱▱▱▱▱▱  0/3 · 36s · ↓ 208.6k tokens │",
+            ]);
+            assert_eq!(
+                screen_state("claude", &screen),
+                Some(crate::hook::Signal::Busy),
+                "{waiting}"
+            );
+        }
 
         // A prompt still wins over a spinner left above it.
         let asking = screen(&[
