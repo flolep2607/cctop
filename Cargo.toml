@@ -19,7 +19,7 @@
 # line per bumped crate, its requirement if the bump is breaking, the root
 # version and the lock.
 [workspace.package]
-version = "0.39.11"
+version = "0.39.12"
 edition = "2024"
 rust-version = "1.89"
 license = "MIT"
