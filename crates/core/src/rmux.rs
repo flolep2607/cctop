@@ -1578,11 +1578,30 @@ pub fn agent_pid(name: &str) -> Option<u32> {
 /// from a process and needs to know whether cctop can reach its terminal: an
 /// agent handed to rmux is on no pty of cctop's, so every other route to it
 /// fails, but the session name is a way in.
+///
+/// The agent's own pid, or any process above it: a pane's process is the
+/// agent only when cctop started it. A shell opened in a tab, with `claude`
+/// typed into it, is a pane whose process is the shell — and that agent is as
+/// reachable as any, through the same session. Matching the pane's pid alone
+/// told the far side of a remote open that the agent was in a terminal cctop
+/// did not start.
 pub fn holding(pid: u32) -> Option<String> {
-    running()
-        .into_iter()
-        .find(|agent| agent.pid == Some(pid))
-        .map(|agent| agent.name)
+    holding_in(&running(), pid, crate::hook::ancestors_of)
+}
+
+/// [`holding`] over a given pane list and process tree.
+fn holding_in(
+    panes: &[Running],
+    pid: u32,
+    ancestors: impl FnOnce(u32) -> Vec<u32>,
+) -> Option<String> {
+    let at = |pid: u32| {
+        panes
+            .iter()
+            .find(|pane| pane.pid == Some(pid))
+            .map(|pane| pane.name.clone())
+    };
+    at(pid).or_else(|| ancestors(pid).into_iter().find_map(at))
 }
 
 /// What the session's first pane shows right now, as bytes a vt100 parser of
@@ -1652,6 +1671,30 @@ fn capture_bytes(raw: &[u8]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An agent typed into a shell tab is held by that tab's session, through
+    /// the shell; one with no cctop pane above it is held by none.
+    #[test]
+    fn an_agent_run_inside_a_shell_tab_is_held_by_it() {
+        let pane = |name: &str, pid: u32| Running {
+            pid: Some(pid),
+            ..Running::unrecorded(name)
+        };
+        let panes = [pane("cctop-claude", 100), pane("cctop-zsh", 200)];
+        let tree = |pid: u32| match pid {
+            // claude → zsh (the tab's shell) → the mux daemon
+            201 => vec![200, 50],
+            // claude in a terminal of its own → its shell → the terminal
+            301 => vec![300, 30],
+            _ => Vec::new(),
+        };
+        assert_eq!(
+            holding_in(&panes, 100, tree).as_deref(),
+            Some("cctop-claude")
+        );
+        assert_eq!(holding_in(&panes, 201, tree).as_deref(), Some("cctop-zsh"));
+        assert_eq!(holding_in(&panes, 301, tree), None);
+    }
     use crossterm::event::KeyCode;
 
     /// A key that cannot scroll is answered without asking the daemon.
