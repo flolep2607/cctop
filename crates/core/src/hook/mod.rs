@@ -64,6 +64,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 mod client;
+pub(crate) use client::ancestors_of;
 mod health;
 mod installers;
 mod listener;

@@ -768,22 +768,28 @@ const MAX_ANCESTRY: usize = 8;
 /// `cctop yolo` walks the same chain for the same reason: the process it
 /// records is the one the YOLO hook will look for among its own ancestors.
 pub(crate) fn ancestry() -> Vec<u32> {
-    // Read directly rather than through `sysinfo`, which was measured at 4.2ms
-    // against 152us for the identical chain. The hook spends the agent's
-    // deadline, so a 28x saving on a fact this small is worth reading `/proc`
-    // by hand.
-    fn parent(pid: u32) -> Option<u32> {
-        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-        // `comm` is parenthesised and may itself contain spaces and parens, so
-        // the fields after it are only countable from the last `)`.
-        stat.rsplit_once(')')?
-            .1
-            .split_whitespace()
-            .nth(1)?
-            .parse()
-            .ok()
-    }
     walk(std::process::id(), parent)
+}
+
+/// `pid`'s parents, nearest first, as [`ancestry`] walks this process's.
+pub(crate) fn ancestors_of(pid: u32) -> Vec<u32> {
+    walk(pid, parent)
+}
+
+// Read directly rather than through `sysinfo`, which was measured at 4.2ms
+// against 152us for the identical chain. The hook spends the agent's
+// deadline, so a 28x saving on a fact this small is worth reading `/proc`
+// by hand.
+fn parent(pid: u32) -> Option<u32> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    // `comm` is parenthesised and may itself contain spaces and parens, so
+    // the fields after it are only countable from the last `)`.
+    stat.rsplit_once(')')?
+        .1
+        .split_whitespace()
+        .nth(1)?
+        .parse()
+        .ok()
 }
 
 /// Follow `parent` up from `pid`, stopping at init, at a cycle, or at
