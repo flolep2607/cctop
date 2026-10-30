@@ -1550,6 +1550,12 @@ fn pump(
     let mut quiet = false;
     // When the keepalive in flight went out: its pong is a round trip.
     let mut pinged: Option<std::time::Instant> = None;
+    // Uncompressed terminal bytes delivered, for the throughput meter below. A
+    // `Cell` so the delivering closure can add to it while the loop reads it —
+    // the meter asks whether a laggy tab is one the tunnel cannot keep up with,
+    // or one where little is sent and the delay is elsewhere. Off unless
+    // `CCTOP_TRACE_WS` is set, like every other line here.
+    let raw_bytes = std::cell::Cell::new(0u64);
     // Every frame decoded so far; `Some` once one of them ends the socket.
     let mut deliver = |decoder: &mut crate::ws::Decoder,
                        up: &mut crate::peer::Upstream,
@@ -1583,6 +1589,7 @@ fn pump(
                 Op::Binary => {
                     stdout.write_all(&payload).map_err(|e| e.to_string())?;
                     *received += payload.len() as u64;
+                    raw_bytes.set(raw_bytes.get() + payload.len() as u64);
                     link.received_raw(payload.len());
                     let over = predictor.on_output(&payload, std::time::Instant::now());
                     stdout.write_all(&over).map_err(|e| e.to_string())?;
@@ -1613,6 +1620,15 @@ fn pump(
         return Ok(dropped(e));
     }
     pinged = Some(std::time::Instant::now());
+    // Throughput meter: wire bytes (what the tunnel actually carries, after
+    // deflate) and raw bytes (what the far terminal produced) over the last
+    // window, logged with the smoothed round trip. The ratio of the two is the
+    // compression a chatty full-screen redraw gets; the wire figure against the
+    // round trip is whether the link is saturated or just far.
+    let mut last_report = std::time::Instant::now();
+    let mut wire_window = 0u64;
+    let mut raw_mark = raw_bytes.get();
+    const REPORT_EVERY: std::time::Duration = std::time::Duration::from_secs(2);
     loop {
         let mut fds = [
             libc::pollfd {
@@ -1688,6 +1704,22 @@ fn pump(
                 SILENCE.as_secs()
             )));
         }
+        if last_report.elapsed() >= REPORT_EVERY {
+            let secs = last_report.elapsed().as_secs_f64().max(0.001);
+            let raw = raw_bytes.get() - raw_mark;
+            crate::ws::trace(
+                "meter",
+                format_args!(
+                    "{machine}: {:.0} wire B/s, {:.0} raw B/s, srtt {}ms",
+                    wire_window as f64 / secs,
+                    raw as f64 / secs,
+                    predictor.srtt().map_or(0, |d| d.as_millis()),
+                ),
+            );
+            last_report = std::time::Instant::now();
+            wire_window = 0;
+            raw_mark = raw_bytes.get();
+        }
         if fds[0].revents != 0 {
             match stdin.read(&mut buf) {
                 Ok(n) if n > 0 => {
@@ -1733,6 +1765,7 @@ fn pump(
             };
             if !incoming.is_empty() {
                 heard = std::time::Instant::now();
+                wire_window += incoming.len() as u64;
                 link.received_wire(incoming.len());
                 // A typed key that came back is a sample too, taken in
                 // `on_output`; read off here rather than there, once a read.
