@@ -535,15 +535,66 @@ const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 /// two minutes and more, on a network that dropped packets rather than
 /// refusing — longer than a tab spends trying to get back at all.
 fn connect_tcp(address: &str) -> std::io::Result<TcpStream> {
-    use std::net::ToSocketAddrs;
     let mut last = std::io::Error::new(std::io::ErrorKind::NotFound, "no address");
-    for addr in address.to_socket_addrs()? {
+    for addr in resolve(address)? {
         match TcpStream::connect_timeout(&addr, CONNECT_TIMEOUT) {
             Ok(stream) => return Ok(stream),
             Err(e) => last = e,
         }
     }
     Err(last)
+}
+
+/// Resolve `address`, remembering the last good answer and falling back to it
+/// when a lookup fails.
+///
+/// `getaddrinfo` returns a *temporary* failure — `EAI_AGAIN`, "temporary
+/// failure in name resolution" — often enough on some stacks (WSL2's in
+/// particular) that a peer polled every few seconds would blink out over a
+/// one-second hiccup that no choice of upstream resolver prevents. A sibling is
+/// reached by a stable hostname — a Cloudflare tunnel's anycast address, which
+/// does not move — so the last resolution is a safe thing to reuse while the
+/// resolver is briefly unavailable.
+///
+/// ponytail: the cache never expires and is never evicted. A stale entry would
+/// only ever be used *during* a lookup outage; the next lookup that succeeds
+/// overwrites it, and if the cached address has genuinely moved the connect to
+/// it fails and the poll re-resolves, so it self-corrects the moment DNS is
+/// back. There are as many entries as there are siblings, which is a handful.
+fn resolve(address: &str) -> std::io::Result<Vec<std::net::SocketAddr>> {
+    use std::net::ToSocketAddrs;
+    static LAST_GOOD: std::sync::LazyLock<Mutex<BTreeMap<String, Vec<std::net::SocketAddr>>>> =
+        std::sync::LazyLock::new(|| Mutex::new(BTreeMap::new()));
+    resolve_with(
+        address,
+        address.to_socket_addrs().map(Iterator::collect),
+        &LAST_GOOD,
+    )
+}
+
+/// The cache decision behind [`resolve`], with the lookup and the store handed
+/// in so it can be exercised without the system resolver.
+fn resolve_with(
+    address: &str,
+    looked_up: std::io::Result<Vec<std::net::SocketAddr>>,
+    cache: &Mutex<BTreeMap<String, Vec<std::net::SocketAddr>>>,
+) -> std::io::Result<Vec<std::net::SocketAddr>> {
+    match looked_up {
+        Ok(addrs) => {
+            // An empty answer is not worth remembering, and must not shadow a
+            // real one already cached for this host.
+            if !addrs.is_empty()
+                && let Ok(mut cache) = cache.lock()
+            {
+                cache.insert(address.to_string(), addrs.clone());
+            }
+            Ok(addrs)
+        }
+        Err(e) => match cache.lock().ok().and_then(|c| c.get(address).cloned()) {
+            Some(addrs) => Ok(addrs),
+            None => Err(e),
+        },
+    }
 }
 
 /// A connection to a sibling: plain TCP for an `http://` one (a test's), TLS
@@ -1200,6 +1251,36 @@ mod tests {
     use super::*;
 
     const SECRET: &str = "eyJhIjoi-made-up-tunnel-token";
+
+    #[test]
+    fn a_transient_lookup_failure_reuses_the_last_good_address() {
+        let cache = Mutex::new(BTreeMap::new());
+        let addr: std::net::SocketAddr = "1.2.3.4:443".parse().unwrap();
+        let fail = || std::io::Error::other("temporary failure");
+
+        // A good lookup is remembered.
+        assert_eq!(
+            resolve_with("peer:443", Ok(vec![addr]), &cache).unwrap(),
+            vec![addr]
+        );
+        // A later failure for the same host reuses it rather than failing.
+        assert_eq!(
+            resolve_with("peer:443", Err(fail()), &cache).unwrap(),
+            vec![addr]
+        );
+        // A host never resolved has nothing to fall back to.
+        assert!(resolve_with("other:443", Err(fail()), &cache).is_err());
+        // An empty answer is not cached, so it cannot shadow the good one.
+        assert!(
+            resolve_with("peer:443", Ok(vec![]), &cache)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            resolve_with("peer:443", Err(fail()), &cache).unwrap(),
+            vec![addr]
+        );
+    }
 
     #[test]
     fn a_signature_checks_out_only_for_what_it_signed() {
