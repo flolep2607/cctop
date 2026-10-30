@@ -21,6 +21,11 @@ pub(crate) struct Message<'a> {
     pub role: Str<'a>,
     #[serde(rename = "modelID", borrow)]
     pub model_id: Str<'a>,
+    /// OpenCode 2 nests the model under `model: {id, variant}` where 1.x wrote a
+    /// flat `modelID` and `variant`. Read both, flat first, through
+    /// [`Message::model_name`] and [`Message::variant_name`].
+    #[serde(borrow)]
+    pub model: Object<ModelRef<'a>>,
     /// How hard the model was asked to think — `high`, `medium` — when the
     /// model has such a setting and the turn chose one.
     #[serde(borrow)]
@@ -38,6 +43,16 @@ pub(crate) struct Message<'a> {
     pub time: Object<Time>,
     #[serde(borrow)]
     pub error: Object<Error<'a>>,
+}
+
+/// OpenCode 2's nested `model` object: the id priced against, and the effort.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub(crate) struct ModelRef<'a> {
+    #[serde(borrow)]
+    pub id: Str<'a>,
+    #[serde(borrow)]
+    pub variant: Str<'a>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -74,6 +89,10 @@ pub(crate) struct Time {
 pub(crate) struct Error<'a> {
     #[serde(borrow)]
     pub name: Str<'a>,
+    /// OpenCode 2 names the failure by a `type` — `provider.rate-limit`,
+    /// `aborted` — where 1.x gave a class `name`. Matched on like the name.
+    #[serde(rename = "type", borrow)]
+    pub kind: Str<'a>,
     #[serde(borrow)]
     pub message: Str<'a>,
     #[serde(borrow)]
@@ -161,11 +180,26 @@ impl Message<'_> {
         u64::try_from(end - start).ok()
     }
 
+    /// The model id, flat (`modelID`, 1.x) or nested (`model.id`, 2.x).
+    pub(crate) fn model_name(&self) -> Option<&str> {
+        self.model_id
+            .get()
+            .or_else(|| self.model.get().and_then(|m| m.id.get()))
+    }
+
+    /// The reasoning effort, flat (`variant`, 1.x) or nested (`model.variant`).
+    pub(crate) fn variant_name(&self) -> Option<&str> {
+        self.variant
+            .get()
+            .or_else(|| self.model.get().and_then(|m| m.variant.get()))
+    }
+
     /// The error's name and words, lowercased into one string to match on.
     pub(crate) fn error_text(&self) -> Option<String> {
         let error = self.error.get()?;
         let text = [
             error.name.get(),
+            error.kind.get(),
             error.data.get().and_then(|d| d.message.get()),
             error.message.get(),
         ]

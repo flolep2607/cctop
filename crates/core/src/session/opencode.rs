@@ -96,6 +96,175 @@ fn with_db<T>(path: &Path, query: impl FnOnce(&Connection) -> T) -> Option<T> {
     })
 }
 
+/// Which storage layout a database holds.
+///
+/// OpenCode 2 replaced the `session`/`message`/`part` tables with
+/// `session_v2`/`session_message` and migrated every old row forward, so a 2.x
+/// database holds all its sessions in `session_v2` and leaves the legacy tables
+/// frozen. Reading the old tables there would show only the sessions that
+/// predate the migration and none written since — the bug this detection fixes.
+/// The two layouts also differ in shape: a 2.x message carries its parts inline
+/// under `data.content[]` rather than in a `part` table, and nests the model
+/// under `data.model`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Schema {
+    V1,
+    V2,
+}
+
+/// `V2` when the database has a `session_v2` table, else `V1`. One indexed
+/// probe, dwarfed by the per-session reads it routes.
+fn schema(db: &Connection) -> Schema {
+    let has_v2 = db
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'session_v2'",
+            [],
+            |_| Ok(()),
+        )
+        .optional()
+        .ok()
+        .flatten()
+        .is_some();
+    if has_v2 { Schema::V2 } else { Schema::V1 }
+}
+
+/// The session table for this schema.
+fn session_table(schema: Schema) -> &'static str {
+    match schema {
+        Schema::V1 => "session",
+        Schema::V2 => "session_v2",
+    }
+}
+
+/// Reshape one OpenCode 2 `content[]` tool item into the flat `part` shape the
+/// typed [`Part`] reader and [`record_tool`] already understand: `name` becomes
+/// `tool`, `id` becomes `callID`, and the item-level `time: {created, completed}`
+/// becomes the state's `time: {start, end}`.
+fn v2_tool_part(item: &Value) -> Value {
+    let state = item.get("state");
+    let time = item.get("time");
+    serde_json::json!({
+        "type": "tool",
+        "tool": item.get("name").and_then(Value::as_str).unwrap_or("unknown"),
+        "callID": item.get("id").and_then(Value::as_str).unwrap_or(""),
+        "state": {
+            "status": state.and_then(|s| s.get("status")).and_then(Value::as_str).unwrap_or(""),
+            "input": state.and_then(|s| s.get("input")).cloned().unwrap_or(Value::Null),
+            "time": {
+                "start": time.and_then(|t| t.get("created")).cloned().unwrap_or(Value::Null),
+                "end": time.and_then(|t| t.get("completed")).cloned().unwrap_or(Value::Null),
+            },
+        },
+    })
+}
+
+/// A session's assistant turns, oldest first, each paired with whether it is a
+/// compaction summary turn whose model and effort must not be taken as the
+/// conversation's own. In 2.x the compaction is its own `compaction` row,
+/// carrying the same spend an assistant turn does; in 1.x it was an assistant
+/// turn flagged in its own `data` (seen by [`Message::is_summary`]).
+fn usage_rows(db: &Connection, schema: Schema, session_id: &str) -> Vec<(String, bool)> {
+    let mut out = Vec::new();
+    let sql = match schema {
+        Schema::V1 => {
+            "SELECT data, '' FROM message WHERE session_id = ?1 \
+             AND json_extract(data, '$.role') = 'assistant' ORDER BY time_created, id"
+        }
+        Schema::V2 => {
+            "SELECT data, type FROM session_message WHERE session_id = ?1 \
+             AND type IN ('assistant', 'compaction') ORDER BY seq"
+        }
+    };
+    let Ok(mut stmt) = db.prepare(sql) else {
+        return out;
+    };
+    let Ok(rows) = stmt.query_map(params![session_id], |row| {
+        let data = row.get::<_, String>(0)?;
+        // 1.x has one column; 2.x's second column is the message `type`, which
+        // is `compaction` for the summary turn.
+        let summary = match schema {
+            Schema::V1 => false,
+            Schema::V2 => row.get::<_, String>(1)? == "compaction",
+        };
+        Ok((data, summary))
+    }) else {
+        return out;
+    };
+    out.extend(rows.flatten());
+    out
+}
+
+/// A session's parts as flat `part` JSON, oldest first, for the extract loop to
+/// parse and keep the `tool` ones. In 1.x these are the `part` rows as written
+/// — read whole and filtered in Rust, so a row of malformed JSON is skipped
+/// rather than failing a `json_extract` over the table. In 2.x they are the
+/// `tool` items inside each assistant message's `content[]`, reshaped by
+/// [`v2_tool_part`].
+fn tool_part_jsons(db: &Connection, schema: Schema, session_id: &str) -> Vec<String> {
+    match schema {
+        Schema::V1 => {
+            let mut out = Vec::new();
+            if let Ok(mut stmt) =
+                db.prepare("SELECT data FROM part WHERE session_id = ?1 ORDER BY time_created, id")
+                && let Ok(rows) = stmt.query_map(params![session_id], |row| row.get::<_, String>(0))
+            {
+                out.extend(rows.flatten());
+            }
+            out
+        }
+        Schema::V2 => v2_tool_items(db, session_id)
+            .iter()
+            .map(|item| v2_tool_part(item).to_string())
+            .collect(),
+    }
+}
+
+/// Every `tool` item across a 2.x session's assistant messages, oldest first.
+fn v2_tool_items(db: &Connection, session_id: &str) -> Vec<Value> {
+    let mut out = Vec::new();
+    let Ok(mut stmt) = db.prepare(
+        "SELECT data FROM session_message WHERE session_id = ?1 AND type = 'assistant' ORDER BY seq",
+    ) else {
+        return out;
+    };
+    let Ok(rows) = stmt.query_map(params![session_id], |row| row.get::<_, String>(0)) else {
+        return out;
+    };
+    for raw in rows.flatten() {
+        for item in content_items(&raw) {
+            if item.get("type").and_then(Value::as_str) == Some("tool") {
+                out.push(item);
+            }
+        }
+    }
+    out
+}
+
+/// The `content[]` array of a 2.x message's `data`, or empty.
+fn content_items(raw: &str) -> Vec<Value> {
+    serde_json::from_str::<Value>(raw)
+        .ok()
+        .and_then(|v| v.get("content").and_then(Value::as_array).cloned())
+        .unwrap_or_default()
+}
+
+/// How many times this session was compacted.
+fn compaction_count(db: &Connection, schema: Schema, session_id: &str) -> u32 {
+    let sql = match schema {
+        Schema::V1 => {
+            // `json_valid` guards the extract: one malformed `part` row otherwise
+            // fails the whole count.
+            "SELECT count(*) FROM part WHERE session_id = ?1 \
+             AND json_valid(data) AND json_extract(data, '$.type') = 'compaction'"
+        }
+        Schema::V2 => {
+            "SELECT count(*) FROM session_message WHERE session_id = ?1 AND type = 'compaction'"
+        }
+    };
+    db.query_row(sql, params![session_id], |row| row.get::<_, u32>(0))
+        .unwrap_or(0)
+}
+
 /// State of the newest OpenCode message. OpenCode keeps events in SQLite rather
 /// than a transcript file, but its assistant messages record both completion
 /// and provider errors.
@@ -104,27 +273,60 @@ pub fn extract_activity_state(path: &Path, session_id: &str) -> ActivityState {
 }
 
 fn activity_state(db: &Connection, session_id: &str) -> ActivityState {
-    let message = db
-        .query_row(
-            "SELECT id, data FROM message WHERE session_id = ?1 ORDER BY time_created DESC, id DESC LIMIT 1",
+    let schema = schema(db);
+    // 1.x needs the message id to find the message's `part` rows; 2.x carries
+    // the parts inline, so the row's own `data` is enough.
+    let newest = match schema {
+        Schema::V1 => db.query_row(
+            "SELECT json_extract(data, '$.role'), id, data FROM message \
+             WHERE session_id = ?1 ORDER BY time_created DESC, id DESC LIMIT 1",
             params![session_id],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-        )
-        .optional()
-        .ok()
-        .flatten();
-    let Some((message_id, raw)) = message else {
+            |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?.unwrap_or_default(),
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        ),
+        Schema::V2 => db.query_row(
+            "SELECT type, '', data FROM session_message \
+             WHERE session_id = ?1 ORDER BY seq DESC LIMIT 1",
+            params![session_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        ),
+    }
+    .optional()
+    .ok()
+    .flatten();
+    let Some((role, message_id, raw)) = newest else {
         return ActivityState::Working;
     };
+    if role != "assistant" {
+        return ActivityState::Working;
+    }
     let Some(message) = opencode_line::parse::<opencode_line::Message>(&raw) else {
         return ActivityState::Working;
     };
-    if !message.role.is("assistant") {
-        return ActivityState::Working;
-    }
+    let waiting = match schema {
+        Schema::V1 => has_input_request(db, &message_id),
+        Schema::V2 => content_items(&raw).iter().any(|item| {
+            item.get("type").and_then(Value::as_str) == Some("tool")
+                && item
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .is_some_and(super::is_input_request_tool)
+        }),
+    };
     if is_api_failure(&message) {
         ActivityState::ApiError
-    } else if has_input_request(db, &message_id) {
+    } else if waiting {
         ActivityState::WaitingForInput
     } else {
         ActivityState::Working
@@ -160,6 +362,11 @@ fn is_api_failure(message: &opencode_line::Message) -> bool {
         "apierror",
         "internal server",
         "queue is full",
+        // OpenCode 2 names failures `provider.rate-limit`, `provider.quota`,
+        // `provider.transport` and so on — every provider fault, as against the
+        // `aborted` and `unknown` it leaves out, which are not the model hitting
+        // a wall.
+        "provider.",
     ]
     .iter()
     .any(|needle| text.contains(needle))
@@ -190,6 +397,10 @@ fn database_paths() -> Vec<PathBuf> {
 /// reads as though it did not.
 pub fn for_each_message(path: &Path, session_id: &str, mut f: impl FnMut(&Value, i64, &[Value])) {
     with_db(path, |db| {
+        if schema(db) == Schema::V2 {
+            for_each_message_v2(db, session_id, &mut f);
+            return;
+        }
         let Ok(mut stmt) = db.prepare(
             "SELECT m.id, m.time_created, m.data, p.data FROM message m \
              LEFT JOIN part p ON p.message_id = m.id \
@@ -240,6 +451,89 @@ pub fn for_each_message(path: &Path, session_id: &str, mut f: impl FnMut(&Value,
     });
 }
 
+/// [`for_each_message`] for an OpenCode 2 database, where a message carries its
+/// parts inline under `data.content[]` rather than in a `part` table.
+///
+/// Each row is reshaped into the `(message, parts)` the sink already reads: the
+/// `type` column becomes the `role` the sink keys on, a user turn's inline
+/// `text` becomes a text part, a `compaction` row becomes the one marker part,
+/// and each assistant `content` item is passed through — tool items reshaped by
+/// [`v2_sink_part`] so the sink's `opencode_call` finds `tool`, `input`,
+/// `output` and `error` where it expects them.
+fn for_each_message_v2(
+    db: &Connection,
+    session_id: &str,
+    f: &mut impl FnMut(&Value, i64, &[Value]),
+) {
+    let Ok(mut stmt) = db.prepare(
+        "SELECT type, time_created, data FROM session_message \
+         WHERE session_id = ?1 ORDER BY seq",
+    ) else {
+        return;
+    };
+    let Ok(mut rows) = stmt.query(params![session_id]) else {
+        return;
+    };
+    while let Ok(Some(row)) = rows.next() {
+        let (Ok(kind), Ok(created), Ok(raw)) = (
+            row.get::<_, String>(0),
+            row.get::<_, i64>(1),
+            row.get::<_, String>(2),
+        ) else {
+            continue;
+        };
+        let mut message = serde_json::from_str::<Value>(&raw).unwrap_or(Value::Null);
+        let role = match kind.as_str() {
+            "assistant" => "assistant",
+            "user" => "user",
+            _ => "system",
+        };
+        if let Some(obj) = message.as_object_mut() {
+            obj.insert("role".into(), Value::from(role));
+        }
+        let parts: Vec<Value> = match kind.as_str() {
+            "assistant" => content_items(&raw).iter().map(v2_sink_part).collect(),
+            "user" => message
+                .get("text")
+                .and_then(Value::as_str)
+                .filter(|t| !t.trim().is_empty())
+                .map(|t| vec![serde_json::json!({"type": "text", "text": t})])
+                .unwrap_or_default(),
+            "compaction" => vec![serde_json::json!({"type": "compaction"})],
+            _ => Vec::new(),
+        };
+        if !message.is_null() {
+            f(&message, created, &parts);
+        }
+    }
+}
+
+/// Reshape one OpenCode 2 `content[]` item into the part shape the conversation
+/// sink's `opencode_call` reads. Text and reasoning items already match; a tool
+/// item's `name`/`state.content`/`state.error.message` are moved to the
+/// `tool`/`state.output`/`state.error` the sink looks for.
+fn v2_sink_part(item: &Value) -> Value {
+    if item.get("type").and_then(Value::as_str) != Some("tool") {
+        return item.clone();
+    }
+    let state = item.get("state");
+    serde_json::json!({
+        "type": "tool",
+        "tool": item.get("name").and_then(Value::as_str).unwrap_or("tool"),
+        "state": {
+            "status": state.and_then(|s| s.get("status")).cloned().unwrap_or(Value::Null),
+            "input": state.and_then(|s| s.get("input")).cloned().unwrap_or(Value::Null),
+            "output": state.and_then(|s| s.get("content")).cloned().unwrap_or(Value::Null),
+            // The error is an object `{type, message}`; the sink wants the words.
+            "error": state
+                .and_then(|s| s.get("error"))
+                .and_then(|e| e.get("message").or(Some(e)))
+                .cloned()
+                .unwrap_or(Value::Null),
+        },
+    })
+}
+
 /// Feed every stored message and part of one session to `feed`, stopping early
 /// once it says the session is found.
 ///
@@ -255,10 +549,16 @@ pub fn for_each_message(path: &Path, session_id: &str, mut f: impl FnMut(&Value,
 /// empty result — hence trying each in turn.
 pub fn scan_session(path: &Path, session_id: &str, mut feed: impl FnMut(&str) -> bool) -> bool {
     with_db(path, |db| {
-        for sql in [
-            "SELECT data FROM part WHERE session_id = ?1 ORDER BY id",
-            "SELECT data FROM message WHERE session_id = ?1 ORDER BY time_created, id",
-        ] {
+        // 2.x keeps a message's text and tool calls inline in its own `data`,
+        // so the one `session_message` table carries everything to search.
+        let queries: &[&str] = match schema(db) {
+            Schema::V1 => &[
+                "SELECT data FROM part WHERE session_id = ?1 ORDER BY id",
+                "SELECT data FROM message WHERE session_id = ?1 ORDER BY time_created, id",
+            ],
+            Schema::V2 => &["SELECT data FROM session_message WHERE session_id = ?1 ORDER BY seq"],
+        };
+        for sql in queries {
             let Ok(mut stmt) = db.prepare(sql) else {
                 continue;
             };
@@ -338,8 +638,19 @@ const LAST_ENTRY: &str = "(SELECT max(x) FROM (SELECT max(m.time_updated, coales
      FROM message m WHERE m.session_id = session.id \
      ORDER BY m.time_created DESC, m.id DESC LIMIT 3))";
 
+/// [`LAST_ENTRY`] for OpenCode 2, where a message's parts are inline and the
+/// `session_message` row's own `time_updated` is the newest stamp there is.
+const LAST_ENTRY_V2: &str = "(SELECT max(time_updated) FROM (SELECT time_updated \
+     FROM session_message WHERE session_id = session_v2.id ORDER BY seq DESC LIMIT 3))";
+
 fn sessions_in(db: &Connection, path: &Path) -> Vec<Session> {
     let mut sessions = Vec::new();
+    let schema = schema(db);
+    let table = session_table(schema);
+    let last_entry = match schema {
+        Schema::V1 => LAST_ENTRY,
+        Schema::V2 => LAST_ENTRY_V2,
+    };
     // A subagent is a session of its own, with `parent_id` naming the one that
     // spawned it; listed, each stands alone as a conversation. They are hidden
     // here and folded into their parent by `extract`, the way Claude's subagents
@@ -350,19 +661,21 @@ fn sessions_in(db: &Connection, path: &Path) -> Vec<Session> {
     // the same way, to the row's own stamp.
     const COLUMNS: &str = "SELECT id, directory, title, model, time_created, time_updated";
     let candidates = [
-        format!("{COLUMNS}, {LAST_ENTRY} FROM session WHERE parent_id IS NULL"),
-        format!("{COLUMNS}, {LAST_ENTRY} FROM session"),
-        format!("{COLUMNS}, NULL FROM session WHERE parent_id IS NULL"),
-        format!("{COLUMNS}, NULL FROM session"),
+        format!("{COLUMNS}, {last_entry} FROM {table} WHERE parent_id IS NULL"),
+        format!("{COLUMNS}, {last_entry} FROM {table}"),
+        format!("{COLUMNS}, NULL FROM {table} WHERE parent_id IS NULL"),
+        format!("{COLUMNS}, NULL FROM {table}"),
     ];
     let Some(mut stmt) = candidates.iter().find_map(|sql| db.prepare(sql).ok()) else {
         return sessions;
     };
+    // 2.x lets `title` be NULL; read it as optional so a row without one is
+    // kept rather than dropped by a failed `String` conversion.
     let Ok(rows) = stmt.query_map([], |row| {
         Ok((
             row.get::<_, String>(0)?,
             row.get::<_, String>(1)?,
-            row.get::<_, String>(2)?,
+            row.get::<_, Option<String>>(2)?,
             row.get::<_, Option<String>>(3)?,
             row.get::<_, i64>(4)?,
             row.get::<_, i64>(5)?,
@@ -373,6 +686,7 @@ fn sessions_in(db: &Connection, path: &Path) -> Vec<Session> {
     };
     for row in rows.flatten() {
         let (id, directory, title, model_json, created, updated, last_entry) = row;
+        let title = title.unwrap_or_default();
         let model = model_json
             .as_deref()
             .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
@@ -394,7 +708,7 @@ fn assistant_usage(
     message: &Message,
     rates: &mut FallbackRates,
 ) -> (String, String, Tokens, Costs) {
-    let model = message.model_id.get().unwrap_or("unknown").to_string();
+    let model = message.model_name().unwrap_or("unknown").to_string();
     let ts = message
         .created_ms()
         .map(util::ms_to_rfc3339)
@@ -537,15 +851,19 @@ fn extract_of(db: &Connection, session_id: &str) -> SessionData {
     let mut breakdown: HashMap<String, (Tokens, Costs)> = HashMap::new();
     let mut saw_usage = false;
     let mut rates = FallbackRates::default();
+    let schema = schema(db);
 
     let aggregate = db
         .query_row(
-            "SELECT title, model, cost, tokens_input, tokens_output, tokens_reasoning, \
-             tokens_cache_read, tokens_cache_write FROM session WHERE id = ?1",
+            &format!(
+                "SELECT title, model, cost, tokens_input, tokens_output, tokens_reasoning, \
+                 tokens_cache_read, tokens_cache_write FROM {} WHERE id = ?1",
+                session_table(schema)
+            ),
             params![session_id],
             |row| {
                 Ok((
-                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(0)?,
                     row.get::<_, Option<String>>(1)?,
                     row.get::<_, f64>(2)?,
                     row.get::<_, u64>(3)?,
@@ -560,7 +878,10 @@ fn extract_of(db: &Connection, session_id: &str) -> SessionData {
         .ok()
         .flatten();
     if let Some((title, model_json, ..)) = &aggregate {
-        data.title = (!title.is_empty()).then(|| title.clone());
+        data.title = title
+            .as_deref()
+            .filter(|t| !t.is_empty())
+            .map(str::to_string);
         data.last_model = model_json
             .as_deref()
             .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
@@ -568,55 +889,48 @@ fn extract_of(db: &Connection, session_id: &str) -> SessionData {
             .unwrap_or_default();
     }
 
-    if let Ok(mut stmt) =
-        db.prepare("SELECT data FROM message WHERE session_id = ?1 ORDER BY time_created, id")
-        && let Ok(rows) = stmt.query_map(params![session_id], |row| row.get::<_, String>(0))
-    {
-        for raw in rows.flatten() {
-            let Some(message) = opencode_line::parse::<Message>(&raw) else {
-                continue;
-            };
-            if !message.role.is("assistant") {
-                continue;
-            }
-            let (model, ts, tokens, costs) = assistant_usage(&message, &mut rates);
-            saw_usage = true;
-            // The newest turn's, as Codex's is: a session that was switched
-            // from `high` to the default shows the default. A compaction's
-            // summary turn is the summariser's, not a switch, so it leaves
-            // both as the conversation set them.
-            if !message.is_summary() {
-                data.last_model = model.clone();
-                data.reasoning_effort = message.variant.get().map(str::to_string);
-            }
-            data.metrics.api_duration_ms += message.duration_ms().unwrap_or(0);
-            add_usage(&mut data, &tokens, &costs);
-            let (mt, mc) = breakdown.entry(model.clone()).or_default();
-            mt.input += tokens.input;
-            mt.output += tokens.output;
-            mt.cache_read += tokens.cache_read;
-            mt.cache_write_5m += tokens.cache_write_5m;
-            mt.reasoning_output += tokens.reasoning_output;
-            mt.total += tokens.total;
-            mc.total += costs.total;
-            if let Some(dt) = util::parse_ts(&ts) {
-                data.record_cost(&dt, &model, costs.total);
-                // Reasoning is already inside `output` here — billing it again
-                // would double-count, the same rule `FallbackRates` applies.
-                let billed = tokens.all_input() + tokens.output;
-                *data
-                    .tokens_by_day
-                    .entry(util::local_date_key(&dt))
-                    .or_default()
-                    .entry(model.clone())
-                    .or_insert(0) += billed;
-                *data
-                    .tokens_by_hour
-                    .entry(util::local_hour_key(&dt))
-                    .or_default()
-                    .entry(model)
-                    .or_insert(0) += billed;
-            }
+    for (raw, is_summary) in usage_rows(db, schema, session_id) {
+        let Some(message) = opencode_line::parse::<Message>(&raw) else {
+            continue;
+        };
+        let is_summary = is_summary || message.is_summary();
+        let (model, ts, tokens, costs) = assistant_usage(&message, &mut rates);
+        saw_usage = true;
+        // The newest turn's, as Codex's is: a session that was switched
+        // from `high` to the default shows the default. A compaction's
+        // summary turn is the summariser's, not a switch, so it leaves
+        // both as the conversation set them.
+        if !is_summary {
+            data.last_model = model.clone();
+            data.reasoning_effort = message.variant_name().map(str::to_string);
+        }
+        data.metrics.api_duration_ms += message.duration_ms().unwrap_or(0);
+        add_usage(&mut data, &tokens, &costs);
+        let (mt, mc) = breakdown.entry(model.clone()).or_default();
+        mt.input += tokens.input;
+        mt.output += tokens.output;
+        mt.cache_read += tokens.cache_read;
+        mt.cache_write_5m += tokens.cache_write_5m;
+        mt.reasoning_output += tokens.reasoning_output;
+        mt.total += tokens.total;
+        mc.total += costs.total;
+        if let Some(dt) = util::parse_ts(&ts) {
+            data.record_cost(&dt, &model, costs.total);
+            // Reasoning is already inside `output` here — billing it again
+            // would double-count, the same rule `FallbackRates` applies.
+            let billed = tokens.all_input() + tokens.output;
+            *data
+                .tokens_by_day
+                .entry(util::local_date_key(&dt))
+                .or_default()
+                .entry(model.clone())
+                .or_insert(0) += billed;
+            *data
+                .tokens_by_hour
+                .entry(util::local_hour_key(&dt))
+                .or_default()
+                .entry(model)
+                .or_insert(0) += billed;
         }
     }
 
@@ -641,27 +955,28 @@ fn extract_of(db: &Connection, session_id: &str) -> SessionData {
         };
     }
 
-    if let Ok(mut stmt) =
-        db.prepare("SELECT data FROM part WHERE session_id = ?1 ORDER BY time_created, id")
-        && let Ok(rows) = stmt.query_map(params![session_id], |row| row.get::<_, String>(0))
-    {
-        let mut seen_urls = HashSet::new();
-        let mut seen_queries = HashSet::new();
-        for raw in rows.flatten() {
-            let Some(part) = opencode_line::parse::<Part>(&raw) else {
-                continue;
-            };
-            match part.kind.or_empty() {
-                // Written where OpenCode cut the conversation down to a summary,
-                // automatically or because the person asked.
-                "compaction" => data.compactions += 1,
-                "tool" => record_tool(&mut data, &part, &mut seen_urls, &mut seen_queries),
-                _ => {}
-            }
+    let mut seen_urls = HashSet::new();
+    let mut seen_queries = HashSet::new();
+    for raw in tool_part_jsons(db, schema, session_id) {
+        if let Some(part) = opencode_line::parse::<Part>(&raw)
+            && part.kind.is("tool")
+        {
+            record_tool(&mut data, &part, &mut seen_urls, &mut seen_queries);
         }
     }
+    // Written where OpenCode cut the conversation down to a summary,
+    // automatically or because the person asked. A 1.x compaction is a `part`
+    // row; a 2.x one is a `compaction` message.
+    data.compactions = compaction_count(db, schema, session_id);
 
-    fold_subagents(db, session_id, &mut data, &mut breakdown, &mut rates);
+    fold_subagents(
+        db,
+        schema,
+        session_id,
+        &mut data,
+        &mut breakdown,
+        &mut rates,
+    );
 
     let mut models: Vec<_> = breakdown.into_iter().collect();
     models.sort_by(|a, b| a.0.cmp(&b.0));
@@ -693,23 +1008,25 @@ fn extract_of(db: &Connection, session_id: &str) -> SessionData {
 /// the parent's Subagents pane do not need them.
 fn fold_subagents(
     db: &Connection,
+    schema: Schema,
     parent_id: &str,
     data: &mut SessionData,
     breakdown: &mut HashMap<String, (Tokens, Costs)>,
     rates: &mut FallbackRates,
 ) {
-    let Ok(mut stmt) = db.prepare(
+    let Ok(mut stmt) = db.prepare(&format!(
         "SELECT id, agent, title, model, cost, tokens_input, tokens_output, tokens_reasoning, \
          tokens_cache_read, tokens_cache_write, time_created, time_updated \
-         FROM session WHERE parent_id = ?1 ORDER BY time_created, id",
-    ) else {
+         FROM {} WHERE parent_id = ?1 ORDER BY time_created, id",
+        session_table(schema)
+    )) else {
         return;
     };
     let Ok(rows) = stmt.query_map(params![parent_id], |row| {
         Ok((
             row.get::<_, String>(0)?,
             row.get::<_, Option<String>>(1)?,
-            row.get::<_, String>(2)?,
+            row.get::<_, Option<String>>(2)?,
             row.get::<_, Option<String>>(3)?,
             row.get::<_, f64>(4)?,
             row.get::<_, u64>(5)?,
@@ -750,15 +1067,21 @@ fn fold_subagents(
             .and_then(|v| v.get("id").and_then(Value::as_str).map(str::to_string))
             .filter(|m| !m.is_empty())
             .or_else(|| {
-                db.query_row(
-                    "SELECT json_extract(data, '$.modelID') FROM message WHERE session_id = ?1 \
-                     AND json_extract(data, '$.role') = 'assistant' \
-                     AND json_extract(data, '$.modelID') <> '' \
-                     ORDER BY time_created DESC, id DESC LIMIT 1",
-                    params![id],
-                    |row| row.get::<_, String>(0),
-                )
-                .ok()
+                let sql = match schema {
+                    Schema::V1 => {
+                        "SELECT json_extract(data, '$.modelID') FROM message WHERE session_id = ?1 \
+                         AND json_extract(data, '$.role') = 'assistant' \
+                         AND json_extract(data, '$.modelID') <> '' \
+                         ORDER BY time_created DESC, id DESC LIMIT 1"
+                    }
+                    Schema::V2 => {
+                        "SELECT json_extract(data, '$.model.id') FROM session_message \
+                         WHERE session_id = ?1 AND type = 'assistant' \
+                         AND json_extract(data, '$.model.id') <> '' ORDER BY seq DESC LIMIT 1"
+                    }
+                };
+                db.query_row(sql, params![id], |row| row.get::<_, String>(0))
+                    .ok()
             })
             .unwrap_or_else(|| "unknown".to_string());
         let tokens = Tokens {
@@ -801,19 +1124,26 @@ fn fold_subagents(
             data.record_cost(&dt, &model, cost);
         }
 
-        let tool_count = db
-            .query_row(
+        let tool_count_sql = match schema {
+            Schema::V1 => {
                 "SELECT count(*) FROM part WHERE session_id = ?1 \
-                 AND json_extract(data, '$.type') = 'tool'",
-                params![id],
-                |row| row.get::<_, u64>(0),
-            )
+                 AND json_extract(data, '$.type') = 'tool'"
+            }
+            Schema::V2 => {
+                // `json_valid` guards `json_each`, which errors on a malformed row.
+                "SELECT count(*) FROM session_message m, json_each(m.data, '$.content') c \
+                 WHERE m.session_id = ?1 AND json_valid(m.data) \
+                 AND json_extract(c.value, '$.type') = 'tool'"
+            }
+        };
+        let tool_count = db
+            .query_row(tool_count_sql, params![id], |row| row.get::<_, u64>(0))
             .unwrap_or(0);
 
         data.subagents.push(Subagent {
             agent_id: id,
             agent_type: agent.unwrap_or_default(),
-            description: title,
+            description: title.unwrap_or_default(),
             model,
             started_at: Some(util::ms_to_rfc3339(created)),
             last_active: Some(util::ms_to_rfc3339(updated)),
@@ -844,7 +1174,7 @@ pub fn delete(session: &Session) -> rusqlite::Result<()> {
     let db = Connection::open(path)?;
     db.execute_batch("PRAGMA foreign_keys = ON")?;
     db.execute(
-        "DELETE FROM session WHERE id = ?1",
+        &format!("DELETE FROM {} WHERE id = ?1", session_table(schema(&db))),
         params![session.session_id],
     )?;
     Ok(())
@@ -860,16 +1190,22 @@ pub fn extract_context(session: &Session) -> Option<ContextUsage> {
 }
 
 fn context_of(db: &Connection, session: &Session) -> Option<ContextUsage> {
+    let schema = schema(db);
     // A turn that was aborted or failed before the provider answered is still
     // recorded, with every count at zero. Those sit at the end of many sessions,
     // so walk back past them rather than reading the newest row and giving up.
-    let mut stmt = db
-        .prepare(
+    let sql = match schema {
+        Schema::V1 => {
             "SELECT time_created, data FROM message WHERE session_id = ?1 \
              AND json_extract(data, '$.role') = 'assistant' \
-             ORDER BY time_created DESC, id DESC LIMIT 40",
-        )
-        .ok()?;
+             ORDER BY time_created DESC, id DESC LIMIT 40"
+        }
+        Schema::V2 => {
+            "SELECT time_created, data FROM session_message WHERE session_id = ?1 \
+             AND type = 'assistant' ORDER BY seq DESC LIMIT 40"
+        }
+    };
+    let mut stmt = db.prepare(sql).ok()?;
     let rows = stmt
         .query_map(params![session.session_id], |row| {
             Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
@@ -888,14 +1224,13 @@ fn context_of(db: &Connection, session: &Session) -> Option<ContextUsage> {
             continue;
         }
         let model = message
-            .model_id
-            .get()
+            .model_name()
             .filter(|m| !m.is_empty())
             .unwrap_or(&session.model);
         return Some(ContextUsage {
             used,
             max: crate::pricing::litellm_max_input_tokens(model)?,
-            compacted: compacted_since(db, &session.session_id, created),
+            compacted: compacted_since(db, schema, &session.session_id, created),
         });
     }
     None
@@ -903,14 +1238,19 @@ fn context_of(db: &Connection, session: &Session) -> Option<ContextUsage> {
 
 /// Whether a compaction was written after the turn that last measured the
 /// window, which then describes the window as it stood before it.
-fn compacted_since(db: &Connection, session_id: &str, created: i64) -> bool {
-    db.query_row(
-        "SELECT 1 FROM part WHERE session_id = ?1 AND time_created > ?2 \
-         AND json_extract(data, '$.type') = 'compaction' LIMIT 1",
-        params![session_id, created],
-        |_| Ok(()),
-    )
-    .is_ok()
+fn compacted_since(db: &Connection, schema: Schema, session_id: &str, created: i64) -> bool {
+    let sql = match schema {
+        Schema::V1 => {
+            "SELECT 1 FROM part WHERE session_id = ?1 AND time_created > ?2 \
+             AND json_extract(data, '$.type') = 'compaction' LIMIT 1"
+        }
+        Schema::V2 => {
+            "SELECT 1 FROM session_message WHERE session_id = ?1 AND time_created > ?2 \
+             AND type = 'compaction' LIMIT 1"
+        }
+    };
+    db.query_row(sql, params![session_id, created], |_| Ok(()))
+        .is_ok()
 }
 
 pub fn extract_last_tool(session: &Session) -> String {
@@ -921,6 +1261,31 @@ pub fn extract_last_tool(session: &Session) -> String {
 }
 
 fn last_tool(db: &Connection, session_id: &str) -> String {
+    if schema(db) == Schema::V2 {
+        // The tools are inline in the assistant content; take the newest
+        // message that holds one and the last tool item within it.
+        let raw: Option<String> = db
+            .query_row(
+                "SELECT data FROM session_message WHERE session_id = ?1 AND type = 'assistant' \
+                 AND data LIKE '%\"type\":\"tool\"%' ORDER BY seq DESC LIMIT 1",
+                params![session_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .ok()
+            .flatten();
+        return raw
+            .map(|raw| content_items(&raw))
+            .and_then(|items| {
+                items
+                    .iter()
+                    .rev()
+                    .find(|i| i.get("type").and_then(Value::as_str) == Some("tool"))
+                    .and_then(|i| i.get("name").and_then(Value::as_str))
+                    .map(str::to_string)
+            })
+            .unwrap_or_default();
+    }
     db.query_row(
         "SELECT json_extract(data, '$.tool') FROM part \
          WHERE session_id = ?1 AND json_extract(data, '$.type') = 'tool' \
@@ -1043,6 +1408,124 @@ mod tests {
         assert_eq!(data.metrics.tool_errors, 1);
 
         // Release the handle this thread holds before removing the file.
+        close_databases();
+        std::fs::remove_file(path).unwrap();
+    }
+
+    /// Build an OpenCode 2 database: `session_v2` plus `session_message`, whose
+    /// parts live inline in each message's `data.content[]`.
+    fn open_v2(path: &Path) -> Connection {
+        let db = Connection::open(path).unwrap();
+        db.execute_batch(
+            "CREATE TABLE session_v2 (
+                id TEXT PRIMARY KEY, parent_id TEXT, directory TEXT NOT NULL, title TEXT,
+                model TEXT, cost REAL NOT NULL DEFAULT 0, tokens_input INTEGER NOT NULL DEFAULT 0,
+                tokens_output INTEGER NOT NULL DEFAULT 0, tokens_reasoning INTEGER NOT NULL DEFAULT 0,
+                tokens_cache_read INTEGER NOT NULL DEFAULT 0, tokens_cache_write INTEGER NOT NULL DEFAULT 0,
+                time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL, agent TEXT
+             );
+             CREATE TABLE session_message (
+                id TEXT PRIMARY KEY, session_id TEXT NOT NULL, type TEXT NOT NULL,
+                seq INTEGER NOT NULL, time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL,
+                data TEXT NOT NULL
+             );",
+        )
+        .unwrap();
+        db
+    }
+
+    /// An OpenCode 2 database reads as the one earlier versions wrote: the
+    /// sessions list, the accounting, the inline tools, the compaction count and
+    /// the conversation all come from `session_v2`/`session_message`.
+    #[test]
+    fn opencode_two_reads_sessions_tools_and_conversation() {
+        let path = temp_db("v2");
+        let db = open_v2(&path);
+        db.execute(
+            "INSERT INTO session_v2 (id, directory, title, model, time_created, time_updated) \
+             VALUES ('ses_2', '/work', 'v2 work', '{\"id\":\"claude-test\"}', 1000, 2000)",
+            [],
+        )
+        .unwrap();
+        // One assistant turn carrying its text and three tool calls inline.
+        let assistant = r#"{"time":{"created":1100,"completed":1900},"model":{"id":"claude-test","variant":"high"},"cost":0.75,"tokens":{"input":120,"output":30,"reasoning":5,"cache":{"read":80,"write":10}},"content":[
+            {"type":"text","text":"on it"},
+            {"type":"tool","id":"c1","name":"bash","state":{"status":"completed","input":{"command":"pwd"}},"time":{"created":1100,"completed":1200}},
+            {"type":"tool","id":"c2","name":"bash","state":{"status":"error","input":{"command":"exit 1"},"error":{"type":"tool.execution","message":"boom"}},"time":{"created":1200,"completed":1300}},
+            {"type":"tool","id":"c3","name":"edit","state":{"status":"completed","input":{"filePath":"src/main.rs","oldString":"old\nline","newString":"new\nlines\nhere"}},"time":{"created":1300,"completed":1450}}
+        ]}"#;
+        let rows = [
+            ("m0", "user", 0i64, 1050i64, r#"{"text":"do the thing"}"#),
+            ("m1", "assistant", 1, 1100, assistant),
+            // A compaction turn: its spend counts, but it is not the last model.
+            (
+                "m2",
+                "compaction",
+                2,
+                1950,
+                r#"{"model":{"id":"summariser"},"cost":0.1,"tokens":{"input":100,"output":0}}"#,
+            ),
+        ];
+        for (id, kind, seq, created, data) in rows {
+            db.execute(
+                "INSERT INTO session_message (id, session_id, type, seq, time_created, time_updated, data) \
+                 VALUES (?1, 'ses_2', ?2, ?3, ?4, ?4, ?5)",
+                params![id, kind, seq, created, data],
+            )
+            .unwrap();
+        }
+        drop(db);
+
+        let data = extract(&path, "ses_2");
+        assert_eq!(data.title.as_deref(), Some("v2 work"));
+        // The compaction's model does not become the conversation's.
+        assert_eq!(data.last_model, "claude-test");
+        assert_eq!(data.reasoning_effort.as_deref(), Some("high"));
+        // Assistant 240 + compaction 100 input.
+        assert_eq!(data.tokens.total, 340);
+        assert!((data.costs.total - 0.85).abs() < 1e-9);
+        assert_eq!(data.compactions, 1);
+        assert_eq!(data.metrics.tools.get("bash"), Some(&2));
+        assert_eq!(data.metrics.tool_errors, 1);
+        let edit = &data.metrics.tool_details["edit"][0];
+        assert_eq!(edit.d, "src/main.rs");
+        assert_eq!(edit.dur_ms, Some(150));
+        let delta = edit.delta.as_ref().unwrap();
+        assert_eq!((delta.added, delta.removed), (3, 2));
+
+        // Listed from `session_v2`, with its last-activity stamp.
+        let listed = with_db(&path, |db| sessions_in(db, &path)).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].session_id, "ses_2");
+        assert_eq!(listed[0].last_active, util::ms_to_rfc3339(1950));
+
+        // The newest tool, read out of the inline content.
+        assert_eq!(extract_last_tool(&listed[0]), "edit");
+
+        // The conversation reads the user's words and the assistant's calls.
+        let mut roles = Vec::new();
+        for_each_message(&path, "ses_2", |message, _, parts| {
+            roles.push(
+                message
+                    .get("role")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
+            );
+            if message.get("role").and_then(Value::as_str) == Some("user") {
+                assert_eq!(parts[0]["text"], "do the thing");
+            }
+            if message.get("role").and_then(Value::as_str) == Some("assistant") {
+                let tools: Vec<_> = parts
+                    .iter()
+                    .filter(|p| p["type"] == "tool")
+                    .map(|p| p["tool"].as_str().unwrap().to_string())
+                    .collect();
+                assert_eq!(tools, ["bash", "bash", "edit"]);
+            }
+        });
+        assert_eq!(roles, ["user", "assistant", "system"]);
+
         close_databases();
         std::fs::remove_file(path).unwrap();
     }
