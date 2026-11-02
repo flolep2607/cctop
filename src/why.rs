@@ -58,12 +58,37 @@ fn resolve<'a>(sessions: &'a [Session], id: &str) -> Result<Vec<&'a Session>, St
     }
 }
 
+/// The one session id among the arguments, if there is one.
+///
+/// Flags are refused rather than dropped: this command has none, and a script
+/// that ran `cctop why --json` and got the plain report it never asked for is
+/// worse off than one that got a usage error.
+fn session_arg(argv: &[String]) -> Result<Option<&str>, String> {
+    let mut session = None;
+    for arg in argv {
+        if arg.starts_with('-') {
+            return Err(format!("unknown option {arg}"));
+        }
+        if session.is_some() {
+            return Err("takes one session id".to_string());
+        }
+        session = Some(arg.as_str());
+    }
+    Ok(session)
+}
+
 pub fn run(argv: &[String]) -> i32 {
     if argv.iter().any(|a| a == "-h" || a == "--help") {
         print!("{HELP}");
         return 0;
     }
-    let wanted = argv.iter().find(|a| !a.starts_with('-'));
+    let wanted = match session_arg(argv) {
+        Ok(wanted) => wanted,
+        Err(why) => {
+            println!("cctop why: {why}\n\n{HELP}");
+            return 2;
+        }
+    };
 
     let mut loader = Loader::new();
     // A full walk, because the question is about attribution and attribution is
@@ -162,6 +187,28 @@ mod tests {
         .into_iter()
         .map(|(id, provider)| Session::new(provider, id.to_string()))
         .collect()
+    }
+
+    /// A flag this command does not have is a usage error, not something to
+    /// drop on the floor: `cctop why --json` used to print the plain report
+    /// and exit 0, so a script could not tell it had been ignored.
+    #[test]
+    fn an_unknown_flag_is_refused_rather_than_dropped() {
+        let args = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            session_arg(&args(&["--json"])),
+            Err("unknown option --json".to_string())
+        );
+        assert_eq!(
+            session_arg(&args(&["--verboes"])),
+            Err("unknown option --verboes".to_string())
+        );
+        assert_eq!(
+            session_arg(&args(&["one", "two"])),
+            Err("takes one session id".to_string())
+        );
+        assert_eq!(session_arg(&args(&["one"])), Ok(Some("one")));
+        assert_eq!(session_arg(&args(&[])), Ok(None));
     }
 
     /// The help says a prefix is allowed, and it is — as long as it picks out
