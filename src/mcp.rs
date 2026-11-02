@@ -659,6 +659,19 @@ fn wait_for_session(args: WaitArgs) -> Result<String, String> {
     }
 }
 
+/// Whether `dir` is `root` or a directory under it, by path component rather
+/// than by string prefix: `/home/x/cctop-old` is not in `/home/x/cctop`, and
+/// an agent asking "who else is in this repo" should not be handed another
+/// checkout's sessions.
+fn under(dir: &str, root: &str) -> bool {
+    let root = root.trim_end_matches('/');
+    match dir.strip_prefix(root) {
+        Some("") => true,
+        Some(rest) => rest.starts_with('/'),
+        None => false,
+    }
+}
+
 fn list_sessions(sessions: &[Session], args: ListArgs) -> String {
     let running_only = args.running_only;
     let directory = args.directory.as_deref();
@@ -668,7 +681,7 @@ fn list_sessions(sessions: &[Session], args: ListArgs) -> String {
         .iter()
         .filter(|s| !running_only || s.is_running())
         .filter(|s| match directory {
-            Some(dir) => s.label_source.starts_with(dir.trim_end_matches('/')),
+            Some(dir) => under(&s.label_source, dir),
             None => true,
         })
         .collect();
@@ -871,6 +884,18 @@ fn search_sessions(sessions: &[Session], args: SearchArgs) -> Result<String, Str
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `list_sessions` promises sessions at or under a directory, and a
+    /// sibling checkout whose name starts with the same letters is neither.
+    #[test]
+    fn a_directory_filter_matches_whole_components_only() {
+        assert!(under("/home/x/cctop", "/home/x/cctop"));
+        assert!(under("/home/x/cctop/sub", "/home/x/cctop/"));
+        assert!(!under("/home/x/cctop-old", "/home/x/cctop"));
+        assert!(!under("/home/x/cctop2", "/home/x/cctop"));
+        assert!(!under("/home/x/cctop.bak", "/home/x/cctop"));
+        assert!(!under("/home/x/other", "/home/x/cctop"));
+    }
 
     /// A notification carries no id, and answering one is a protocol error —
     /// the client is not waiting for a reply and will not match it to anything.

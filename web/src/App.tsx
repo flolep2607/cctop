@@ -18,7 +18,11 @@ export default function App() {
         <Switch>
           <Route path="/" component={DashboardPage} />
           <Route path="/analytics" component={AnalyticsPage} />
-          <Route path="/session/:id" component={SessionPage} />
+          {/* Keyed by id: wouter reuses the page when only the id changes, and
+              the terminal it is showing is a credential for the *previous*
+              session — typing after a jump from the palette would reach the
+              agent left behind. A new key remounts the page, which drops it. */}
+          <Route path="/session/:id">{(params) => <SessionPage key={params.id} />}</Route>
           <Route path="/window/:name">{(params) => <TerminalWindow name={decodeURIComponent(params.name)} />}</Route>
           <Route path="/workspace" component={WorkspacePage} />
           <Route>

@@ -1,5 +1,6 @@
 import { memo, useState, type ReactNode } from "react";
 import { ArrowUpRight, Bot, ChevronRight, Hash, Loader2 } from "lucide-react";
+import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 import { clock, costLabel, secs, tokens } from "@/lib/format";
 import { Badge } from "@/components/ui/badge";
@@ -314,7 +315,11 @@ function AgentTurns({ session, agent, brief }: { session: string; agent: AgentCa
   return (
     <div className="border-primary/30 ml-3 border-l-2">
       {earlier > 0 && (
-        <button type="button" onClick={() => loadEarlier()} className="text-muted-foreground hover:text-primary w-full px-4 py-2 text-left text-xs">
+        <button
+          type="button"
+          onClick={() => loadEarlier().catch((e) => toast.error("Could not read earlier turns: " + String((e as Error).message || e)))}
+          className="text-muted-foreground hover:text-primary w-full px-4 py-2 text-left text-xs"
+        >
           Show earlier turns — {earlier} not drawn
         </button>
       )}
