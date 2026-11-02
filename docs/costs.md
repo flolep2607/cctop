@@ -59,6 +59,10 @@ as a measure of resource consumption, not as billing. Use `--plan max` or
 
 ## Today's model mix
 
+"Today" follows `today_window` in `config.toml`: the calendar day, or the last
+24 hours. The [settings](the-table.md#settings-and-keybinds) section says what
+the two spellings change, here and in the month's rows.
+
 The Overview's **Models** row is today's spend split by model: a short stacked
 bar, then each model's name in its segment's colour with its share of the day.
 Colours go by rank, not vendor, since the mix worth seeing is usually two

@@ -18,7 +18,7 @@ use std::path::Path;
 
 /// Every `[settings]` key: its name, its default as the file would spell it,
 /// and what it does.
-pub const SETTINGS: [(&str, &str, &str); 22] = [
+pub const SETTINGS: [(&str, &str, &str); 24] = [
     (
         "theme",
         "\"auto\"",
@@ -53,6 +53,16 @@ pub const SETTINGS: [(&str, &str, &str); 22] = [
         "compact_threshold",
         "83.5",
         "Context % at which the agent compacts. On restart",
+    ),
+    (
+        "today_window",
+        "\"calendar\"",
+        "calendar/rolling: Today is this day, or the last 24h",
+    ),
+    (
+        "month_window",
+        "\"calendar\"",
+        "calendar/rolling: This month is this one, or 30 days",
     ),
     (
         "hide_columns",
@@ -127,6 +137,37 @@ pub const SETTINGS: [(&str, &str, &str); 22] = [
 
 /// The values a setting that is a choice between names takes, default first,
 /// in the order Enter turns through them.
+/// Whether a figure the Overview shows is the calendar one or the trailing one.
+///
+/// The calendar day is the one that resets at midnight: a session started at
+/// 23:00 stops counting at 00:00, and the chart is drawn by clock hour. The
+/// rolling day is the 24 hours ending with this one, and the rolling month the
+/// 30 days ending today, so a late-night session is still "today" when you
+/// come back to it at one in the morning.
+///
+/// The month's two spellings differ more than their names suggest: a calendar
+/// month is 28 to 31 days and starts over on the 1st, while the rolling one is
+/// always 30 days and always includes today.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Window {
+    #[default]
+    Calendar,
+    Rolling,
+}
+
+impl Window {
+    /// The names the file spells, default first.
+    pub const NAMES: &'static [&'static str] = &["calendar", "rolling"];
+
+    pub fn parse(name: &str) -> Option<Window> {
+        match name {
+            "calendar" => Some(Window::Calendar),
+            "rolling" => Some(Window::Rolling),
+            _ => None,
+        }
+    }
+}
+
 pub fn choices(name: &str) -> Option<&'static [&'static str]> {
     match name {
         "theme" => Some(&["auto", "light", "dark", "mono"]),
@@ -136,6 +177,7 @@ pub fn choices(name: &str) -> Option<&'static [&'static str]> {
         // Top first: it is where the bar has always been, so nobody's screen
         // moves on an upgrade.
         "tab_bar" => Some(&["top", "bottom", "left", "right"]),
+        "today_window" | "month_window" => Some(Window::NAMES),
         "predictive_echo" => Some(&crate::predict::Mode::NAMES),
         _ => None,
     }
@@ -245,6 +287,11 @@ pub struct Settings {
     pub graph_glyphs: Option<String>,
     /// One of [`choices`]`("tab_bar")`, refused otherwise like `graph_glyphs`.
     pub tab_bar: Option<String>,
+    /// One of [`choices`]`("today_window")`: whether the Overview's day is the
+    /// calendar one or the last 24 hours. See [`Settings::today_window`].
+    pub today_window: Option<String>,
+    /// The same for the month: this calendar month, or the last 30 days.
+    pub month_window: Option<String>,
     pub notify: Option<bool>,
     pub auto_update: Option<bool>,
     /// Whether the daily usage report is sent — see [`crate::telemetry`].
@@ -330,6 +377,16 @@ impl Settings {
                         .as_str()
                         .filter(|v| choices(name).is_some_and(|c| c.contains(v)))
                         .map(|v| out.tab_bar = Some(v.into()))
+                        .is_none(),
+                    "today_window" => item
+                        .as_str()
+                        .filter(|v| choices(name).is_some_and(|c| c.contains(v)))
+                        .map(|v| out.today_window = Some(v.into()))
+                        .is_none(),
+                    "month_window" => item
+                        .as_str()
+                        .filter(|v| choices(name).is_some_and(|c| c.contains(v)))
+                        .map(|v| out.month_window = Some(v.into()))
                         .is_none(),
                     "notify" => item.as_bool().map(|v| out.notify = Some(v)).is_none(),
                     "auto_update" => item.as_bool().map(|v| out.auto_update = Some(v)).is_none(),
@@ -430,6 +487,8 @@ impl Settings {
             "theme" => self.theme.as_ref().map(|v| format!("{v:?}")),
             "graph_glyphs" => self.graph_glyphs.as_ref().map(|v| format!("{v:?}")),
             "tab_bar" => self.tab_bar.as_ref().map(|v| format!("{v:?}")),
+            "today_window" => self.today_window.as_ref().map(|v| format!("{v:?}")),
+            "month_window" => self.month_window.as_ref().map(|v| format!("{v:?}")),
             "notify" => self.notify.map(|v| v.to_string()),
             "auto_update" => self.auto_update.map(|v| v.to_string()),
             "telemetry" => self.telemetry.map(|v| v.to_string()),
@@ -502,6 +561,17 @@ impl Settings {
     /// How long a live session has to have been quiet to count as idle.
     pub fn idle_after_ms(&self) -> i64 {
         (self.idle_after.unwrap_or(IDLE_AFTER_HOURS) * 3_600_000.0) as i64
+    }
+
+    /// Whether the Overview's "Today" is this calendar day or the last 24
+    /// hours.
+    pub fn today_window(&self) -> Window {
+        Window::parse(self.today_window.as_deref().unwrap_or_default()).unwrap_or_default()
+    }
+
+    /// Whether its "This month" is this calendar month or the last 30 days.
+    pub fn month_window(&self) -> Window {
+        Window::parse(self.month_window.as_deref().unwrap_or_default()).unwrap_or_default()
     }
 
     /// How soon after a paste an identical one is taken for an echo and
@@ -854,6 +924,25 @@ mod tests {
             map.remap.is_empty(),
             "a default rebound onto itself is no change"
         );
+    }
+
+    /// Both windows default to the calendar spelling, so an upgrade does not
+    /// quietly move what "Today" means, and the rolling one is what the file
+    /// says rather than what the accessor ignores.
+    #[test]
+    fn the_day_and_month_windows_default_to_the_calendar_one() {
+        let plain = Settings::default();
+        assert_eq!(plain.today_window(), Window::Calendar);
+        assert_eq!(plain.month_window(), Window::Calendar);
+        let s =
+            Settings::parse("[settings]\ntoday_window = \"rolling\"\nmonth_window = \"rolling\"");
+        assert!(s.problems.is_empty(), "{:?}", s.problems);
+        assert_eq!(s.today_window(), Window::Rolling);
+        assert_eq!(s.month_window(), Window::Rolling);
+        // And one can move without the other.
+        let half = Settings::parse("[settings]\nmonth_window = \"rolling\"");
+        assert_eq!(half.today_window(), Window::Calendar);
+        assert_eq!(half.month_window(), Window::Rolling);
     }
 
     /// The module doc says [`SETTINGS`] and [`BINDINGS`] are the whole schema,

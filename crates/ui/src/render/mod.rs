@@ -2724,6 +2724,93 @@ mod tests {
         );
     }
 
+    /// "Today" and "This month" are whichever window the settings name: the
+    /// labels say which one, and the figures and charts come from that window
+    /// rather than from the calendar buckets the other one fills.
+    #[test]
+    fn the_overview_counts_the_window_the_settings_ask_for() {
+        use cctop_core::cache::UiPrefs;
+        use cctop_core::pricing::Plan;
+        use cctop_core::settings::Window;
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let screen = |today: Window, month: Window| -> String {
+            let (tx, _rx) = std::sync::mpsc::channel();
+            let mut app = App::with_prefs(Plan::Retail, tx, UiPrefs::default());
+            app.today_window = today;
+            app.month_window = month;
+            // Different figures on each side so a row that reads the wrong
+            // one is a wrong number, not a tie.
+            app.stats.spend_today = 4.0;
+            app.stats.spend_last_24h = 9.0;
+            app.stats.daily_hourly = vec![0.0; 24];
+            app.stats.rolling_hourly = vec![0.0; 24];
+            app.stats.rolling_hourly[23] = 9.0;
+            app.stats.spend_calendar_month = 40.0;
+            app.stats.spend_month = 90.0;
+            app.stats.monthly_daily = vec![0.0; 31];
+            app.stats.rolling_daily = vec![0.0; 30];
+            app.stats.rolling_daily[29] = 90.0;
+            app.stats.spend_total = 900.0;
+            app.stats.top_today = vec![("orchard".into(), 4.0)];
+            app.stats.top_last_24h = vec![("beehive".into(), 9.0)];
+            app.stats.models_today = vec![("opus-5".into(), 4.0)];
+            app.stats.models_last_24h = vec![("haiku-4-5".into(), 9.0)];
+
+            let (cols, rows) = (190u16, 12u16);
+            let mut terminal = Terminal::new(TestBackend::new(cols, rows)).expect("backend");
+            terminal
+                .draw(|frame| {
+                    draw(frame, &mut app);
+                })
+                .expect("draw");
+            let buffer = terminal.backend().buffer().clone();
+            (0..6)
+                .map(|y| (0..cols).map(|x| buffer[(x, y)].symbol()).collect())
+                .collect::<Vec<String>>()
+                .join("\n")
+        };
+
+        let calendar = screen(Window::Calendar, Window::Calendar);
+        assert!(
+            calendar.contains("Today") && calendar.contains("$4.00"),
+            "the calendar day is not the one drawn: {calendar}"
+        );
+        assert!(
+            calendar.contains("This month") && calendar.contains("$40.00"),
+            "the calendar month is not the one drawn: {calendar}"
+        );
+        assert!(calendar.contains("Top today") && calendar.contains("orchard"));
+        assert!(calendar.contains("/day this month"), "{calendar}");
+
+        let rolling = screen(Window::Rolling, Window::Rolling);
+        assert!(
+            rolling.contains("Last 24h") && rolling.contains("$9.00"),
+            "the rolling day is not the one drawn: {rolling}"
+        );
+        assert!(
+            rolling.contains("Last 30d") && rolling.contains("$90.00"),
+            "the rolling month is not the one drawn: {rolling}"
+        );
+        assert!(
+            rolling.contains("Top 24h") && rolling.contains("beehive"),
+            "the day's ranking did not move with the window: {rolling}"
+        );
+        assert!(
+            rolling.contains("haiku-4-5"),
+            "the model mix did not move with the window: {rolling}"
+        );
+        assert!(
+            rolling.contains("/day, last 30 days"),
+            "the trailing average still divides by the calendar: {rolling}"
+        );
+        assert!(
+            !rolling.contains("This month") && !rolling.contains("Top today"),
+            "a calendar label survived the rolling window: {rolling}"
+        );
+    }
+
     /// One line per entry, whether or not it can run.
     ///
     /// The reason a blocked entry carries used to sit on a line of its own,

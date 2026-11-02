@@ -20,9 +20,9 @@ expression: screen
 │  auto_update       [x]              Offer to update at startup when a newer …│
 │  telemetry         [x]              Send an anonymous usage report once a da…│
 │  compact_threshold 83.5             Context % at which the agent compacts. O…│
+│  today_window      calendar     ↻   calendar/rolling: Today is this day, or …│
+│  month_window      calendar     ↻   calendar/rolling: This month is this one…│
 │  hide_columns      ""               Columns to hide, e.g. "tok_rate,mem"     │
 │  alert_cost        0                Alert when a session's cost passes $X    │
-│  alert_burn        0                Alert when a session burns over $X an ho…│
-│  alert_today       0                Alert when today's spend passes $X       │
-╰ 88   ↑↓ scroll   / filter   Esc back ────────────────────────────────────────╯
+╰ 90   ↑↓ scroll   / filter   Esc back ────────────────────────────────────────╯
 / Filter ↵ Change ⌫ Reset e Edit file , Back Alt+←→ Tabs F1 Help        ⧉ share

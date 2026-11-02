@@ -1,6 +1,7 @@
 //! The overview: what is being spent, how fast, and on which models.
 
 use super::*;
+use cctop_core::settings::Window;
 
 /// The longest series the Overview charts: one calendar month, one dot a day.
 /// Every chart is drawn at this width or narrower and right-aligned into it, so
@@ -196,9 +197,29 @@ pub(super) fn draw_overview(frame: &mut Frame, area: Rect, app: &App) {
     .split(inner);
 
     let now = chrono::Local::now();
-    let hour_idx = Some(chrono::Timelike::hour(&now) as usize);
     let day_of_month = chrono::Datelike::day(&now) as usize;
-    let day_idx = Some(day_of_month - 1);
+    // Which day and which month the panel is counting, as `config.toml` says:
+    // the calendar ones, or the trailing ones. The chart's "now" marker is the
+    // bar the window ends on — this hour, or the 30th day — not the clock's.
+    let (hour_idx, day_idx) = match (app.today_window, app.month_window) {
+        (Window::Calendar, Window::Calendar) => (
+            Some(chrono::Timelike::hour(&now) as usize),
+            Some(day_of_month - 1),
+        ),
+        (Window::Calendar, Window::Rolling) => {
+            (Some(chrono::Timelike::hour(&now) as usize), Some(29))
+        }
+        (Window::Rolling, Window::Calendar) => (Some(23), Some(day_of_month - 1)),
+        (Window::Rolling, Window::Rolling) => (Some(23), Some(29)),
+    };
+    let day_title = match app.today_window {
+        Window::Calendar => "Today",
+        Window::Rolling => "Last 24h",
+    };
+    let month_title = match app.month_window {
+        Window::Calendar => "This month",
+        Window::Rolling => "Last 30d",
+    };
     let rt_idx = app.global_spend.values().len().checked_sub(1);
 
     // --- Spend -------------------------------------------------------------
@@ -223,8 +244,17 @@ pub(super) fn draw_overview(frame: &mut Frame, area: Rect, app: &App) {
     };
 
     // A month-to-date average is the one number that says whether today was
-    // ordinary, and it is a division of two figures already on the panel.
-    let per_day = app.stats.spend_calendar_month / day_of_month as f64;
+    // ordinary, and it is a division of two figures already on the panel. A
+    // rolling month divides by its own 30 days rather than the calendar's.
+    let month_spend = app.stats.month_spend(app.month_window);
+    let per_day = match app.month_window {
+        Window::Calendar => month_spend / day_of_month as f64,
+        Window::Rolling => month_spend / 30.0,
+    };
+    let per_day_what = match app.month_window {
+        Window::Calendar => "day this month",
+        Window::Rolling => "day, last 30 days",
+    };
 
     let left_lines = vec![
         row(
@@ -235,16 +265,16 @@ pub(super) fn draw_overview(frame: &mut Frame, area: Rect, app: &App) {
             rt_idx,
         ),
         row(
-            "Today",
-            app.stats.spend_today,
-            &app.stats.daily_hourly,
+            day_title,
+            app.stats.day_spend(app.today_window),
+            app.stats.day_hours(app.today_window),
             HOUR_FLOOR,
             hour_idx,
         ),
         row(
-            "This month",
-            app.stats.spend_calendar_month,
-            &app.stats.monthly_daily,
+            month_title,
+            month_spend,
+            app.stats.month_days(app.month_window),
             DAY_FLOOR,
             day_idx,
         ),
@@ -261,7 +291,7 @@ pub(super) fn draw_overview(frame: &mut Frame, area: Rect, app: &App) {
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                format!("{}/day this month", util::adaptive_usd(per_day)),
+                format!("{}/{}", util::adaptive_usd(per_day), per_day_what),
                 theme::dim(),
             ),
         ]),
@@ -284,12 +314,22 @@ pub(super) fn draw_overview(frame: &mut Frame, area: Rect, app: &App) {
         let capacity = sub_cols * ROWS;
 
         let mut mid_lines: Vec<Line<'static>> = Vec::with_capacity(ROWS);
-        let top = &app.stats.top_today;
+        let top = app.stats.day_top(app.today_window);
+        let top_title = match app.today_window {
+            Window::Calendar => "Top today",
+            Window::Rolling => "Top 24h",
+        };
 
         if top.is_empty() {
             mid_lines.push(Line::from(vec![
-                Span::styled(format!("{:<head_w$}", "Top today"), theme::label()),
-                Span::styled("nothing spent yet today", theme::dim()),
+                Span::styled(format!("{top_title:<head_w$}"), theme::label()),
+                Span::styled(
+                    match app.today_window {
+                        Window::Calendar => "nothing spent yet today",
+                        Window::Rolling => "nothing in the last 24 hours",
+                    },
+                    theme::dim(),
+                ),
             ]));
         } else {
             let shown = capacity.min(top.len());
@@ -298,7 +338,7 @@ pub(super) fn draw_overview(frame: &mut Frame, area: Rect, app: &App) {
             let hidden = top.len() - shown;
             for r in 0..ROWS {
                 let head = match r {
-                    0 => format!("{:<head_w$}", "Top today"),
+                    0 => format!("{:<head_w$}", top_title),
                     _ => " ".repeat(head_w),
                 };
                 let mut spans = vec![Span::styled(head, theme::label())];
@@ -336,18 +376,24 @@ pub(super) fn draw_overview(frame: &mut Frame, area: Rect, app: &App) {
             format!("{:<r_label_w$}", "Models"),
             theme::label(),
         )];
-        let today: f64 = stats.models_today.iter().map(|m| m.1).sum();
+        let models = stats.day_models(app.today_window);
+        let today: f64 = models.iter().map(|m| m.1).sum();
         if today <= 0.0 {
-            model_spans.push(Span::styled("idle today", theme::dim()));
+            model_spans.push(Span::styled(
+                match app.today_window {
+                    Window::Calendar => "idle today",
+                    Window::Rolling => "quiet 24h",
+                },
+                theme::dim(),
+            ));
         } else {
-            // Percentages of today's spend, not a count of sessions ever seen:
-            // the mix that is costing money is the one worth naming.
-            let bar = spend_bar(&stats.models_today, body_w);
+            // Percentages of the day's spend, not a count of sessions ever
+            // seen: the mix that is costing money is the one worth naming.
+            let bar = spend_bar(models, body_w);
             let charted = !bar.is_empty();
             model_spans.extend(bar);
             let mut groups = Vec::new();
-            for (i, (name, cost)) in stats
-                .models_today
+            for (i, (name, cost)) in models
                 .iter()
                 .take(if charted { CHARTED_MODELS } else { 3 })
                 .enumerate()
