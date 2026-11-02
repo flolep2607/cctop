@@ -756,6 +756,15 @@ pub struct UiPrefs {
     /// Keys of the tree's folded groups. Kept even while the tree is off, so
     /// turning it back on restores the shape it was left in.
     pub collapsed_groups: Vec<String>,
+    /// What the dashboard was exposing when it last served: `"local"` for the
+    /// loopback page, `"worldwide"` for one on a tunnel. `None` when it was
+    /// stopped on purpose.
+    ///
+    /// A server is what makes a row reachable from a phone, and having to arm
+    /// the same two-step corner after every launch is the kind of chore that
+    /// ends in serving nothing. Saying yes is remembered as saying yes; the
+    /// red `×` on the link is what says no.
+    pub serve: Option<String>,
     /// The telemetry notice has been shown on an interactive run. Until it
     /// has, nothing is sent — see [`crate::telemetry`].
     pub telemetry_notice_shown: bool,
@@ -797,6 +806,7 @@ impl Default for UiPrefs {
             search_history: Vec::new(),
             tree: false,
             collapsed_groups: Vec::new(),
+            serve: None,
             telemetry_notice_shown: false,
             telemetry_id: None,
         }

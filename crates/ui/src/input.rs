@@ -2226,6 +2226,9 @@ impl App {
             // turning an unrelated one into a tunnel.
             let armed = std::mem::replace(&mut self.share_arm, false);
             let on_local = layout.share_local_at(ev.column, ev.row);
+            // The red `×` in front of the link, which takes the page down
+            // rather than opening it.
+            let on_stop = layout.share_stop_at(ev.column, ev.row);
             // Same rule as the corner's: arming is about the click being made
             // now, so any click that is not the second one on `q Quit` takes it
             // back. A first click that quits on the next unrelated one would be
@@ -2233,6 +2236,10 @@ impl App {
             let quit_armed = std::mem::replace(&mut self.quit_arm, false);
             if let Some(key) = layout.key_at(ev.column, ev.row) {
                 self.on_hint_click(key, quit_armed);
+                return;
+            }
+            if on_stop {
+                self.stop_serving();
                 return;
             }
             if on_corner {

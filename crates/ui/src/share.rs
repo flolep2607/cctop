@@ -269,6 +269,29 @@ impl App {
         }
     }
 
+    /// Serve again the way the last run was serving, if it was.
+    ///
+    /// Called once as the dashboard starts. A link that has to be re-armed on
+    /// every launch is a link nobody uses from the phone it was made for, so
+    /// saying yes is remembered as saying yes. A deliberate stop — the red `×`
+    /// on the corner, or `x` in the serve panel — is what clears it.
+    pub(super) fn resume_serving(&mut self) {
+        match self.prefs.serve.as_deref() {
+            Some("worldwide") => self.start_serving_with(true, false),
+            Some("local") => self.start_serving_with(false, false),
+            _ => {}
+        }
+    }
+
+    /// Remember how this serve was exposed, for the next launch to restore.
+    fn remember_serving(&mut self, mode: &str) {
+        if self.prefs.serve.as_deref() == Some(mode) {
+            return;
+        }
+        self.prefs.serve = Some(mode.to_string());
+        self.save_prefs();
+    }
+
     /// Start serving the table to a browser, or say why not.
     ///
     /// `tunnel` is the difference between a link that works on this machine and
@@ -341,6 +364,10 @@ impl App {
                     true => "on the internet",
                     false => "on this machine",
                 };
+                self.remember_serving(match serving.public.is_some() {
+                    true => "worldwide",
+                    false => "local",
+                });
                 self.set_status(format!("Serving {where_to} — B for the link"));
                 self.serving = Some(serving);
             }
@@ -379,6 +406,10 @@ impl App {
                     Some(why) => self.set_status(format!("On a quick tunnel instead: {why}")),
                     None => self.set_status("On the internet — click the link, or B to copy it"),
                 }
+                self.remember_serving(match serving.public.is_some() {
+                    true => "worldwide",
+                    false => "local",
+                });
                 self.serving = Some(serving);
             }
             Err(error) => {
@@ -395,6 +426,12 @@ impl App {
     pub(super) fn stop_serving(&mut self) {
         let kept = self.serving_on_account();
         if self.serving.take().is_some() {
+            // Stopping is a decision about the next launch too: a link that
+            // came back by itself after this would be one the user did not ask
+            // for. The choice is forgotten, and the corner goes back to
+            // `⧉ share`.
+            self.prefs.serve = None;
+            self.save_prefs();
             self.set_status(match kept {
                 true => "Stopped serving — the links work again when you serve; r revokes them",
                 false => "Stopped serving — the links no longer answer",
@@ -433,6 +470,76 @@ mod tests {
             publish: Box::new(|_, _, _| {}),
         };
         (served, token)
+    }
+
+    /// What the last launch decided, as the fake server saw it. One static per
+    /// test that reads it: the two resumes run in parallel.
+    static LOCAL_ASKED_FOR_TUNNEL: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+    static WORLDWIDE_ASKED_FOR_TUNNEL: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+
+    fn local_server(request: ServeRequest) -> anyhow::Result<Served> {
+        LOCAL_ASKED_FOR_TUNNEL.store(request.tunnel, std::sync::atomic::Ordering::SeqCst);
+        Ok(served().0)
+    }
+
+    fn worldwide_server(request: ServeRequest) -> anyhow::Result<Served> {
+        WORLDWIDE_ASKED_FOR_TUNNEL.store(request.tunnel, std::sync::atomic::Ordering::SeqCst);
+        let (mut serving, _) = served();
+        serving.public = Some("https://cctop-computer.masterchef.mom/?t=abc".into());
+        Ok(serving)
+    }
+
+    /// Saying yes is remembered as saying yes: a launch puts back the serve
+    /// the last one left on, on the same machine or on the internet.
+    #[test]
+    fn a_local_serve_is_put_back_on_launch() {
+        let mut app = test_app();
+        app.start_server = Some(local_server);
+        app.prefs.serve = Some("local".into());
+        app.resume_serving();
+        assert!(
+            !LOCAL_ASKED_FOR_TUNNEL.load(std::sync::atomic::Ordering::SeqCst),
+            "a local serve was resumed as a tunnel"
+        );
+        assert!(app.serving.is_some(), "nothing is serving after the resume");
+        assert_eq!(app.prefs.serve.as_deref(), Some("local"));
+    }
+
+    #[test]
+    fn a_worldwide_serve_is_dialled_again_on_launch() {
+        let mut app = test_app();
+        app.start_server = Some(worldwide_server);
+        app.prefs.serve = Some("worldwide".into());
+        app.resume_serving();
+        // Dialling happens off the UI thread; wait for the fake edge to answer
+        // the way the loop waits for a real one.
+        assert!(app.share_opening.is_some(), "the tunnel was not dialled");
+        let start = Instant::now();
+        while app.share_opening.is_some() && start.elapsed() < std::time::Duration::from_secs(5) {
+            app.tick_share();
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert!(app.share_opening.is_none(), "the tunnel never answered");
+        assert!(
+            WORLDWIDE_ASKED_FOR_TUNNEL.load(std::sync::atomic::Ordering::SeqCst),
+            "the resumed serve asked for a loopback page"
+        );
+        assert!(app.serving.is_some(), "nothing is serving after the resume");
+        assert_eq!(app.prefs.serve.as_deref(), Some("worldwide"));
+    }
+
+    /// The red `×` is a decision about the next launch too: a stop means stop,
+    /// and the corner goes back to `⧉ share` rather than coming back by itself.
+    #[test]
+    fn stopping_forgets_the_serve_mode() {
+        let mut app = test_app();
+        app.serving = Some(served().0);
+        app.prefs.serve = Some("worldwide".into());
+        app.stop_serving();
+        assert!(app.serving.is_none());
+        assert_eq!(app.prefs.serve, None);
     }
     /// Both halves matter. A panel that cannot say where the page is has not
     /// answered the question it was opened to answer; a panel that prints the
