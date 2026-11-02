@@ -94,11 +94,21 @@ EOF
     ;;
 esac
 
-if [ "${1:-}" != "--replace" ] &&
-    gh secret list --json name --jq '.[].name' | grep -qx RELEASE_SIGNING_KEY; then
-    echo "RELEASE_SIGNING_KEY is already set; binaries carrying its public half would refuse a new one." >&2
-    echo "Run with --replace only to rotate it (see the top of this script)." >&2
-    exit 1
+if [ "${1:-}" != "--replace" ]; then
+    # Listed into a variable first: with pipefail, a `gh` that fails (expired
+    # token, wrong repository, no network) makes the pipeline non-zero, and
+    # read as a condition that would be taken for "the secret is not set" —
+    # falling through to set a new one and silently rotate the key this guard
+    # exists to keep.
+    secrets=$(gh secret list --json name --jq '.[].name') || {
+        echo "Could not list the repository's secrets; not touching RELEASE_SIGNING_KEY." >&2
+        exit 1
+    }
+    if printf '%s\n' "$secrets" | grep -qx RELEASE_SIGNING_KEY; then
+        echo "RELEASE_SIGNING_KEY is already set; binaries carrying its public half would refuse a new one." >&2
+        echo "Run with --replace only to rotate it (see the top of this script)." >&2
+        exit 1
+    fi
 fi
 
 work=$(mktemp -d)
