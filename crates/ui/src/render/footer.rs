@@ -354,6 +354,9 @@ enum Corner {
     /// the first only arms it. The label says which of the two it is asking
     /// for.
     Button(&'static str),
+    /// Serving on this machine only: the `×` in front of the label stops that
+    /// serve, the rest of the label adds a tunnel to it.
+    ButtonStop(&'static str),
     /// A tunnel is being registered. Cloudflare's edge takes a second or so to
     /// answer, and a spinner is the difference between a wait and a hang.
     Working(String),
@@ -363,7 +366,7 @@ impl Corner {
     fn label(&self) -> &str {
         match self {
             Self::Link(label, _) => label,
-            Self::Button(label) => label,
+            Self::Button(label) | Self::ButtonStop(label) => label,
             Self::Working(label) => label,
         }
     }
@@ -387,13 +390,18 @@ fn share_corner(app: &App) -> Corner {
         return Corner::Working(format!("{} opening a tunnel…", opening.frame()));
     }
     match app.serving.as_ref().and_then(|s| s.public.as_deref()) {
-        Some(url) => Corner::Link(link_label(url), url.to_string()),
+        // The `×` is part of the label rather than a second corner, so the
+        // width reserved for it is the width that is drawn, and the click that
+        // stops has a region of its own (recorded below).
+        Some(url) => Corner::Link(format!("× {}", link_label(url)), url.to_string()),
         // Armed, nothing served yet: the corner becomes two doors — this
         // machine, or the internet. Two halves, one for each answer.
         None if app.share_arm => Corner::Button("⧉ local  ⧉ worldwide"),
         // Serving already, just not off this machine: the click adds the tunnel
-        // to the server that is up rather than starting one.
-        None if app.serving.is_some() => Corner::Button("⧉ + tunnel"),
+        // to the server that is up rather than starting one. The `×` is the
+        // way out of the local serve, which has no link of its own to hang one
+        // on.
+        None if app.serving.is_some() => Corner::ButtonStop("× ⧉ + tunnel"),
         None => Corner::Button("⧉ share"),
     }
 }
@@ -405,6 +413,26 @@ fn share_corner(app: &App) -> Corner {
 /// at full length took a quarter of a wide footer and half a narrow one, and
 /// pushed the key hints off the row it was borrowing.
 const LINK_MAX: usize = 30;
+
+/// The way out of a serve, drawn before the link or the button it belongs to.
+/// Red because it is the one thing on the footer that takes something down.
+const STOP_LABEL: &str = "× ";
+
+/// The red `×` at `x`, and the column just after it, recorded in the layout so
+/// a click on it stops the serve rather than opening the link beside it.
+fn draw_stop(frame: &mut Frame, x: u16, y: u16, layout: &mut Layout) -> u16 {
+    frame.buffer_mut().set_string(
+        x,
+        y,
+        STOP_LABEL,
+        Style::default()
+            .fg(theme::colors().cost_high)
+            .add_modifier(Modifier::BOLD),
+    );
+    let after = x + STOP_LABEL.chars().count() as u16;
+    layout.share_stop = Some((y, x, after));
+    after
+}
 
 /// `https://abc-def.trycloudflare.com/?t=secret` → `⧉ abc-def.trycloudflare.com`.
 ///
@@ -491,15 +519,33 @@ pub(super) fn draw_footer(frame: &mut Frame, area: Rect, app: &App, layout: &mut
     // is least willing to paint — writing it can scroll the screen — and a
     // label that ends there also reads as if it had been cut off.
     let x = area.right() - width as u16 - 1;
+    layout.share_stop = None;
     match &corner {
-        Corner::Link(label, url) => hyperlink::draw(
-            frame.buffer_mut(),
-            x,
-            area.y,
-            label,
-            url,
-            Style::default().fg(theme::colors().accent),
-        ),
+        Corner::Link(label, url) => {
+            // The stop mark in red, and the link after it in the accent, so a
+            // glance reads "here is the page, and here is how to stop it".
+            // Only the label is in the hyperlink: clicking the `×` must not
+            // open the page it is there to take down.
+            let rest_x = draw_stop(frame, x, area.y, layout);
+            let rest: String = label.chars().skip(STOP_LABEL.chars().count()).collect();
+            hyperlink::draw(
+                frame.buffer_mut(),
+                rest_x,
+                area.y,
+                &rest,
+                url,
+                Style::default().fg(theme::colors().accent),
+            );
+        }
+        // The local serve's corner is a button with the same way out in front
+        // of it: the `×` stops, the rest adds a tunnel.
+        Corner::ButtonStop(label) => {
+            let rest_x = draw_stop(frame, x, area.y, layout);
+            let rest: String = label.chars().skip(STOP_LABEL.chars().count()).collect();
+            frame
+                .buffer_mut()
+                .set_string(rest_x, area.y, &rest, theme::dim());
+        }
         // Amber while armed: the next click is the one that publishes, and the
         // colour cctop uses for "this wants reading" is the honest one for it.
         Corner::Button(label) => {
@@ -779,6 +825,89 @@ mod tests {
         assert!(layout.share_corner_at(b - 1, row));
         assert!(!layout.share_corner_at(b, row));
         assert!(!layout.share_corner_at(a - 1, row));
+    }
+
+    /// A link is also a way out of the link: the `×` before the host is red,
+    /// has a hit region of its own, and is not inside the hyperlink — a click
+    /// on it stops serving rather than opening the page.
+    #[test]
+    fn a_served_link_has_a_red_stop_before_it() {
+        use cctop_core::cache::UiPrefs;
+        use cctop_core::pricing::Plan;
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::with_prefs(Plan::Retail, tx, UiPrefs::default());
+        app.serving = Some(crate::share::Served {
+            local: "http://127.0.0.1:7777/?t=abc".into(),
+            public: Some("https://cctop-computer.masterchef.mom/?t=abc".into()),
+            tunnel_fallback: None,
+            readonly: String::new(),
+            actions: true,
+            publish: Box::new(|_, _, _| {}),
+        });
+        let (cols, rows) = (80u16, 24u16);
+        let mut terminal = Terminal::new(TestBackend::new(cols, rows)).expect("backend");
+        let mut layout = Layout::default();
+        terminal
+            .draw(|frame| layout = draw(frame, &mut app))
+            .expect("draw");
+
+        let buffer = terminal.backend().buffer().clone();
+        let footer = crate::hyperlink::visible(&buffer);
+        assert!(
+            footer.contains("× ⧉ cctop-computer.masterchef.mom"),
+            "the stop and the link are not on the corner: {footer:?}"
+        );
+        let (row, a, b) = layout.share_stop.expect("no stop hit region");
+        assert_eq!((row, b - a), (rows - 1, 2), "the stop is not two cells");
+        assert!(layout.share_stop_at(a, row));
+        assert!(!layout.share_stop_at(b, row), "the link is in the stop");
+        // Red, so the way out reads before the link is followed.
+        assert_eq!(buffer[(a, row)].fg, crate::theme::colors().cost_high);
+        // And the link after it is still hit-testable where it was drawn.
+        assert!(layout.share_corner_at(b, row));
+        assert!(layout.share_corner_at(layout.share_corner.expect("no link").2 - 1, row));
+    }
+
+    /// A local serve has no link to hang the `×` on, so the corner's button
+    /// carries it: stop on the left, add a tunnel on the right.
+    #[test]
+    fn a_local_serve_can_be_stopped_from_the_corner() {
+        use cctop_core::cache::UiPrefs;
+        use cctop_core::pricing::Plan;
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::with_prefs(Plan::Retail, tx, UiPrefs::default());
+        app.serving = Some(crate::share::Served {
+            local: "http://127.0.0.1:7777/?t=abc".into(),
+            public: None,
+            tunnel_fallback: None,
+            readonly: String::new(),
+            actions: true,
+            publish: Box::new(|_, _, _| {}),
+        });
+        let (cols, rows) = (80u16, 24u16);
+        let mut terminal = Terminal::new(TestBackend::new(cols, rows)).expect("backend");
+        let mut layout = Layout::default();
+        terminal
+            .draw(|frame| layout = draw(frame, &mut app))
+            .expect("draw");
+
+        let buffer = terminal.backend().buffer().clone();
+        let footer = crate::hyperlink::visible(&buffer);
+        assert!(
+            footer.contains("× ⧉ + tunnel"),
+            "the local serve has no way out on the corner: {footer:?}"
+        );
+        let (row, a, b) = layout.share_stop.expect("no stop hit region");
+        assert_eq!(b - a, 2);
+        assert_eq!(buffer[(a, row)].fg, crate::theme::colors().cost_high);
+        // The rest of the label is still the button that adds a tunnel.
+        assert!(layout.share_corner_at(b, row));
     }
 
     /// With no tunnel the corner is the button that would open one, and it

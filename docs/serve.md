@@ -92,10 +92,15 @@ it does not scan for sessions. The dashboard already walks them several times a
 second, so the page is fed from the rows on screen — one pass over the disk
 instead of two, and no way for the page and the table beside it to disagree.
 
-Stopping it, or quitting cctop, revokes every link handed out — unless it is on
+Stopping it revokes every link handed out — unless it is on
 [your own Cloudflare account](#your-own-cloudflare-account)'s tunnel, whose
-links come back with the next serve until `r` replaces them. A tunnel lasts
-exactly as long as the cctop that opened it.
+links come back with the next serve until `r` replaces them. Quitting cctop
+stops serving for that run and nothing more: saying yes is remembered as saying
+yes, so the next launch serves the same way again, on this machine or on the
+internet — on the account's tunnel, with the same hostname and the same links.
+The red `×` in front of the link on the dashboard's footer, or `x` in this
+panel, is what stops that, and then the next launch stays stopped. A tunnel
+lasts exactly as long as the cctop that opened it.
 
 ## Why you would want it
 

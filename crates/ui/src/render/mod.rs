@@ -63,6 +63,10 @@ pub struct Layout {
     /// drawn. Recorded because cctop holds the terminal's mouse capture: the
     /// click that would follow the link has to be answered here or nowhere.
     pub(super) share_corner: Option<(u16, u16, u16)>,
+    /// The red `×` in front of the share link, while one is drawn. Clicked, it
+    /// stops serving — the corner says where the page is, and the `×` is the
+    /// only thing there that says how to take it back.
+    pub(super) share_stop: Option<(u16, u16, u16)>,
     /// The `⧉ local` half of the share corner, while the corner is armed and
     /// nothing is being served. A click on it serves on this machine only;
     /// the rest of the corner is the internet.
@@ -259,6 +263,11 @@ impl Layout {
     /// Whether the cursor is on the footer's share link.
     pub fn share_corner_at(&self, col: u16, row: u16) -> bool {
         matches!(self.share_corner, Some((y, a, b)) if row == y && col >= a && col < b)
+    }
+
+    /// Whether the cursor is on the `×` that stops sharing.
+    pub fn share_stop_at(&self, col: u16, row: u16) -> bool {
+        matches!(self.share_stop, Some((y, a, b)) if row == y && col >= a && col < b)
     }
 
     /// Whether the cursor is on the footer's update button.
@@ -2317,6 +2326,7 @@ mod tests {
             workspace_column: false,
             share_corner: Some((24, 50, 78)),
             share_local: None,
+            share_stop: Some((24, 50, 52)),
             update_corner: None,
             header_row: 6,
             rows_start: 7,
@@ -2370,6 +2380,11 @@ mod tests {
         assert!(layout.share_corner_at(77, 24));
         assert!(!layout.share_corner_at(78, 24));
         assert!(!layout.share_corner_at(50, 23));
+        // The stop is the two cells in front of it, and stops at the link.
+        assert!(layout.share_stop_at(50, 24));
+        assert!(layout.share_stop_at(51, 24));
+        assert!(!layout.share_stop_at(52, 24));
+        assert!(!layout.share_stop_at(50, 23));
         assert_eq!(layout.launch_row_at(15, 11), Some(1));
         assert_eq!(layout.launch_row_at(15, 12), None);
         // Same row, but outside the modal: still not a choice.

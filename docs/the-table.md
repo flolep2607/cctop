@@ -441,7 +441,7 @@ It is in three parts, because the values live in three places:
 | Part | Lives in | What is on it |
 |------|----------|---------------|
 | `config.toml · [settings]` | the file you wrote | the theme, the alerts, how long a session counts as idle, hidden columns |
-| `Remembered · view` | `ui-prefs.json` | the tree, the filters, the cost floor, which panel opens, the account a new tab launches under |
+| `Remembered · view` | `ui-prefs.json` | the tree, the filters, the cost floor, which panel opens, the account a new tab launches under, whether the table is served to a browser |
 | `config.toml · [keys]` | the file you wrote | every dashboard keybind |
 
 `/` filters the page, matched against a row's name, what it does *and* its

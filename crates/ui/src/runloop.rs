@@ -166,6 +166,10 @@ pub fn run(
     // The conversations and serves that reach back to a remote row ask the
     // `Host`, not the row — the row only knows the machine's name.
     app.remote_hosts = hosts;
+    // A serve the last run left on comes back the same way, with the same
+    // kind of link. Set only after the hosts above, since the server is handed
+    // them; stopping on purpose is what clears the memory.
+    app.resume_serving();
     // And PROFILE, which most machines have exactly one of. A column repeating
     // `default` down every row is a column that answers nothing.
     if cctop_core::config::profile_count() <= 1 {
