@@ -708,10 +708,15 @@ fn machine_selector() {
     }
     // Merging recomputes the totals, and the CPU share is over this
     // machine's cores; the fixture's figure keeps the frame the same on every
-    // machine.
+    // machine. The month's chart is bucketed by that month's length — 28 to 31
+    // cells — so it is pinned to 31 here too, or the frame would change with
+    // the calendar and pass only in January.
     let cpu = app.stats.total_cpu;
     app.merge_remotes();
     app.stats.total_cpu = cpu;
+    if app.stats.monthly_daily.len() < 31 {
+        app.stats.monthly_daily.resize(31, 0.0);
+    }
     app.pick_machine(crate::machine::Machine::Host("procdb".into()));
     // Off Info, which a remote row falls back to, for the reason the fixture
     // is: it names the account signed in on whatever machine runs the test.
