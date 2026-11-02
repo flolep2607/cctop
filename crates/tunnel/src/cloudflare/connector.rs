@@ -43,8 +43,14 @@ use crate::{BoxFuture, Error, Live, Routes};
 /// Budget for the `unregisterConnection` RPC on shutdown.
 pub const DEFAULT_GRACE_PERIOD: Duration = Duration::from_secs(5);
 
-/// Consecutive reconnect failures before a reactor gives up. Each failure
-/// widens the backoff (1s → 30s), so ten span about ninety seconds of trying.
+/// Consecutive refusals before a reactor gives up.
+///
+/// A refusal is the edge saying the tunnel was deleted or its secret no longer
+/// matches ([`Error::Refused`]), which waiting does not mend. It is counted
+/// separately from a failed reconnect on purpose: a network that is down is
+/// retried until the tunnel is stopped, because a laptop that slept or a line
+/// that came back must not need the process restarted to be reachable again
+/// (see [`reconnect`]).
 pub const MAX_RECONNECT_ATTEMPTS: u32 = 10;
 
 /// Hard ceiling, as in cloudflared: higher hits diminishing returns, and the
@@ -408,16 +414,31 @@ async fn reactor_loop(shared: Shared, conn_index: u8, mut conn: Link, mut contro
     }
 }
 
-/// Retry a registration with backoff until it succeeds, the attempts run out,
-/// or the tunnel is stopped — `None` for the last two.
+/// Retry a registration until it succeeds, the tunnel is stopped, or the edge
+/// refuses the credentials — `None` for those last two.
+///
+/// A network failure is never a reason to end a tunnel. cctop is often the one
+/// way back to a machine that is away from a desk — a laptop that slept, a
+/// phone on a train, a home line whose uplink came back — and the edge keeps no
+/// state for a client that stopped asking. Once this returned, nothing would
+/// register again and the URL it handed out would answer 502 until the process
+/// was restarted, so the delay stops widening at [`backoff`]'s ceiling rather
+/// than the retrying stopping.
+///
+/// A refusal is different: the edge says the tunnel was deleted or its secret
+/// no longer matches, which waiting does not mend — [`MAX_RECONNECT_ATTEMPTS`]
+/// of them and the reactor gives up.
 async fn reconnect(
     shared: &Shared,
     conn_index: u8,
     replace_existing: bool,
 ) -> Option<(Link, ControlSession)> {
     let mut stop = shared.stop.clone();
-    for attempt in 1..=MAX_RECONNECT_ATTEMPTS {
-        let delay = backoff(attempt);
+    let mut attempt: u32 = 0;
+    let mut refusals: u32 = 0;
+    loop {
+        attempt = attempt.saturating_add(1);
+        let delay = retry_delay(attempt);
         warn!(conn_index, attempt, ?delay, "reactor: scheduling reconnect");
         tokio::select! {
             biased;
@@ -429,14 +450,32 @@ async fn reconnect(
                 info!(conn_index, attempt, %location, "reactor: reconnect succeeded");
                 return Some((conn, control));
             }
+            Err(e @ Error::Refused(_)) => {
+                refusals = refusals.saturating_add(1);
+                warn!(conn_index, attempt, refusals, error = %e, "reactor: reconnect refused");
+                if refusals >= MAX_RECONNECT_ATTEMPTS {
+                    warn!(
+                        conn_index,
+                        "reactor: giving up; the tunnel was deleted or its token revoked"
+                    );
+                    return None;
+                }
+            }
             Err(e) => warn!(conn_index, attempt, error = %e, "reactor: reconnect failed"),
         }
     }
-    warn!(
-        conn_index,
-        "reactor: giving up after {MAX_RECONNECT_ATTEMPTS} reconnect attempts"
-    );
-    None
+}
+
+/// [`backoff`] with a little noise, so the HA legs of one tunnel (and two
+/// cctops behind one address) do not present their registrations in lockstep.
+///
+/// Never shortens the wait: the ceiling is already the smallest that keeps a
+/// long outage from spending the agent's day in registration attempts.
+fn retry_delay(attempt: u32) -> Duration {
+    use std::hash::{BuildHasher, Hasher};
+    let mut state = std::collections::hash_map::RandomState::new().build_hasher();
+    state.write_u8(0);
+    backoff(attempt) + Duration::from_millis(state.finish() % 1000)
 }
 
 /// Exponential backoff with a 30s ceiling: 1s, 2s, 4s, 8s, 16s, 30s, 30s, …
@@ -458,5 +497,20 @@ mod tests {
         assert_eq!(backoff(5), Duration::from_secs(16));
         assert_eq!(backoff(6), Duration::from_secs(30));
         assert_eq!(backoff(20), Duration::from_secs(30));
+    }
+
+    /// The jitter may move the wait, but it may not shorten it: a retry that
+    /// came back sooner than the curve says is a retry storm the curve was
+    /// there to prevent.
+    #[test]
+    fn a_retry_delay_is_the_backoff_plus_less_than_a_second() {
+        for attempt in 1..=40 {
+            let delay = retry_delay(attempt);
+            assert!(delay >= backoff(attempt), "attempt {attempt}: {delay:?}");
+            assert!(
+                delay < backoff(attempt) + Duration::from_secs(1),
+                "attempt {attempt}: {delay:?}"
+            );
+        }
     }
 }
