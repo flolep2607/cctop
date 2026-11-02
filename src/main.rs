@@ -444,8 +444,12 @@ fn main() -> anyhow::Result<()> {
         if args.converted {
             cli::run_converted(&sessions, args.remove)?;
         } else {
-            let (which, agent) = args.convert.split_at(1);
-            cli::run_convert(&sessions, which[0].as_str(), agent[0].as_str())?;
+            // clap wants both, and this is written so that a change to that
+            // is a message rather than an index into an empty half.
+            let [which, agent] = args.convert.as_slice() else {
+                anyhow::bail!("--convert needs a session and a harness");
+            };
+            cli::run_convert(&sessions, which, agent)?;
         }
         loader.store().save();
         finish_trace(&args);

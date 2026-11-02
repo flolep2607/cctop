@@ -237,12 +237,7 @@ pub struct Args {
     /// account, as `codex:work`, to write into that account's store. The copy keeps the
     /// session's own id where the receiving store has it free, so cctop can
     /// tell the two apart as one piece of work
-    #[arg(
-        long,
-        num_args = 1..=2,
-        value_names = ["SESSION", "AGENT"],
-        default_missing_value = ""
-    )]
+    #[arg(long, num_args = 2..=2, value_names = ["SESSION", "AGENT"])]
     pub convert: Vec<String>,
 
     /// List the sessions converted as a handoff, and exit
@@ -1079,6 +1074,21 @@ mod tests {
     fn clear_cache_flag_is_accepted() {
         let args = Args::try_parse_from(["cctop", "--clear-cache"]).expect("valid args");
         assert!(args.clear_cache);
+    }
+
+    /// Both halves are needed, and clap is what has to say so: the one-value
+    /// form used to parse and then index an empty half in `main`.
+    #[test]
+    fn convert_needs_a_session_and_a_harness() {
+        let short = Args::try_parse_from(["cctop", "--convert", "abc"])
+            .expect_err("one value must not parse");
+        assert!(
+            short.to_string().contains("2 values"),
+            "the error does not say how many: {short}"
+        );
+        assert!(Args::try_parse_from(["cctop", "--convert"]).is_err());
+        let both = Args::try_parse_from(["cctop", "--convert", "abc", "codex"]).expect("valid");
+        assert_eq!(both.convert, ["abc", "codex"]);
     }
 
     /// The line a status bar is handed: live counts in the words the status
