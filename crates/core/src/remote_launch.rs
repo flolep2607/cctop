@@ -395,7 +395,7 @@ mod tests {
             .to_string_lossy()
             .into_owned();
         let printed = run_on_host(
-            &agent_argv("devbox", &odd, &argv[2..].to_vec()),
+            &agent_argv("devbox", &odd, &argv[2..]),
             "exec \"$@\"",
             "pwd; printf \"%s\\n\" \"$@\"",
         );

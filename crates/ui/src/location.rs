@@ -1039,6 +1039,10 @@ mod tests {
     /// The offer follows the host's agents without moving the cursor off the
     /// row it was on — a list that reshuffles under a cursor makes Enter start
     /// something other than the row highlighted.
+    ///
+    /// Anchored on whatever this machine actually offers rather than on a
+    /// hard-coded command, because the row has to be in the rebuilt list for
+    /// the rebuild to have anything to keep.
     #[test]
     fn a_rebuilt_offer_keeps_the_cursor_on_the_same_command() {
         let mut app = app_with_requests().0;
@@ -1052,22 +1056,32 @@ mod tests {
             peer: false,
         });
         told_agents(&mut app, &[]);
-        app.launch_offer = vec![
-            tabs::Choice::Start(vec!["claude".into()]),
-            tabs::Choice::Start(vec!["codex".into()]),
-        ];
-        app.launch_cursor = 1;
-        told_agents(&mut app, &["devin", "pi"]);
+        app.launch_offer.clear();
         app.refresh_launch_offer(true);
-        let at = app.launch_cursor;
+        if app.launch_offer.is_empty() {
+            // Nothing installed and no $SHELL: there is no row to hold.
+            return;
+        }
+        let was = app.launch_offer.last().expect("a row").label();
+        app.launch_cursor = app.launch_offer.len() - 1;
+
+        // The host answers with every agent cctop knows, which is more than
+        // this machine may have: the list grows around the row, and the row
+        // under the cursor is still the same command.
+        told_agents(&mut app, &["claude", "codex", "devin", "opencode", "pi"]);
+        app.refresh_launch_offer(true);
         assert_eq!(
-            app.launch_choices()[at].label(),
-            "codex",
+            app.launch_choices()[app.launch_cursor].label(),
+            was,
             "the cursor moved off the row it was on"
         );
-        // And the agents only the host has are on the list at all.
         let labels: Vec<String> = app.launch_choices().iter().map(|c| c.label()).collect();
-        assert!(labels.iter().any(|l| l == "pi"), "{labels:?}");
+        for agent in ["claude", "codex", "devin", "opencode", "pi"] {
+            assert!(
+                labels.iter().any(|label| label == agent),
+                "the host's {agent} is not on the list: {labels:?}"
+            );
+        }
     }
 
     fn told_agents(app: &mut App, agents: &[&str]) {
