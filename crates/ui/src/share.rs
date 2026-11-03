@@ -334,12 +334,18 @@ impl App {
             // them the same answers — the `Host`s are how it reaches back.
             hosts: self.remote_hosts.clone(),
         };
+        // One at a time. A second click while the first is still dialling
+        // would register a second tunnel and throw the first away.
+        if tunnel && self.share_opening.is_some() {
+            return;
+        }
+        // The serve being replaced goes first, not when its successor lands.
+        // It holds what the new one needs: the account tunnel's lock, which
+        // this process taking twice reads as another cctop holding it — so
+        // `t` on a serve already on the internet came back on a quick tunnel,
+        // blaming a cctop that was this one — and the loopback port.
+        self.serving = None;
         if tunnel {
-            // One at a time. A second click while the first is still dialling
-            // would register a second tunnel and throw the first away.
-            if self.share_opening.is_some() {
-                return;
-            }
             let (tx, rx) = channel();
             std::thread::spawn(move || {
                 // The receiver is gone if cctop quit while this was dialling,
@@ -528,6 +534,57 @@ mod tests {
         );
         assert!(app.serving.is_some(), "nothing is serving after the resume");
         assert_eq!(app.prefs.serve.as_deref(), Some("worldwide"));
+    }
+
+    /// Whether the serve being replaced was still alive when its successor
+    /// was started — which, holding the account tunnel's lock, sent the new
+    /// one to a quick tunnel.
+    static REPLACED_WHILE_ALIVE: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+    static OLD_SERVE_ALIVE: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+
+    struct Alive;
+    impl Drop for Alive {
+        fn drop(&mut self) {
+            OLD_SERVE_ALIVE.store(false, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    fn successor(request: ServeRequest) -> anyhow::Result<Served> {
+        if OLD_SERVE_ALIVE.load(std::sync::atomic::Ordering::SeqCst) {
+            REPLACED_WHILE_ALIVE.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        worldwide_server(request)
+    }
+
+    /// `t` on a serve already on the internet: the one up is stopped before
+    /// the next is dialled, so the next can take the account's tunnel.
+    #[test]
+    fn a_serve_is_stopped_before_its_replacement_starts() {
+        let mut app = test_app();
+        let (mut old, _) = served();
+        let alive = Alive;
+        OLD_SERVE_ALIVE.store(true, std::sync::atomic::Ordering::SeqCst);
+        old.publish = Box::new(move |_, _, _| {
+            let _ = &alive;
+        });
+        app.serving = Some(old);
+        app.start_server = Some(successor);
+        app.start_serving(true);
+        let start = Instant::now();
+        while app.share_opening.is_some() && start.elapsed() < std::time::Duration::from_secs(5) {
+            app.tick_share();
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert!(
+            app.serving.is_some(),
+            "nothing is serving after the restart"
+        );
+        assert!(
+            !REPLACED_WHILE_ALIVE.load(std::sync::atomic::Ordering::SeqCst),
+            "the new serve was started while the old one still held the tunnel"
+        );
     }
 
     /// The red `×` is a decision about the next launch too: a stop means stop,
