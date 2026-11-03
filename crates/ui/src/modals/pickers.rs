@@ -384,6 +384,9 @@ pub(crate) fn draw_cost_filter(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 pub(crate) fn draw_send_keys(frame: &mut Frame, area: Rect, app: &App) {
+    if app.send_to_marked {
+        return draw_send_marked(frame, area, app);
+    }
     let Some(s) = app.selected_session() else {
         return;
     };
@@ -409,6 +412,49 @@ pub(crate) fn draw_send_keys(frame: &mut Frame, area: Rect, app: &App) {
         )),
     ];
     modal(frame, area, "Send to session", lines, 64);
+}
+
+/// The send box over every marked session (`P`).
+///
+/// The count and the names are on the title, where the eye lands before
+/// Enter: the box looks like `s`'s otherwise, and a stray Enter here is five
+/// agents typed into rather than one. The rows that will not get it are named
+/// inside, with why, so the box is the whole of what Enter will do.
+pub(crate) fn draw_send_marked(frame: &mut Frame, area: Rect, app: &App) {
+    const WIDTH: u16 = 64;
+    let (to, refused) = app.send_targets();
+    let names: Vec<&str> = to.iter().map(|(name, _)| name.as_str()).collect();
+    let head = match to.len() {
+        1 => "Send to 1 session: ".to_string(),
+        n => format!("Send to {n} sessions: "),
+    };
+    // The border's corners, and the space either side `modal` puts round it.
+    let room = usize::from(WIDTH).saturating_sub(4);
+    let title = cctop_core::util::truncate(&format!("{head}{}", names.join(", ")), room);
+    let mut lines = vec![Line::from(Span::styled(
+        " Typed into each one's terminal, then submitted.",
+        theme::dim(),
+    ))];
+    if !refused.is_empty() {
+        let missed: Vec<String> = refused
+            .iter()
+            .map(|(name, why)| format!("{name} ({})", why.short()))
+            .collect();
+        lines.push(Line::from(Span::styled(
+            format!(" Not to {}", missed.join(", ")),
+            theme::failed(),
+        )));
+    }
+    lines.extend([
+        Line::default(),
+        input_line(&app.send_input),
+        Line::default(),
+        Line::from(Span::styled(
+            " Enter send to all   F9 paste an image   Esc cancel",
+            theme::dim(),
+        )),
+    ]);
+    modal(frame, area, &title, lines, WIDTH);
 }
 
 /// Naming the branch for `F`. The directory it will land in is shown as it is

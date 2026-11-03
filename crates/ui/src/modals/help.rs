@@ -92,6 +92,7 @@ pub(crate) fn draw_help(frame: &mut Frame, area: Rect, app: &mut App) {
         item("{unmark_all}", "Clear all marks"),
         item("{delete_marked}", "Delete all marked sessions"),
         item("{kill_marked}", "Terminate all marked live sessions"),
+        item("{send_marked}", "Type one line into every marked session"),
         item("{idle}", "Idle view: live sessions quiet for idle_after"),
         item("", "(6h by default), the biggest memory first"),
         item(

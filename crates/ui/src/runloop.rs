@@ -748,10 +748,7 @@ fn event_loop(
                         }
                     }
                 }
-                Ok(Response::KeysSent { result }) => match result {
-                    Ok(()) => app.set_status("Sent to the session's terminal"),
-                    Err(error) => app.set_status(error),
-                },
+                Ok(Response::KeysSent { tag, result }) => app.keys_sent(tag, result),
                 Ok(Response::Remote { host, snapshot }) => {
                     // The account's own listing is read here rather than on a
                     // timer of its own: a machine that names a cctop and

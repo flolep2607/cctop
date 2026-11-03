@@ -490,6 +490,7 @@ reach them was to remember which key pressed which one.
 | `Space` | Mark / unmark the selected session |
 | `D`, `K` | Delete / terminate all marked sessions (with confirmation); in the idle view `K` stops the idle ones |
 | `U` | Clear all marks |
+| `P` | Type one line into every marked session — the `s` box, sent to each (see [Driving agents](driving-agents.md#one-prompt-to-several-agents)) |
 | `h` or `F8` | Agent integration: what reports to cctop, and install it |
 | `!` | Provider status: whether a vendor outage explains the failing sessions (see [above](#is-it-me-or-is-it-them)) |
 | `i` | Read the conversation, full-screen (see [Panels](panels.md#reading-the-conversation)) |

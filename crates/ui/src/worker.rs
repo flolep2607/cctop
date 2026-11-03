@@ -24,10 +24,12 @@ pub(super) enum Request {
         session_key: String,
         pid: u32,
     },
-    /// Type a line into the terminal hosting a live session.
+    /// Type a line into the terminal hosting a live session. `tag` is set
+    /// when it is one of a fan-out's sends, and comes back on the reply.
     SendKeys {
         pid: u32,
         text: String,
+        tag: Option<super::fanout::SendTag>,
     },
     /// Build an `optimize` or `compare` report. Slow — it re-parses every
     /// transcript, because the tool calls it reasons about are never cached —
@@ -120,6 +122,7 @@ pub(super) enum Response {
         result: Result<(), String>,
     },
     KeysSent {
+        tag: Option<super::fanout::SendTag>,
         result: Result<(), String>,
     },
     /// One remote machine's snapshot, or why it could not be read.
@@ -582,9 +585,9 @@ pub(super) fn spawn_worker(
                         break;
                     }
                 }
-                Request::SendKeys { pid, text } => {
+                Request::SendKeys { pid, text, tag } => {
                     let result = cctop_core::inject::send_line(pid, &text);
-                    if tx.send(Response::KeysSent { result }).is_err() {
+                    if tx.send(Response::KeysSent { tag, result }).is_err() {
                         break;
                     }
                 }
