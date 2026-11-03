@@ -154,12 +154,23 @@ path: it is mounted at the same path when it can be, and under
 goes](integrations.md#where-the-mount-goes).
 
 The launcher's line then reads `in procdb:~/proj`, and the agent you pick starts
-there: Claude and opencode through `cctop sandbox` (their commands run on the
-host, their file tools on a mount of it), your shell over `ssh -t` into the
-directory. An agent with no way to run its commands on a host — codex, devin, pi
-— is greyed out with the reason (`codex can't run commands on a remote host
-yet`), and `Enter` on it says so instead of starting it here. The tab is called
-`<agent> ⇄ <host>`. If `sshfs` is not installed the tab asks to install it
+there — how depends on what the host has. The connect that completes the paths
+also asks which of cctop's agents are installed on the host, and a harness the
+host has runs as its own copy: `ssh -t` into the directory, then the agent,
+whichever harness it is. Nothing is mounted and no shell is redirected, and the
+options and account you picked travel with it, so `codex` on a host that has
+codex works exactly as `codex` here. A harness the host lacks but this machine
+has still gets there, when it is Claude or opencode: it runs *here* through
+`cctop sandbox`, with its commands on the host and its file tools on a mount of
+it — see [an agent here, working
+there](integrations.md#an-agent-here-working-there). A harness only the host has
+is on the list too, because starting it there is the only way to have it at all.
+An agent on neither side — codex, devin or pi, with no copy on the host — is
+greyed out with the reason (`devin can't run commands on a remote host yet, and
+it is not on procdb`), and `Enter` on it says so instead of starting it here.
+Until the host has answered, the list is what this machine has and every launch
+takes the sandbox; it fills in when the answer lands, keeping the cursor on the
+row you were on. The tab is called `<agent> ⇄ <host>`. If `sshfs` is not installed the tab asks to install it
 before connecting. A new tab starts on this machine again; a split keeps its
 tab's location. `Alt+v` and `Alt+s` split
 the tab you are in, side by side or stacked, so `claude` and a shell for

@@ -107,6 +107,49 @@ fn parse_listing(out: &str) -> Option<Listing> {
     Some(Listing { resolved, dirs })
 }
 
+/// The agents cctop knows that are installed on `host` — the ones a tab can
+/// start there, rather than here.
+///
+/// Asked of a login shell, because that is the PATH a tab gets: an agent
+/// installed by a version manager or into `~/.local/bin` is on the profile's
+/// PATH and nowhere else, and asking a bare `sh -c` would report a host as
+/// having none. One round trip, whatever the number of names.
+pub fn agents(runner: &dyn Runner, host: &str) -> Result<Vec<String>, String> {
+    let names: Vec<&str> = crate::alias::AGENTS.split_whitespace().collect();
+    let out = runner.run(host, &agents_script(&names), LIST_TIMEOUT)?;
+    Ok(parse_agents(&out))
+}
+
+/// The one command [`agents`] sends: `command -v` for each name, the ones it
+/// finds printed. A name that is not there says nothing rather than failing,
+/// so a host with one agent of five answers about that one.
+fn agents_script(names: &[&str]) -> String {
+    use crate::sandbox::sh_quote;
+    let list = names
+        .iter()
+        .map(|n| sh_quote(n))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let script = format!(
+        r#"for a in {list}; do
+  command -v "$a" >/dev/null 2>&1 && printf '%s\n' "$a"
+done
+exit 0"#
+    );
+    format!("exec \"${{SHELL:-sh}}\" -lc {}", sh_quote(&script))
+}
+
+/// What the host said it has, in the order [`crate::alias::AGENTS`] lists
+/// them so two machines' answers read the same way.
+fn parse_agents(out: &str) -> Vec<String> {
+    let known: Vec<&str> = crate::alias::AGENTS.split_whitespace().collect();
+    known
+        .into_iter()
+        .filter(|name| out.lines().any(|line| line.trim() == *name))
+        .map(str::to_string)
+        .collect()
+}
+
 /// The git repositories under the host's home, as `~/…` paths, newest first
 /// where the host can say when each was last touched.
 ///
@@ -590,6 +633,54 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let home = dir.path().canonicalize().expect("canonical");
         (dir, LocalSh { home })
+    }
+
+    /// Only names cctop knows, in the order it lists them, whatever order the
+    /// host answered in and however it spaced the lines.
+    #[test]
+    fn what_a_host_has_is_read_in_the_order_cctop_lists_agents() {
+        let out = "  pi  \n\nopencode\nnot-an-agent\nclaude \n";
+        assert_eq!(parse_agents(out), ["claude", "opencode", "pi"]);
+        assert_eq!(parse_agents(""), Vec::<String>::new());
+        // A command that merely starts with a name is a different command.
+        assert_eq!(parse_agents("claude-code\n"), Vec::<String>::new());
+    }
+
+    /// The scan asks a login shell, and a name that is not installed says
+    /// nothing rather than failing the whole answer. Run against a local
+    /// `sh`, with the fake home's profile putting a fake agent on the PATH —
+    /// which is exactly how a version manager's agent gets there.
+    #[test]
+    fn the_scan_finds_a_login_shells_agent_and_ignores_the_ones_it_lacks() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_keep, sh) = fake_home();
+        let bin = sh.home.join("bin");
+        std::fs::create_dir(&bin).expect("mkdir");
+        let fake = bin.join("pi");
+        std::fs::write(&fake, "#!/bin/sh\nexit 0\n").expect("write");
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        // Every login shell's own file: the runner runs `${SHELL:-sh}`, and
+        // which one that is depends on the machine the tests are on.
+        for name in [".profile", ".bash_profile", ".zprofile"] {
+            std::fs::write(
+                sh.home.join(name),
+                "PATH=\"$HOME/bin:$PATH\"; export PATH\n",
+            )
+            .expect("profile");
+        }
+
+        let found = agents(&sh, "box").expect("ran");
+        assert!(
+            found.iter().any(|a| a == "pi"),
+            "the login shell's PATH was not asked: {found:?}"
+        );
+        // And nothing it did not find is claimed.
+        for name in &found {
+            assert!(
+                crate::alias::AGENTS.split_whitespace().any(|a| a == name),
+                "{name} is not an agent cctop knows"
+            );
+        }
     }
 
     #[test]

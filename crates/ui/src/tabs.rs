@@ -1597,15 +1597,19 @@ impl Tab {
 }
 
 /// The agents a new pane can be started with: the ones cctop already knows how
-/// to alias, filtered to what is actually installed, plus the login shell.
+/// to alias, filtered to what is installed here — or there, when `also` names
+/// what a remote host has — plus the login shell.
 ///
 /// The shell earns its place — half of what a tab is wanted for next to an agent
 /// is `git diff`, and a tab that can only hold an agent would send you back out
-/// to another window for it.
-pub fn harnesses() -> Vec<Vec<String>> {
+/// to another window for it. It is this machine's shell: a remote target that
+/// wants a plain terminal is the host's own row in the directory field.
+pub fn harnesses(also: &[String]) -> Vec<Vec<String>> {
     let mut found: Vec<Vec<String>> = cctop_core::alias::AGENTS
         .split_whitespace()
-        .filter(|agent| cctop_core::shim::is_command(agent))
+        .filter(|agent| {
+            cctop_core::shim::is_command(agent) || also.iter().any(|there| there == agent)
+        })
         .map(|agent| vec![agent.to_string()])
         .collect();
     if let Some(shell) = std::env::var("SHELL").ok().filter(|s| !s.is_empty()) {
@@ -1680,12 +1684,12 @@ impl Choice {
 /// A session attached from *elsewhere* — a `rmux attach` in another terminal —
 /// is still offered. It has the same problem, but hiding a running agent is the
 /// worse of the two failures, so it is shown and labelled instead.
-pub fn choices(open: &[String]) -> Vec<Choice> {
+pub fn choices(open: &[String], also: &[String]) -> Vec<Choice> {
     cctop_core::rmux::running()
         .into_iter()
         .filter(|agent| !open.contains(&agent.name))
         .map(|agent| Choice::Waiting(Box::new(agent)))
-        .chain(harnesses().into_iter().map(Choice::Start))
+        .chain(harnesses(also).into_iter().map(Choice::Start))
         .collect()
 }
 
@@ -2096,7 +2100,7 @@ Enter to select · ↑/↓ to navigate · Esc to cancel";
     /// would open a tab onto an immediate "command not found".
     #[test]
     fn the_launcher_only_offers_commands_that_exist() {
-        for argv in harnesses() {
+        for argv in harnesses(&[]) {
             assert!(
                 cctop_core::shim::is_command(&argv[0]),
                 "offered a command that is not installed: {argv:?}"
@@ -2108,8 +2112,8 @@ Enter to select · ↑/↓ to navigate · Esc to cancel";
     /// new one, and never offers a second pane onto an agent already on screen.
     #[test]
     fn the_launcher_offers_what_is_running_before_what_is_new() {
-        let starts = harnesses().len();
-        let plain = choices(&[]);
+        let starts = harnesses(&[]).len();
+        let plain = choices(&[], &[]);
         // Whatever rmux happens to be holding, the "start new" block is intact
         // and comes last.
         assert_eq!(
@@ -2133,7 +2137,7 @@ Enter to select · ↑/↓ to navigate · Esc to cancel";
         // An agent already on screen is not offered again.
         if let Some(Choice::Waiting(agent)) = plain.iter().find(|c| matches!(c, Choice::Waiting(_)))
         {
-            let hidden = choices(std::slice::from_ref(&agent.name));
+            let hidden = choices(std::slice::from_ref(&agent.name), &[]);
             assert!(!hidden.contains(&Choice::Waiting(agent.clone())));
         }
     }

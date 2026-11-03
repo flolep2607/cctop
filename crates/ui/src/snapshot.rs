@@ -983,6 +983,7 @@ fn launch_cwd_remote() {
             home: "/home/me".into(),
         },
         repos: Some(Vec::new()),
+        agents: Some(Vec::new()),
         dirs: [(
             "~/src".to_string(),
             Dir::Listed(cctop_core::remote_fs::Listing::default()),
@@ -1010,6 +1011,7 @@ fn launch_cwd_remote() {
         HostState {
             conn: Conn::Offline("needs a password or key prompt".into()),
             repos: None,
+            agents: None,
             dirs: Default::default(),
         },
     );
