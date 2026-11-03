@@ -1131,23 +1131,31 @@ mod tests {
         let now = Utc::now();
         let hour = |back: i64| util::local_hour_key(&(now - chrono::Duration::hours(back)));
         // Back to yesterday's 23:00 from whatever the hour is now: always
-        // inside a rolling day, never inside this calendar one.
+        // inside a rolling day, never inside this calendar one — except in the
+        // 23:00 hour, when yesterday's 23:00 is a full day back and every hour
+        // of the rolling day is also today's. Then there is nothing to cross.
         let crossed = chrono::Timelike::hour(&now.with_timezone(&chrono::Local)) as i64 + 1;
-        assert!(crossed < 24, "a day has 24 hours");
-        let st = compute_stats(&[
+        let crossed = (crossed < 24).then_some(crossed);
+        let mut sessions = vec![
             session_with_hours(&[(&hour(0), 1.0)]),
-            session_with_hours(&[(&hour(crossed), 2.0)]),
             session_with_hours(&[(&hour(30), 4.0)]),
-        ]);
+        ];
+        if let Some(crossed) = crossed {
+            sessions.push(session_with_hours(&[(&hour(crossed), 2.0)]));
+        }
+        let st = compute_stats(&sessions);
+        let expected = 1.0 + crossed.map_or(0.0, |_| 2.0);
         assert!(
-            (st.spend_last_24h - 3.0).abs() < 1e-9,
+            (st.spend_last_24h - expected).abs() < 1e-9,
             "{:?}",
             st.rolling_hourly
         );
         assert_eq!(st.rolling_hourly.len(), 24);
         // The newest bar is this hour; yesterday's 23:00 is `crossed` back.
         assert!((st.rolling_hourly[23] - 1.0).abs() < 1e-9);
-        assert!((st.rolling_hourly[23 - crossed as usize] - 2.0).abs() < 1e-9);
+        if let Some(crossed) = crossed {
+            assert!((st.rolling_hourly[23 - crossed as usize] - 2.0).abs() < 1e-9);
+        }
         // The calendar day saw only this hour, and 30 hours back is in none
         // of its buckets.
         assert!((st.daily_hourly.iter().sum::<f64>() - 1.0).abs() < 1e-9);
