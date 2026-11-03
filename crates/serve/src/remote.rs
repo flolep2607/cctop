@@ -20,6 +20,7 @@ pub(crate) fn peer_of(shared: &Shared, path: &str) -> Option<Arc<cctop_core::pee
     let id = [
         "/api/chat/",
         "/api/report/",
+        "/api/data/",
         "/api/access/",
         "/api/handoff/",
     ]

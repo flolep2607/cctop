@@ -665,6 +665,13 @@ fn event_loop(
                         // fifteen scalars and shares; this is one session, on
                         // selection, and it is where the copy belongs.
                         app.panel_data = Some(Arc::unwrap_or_clone(data));
+                        app.panel_unread = None;
+                        app.needs_redraw = true;
+                    }
+                }
+                Ok(Response::DataUnread(key, why)) => {
+                    if key == app.panel_key {
+                        app.panel_unread = Some(why);
                         app.needs_redraw = true;
                     }
                 }

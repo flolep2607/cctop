@@ -19,6 +19,7 @@ use std::sync::Arc;
 use crate::chat::Conversation;
 use crate::fleet::Host;
 use crate::peer::{self, Peer};
+use crate::session::SessionData;
 
 /// The way back to a remote row's machine.
 #[derive(Clone)]
@@ -165,41 +166,55 @@ impl Reach {
         before: Option<usize>,
         agent: Option<&str>,
     ) -> Result<Conversation, String> {
-        let json = match self {
-            Reach::Ssh(host) => {
-                let marker = before.map(|b| b.to_string());
-                let mut args = vec!["--chat", id];
-                if let Some(marker) = marker.as_deref() {
-                    args.extend(["--before", marker]);
-                }
-                if let Some(agent) = agent {
-                    args.extend(["--agent", agent]);
-                }
-                host.run(&args)?
-            }
-            Reach::Peer(peer) => {
-                let mut query = Vec::new();
-                if let Some(before) = before {
-                    query.push(format!("before={before}"));
-                }
-                if let Some(agent) = agent {
-                    query.push(format!("agent={}", encode(agent)));
-                }
-                let answer =
-                    peer.send("GET", &format!("/api/chat/{id}"), &query.join("&"), None)?;
-                if answer.status != 200 {
-                    return Err(format!("{} {}", peer.machine, peer::refusal(&answer)));
-                }
-                String::from_utf8(answer.body)
-                    .map_err(|_| format!("{}'s answer was not UTF-8", peer.machine))?
-            }
-        };
+        let marker = before.map(|b| b.to_string());
+        let mut args = vec!["--chat", id];
+        if let Some(marker) = marker.as_deref() {
+            args.extend(["--before", marker]);
+        }
+        if let Some(agent) = agent {
+            args.extend(["--agent", agent]);
+        }
+        let mut query = Vec::new();
+        if let Some(before) = before {
+            query.push(format!("before={before}"));
+        }
+        if let Some(agent) = agent {
+            query.push(format!("agent={}", encode(agent)));
+        }
+        let json = self.ask(&args, &format!("/api/chat/{id}"), &query.join("&"))?;
         serde_json::from_str(&json).map_err(|e| {
             format!(
                 "{} returned an unreadable conversation: {e}",
                 self.machine()
             )
         })
+    }
+
+    /// Everything parsed out of session `id`'s transcript, read by the cctop
+    /// that holds it — what the panels below the table break down.
+    ///
+    /// Over ssh that is `cctop --data`; from a sibling, `/api/data/<id>`. A
+    /// cctop from before either refuses, and the error says which machine.
+    pub fn data(&self, id: &str) -> Result<SessionData, String> {
+        let json = self.ask(&["--data", id], &format!("/api/data/{id}"), "")?;
+        serde_json::from_str(&json)
+            .map_err(|e| format!("{} returned an unreadable session: {e}", self.machine()))
+    }
+
+    /// One answer from the far cctop: `args` run over ssh, or `path?query`
+    /// asked of a sibling's serve — the same document either way.
+    fn ask(&self, args: &[&str], path: &str, query: &str) -> Result<String, String> {
+        match self {
+            Reach::Ssh(host) => host.run(args),
+            Reach::Peer(peer) => {
+                let answer = peer.send("GET", path, query, None)?;
+                if answer.status != 200 {
+                    return Err(format!("{} {}", peer.machine, peer::refusal(&answer)));
+                }
+                String::from_utf8(answer.body)
+                    .map_err(|_| format!("{}'s answer was not UTF-8", peer.machine))
+            }
+        }
     }
 }
 

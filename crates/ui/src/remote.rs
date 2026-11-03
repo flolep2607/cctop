@@ -971,6 +971,52 @@ mod tests {
         );
     }
 
+    /// The panels under the table read a sibling's row from the sibling: the
+    /// selection asks the worker with the way there, and what the sibling
+    /// answers is what the panels draw.
+    #[test]
+    fn a_siblings_row_fills_the_panels_from_the_sibling() {
+        use cctop_core::peer::{Peer, add_known, fake};
+        let sent = SessionData {
+            last_model: "claude-from-there".into(),
+            ..Default::default()
+        };
+        let body = serde_json::to_string(&sent).unwrap().leak();
+        let (url, seen) = fake::sibling(200, body);
+        add_known(std::sync::Arc::new(Peer::fixed(
+            "ui-test-panels",
+            &url,
+            fake::SECRET,
+        )));
+        let (tx, rx) = channel();
+        let mut app = App::new(Plan::Retail, tx);
+        let mut s = session("away", true, "/home/me/work");
+        s.remote = Some(cctop_core::session::Remote {
+            host: "ui-test-panels".into(),
+            ..Default::default()
+        });
+        app.sessions = vec![s];
+        app.refilter();
+        app.selected = 0;
+        app.sync_panel_data();
+
+        let (session, reach) = std::iter::from_fn(|| rx.try_recv().ok())
+            .find_map(|r| match r {
+                Request::Data(session, reach) => Some((session, reach)),
+                _ => None,
+            })
+            .expect("the read went to the worker");
+        let data = reach
+            .expect("a remote row is read where it lives")
+            .data(&session.session_id)
+            .expect("the sibling answered");
+        assert_eq!(data.last_model, "claude-from-there");
+        assert_eq!(
+            seen.lock().unwrap().as_slice(),
+            [format!("/api/data/{}", session.session_id)]
+        );
+    }
+
     /// A row whose machine is neither says which of the two it is not, and a
     /// sibling that is down says that instead.
     #[test]

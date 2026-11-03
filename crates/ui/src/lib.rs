@@ -671,6 +671,13 @@ pub struct App {
     /// [`Session::touched`] of the session when its panel data was requested, so an
     /// append can be told apart from an unchanged session.
     panel_stamp: String,
+    /// Why a remote row's data could not be read from its machine, for the
+    /// panels to say in place of what they would have drawn.
+    pub panel_unread: Option<String>,
+    /// When a remote row's data was last asked for, so a session that is
+    /// still writing is re-read across the network now and then rather than
+    /// on every append.
+    panel_asked: Option<std::time::Instant>,
     pub info_scroll: u16,
     pub cost_scroll: u16,
     pub config_scroll: u16,
@@ -1184,6 +1191,8 @@ impl App {
             panel_data: None,
             panel_key: String::new(),
             panel_stamp: String::new(),
+            panel_unread: None,
+            panel_asked: None,
             info_scroll: 0,
             cost_scroll: 0,
             config_scroll: 0,

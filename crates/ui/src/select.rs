@@ -11,6 +11,10 @@ use super::*;
 /// Rows moved by PageUp/PageDown and the fallback for half-page scrolls.
 pub(super) const PAGE: isize = 10;
 
+/// How often a remote row that keeps growing has its data read again — see
+/// [`App::sync_panel_data`].
+const REMOTE_DATA_EVERY: std::time::Duration = std::time::Duration::from_secs(15);
+
 /// Whether a panels key is the one `Session::key` would make for this session.
 ///
 /// `Session::key` is a `format!`, and a key built to be compared and dropped is
@@ -235,14 +239,21 @@ impl App {
             self.panel_key.clear();
             return;
         };
-        // Nothing to extract for a row read over ssh: the transcript is a file
-        // on the other machine and cctop never fetches it. Asking would hand the
-        // worker a session with no `data_file` and get an empty result back that
-        // the panels would draw as zeroes.
-        if session.remote.is_some() {
+        // A subagent's stand-in names a transcript path on the other machine,
+        // which read here is nothing, and the far side's `--data` takes a
+        // session's id and not an agent's.
+        // ponytail: a remote subagent's own panels are not fetched.
+        if matches!(row, Row::Subagent { .. })
+            && row
+                .session()
+                .and_then(|i| self.sessions.get(i))
+                .is_some_and(|parent| parent.remote.is_some())
+        {
             self.panel_data = None;
             self.panel_key = session.key();
             self.panel_stamp = session.touched().to_string();
+            self.panel_unread =
+                Some("a subagent's own transcript is not read from another machine".into());
             return;
         }
         let key = session.key();
@@ -255,6 +266,32 @@ impl App {
         if !switched && !grew {
             return;
         }
+        // A remote row's transcript is parsed on its machine and the whole
+        // result sent back, which is a round trip and can be megabytes: a
+        // session still writing is re-read every so often, not on every append.
+        // The stamp is left as it was, so the append is still owed and the
+        // next pass after the wait asks for it.
+        if grew
+            && session.remote.is_some()
+            && self
+                .panel_asked
+                .is_some_and(|at| at.elapsed() < REMOTE_DATA_EVERY)
+        {
+            return;
+        }
+        let reach = match session.remote.as_ref().map(|r| self.reach_of(&r.host)) {
+            None => None,
+            Some(Ok(reach)) => Some(reach),
+            // Nothing to ask, and nothing that asking again would change
+            // until the row does: said in the panel, as a failed read is.
+            Some(Err(why)) => {
+                self.panel_key = key;
+                self.panel_stamp = stamp;
+                self.panel_data = None;
+                self.panel_unread = Some(why.to_string());
+                return;
+            }
+        };
 
         self.panel_key = key;
         self.panel_stamp = stamp;
@@ -273,7 +310,11 @@ impl App {
             self.tool_tab = 0;
             self.tool_expanded = None;
         }
-        let _ = self.tx.send(Request::Data(Box::new(session)));
+        if switched {
+            self.panel_unread = None;
+        }
+        self.panel_asked = Some(std::time::Instant::now());
+        let _ = self.tx.send(Request::Data(Box::new(session), reach));
     }
 
     pub(super) fn move_selection(&mut self, delta: isize) {
@@ -764,7 +805,7 @@ mod tests {
         app.refilter();
         let asked = || {
             rx.try_iter()
-                .filter(|r| matches!(r, Request::Data(_)))
+                .filter(|r| matches!(r, Request::Data(..)))
                 .count()
         };
 
