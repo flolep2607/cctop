@@ -886,6 +886,7 @@ mod tests {
             provider_status: Mutex::default(),
             topics: Mutex::new(search::Topics::default()),
             notify: None,
+            push: crate::tests::shared("full", "view").push,
             hosts: HashMap::new(),
             ssh: crate::ssh::Reach::nowhere(),
             is_share_host: |_| false,

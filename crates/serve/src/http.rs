@@ -533,9 +533,11 @@ fn reason(status: u16) -> &'static str {
 /// `frame-ancestors 'none'`, which is why the copy is served here at all.
 /// Nothing off this server can be framed.
 ///
-/// Two same-origin exceptions carry the installable-page furniture: `img-src
+/// Same-origin exceptions carry the installable-page furniture: `img-src
 /// 'self'` for `/favicon.svg`, and `manifest-src 'self'` for
-/// `/manifest.webmanifest`, which `default-src` does not cover. `data:` stays
+/// `/manifest.webmanifest`, which `default-src` does not cover. `worker-src
+/// 'self'` is `/sw.js`, the one script the page registers rather than
+/// inlines: Web Push wakes a service worker, not a page. `data:` stays
 /// for images a transcript paste renders inline. `font-src data:` is the app
 /// page's fonts, which are inlined into it as data URLs. None of them opens
 /// anything off this server.
@@ -549,6 +551,7 @@ fn common_headers(out: &mut String) {
          img-src 'self' data:; \
          font-src data:; \
          manifest-src 'self'; \
+         worker-src 'self'; \
          connect-src 'self'; \
          frame-src 'self'; \
          base-uri 'none'; \
