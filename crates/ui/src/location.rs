@@ -51,6 +51,10 @@ pub struct HostState {
     /// The repository scan's answer, once; `None` until it lands. Asked once
     /// per host per run — it walks the home directory there.
     pub repos: Option<Vec<String>>,
+    /// The agents installed on the host, once; `None` until it lands. What the
+    /// launcher offers as startable *there*, and what decides whether a
+    /// remote launch is the host's own agent or this machine's, sandboxed.
+    pub agents: Option<Vec<String>>,
     /// Listings by directory as typed (`~`, `~/src`, `/srv`), kept for the
     /// run: a directory seen once is completed again without a round trip.
     pub dirs: HashMap<String, Dir>,
@@ -61,6 +65,7 @@ impl HostState {
         HostState {
             conn: Conn::Connecting,
             repos: None,
+            agents: None,
             dirs: HashMap::new(),
         }
     }
@@ -140,6 +145,7 @@ pub enum Ask {
     Connect(String),
     List { host: String, dir: String },
     Repos(String),
+    Agents(String),
     Check { host: String, path: String },
 }
 
@@ -156,6 +162,10 @@ pub enum Answer {
         result: Result<Option<Listing>, String>,
     },
     Repos {
+        host: String,
+        result: Result<Vec<String>, String>,
+    },
+    Agents {
         host: String,
         result: Result<Vec<String>, String>,
     },
@@ -187,6 +197,10 @@ pub fn answer(
         Ask::Repos(host) => {
             let result = remote_fs::repos(runner, &host);
             Answer::Repos { host, result }
+        }
+        Ask::Agents(host) => {
+            let result = remote_fs::agents(runner, &host);
+            Answer::Agents { host, result }
         }
         Ask::Check { host, path } => {
             let result = remote_fs::check(runner, &host, &path);
@@ -443,6 +457,12 @@ impl App {
                                 .tx
                                 .send(worker::Request::Location(Ask::Repos(host.clone())));
                         }
+                        if state.agents.is_none() {
+                            state.agents = Some(Vec::new());
+                            let _ = self
+                                .tx
+                                .send(worker::Request::Location(Ask::Agents(host.clone())));
+                        }
                     }
                     Err(why) => state.conn = Conn::Offline(why),
                 }
@@ -460,6 +480,25 @@ impl App {
             Answer::Repos { host, result } => {
                 if let Some(state) = self.ssh_states.get_mut(&host) {
                     state.repos = Some(result.unwrap_or_default());
+                }
+            }
+            Answer::Agents { host, result } => {
+                if let Some(state) = self.ssh_states.get_mut(&host) {
+                    // A failure is "nothing known", not "nothing there": the
+                    // launcher then offers what this machine has and sandboxes
+                    // it, which is what it did before it could ask.
+                    state.agents = Some(result.unwrap_or_default());
+                }
+                // The list the launcher was opened with is now out of date:
+                // the host has agents this machine does not, or lacks ones it
+                // has. Rebuilt where the launcher is aimed at this host.
+                if self.mode == Mode::Launch
+                    && self
+                        .launch_remote
+                        .as_ref()
+                        .is_some_and(|target| target.host == host)
+                {
+                    self.refresh_launch_offer(false);
                 }
             }
             Answer::Checked { host, path, result } => {
@@ -575,6 +614,10 @@ impl App {
         self.launch_cwd_bad = false;
         self.launch_cwd_why = None;
         self.mode = self.launch_cwd_from;
+        // The offer is what can start *there*, so it moves with the location:
+        // a host with an agent this machine lacks is the only way to offer it,
+        // and one both have starts there, which is worth knowing before Enter.
+        self.refresh_launch_offer(true);
         self.needs_redraw = true;
     }
 
@@ -636,6 +679,30 @@ impl App {
         }
     }
 
+    /// The agents the ssh host `host` said it has, as of the last time it was
+    /// asked — empty when it has not said, or could not.
+    pub(super) fn remote_agents(&self, host: &str) -> &[String] {
+        self.ssh_states
+            .get(host)
+            .and_then(|state| state.agents.as_deref())
+            .unwrap_or_default()
+    }
+
+    /// Whether `host` has ever answered what it has. A host that has not is
+    /// not the same as one with nothing: the one is worth waiting for, the
+    /// other is a reason to say so.
+    pub(super) fn remote_agents_known(&self, host: &str) -> bool {
+        self.ssh_states
+            .get(host)
+            .is_some_and(|state| state.agents.is_some())
+    }
+
+    /// Whether `host` has `agent` itself. Unknown counts as no: the launch
+    /// then takes the sandbox, which needs nothing on the host.
+    pub(super) fn remote_has(&self, host: &str, agent: &str) -> bool {
+        self.remote_agents(host).iter().any(|there| there == agent)
+    }
+
     /// Why the launcher row `choice` cannot start in the remote location, or
     /// `None` if it can — or if the location is this machine.
     pub fn launch_blocked(&self, choice: &tabs::Choice) -> Option<String> {
@@ -649,23 +716,87 @@ impl App {
             // same link may start `claude --dangerously-skip-permissions`
             // there, which is a shell already.
             tabs::Choice::Start(_) if target.peer => None,
-            tabs::Choice::Start(argv) => match reach_of(argv) {
-                Reach::No(why) => Some(why),
-                Reach::Shell(_) => None,
-                Reach::Sandbox(_) => target
-                    .problem
-                    .as_ref()
-                    .map(|why| format!("can't work in {}: {why}", target.path)),
-            },
+            // Asked of the same function that starts it, so a row cannot be
+            // offered as usable and then refused on Enter.
+            tabs::Choice::Start(argv) => self.remote_argv(argv, target).err(),
         }
     }
 
-    /// Start the launcher's pick in the remote location.
+    /// How `argv` starts on `target`: the host's own agent when it has one,
+    /// the sandbox when it does not and the agent's shell can be pointed at
+    /// the host, or why neither is possible.
     ///
-    /// Nothing about this machine is checked: wherever the host's path cannot
-    /// be mounted at the same path here, the sandbox mounts it under cctop's
-    /// cache instead. The host's half was asked when the field took the path,
-    /// and the sandbox asks it again before mounting.
+    /// The host's copy wins whenever it exists, whatever the agent: nothing is
+    /// mounted, nothing is redirected, and every harness works that way, not
+    /// only the two whose shell cctop knows how to point. The sandbox is the
+    /// fallback that made a host without the agent useful in the first place.
+    pub(super) fn remote_argv(
+        &self,
+        argv: &[String],
+        target: &RemoteTarget,
+    ) -> Result<(String, Vec<String>), String> {
+        let agent = agent_of(argv);
+        let reach = reach_of(argv);
+        // A shell is a command, not one of the agents the scan asks about: it
+        // goes over ssh because that is what a shell on the host *is*.
+        if let Reach::Shell(name) = reach {
+            return Ok((name, shell_argv(&target.host, &target.path)));
+        }
+        let native = self.remote_has(&target.host, &agent);
+        if !native {
+            match reach {
+                // The host's own copy is the only thing that would have
+                // worked, and it said it has none.
+                Reach::No(why) if self.remote_agents_known(&target.host) => {
+                    return Err(format!("{why}, and it is not on {}", target.host));
+                }
+                // It has not answered yet: say what cctop knows, and nothing
+                // about a host that may still surprise.
+                Reach::No(why) => return Err(why),
+                _ => {
+                    if let Some(why) = target.problem.as_ref() {
+                        return Err(format!("can't work in {}: {why}", target.path));
+                    }
+                }
+            }
+        }
+        let mut argv = match native {
+            true => argv.to_vec(),
+            false => {
+                let exe = cctop_core::mux::own_exe();
+                sandbox_argv(&exe, &agent, &target.host, &target.path)
+            }
+        };
+        // The model and the permission setting, as the agent arguments
+        // `cctop sandbox` hands on after the location — or, natively, as the
+        // arguments the host's own agent is started with.
+        argv.extend(self.options_for(&agent).options.flags(&agent)?);
+        // The account `p` picked, carried the way a local launch carries it:
+        // as the environment the sandbox, and so the agent it starts,
+        // inherits. Over ssh it is `env` on the host's line, which is the same
+        // thing said there.
+        let argv = match Self::profile_provider(std::slice::from_ref(&agent))
+            .and_then(|p| self.chosen_profile(p))
+        {
+            Some(profile) => cctop_core::config::argv_under_profile(argv, profile),
+            None => argv,
+        };
+        Ok(match native {
+            true => (
+                agent,
+                cctop_core::remote_launch::agent_argv(&target.host, &target.path, &argv),
+            ),
+            false => (agent, argv),
+        })
+    }
+
+    /// Start the launcher's pick in the remote location, the way
+    /// [`App::remote_argv`] decided it should run.
+    ///
+    /// A harness the host has is its own copy over ssh and nothing about this
+    /// machine is involved. One it lacks is this machine's, sandboxed: whatever
+    /// path the host cannot mount here is mounted under cctop's cache instead,
+    /// and the sandbox asks the host again before mounting.
     pub(super) fn launch_remote_choice(&mut self, choice: &tabs::Choice, target: &RemoteTarget) {
         if let Some(why) = self.launch_blocked(choice) {
             self.set_status(why);
@@ -687,34 +818,11 @@ impl App {
         if target.peer {
             return self.launch_on_peer(argv, target, options);
         }
-        let (agent, argv) = match reach_of(argv) {
-            Reach::No(why) => {
+        let (agent, argv) = match self.remote_argv(argv, target) {
+            Ok(planned) => planned,
+            Err(why) => {
                 self.set_status(why);
                 return;
-            }
-            Reach::Shell(name) => (name, shell_argv(&target.host, &target.path)),
-            Reach::Sandbox(agent) => {
-                let exe = cctop_core::mux::own_exe();
-                let mut argv = sandbox_argv(&exe, &agent, &target.host, &target.path);
-                // The model and the permission setting, as the agent arguments
-                // `cctop sandbox` hands on after the location.
-                match options.flags(&agent) {
-                    Ok(flags) => argv.extend(flags),
-                    Err(why) => {
-                        self.set_status(why);
-                        return;
-                    }
-                }
-                // The account `p` picked, carried the way a local launch
-                // carries it: as the environment the sandbox, and so the agent
-                // it starts, inherits.
-                let argv = match Self::profile_provider(std::slice::from_ref(&agent))
-                    .and_then(|p| self.chosen_profile(p))
-                {
-                    Some(profile) => cctop_core::config::argv_under_profile(argv, profile),
-                    None => argv,
-                };
-                (agent, argv)
             }
         };
         let host = target.host.clone();
@@ -881,6 +989,114 @@ mod tests {
     use cctop_core::remote_fs::LocalSh;
     use ratatui::crossterm::event::KeyCode;
     use std::sync::mpsc::{Receiver, channel};
+
+    /// A host with the agent runs it there — any agent, not only the two whose
+    /// shell cctop can point at a host — and one without falls back to the
+    /// sandbox, which is what made a host that lacks it useful before.
+    #[test]
+    fn what_the_host_has_runs_there_and_what_it_hasnt_is_sandboxed() {
+        let mut app = app_with_requests().0;
+        let target = |host: &str| RemoteTarget {
+            host: host.to_string(),
+            path: "~/src".into(),
+            resolved: None,
+            facts: None,
+            problem: None,
+            unchecked: None,
+            peer: false,
+        };
+        let devbox = target("devbox");
+        let claude = vec!["claude".to_string()];
+
+        // Not on the host: the agent runs here, with its shell pointed there.
+        told_agents(&mut app, &[]);
+        let (agent, argv) = app.remote_argv(&claude, &devbox).expect("sandbox");
+        assert_eq!(agent, "claude");
+        assert_eq!(&argv[..2], ["env", "CCTOP_SANDBOX_HOLD=1"]);
+        assert!(argv.iter().any(|w| w == "sandbox"), "{argv:?}");
+
+        // On the host: its own copy, over ssh, with no sandbox involved.
+        told_agents(&mut app, &["claude"]);
+        let (_, argv) = app.remote_argv(&claude, &devbox).expect("native");
+        assert_eq!(&argv[..2], ["ssh", "-t"]);
+        assert!(argv.contains(&"devbox".to_string()));
+        let line = argv.last().expect("line");
+        assert!(line.contains("claude"), "{line}");
+        assert!(!line.contains("sandbox"), "sandboxed anyway: {line}");
+
+        // An agent with no way to redirect its own shell is only usable there,
+        // and says so when it is not.
+        let devin = vec!["devin".to_string()];
+        assert!(
+            app.remote_argv(&devin, &devbox)
+                .is_err_and(|why| why.contains("not on devbox"))
+        );
+        told_agents(&mut app, &["devin"]);
+        let (_, argv) = app.remote_argv(&devin, &devbox).expect("native");
+        assert!(argv.last().expect("line").contains("devin"));
+    }
+
+    /// The offer follows the host's agents without moving the cursor off the
+    /// row it was on — a list that reshuffles under a cursor makes Enter start
+    /// something other than the row highlighted.
+    ///
+    /// Anchored on whatever this machine actually offers rather than on a
+    /// hard-coded command, because the row has to be in the rebuilt list for
+    /// the rebuild to have anything to keep.
+    #[test]
+    fn a_rebuilt_offer_keeps_the_cursor_on_the_same_command() {
+        let mut app = app_with_requests().0;
+        app.launch_remote = Some(RemoteTarget {
+            host: "devbox".into(),
+            path: "~/src".into(),
+            resolved: None,
+            facts: None,
+            problem: None,
+            unchecked: None,
+            peer: false,
+        });
+        told_agents(&mut app, &[]);
+        app.launch_offer.clear();
+        app.refresh_launch_offer(true);
+        if app.launch_offer.is_empty() {
+            // Nothing installed and no $SHELL: there is no row to hold.
+            return;
+        }
+        let was = app.launch_offer.last().expect("a row").label();
+        app.launch_cursor = app.launch_offer.len() - 1;
+
+        // The host answers with every agent cctop knows, which is more than
+        // this machine may have: the list grows around the row, and the row
+        // under the cursor is still the same command.
+        told_agents(&mut app, &["claude", "codex", "devin", "opencode", "pi"]);
+        app.refresh_launch_offer(true);
+        assert_eq!(
+            app.launch_choices()[app.launch_cursor].label(),
+            was,
+            "the cursor moved off the row it was on"
+        );
+        let labels: Vec<String> = app.launch_choices().iter().map(|c| c.label()).collect();
+        for agent in ["claude", "codex", "devin", "opencode", "pi"] {
+            assert!(
+                labels.iter().any(|label| label == agent),
+                "the host's {agent} is not on the list: {labels:?}"
+            );
+        }
+    }
+
+    fn told_agents(app: &mut App, agents: &[&str]) {
+        app.ssh_states.insert(
+            "devbox".into(),
+            HostState {
+                conn: Conn::Ready {
+                    home: "/home/me".into(),
+                },
+                repos: Some(Vec::new()),
+                agents: Some(agents.iter().map(|a| a.to_string()).collect()),
+                dirs: Default::default(),
+            },
+        );
+    }
 
     /// The agents that have a way to run their commands on the host go through
     /// the sandbox; the shell goes over ssh; the rest are refused by name.
@@ -1075,6 +1291,14 @@ mod tests {
         serve(&mut app, &rx, &sh, true);
         let target = app.launch_remote.clone().expect("taken");
         assert_eq!(target.problem.as_deref(), Some("read-only on the host"));
+        // "The host" is this machine under a local `sh` in this test, so its
+        // own PATH would answer that it has every agent the developer does.
+        // What is being checked here is the mount, so the host is taken at its
+        // word that it has none.
+        app.ssh_states
+            .get_mut("box")
+            .expect("the host was asked about")
+            .agents = Some(Vec::new());
         let claude = tabs::Choice::Start(vec!["claude".into()]);
         assert!(
             app.launch_blocked(&claude)
@@ -1154,7 +1378,16 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(asks, [Ask::Connect("box".into()), Ask::Repos("box".into())]);
+        // Once each, and the agents with the repositories: what the host has
+        // is asked on the same connect, so a launcher opened later knows.
+        assert_eq!(
+            asks,
+            [
+                Ask::Connect("box".into()),
+                Ask::Repos("box".into()),
+                Ask::Agents("box".into()),
+            ]
+        );
     }
 
     /// Hosts sit beside the local directories, as `name:`, and taking one puts

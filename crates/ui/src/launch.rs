@@ -126,12 +126,6 @@ impl App {
             self.set_status("Nothing to split — open a tab first");
             return;
         }
-        let offer = tabs::choices(&self.open_rmux());
-        if offer.is_empty() {
-            self.set_status("No agent found in PATH, and $SHELL is not set");
-            return;
-        }
-        self.launch_offer = offer;
         self.launch_into = into;
         self.launch_cursor = 0;
         // A split lands next to an agent already working somewhere; a fresh tab
@@ -146,7 +140,66 @@ impl App {
         if into == LaunchInto::Tab {
             self.launch_remote = self.selected_remote_project();
         }
+        // What is offered depends on the machine: a row on another one offers
+        // what that machine has, which may be an agent this one lacks, and
+        // starts the ones both have there.
+        self.launch_offer.clear();
+        self.refresh_launch_offer(true);
+        if self.launch_offer.is_empty() {
+            self.set_status("No agent found in PATH, and $SHELL is not set");
+            return;
+        }
         self.mode = Mode::Launch;
+    }
+
+    /// Rebuild the launcher's offer for the location it is aimed at, keeping
+    /// the cursor on the same command.
+    ///
+    /// What is offered depends on the machine: an ssh host's own agents are
+    /// started there, and a host that has one this machine does not is the
+    /// only way to start it at all. The list arrives after the launcher opens
+    /// — a connect and a round trip later — so it is rebuilt when it does.
+    /// The cursor follows what it was on rather than its index, since the rows
+    /// before it can have changed: a list that reshuffles under a cursor makes
+    /// Enter start something other than the row highlighted.
+    ///
+    /// `reseed` drops a cursor that has no row any more to the first one; a
+    /// rebuild from an answer keeps it, because an agent that went missing
+    /// from the host should not move the cursor off what the user picked.
+    pub(super) fn refresh_launch_offer(&mut self, reseed: bool) {
+        // A handoff's list is (agent, account) pairs, not what is installed:
+        // rebuilding it from the machine would throw the handoff away. Its
+        // rows are a handed-over session's whole point, and `c` only detours
+        // through the location field on the way back to them.
+        if self
+            .launch_offer
+            .iter()
+            .any(|c| matches!(c, tabs::Choice::Handoff(_)))
+        {
+            return;
+        }
+        let also = self
+            .launch_remote
+            .as_ref()
+            .filter(|target| !target.peer)
+            .map(|target| target.host.clone())
+            .map(|host| self.remote_agents(&host).to_vec())
+            .unwrap_or_default();
+        let offer = tabs::choices(&self.open_rmux(), &also);
+        if offer.is_empty() {
+            return;
+        }
+        let was = self.launch_offer.get(self.launch_cursor).map(|c| c.label());
+        self.launch_offer = offer;
+        self.launch_cursor = match self
+            .launch_offer
+            .iter()
+            .position(|c| Some(c.label()) == was)
+        {
+            Some(at) => at,
+            None if reseed => 0,
+            None => self.launch_cursor.min(self.launch_offer.len() - 1),
+        };
     }
 
     /// Where a new agent goes when the launcher is opened on a remote row:

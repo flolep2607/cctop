@@ -164,16 +164,12 @@ pub fn sandbox_argv(exe: &std::path::Path, agent: &str, host: &str, path: &str) 
     ]
 }
 
-/// The command a remote shell runs: ssh with a terminal, into the directory.
+/// ssh into `host` with a terminal, ready for the command line that follows.
 ///
 /// Over the launcher's master when it is up (`ControlMaster=auto` uses a live
 /// socket and otherwise connects, prompting in the tab as ssh at a prompt
-/// would). `~` is expanded there, by the host's `sh`.
-pub fn shell_argv(host: &str, path: &str) -> Vec<String> {
-    let script = r#"p=$1
-case $p in "~"|"") p=$HOME ;; "~/"*) p=$HOME/${p#"~/"} ;; esac
-cd -- "$p" || exit 1
-exec "${SHELL:-sh}" -l"#;
+/// would).
+fn ssh_argv(host: &str) -> Vec<String> {
     let mut argv = vec!["ssh".to_string(), "-t".to_string()];
     if let Some(socket) = crate::ssh_master::socket_for(host) {
         argv.extend([
@@ -183,12 +179,54 @@ exec "${SHELL:-sh}" -l"#;
             "ControlMaster=auto".to_string(),
         ]);
     }
-    argv.extend([
-        host.to_string(),
-        "--".to_string(),
-        format!("exec sh -c {} cctop {}", sh_quote(script), sh_quote(path)),
-    ]);
+    argv.push(host.to_string());
+    argv.push("--".to_string());
     argv
+}
+
+/// `sh` prologue shared by a remote shell and a remote agent: into the
+/// directory, `~` expanded by the host. `$1` is the path as typed.
+const INTO_DIR: &str = r#"p=$1
+shift
+case $p in "~"|"") p=$HOME ;; "~/"*) p=$HOME/${p#"~/"} ;; esac
+cd -- "$p" || exit 1"#;
+
+/// The command a remote shell runs: ssh with a terminal, into the directory.
+///
+/// `~` is expanded there, by the host's `sh`.
+pub fn shell_argv(host: &str, path: &str) -> Vec<String> {
+    let script = format!("{INTO_DIR}\nexec \"${{SHELL:-sh}}\" -l");
+    let mut argv = ssh_argv(host);
+    argv.push(format!(
+        "exec sh -c {} cctop {}",
+        sh_quote(&script),
+        sh_quote(path)
+    ));
+    argv
+}
+
+/// The command an agent already installed on `host` runs: ssh with a terminal,
+/// into the directory, then the agent itself.
+///
+/// The other way to use a remote directory is [`sandbox_argv`], which runs the
+/// agent from *this* machine and points its shell at the host. That needs an
+/// agent with a way to redirect its own shell — two of the five have one — so
+/// this is what runs whenever the host has the agent itself: any harness, no
+/// mounting, no redirect, just a tab that is a terminal on the host.
+///
+/// `argv` is the launcher's own, so an account (`env … claude`) and the
+/// options' flags travel with it. Every word is quoted for the host's `sh`,
+/// and passed as its own argument, so nothing is re-split there.
+pub fn agent_argv(host: &str, path: &str, argv: &[String]) -> Vec<String> {
+    let script = format!("{INTO_DIR}\nexec \"$@\"");
+    let mut line = format!("exec sh -c {} cctop {}", sh_quote(&script), sh_quote(path));
+    for word in argv {
+        line.push(' ');
+        line.push_str(&sh_quote(word));
+    }
+    let mut out = ssh_argv(host);
+    out.push(line);
+    out
 }
 
 #[cfg(test)]
@@ -315,5 +353,69 @@ mod tests {
             .output()
             .expect("sh");
         assert_eq!(String::from_utf8_lossy(&out.stdout), "/\n");
+    }
+
+    /// The native launch: the host's own agent, in the host's directory, with
+    /// the argv cctop would have started here — every word still one word by
+    /// the time the host's sh sees it, which is what breaks when a command is
+    /// pasted into a shell line unquoted.
+    #[test]
+    fn an_agent_the_host_has_is_started_there_word_for_word() {
+        let argv: Vec<String> = [
+            "env",
+            "CLAUDE_CONFIG_DIR=/home/me/.claude work",
+            "claude",
+            "--model",
+            "opus-5",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let line = agent_argv("devbox", "/", &argv);
+        assert_eq!(line[..2], ["ssh", "-t"]);
+        assert!(line.contains(&"devbox".to_string()));
+
+        // Run the line the host would run, with the agent swapped for a
+        // printer: what comes back is what the host's sh made of the argv.
+        let printed = run_on_host(
+            &agent_argv("devbox", "/", &argv),
+            "exec \"$@\"",
+            // Double quotes, not single: the script this replaces is itself
+            // inside the single quotes of the ssh command line.
+            "printf \"%s\\n\" \"$@\"",
+        );
+        assert_eq!(printed, argv.join("\n"));
+
+        // A directory with a space and a quote in it arrives whole too.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let odd = dir.path().join("it's here");
+        std::fs::create_dir(&odd).expect("mkdir");
+        let odd = std::fs::canonicalize(&odd)
+            .expect("canonical")
+            .to_string_lossy()
+            .into_owned();
+        let printed = run_on_host(
+            &agent_argv("devbox", &odd, &argv[2..]),
+            "exec \"$@\"",
+            "pwd; printf \"%s\\n\" \"$@\"",
+        );
+        assert_eq!(printed, format!("{odd}\nclaude\n--model\nopus-5"));
+    }
+
+    /// The remote command line of `argv`, run here by `sh` with its program
+    /// swapped for `instead` — the only way to read what quoting did to it.
+    fn run_on_host(argv: &[String], program: &str, instead: &str) -> String {
+        let out = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(argv.last().expect("line").replace(program, instead))
+            .env("HOME", "/")
+            .output()
+            .expect("sh");
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim_end().to_string()
     }
 }
