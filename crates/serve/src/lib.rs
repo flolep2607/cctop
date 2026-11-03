@@ -100,6 +100,9 @@ mod notify;
 mod open;
 /// The threads that keep the snapshot, the quota and the provider status fresh.
 mod pollers;
+/// `/api/push/…` and the Web Push sent on a crossing — a phone told with the
+/// page closed.
+mod push;
 mod quota;
 /// The session routes answered by asking another machine: an ssh host or a
 /// sibling serve.
@@ -227,6 +230,16 @@ const FAVICON: &str = "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 6
 static FAVICON_P: std::sync::LazyLock<http::Packed> =
     std::sync::LazyLock::new(|| http::Packed::plain(FAVICON.as_bytes()));
 
+/// The page's service worker, which shows a Web Push notification with the
+/// page closed — see [`push`].
+///
+/// Its own file beside the app page rather than inlined into it, because a
+/// service worker can only be registered from a URL on this origin. Built
+/// from `web/sw/` by the same `npm run build`, and committed with the page.
+/// Small enough to send as it is.
+static SERVICE_WORKER: std::sync::LazyLock<http::Packed> =
+    std::sync::LazyLock::new(|| http::Packed::plain(include_bytes!("assets/app/sw.js")));
+
 static MANIFEST_P: std::sync::LazyLock<http::Packed> =
     std::sync::LazyLock::new(|| http::Packed::plain(MANIFEST.as_bytes()));
 
@@ -308,6 +321,9 @@ struct Shared {
     topics: Mutex<search::Topics>,
     /// The webhook `--notify` points at, when one was asked for.
     notify: Option<notify::Webhook>,
+    /// The browsers subscribed to Web Push, told on the same crossing as the
+    /// webhook — see [`push`].
+    push: Arc<push::Push>,
     /// The `--host` machines by target name, so a route for a remote row can
     /// ask the cctop that actually holds the transcript — see [`remote_json`].
     /// Present even when `scan` is off: a dashboard-hosted serve still owes
@@ -751,6 +767,7 @@ pub fn start(options: Options) -> anyhow::Result<Serving> {
                     .filter(|url| !url.is_empty())
             })
             .map(|target| notify::Webhook::new(target, link_base)),
+        push: Arc::new(push::Push::new(cctop_core::secrets::Store::current())),
         hosts: options
             .hosts
             .iter()
@@ -1568,6 +1585,18 @@ fn serve_connection(shared: &Shared, stream: &mut TcpStream) {
             "",
             None,
         ),
+        // Behind the token like everything else, which is why the page
+        // registers it as `/sw.js?t=…`: the worker reads the token back off its
+        // own URL to open the session a notification is about.
+        "/sw.js" => http::respond_packed(
+            stream,
+            &request,
+            "text/javascript; charset=utf-8",
+            &SERVICE_WORKER,
+            http::REVALIDATE,
+            "",
+            None,
+        ),
         "/api/config" => config_route(shared, stream, &request, access, handed),
         "/api/sessions" => {
             // Tagged, because a page whose event stream is not getting through
@@ -1869,6 +1898,13 @@ fn serve_connection(shared: &Shared, stream: &mut TcpStream) {
             api_act(shared, stream, &request, &path["/api/act/".len()..], access);
         }
         "/api/address" => address::route(shared, stream, &request, "", access),
+        _ if path.starts_with("/api/push/") => push::route(
+            &shared.push,
+            stream,
+            &request,
+            &path["/api/push/".len()..],
+            access,
+        ),
         "/api/access" => invites::route(shared, stream, &request, access, admin),
         _ if path.starts_with("/api/address/") => {
             address::route(
@@ -2436,6 +2472,9 @@ mod tests {
             provider_status: Mutex::default(),
             topics: Mutex::new(search::Topics::default()),
             notify: None,
+            push: Arc::new(push::Push::new(cctop_core::secrets::Store::in_dir(
+                &std::env::temp_dir().join(format!("cctop-push-{}", new_token())),
+            ))),
             hosts: HashMap::new(),
             ssh: ssh::Reach::nowhere(),
             is_share_host: |_| false,

@@ -510,6 +510,12 @@ the footer keeps naming it (`Bell: ◉ cctop · waiting for input · 12s ago`)
 until you select it. `b` jumps straight there. A bell out of a dozen panes is
 never a mystery, even if you were away when it rang.
 
+Neither reaches you once you have walked away from the machine. For that,
+serve the dashboard (`B`, or `cctop serve`) and press **Notify** on the page
+from your phone: it subscribes to Web Push, and the same crossing reaches the
+phone with the page closed. [The serve guide](serve.md#on-your-phone-with-the-page-closed)
+says what that sends and to whom.
+
 One thing it deliberately does *not* ring for: an agent that has simply
 finished its turn and is sitting at its prompt. In the transcript that looks
 the same as an agent still thinking, and a timer would fire in the middle of

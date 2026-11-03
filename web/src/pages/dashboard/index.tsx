@@ -64,7 +64,7 @@ export function DashboardPage() {
   const [find, setFind] = useState<Find | null>(null);
   const [pickedRaw, setPicked] = useState<Set<string>>(new Set());
   const [selId, setSelId] = useState<string | null>(null);
-  const { notify, toggle: toggleNotify } = useWantingNotifications(sessions);
+  const { notify, pushing, toggle: toggleNotify } = useWantingNotifications(sessions);
   const filterRef = useRef<HTMLInputElement>(null);
   const [, navigate] = useLocation();
   const now = useTick();
@@ -208,7 +208,7 @@ export function DashboardPage() {
           <Button variant={p.running ? "secondary" : "outline"} size="sm" aria-pressed={p.running} onClick={() => update({ running: !p.running })}>
             <Play /> Running
           </Button>
-          <Button variant={notify ? "secondary" : "outline"} size="sm" aria-pressed={notify} onClick={toggleNotify} title="Notify when a session starts waiting on you">
+          <Button variant={notify ? "secondary" : "outline"} size="sm" aria-pressed={notify} onClick={toggleNotify} title={pushing ? "This device is notified even with the page closed" : "Notify when a session starts waiting on you"}>
             {notify ? <Bell /> : <BellOff />} Notify
           </Button>
           <Select value={p.sort} onValueChange={(v) => update({ sort: v as Sort })}>

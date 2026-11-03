@@ -344,12 +344,13 @@ pub(crate) fn publish(
     );
     // The crossing is read off the pair of snapshots as they meet, which is the
     // one place both feeds — this server's own refresher and the dashboard's —
-    // pass through. A webhook asked for here therefore covers both.
+    // pass through. A webhook asked for here therefore covers both, and so does
+    // Web Push: one edge, told to whoever is listening.
     let mut crossed = Vec::new();
+    let pushing = shared.push.wanted();
     if let Ok(mut latest) = shared.latest.lock() {
-        if let Some(hook) = &shared.notify {
-            crossed = hook
-                .crossed(&latest.sessions, &snapshot.sessions)
+        if shared.notify.is_some() || pushing {
+            crossed = crate::notify::crossed(&latest.sessions, &snapshot.sessions)
                 .into_iter()
                 .map(|(event, s)| (event, s.clone()))
                 .collect();
@@ -357,9 +358,12 @@ pub(crate) fn publish(
         *latest = snapshot;
     }
     shared.updated.notify_all();
-    if let Some(hook) = &shared.notify {
-        for (event, session) in crossed {
+    for (event, session) in crossed {
+        if let Some(hook) = &shared.notify {
             hook.post(event, &session);
+        }
+        if pushing {
+            shared.push.send(event, &session);
         }
     }
 }
