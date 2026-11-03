@@ -593,6 +593,11 @@ pub struct App {
     /// Footer items the user has hidden with `footer_hide` — badge names,
     /// hint names, and `share` for the corner.
     pub hidden_footer: Vec<String>,
+    /// Whether the Overview's "Today" is this calendar day or the last 24
+    /// hours — `today_window` in `config.toml`, re-read on every reload.
+    pub today_window: cctop_core::settings::Window,
+    /// The same for "This month": this calendar month, or the last 30 days.
+    pub month_window: cctop_core::settings::Window,
     /// The user's footer line — a static note, or a command's first line.
     pub footer_extra: note::Extra,
     /// The start-up hook repair, while it is still running on its own thread.
@@ -1154,6 +1159,8 @@ impl App {
             list_height: 0,
             hidden_columns: hidden_columns(&prefs),
             hidden_footer: Vec::new(),
+            today_window: cctop_core::settings::Window::default(),
+            month_window: cctop_core::settings::Window::default(),
             footer_extra: note::Extra::default(),
             hook_repair: None,
             help_scroll: 0,

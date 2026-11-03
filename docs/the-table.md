@@ -629,6 +629,8 @@ tokens, and only what you changed is written:
 theme = "light"          # auto / light / dark / mono
 graph_glyphs = "octant"  # braille / octant / sextant: what the charts are drawn in
 tab_bar = "left"         # top / bottom / left / right: where the tab bar sits
+today_window = "rolling" # calendar / rolling: Today, or the last 24 hours
+month_window = "rolling" # calendar / rolling: This month, or the last 30 days
 notify = true
 compact_threshold = 90   # context % the agent compacts at
 idle_after = 12          # hours quiet before `I` counts a live session idle
@@ -637,6 +639,17 @@ idle_after = 12          # hours quiet before `I` counts a live session idle
 quit = "x"
 bottom = "shift+down"    # ctrl+, alt+ and shift+ all work
 ```
+
+`today_window` and `month_window` decide what the Overview counts. The
+calendar spellings are the day that resets at midnight and the month that
+starts over on the 1st; `rolling` is the 24 hours ending with the current one
+and the 30 days ending today, so a session started at 23:00 is still "today"
+when you look at it after midnight. The labels say which is in force
+(`Today`/`Last 24h`, `This month`/`Last 30d`), and the model mix, the
+`Top today` ranking and the `alert_today` threshold follow the same choice.
+The two are independent: a rolling day with a calendar month is a valid pair.
+A calendar month is 28 to 31 days long, so its daily average divides by the
+day of the month; the rolling one always divides by 30.
 
 Octants (Unicode 16) and sextants draw the charts as solid blocks rather than
 braille dots, but only in a font that has them. The `graph_glyphs` row draws a

@@ -338,6 +338,7 @@ impl App {
         self.settings = settings;
         self.keymap = keymap;
         self.apply_columns();
+        self.apply_windows();
         self.apply_theme();
         self.apply_graph_glyphs();
         super::render::set_tab_bar(super::render::TabBar::from_name(
@@ -347,6 +348,15 @@ impl App {
         // `[tunnel]` is in the same file, and `cctop tunnel setup` in another
         // terminal is a change to it like any other.
         self.refresh_connected();
+    }
+
+    /// Re-read which day and month the Overview counts.
+    ///
+    /// On the same reload path as the theme, so the row on the page shows its
+    /// effect on the press that saved it.
+    pub(super) fn apply_windows(&mut self) {
+        self.today_window = self.settings.today_window();
+        self.month_window = self.settings.month_window();
     }
 
     /// Repaint if the file now names a different theme.

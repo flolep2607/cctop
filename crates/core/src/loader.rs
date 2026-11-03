@@ -5,6 +5,7 @@ use crate::fingerprint;
 use crate::pricing::{Plan, Provider};
 use crate::proc;
 use crate::session::{self, ContextUsage, Session, SessionData};
+use crate::settings::Window;
 use crate::util;
 use chrono::Utc;
 use rayon::prelude::*;
@@ -795,6 +796,20 @@ pub struct Stats {
     pub daily_hourly: Vec<f64>,
     /// This calendar month's spend bucketed by day.
     pub monthly_daily: Vec<f64>,
+    /// Spend in the last 24 hours, ending with the one it is now: what "Today"
+    /// means when [`settings::Window::Rolling`] is chosen.
+    pub spend_last_24h: f64,
+    /// The last 24 hours bucketed by hour, oldest first — the rolling day's
+    /// chart, drawn where [`Self::daily_hourly`] is when the day is the
+    /// calendar one.
+    pub rolling_hourly: Vec<f64>,
+    /// The last 30 days bucketed by day, today last.
+    pub rolling_daily: Vec<f64>,
+    /// The last 24 hours' spend per project label, largest first: the rolling
+    /// spelling of [`Self::top_today`].
+    pub top_last_24h: Vec<(String, f64)>,
+    /// The last 24 hours' spend per model, largest first.
+    pub models_last_24h: Vec<(String, f64)>,
     pub models: HashMap<String, usize>,
     /// Today's spend per project label, largest first.
     ///
@@ -808,6 +823,66 @@ pub struct Stats {
     ///
     /// [`models`]: Self::models
     pub models_today: Vec<(String, f64)>,
+}
+
+impl Stats {
+    /// The figure the Overview's day row shows: since midnight, or the last
+    /// 24 hours.
+    pub fn day_spend(&self, window: Window) -> f64 {
+        match window {
+            Window::Calendar => self.spend_today,
+            Window::Rolling => self.spend_last_24h,
+        }
+    }
+
+    /// That row's chart.
+    pub fn day_hours(&self, window: Window) -> &[f64] {
+        match window {
+            Window::Calendar => &self.daily_hourly,
+            Window::Rolling => &self.rolling_hourly,
+        }
+    }
+
+    /// That row's per-project ranking, and its model mix.
+    pub fn day_top(&self, window: Window) -> &[(String, f64)] {
+        match window {
+            Window::Calendar => &self.top_today,
+            Window::Rolling => &self.top_last_24h,
+        }
+    }
+
+    pub fn day_models(&self, window: Window) -> &[(String, f64)] {
+        match window {
+            Window::Calendar => &self.models_today,
+            Window::Rolling => &self.models_last_24h,
+        }
+    }
+
+    /// The figure the Overview's month row shows: this calendar month, or the
+    /// last 30 days.
+    pub fn month_spend(&self, window: Window) -> f64 {
+        match window {
+            Window::Calendar => self.spend_calendar_month,
+            Window::Rolling => self.spend_month,
+        }
+    }
+
+    /// That row's chart.
+    pub fn month_days(&self, window: Window) -> &[f64] {
+        match window {
+            Window::Calendar => &self.monthly_daily,
+            Window::Rolling => &self.rolling_daily,
+        }
+    }
+}
+
+/// The name a session's spend is ranked under: its abbreviated working
+/// directory, or an em dash for a session without one.
+fn project_label(s: &Session) -> &str {
+    match s.abbrev_label.is_empty() {
+        true => "—",
+        false => s.abbrev_label.as_str(),
+    }
 }
 
 /// Largest first, ties broken by name so the Overview does not reshuffle two
@@ -829,14 +904,41 @@ pub fn compute_stats(sessions: &[Session]) -> Stats {
     let days = util::days_in_current_month() as usize;
     let month_start_key = format!("{}-01", &today_key[..7]);
 
+    // The rolling windows are the same buckets read from the other end: the
+    // 24 local hours ending with this one, and the 30 local days ending
+    // today. A zone that moves its clocks twice a year gives one label two
+    // buckets or none; the totals are still every bucket in the window.
+    let rolling_hours: Vec<String> = (0..24)
+        .rev()
+        .map(|i| util::local_hour_key(&(now - chrono::Duration::hours(i))))
+        .collect();
+    let rolling_days: Vec<String> = (0..30)
+        .rev()
+        .map(|i| util::local_date_key(&(now - chrono::Duration::days(i))))
+        .collect();
+    let hour_at: HashMap<&str, usize> = rolling_hours
+        .iter()
+        .enumerate()
+        .map(|(i, key)| (key.as_str(), i))
+        .collect();
+    let day_at: HashMap<&str, usize> = rolling_days
+        .iter()
+        .enumerate()
+        .map(|(i, key)| (key.as_str(), i))
+        .collect();
+
     let mut st = Stats {
         daily_hourly: vec![0.0; 24],
         monthly_daily: vec![0.0; days],
+        rolling_hourly: vec![0.0; 24],
+        rolling_daily: vec![0.0; 30],
         ..Default::default()
     };
     st.total = sessions.len();
     let mut today_by_project: HashMap<String, f64> = HashMap::new();
     let mut today_by_model: HashMap<String, f64> = HashMap::new();
+    let mut rolling_by_project: HashMap<String, f64> = HashMap::new();
+    let mut rolling_by_model: HashMap<String, f64> = HashMap::new();
 
     for s in sessions {
         match s.provider {
@@ -901,13 +1003,14 @@ pub fn compute_stats(sessions: &[Session]) -> Stats {
                 if day.as_str() >= week_key.as_str() {
                     st.spend_week += amount;
                 }
+                if let Some(at) = day_at.get(day.as_str()) {
+                    st.rolling_daily[*at] += amount;
+                }
                 if day.as_str() >= today_key.as_str() {
                     st.spend_today += amount;
-                    let project = match s.abbrev_label.is_empty() {
-                        true => "—",
-                        false => s.abbrev_label.as_str(),
-                    };
-                    *today_by_project.entry(project.to_string()).or_default() += amount;
+                    *today_by_project
+                        .entry(project_label(s).to_string())
+                        .or_default() += amount;
                     for (model, spend) in models {
                         *today_by_model.entry(util::short_model(model)).or_default() += spend;
                     }
@@ -922,6 +1025,17 @@ pub fn compute_stats(sessions: &[Session]) -> Stats {
             }
             for (key, models) in s.costs_by_hour.iter() {
                 let amount: f64 = models.values().sum();
+                if let Some(at) = hour_at.get(key.as_str()) {
+                    st.rolling_hourly[*at] += amount;
+                    *rolling_by_project
+                        .entry(project_label(s).to_string())
+                        .or_default() += amount;
+                    for (model, spend) in models {
+                        *rolling_by_model
+                            .entry(util::short_model(model))
+                            .or_default() += spend;
+                    }
+                }
                 if key.starts_with(&today_key)
                     && let Some(hour_part) = key.get(11..13)
                     && let Ok(hour) = hour_part.parse::<usize>()
@@ -947,8 +1061,11 @@ pub fn compute_stats(sessions: &[Session]) -> Stats {
         + st.spend_vibe
         + st.spend_windsurf;
     st.spend_calendar_month = st.monthly_daily.iter().sum();
+    st.spend_last_24h = st.rolling_hourly.iter().sum();
     st.top_today = descending(today_by_project);
     st.models_today = descending(today_by_model);
+    st.top_last_24h = descending(rolling_by_project);
+    st.models_last_24h = descending(rolling_by_model);
     // Summed per-core above; reported as a share of the machine.
     st.total_cpu /= *CORES;
     st
@@ -991,6 +1108,70 @@ mod tests {
 
         assert_eq!(st.active_1h, 2);
         assert_eq!(st.running, 1);
+    }
+
+    fn session_with_hours(hours: &[(&str, f64)]) -> Session {
+        let mut s = Session::new(Provider::Claude, "x".into());
+        s.total_cost = Some(hours.iter().map(|(_, v)| v).sum());
+        s.costs_by_hour = Arc::new(
+            hours
+                .iter()
+                .map(|(key, amount)| (key.to_string(), HashMap::from([("m".to_string(), *amount)])))
+                .collect(),
+        );
+        s.last_active = Utc::now().to_rfc3339();
+        s
+    }
+
+    /// The rolling day is the 24 hours ending with this one, not the calendar
+    /// day: an hour that crossed midnight still counts there, and the calendar
+    /// buckets keep their own answer.
+    #[test]
+    fn the_rolling_day_is_the_last_twenty_four_hours() {
+        let now = Utc::now();
+        let hour = |back: i64| util::local_hour_key(&(now - chrono::Duration::hours(back)));
+        // Back to yesterday's 23:00 from whatever the hour is now: always
+        // inside a rolling day, never inside this calendar one.
+        let crossed = chrono::Timelike::hour(&now.with_timezone(&chrono::Local)) as i64 + 1;
+        assert!(crossed < 24, "a day has 24 hours");
+        let st = compute_stats(&[
+            session_with_hours(&[(&hour(0), 1.0)]),
+            session_with_hours(&[(&hour(crossed), 2.0)]),
+            session_with_hours(&[(&hour(30), 4.0)]),
+        ]);
+        assert!(
+            (st.spend_last_24h - 3.0).abs() < 1e-9,
+            "{:?}",
+            st.rolling_hourly
+        );
+        assert_eq!(st.rolling_hourly.len(), 24);
+        // The newest bar is this hour; yesterday's 23:00 is `crossed` back.
+        assert!((st.rolling_hourly[23] - 1.0).abs() < 1e-9);
+        assert!((st.rolling_hourly[23 - crossed as usize] - 2.0).abs() < 1e-9);
+        // The calendar day saw only this hour, and 30 hours back is in none
+        // of its buckets.
+        assert!((st.daily_hourly.iter().sum::<f64>() - 1.0).abs() < 1e-9);
+    }
+
+    /// The rolling month is 30 days ending today, which is what `spend_month`
+    /// has always summed — the two must not drift apart.
+    #[test]
+    fn the_rolling_month_is_thirty_days_and_agrees_with_spend_month() {
+        let now = Utc::now();
+        let day = |back: i64| util::local_date_key(&(now - chrono::Duration::days(back)));
+        let st = compute_stats(&[
+            session_with_day(&day(0), 1.0),
+            session_with_day(&day(29), 2.0),
+            session_with_day(&day(30), 8.0),
+        ]);
+        assert_eq!(st.rolling_daily.len(), 30);
+        assert!((st.rolling_daily[29] - 1.0).abs() < 1e-9);
+        assert!((st.rolling_daily[0] - 2.0).abs() < 1e-9);
+        assert!((st.spend_month - 3.0).abs() < 1e-9);
+        assert!((st.rolling_daily.iter().sum::<f64>() - st.spend_month).abs() < 1e-9);
+        // The calendar month may or may not hold the 29th, so only its own
+        // sum is asserted: it is exactly the buckets it keeps.
+        assert!((st.spend_calendar_month - st.monthly_daily.iter().sum::<f64>()).abs() < 1e-9);
     }
 
     #[test]

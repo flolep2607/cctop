@@ -84,7 +84,10 @@ impl App {
         let fired = self.alerts.observe(
             &self.settings.alert_rules(),
             &self.sessions,
-            self.stats.spend_today,
+            // The threshold follows the window the Overview is counting: a
+            // `today_window = "rolling"` that left the alert on the calendar
+            // day would fire on a day the panel does not show.
+            self.stats.day_spend(self.today_window),
             |s| stall_view(reports, &s.session_id),
             Instant::now(),
             chrono::Utc::now(),

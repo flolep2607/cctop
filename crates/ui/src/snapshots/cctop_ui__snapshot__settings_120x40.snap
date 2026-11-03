@@ -20,6 +20,8 @@ expression: screen
 │  auto_update       [x]              Offer to update at startup when a newer release is out                           ┃
 │  telemetry         [x]              Send an anonymous usage report once a day (see README)                           ┃
 │  compact_threshold 83.5             Context % at which the agent compacts. On restart                                │
+│  today_window      calendar     ↻   calendar/rolling: Today is this day, or the last 24h                             │
+│  month_window      calendar     ↻   calendar/rolling: This month is this one, or 30 days                             │
 │  hide_columns      ""               Columns to hide, e.g. "tok_rate,mem"                                             │
 │  alert_cost        0                Alert when a session's cost passes $X                                            │
 │  alert_burn        0                Alert when a session burns over $X an hour                                       │
@@ -38,7 +40,5 @@ expression: screen
 │                                                                                                                      │
 │Remembered · view                                                                                                     │
 │  tree              [ ]              Draw the table as repositories and their checkouts                               │
-│  live_only         [ ]              Only sessions that are running                                                   │
-│  age               default      ↻   Hide sessions quiet for longer than                                              │
-╰ 88   ↑↓ scroll   / filter   Esc back ────────────────────────────────────────────────────────────────────────────────╯
+╰ 90   ↑↓ scroll   / filter   Esc back ────────────────────────────────────────────────────────────────────────────────╯
 / Filter ↵ Change ⌫ Reset e Edit file , Back Alt+←→ Tabs F1 Help F10 Quit                                       ⧉ share
