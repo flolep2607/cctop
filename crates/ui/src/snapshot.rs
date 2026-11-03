@@ -1065,6 +1065,18 @@ fn idle_view_and_reclaim() {
     snap("idle_reclaim", &mut app);
 }
 
+/// `P` over three marked rows: `web` and `api` are live and named on the
+/// title with their count, `docs` has ended and is named inside with why.
+#[test]
+fn send_marked() {
+    let mut app = fixture();
+    app.marked = app.sessions[..3].iter().map(|s| s.key()).collect();
+    app.send_marked_prompt();
+    assert_eq!(app.mode, Mode::SendKeys);
+    app.send_input = "rebase on main and rerun the tests".into();
+    snap("send_marked", &mut app);
+}
+
 /// A tab whose agent died at once: its last screen, frozen, and the line
 /// across the bottom saying how it ended and that any key closes it.
 #[test]

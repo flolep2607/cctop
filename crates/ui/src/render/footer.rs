@@ -159,6 +159,9 @@ fn list_hints(app: &App) -> Vec<Hint> {
         hints.push(hint("D", "Delete marked"));
         hints.push(hint("K", "Kill marked"));
         hints.push(hint("U", "Unmark"));
+        // After the three that were here first, so a narrow footer that only
+        // had room for them still shows them where they were.
+        hints.push(hint("P", "Prompt marked"));
     }
     if app.has_filter() {
         hints.push(hint("Esc", "Clear filter"));

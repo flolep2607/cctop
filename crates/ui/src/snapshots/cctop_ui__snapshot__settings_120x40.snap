@@ -40,5 +40,5 @@ expression: screen
 │                                                                                                                      │
 │Remembered · view                                                                                                     │
 │  tree              [ ]              Draw the table as repositories and their checkouts                               │
-╰ 90   ↑↓ scroll   / filter   Esc back ────────────────────────────────────────────────────────────────────────────────╯
+╰ 91   ↑↓ scroll   / filter   Esc back ────────────────────────────────────────────────────────────────────────────────╯
 / Filter ↵ Change ⌫ Reset e Edit file , Back Alt+←→ Tabs F1 Help F10 Quit                                       ⧉ share
