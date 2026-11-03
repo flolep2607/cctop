@@ -17,7 +17,8 @@ pub(super) enum Request {
     /// Update the running sessions without re-walking every provider directory.
     RefreshLive,
     /// Extract full data for one session, to populate the bottom panels.
-    Data(Box<Session>),
+    /// `reach` is the machine to ask when the row is remote.
+    Data(Box<Session>, Option<cctop_core::reach::Reach>),
     Delete(Box<Session>),
     Terminate {
         session_key: String,
@@ -95,6 +96,8 @@ pub(super) enum Response {
     /// because the store keeps it; it is *taken* shared out of the run loop,
     /// which is the one place that copies — see there.
     Data(String, Arc<SessionData>),
+    /// A remote row's machine could not give its data, and why.
+    DataUnread(String, String),
     Quota(Box<Quota>),
     /// One vendor's status page answered, or could not be reached.
     ProviderStatus(
@@ -483,7 +486,25 @@ pub(super) fn spawn_worker(
                         break;
                     }
                 }
-                Request::Data(session) => {
+                Request::Data(session, Some(reach)) => {
+                    // The transcript is a file on the other machine: the cctop
+                    // there parses it, and only the result crosses.
+                    let tx = tx.clone();
+                    loader.gently_spawn(move || {
+                        let _ = tx.send(match reach.data(&session.session_id) {
+                            Ok(data) => Response::Data(session.key(), Arc::new(data)),
+                            // The likeliest failure is a cctop over there
+                            // from before `--data`, which updating fixes.
+                            Err(why) => Response::DataUnread(
+                                session.key(),
+                                format!(
+                                    "{why}. The cctop there may be too old to answer — update it"
+                                ),
+                            ),
+                        });
+                    });
+                }
+                Request::Data(session, None) => {
                     // Off the request loop: a big transcript takes seconds to
                     // re-read, and everything queued behind it on this thread —
                     // refreshes, searches, the next keystroke's work — waits

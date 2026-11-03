@@ -286,6 +286,13 @@ pub struct Args {
     #[arg(long, requires = "chat", value_name = "AGENT")]
     pub agent: Option<String>,
 
+    /// Print everything parsed out of one session's transcript, as JSON, and exit
+    ///
+    /// /api/data/<id> on a serve: what a TUI on another machine breaks down
+    /// in the panels under the table for a row it reads from this one
+    #[arg(long, value_name = "SESSION")]
+    pub data: Option<String>,
+
     /// Print this machine's tally of a year, as JSON, and exit
     ///
     /// What `Y` in the table asks each remote for, so the year in review
@@ -904,7 +911,7 @@ fn statusline(sessions: &[Session]) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// --report / --chat / --access: the per-session documents, as commands
+// --report / --chat / --data / --access: the per-session documents, as commands
 // ---------------------------------------------------------------------------
 //
 // The same three documents `cctop serve` answers `/api/report`, `/api/chat`
@@ -942,6 +949,14 @@ pub fn run_chat(
         None => cctop_core::chat::build(session, before),
     };
     println!("{}", serde_json::to_string(&conversation)?);
+    Ok(())
+}
+
+/// Print everything parsed out of one session's transcript as JSON, and exit.
+pub fn run_data(sessions: &[Session], which: &str, loader: &Loader) -> anyhow::Result<()> {
+    let session = find_session(sessions, which)?;
+    let data = loader.store().session_data_fresh(session);
+    println!("{}", serde_json::to_string(&*data)?);
     Ok(())
 }
 

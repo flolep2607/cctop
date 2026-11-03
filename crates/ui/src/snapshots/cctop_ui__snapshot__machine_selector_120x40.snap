@@ -28,8 +28,8 @@ expression: screen
 ╭ Info  Tool Activity  Subagents  Cost  Config  Context  Preview  ─────────────────────────────────────────────────────╮
 │This session is on procdb.                                                                                            │
 │                                                                                                                      │
-│cctop reads that machine's summary over ssh; the transcript this panel would break down stays there. Info has         │
-│everything that crossed.                                                                                              │
+│Reading this session over ssh…                                                                                        │
+│                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │

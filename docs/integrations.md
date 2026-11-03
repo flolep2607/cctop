@@ -431,16 +431,17 @@ read, not whatever happens to sit at that path here, and the `!` conflict column
 carries the verdict that machine reached: each one detects its own overlaps,
 being the only one that can see its own disk.
 
-Only the Info panel is filled in for a remote session. Cost, Context, Tool
-Activity and the rest are readings of a transcript that stays where it is, and
-they say so rather than drawing zeroes.
-
-Two readers do reach back across the wire. `i` opens the conversation view for
-a remote row — the transcript is walked by the cctop on the far side and the
-document comes back over the same ssh channel, never parsed at the local path.
-And a `cctop serve` — whether standalone or the one `B` runs inside the TUI —
-answers `/api/report`, `/api/chat` and `/api/access` for remote rows the same
-way.
+Three readers reach back across the wire. The panels under the table — Cost,
+Context, Tool Activity and the rest — break down what the cctop on the far side
+parsed out of the transcript (`cctop --data`), sent back over ssh or through
+the machine's tunnel and never parsed at the local path; a session still
+writing is read again every fifteen seconds. Performance and Processes stay
+blank, being readings of a process tree that is over there. `i` opens the
+conversation view for a remote row the same way. And a `cctop serve` — whether
+standalone or the one `B` runs inside the TUI — answers `/api/report`,
+`/api/chat`, `/api/data` and `/api/access` for remote rows the same way. A
+cctop on the far side too old to answer is said in the panel, with the update
+that fixes it.
 
 A host that stops answering keeps its last rows and says so in the footer
 (`⚠ devbox: Permission denied`). Blanking them would be the stronger claim —

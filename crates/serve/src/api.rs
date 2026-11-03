@@ -450,6 +450,28 @@ pub(crate) fn api_report(shared: &Shared, stream: &mut TcpStream, request: &Requ
     }
 }
 
+/// Serve everything parsed out of one session's transcript.
+///
+/// Not for the page, which reads the report: for another machine's TUI, whose
+/// panels under the table break down this document for a row it shows from
+/// here. A remote row is asked of the machine it came from, like a report.
+pub(crate) fn api_data(shared: &Shared, stream: &mut TcpStream, request: &Request, id: &str) {
+    let snapshot = current(shared);
+    let Some(session) = find(&snapshot.sessions, id) else {
+        return http::respond_error(stream, Some(request), 404, NO_SUCH_SESSION);
+    };
+    if session.remote.is_some() {
+        return remote_json(
+            shared,
+            stream,
+            request,
+            session,
+            &["--data".to_string(), session.session_id.clone()],
+        );
+    }
+    json(stream, request, &*shared.store.session_data_fresh(session));
+}
+
 /// Find a session by id, or by a prefix that matches exactly one.
 ///
 /// Prefixes because session ids are uuids and the report link is a thing people

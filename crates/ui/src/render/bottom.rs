@@ -87,14 +87,13 @@ pub(super) fn draw_bottom(frame: &mut Frame, area: Rect, app: &mut App, layout: 
         return;
     }
 
-    // A remote row carries what the table shows and nothing behind it: the
-    // transcript that every other panel is a reading of is a file on the other
-    // machine, and cctop never fetches it. Info is the exception, being built
-    // from the row itself.
-    //
-    // Said outright rather than left to draw as zeroes. A Cost panel reporting
+    // A remote row's transcript is read by the cctop on its machine, and the
+    // panels break down what that sends back. Until it has — or when it could
+    // not — they say so rather than draw as zeroes: a Cost panel reporting
     // $0.00 next to a `$` column reporting $12 is not an empty panel, it is a
-    // wrong one, and nothing on screen would say which to believe.
+    // wrong one. Performance and Processes are readings of a process tree,
+    // which is on the other machine and never crosses at all. Info is built
+    // from the row itself.
     if app.bottom_tab != 0
         && let Some(host) = app
             .selected_session()
@@ -102,25 +101,33 @@ pub(super) fn draw_bottom(frame: &mut Frame, area: Rect, app: &mut App, layout: 
             .map(|r| r.host.clone())
     {
         let via = app.remote_via(&host);
-        frame.render_widget(
-            Paragraph::new(vec![
-                Line::from(Span::styled(
-                    format!("This session is on {host}."),
-                    theme::dim(),
-                )),
-                Line::default(),
-                Line::from(Span::styled(
-                    format!(
-                        "cctop reads that machine's summary {via}; the transcript this panel \
-                         would break down stays there. Info has everything that crossed."
-                    ),
-                    theme::dim(),
-                )),
-            ])
-            .wrap(ratatui::widgets::Wrap { trim: true }),
-            inner,
-        );
-        return;
+        let said = match (app.bottom_tab, &app.panel_data, &app.panel_unread) {
+            (1 | 2, _, _) => Some(format!(
+                "cctop reads that machine's sessions {via}; their processes stay there. \
+                 Info has everything that crossed."
+            )),
+            (_, Some(_), _) => None,
+            (_, None, Some(why)) => Some(format!(
+                "cctop could not read this session from there: {why}. Info has everything \
+                 that crossed."
+            )),
+            (_, None, None) => Some(format!("Reading this session {via}…")),
+        };
+        if let Some(said) = said {
+            frame.render_widget(
+                Paragraph::new(vec![
+                    Line::from(Span::styled(
+                        format!("This session is on {host}."),
+                        theme::dim(),
+                    )),
+                    Line::default(),
+                    Line::from(Span::styled(said, theme::dim())),
+                ])
+                .wrap(ratatui::widgets::Wrap { trim: true }),
+                inner,
+            );
+            return;
+        }
     }
 
     // The Performance tab draws charts rather than text lines.

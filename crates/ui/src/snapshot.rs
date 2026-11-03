@@ -721,6 +721,9 @@ fn machine_selector() {
     // Off Info, which a remote row falls back to, for the reason the fixture
     // is: it names the account signed in on whatever machine runs the test.
     app.bottom_tab = tab("Cost");
+    // The fixture's extraction is the local row's; the remote one under the
+    // cursor is still being read from its machine.
+    app.panel_data = None;
     snap("machine_selector", &mut app);
 }
 
