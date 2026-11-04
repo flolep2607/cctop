@@ -253,7 +253,7 @@ fn is_claude_binary(name: &str, tokens: &[String]) -> bool {
     name == "claude" || tokens.first().is_some_and(|argv0| is_claude_argv0(argv0))
 }
 
-fn is_claude_argv0(argv0: &str) -> bool {
+pub(crate) fn is_claude_argv0(argv0: &str) -> bool {
     command_stem(argv0) == "claude"
         || argv0.contains("/.claude/remote/ccd-cli/")
         || argv0.contains("\\.claude\\remote\\ccd-cli\\")

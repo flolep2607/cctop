@@ -136,7 +136,7 @@ pub fn start_detached_with(
     }
     let mut environment = launch_env(argv);
     environment.extend(env.iter().cloned());
-    crate::mux::new_session(name, cwd, environment, argv)
+    crate::mux::new_session(name, cwd, environment, &launch_argv(argv))
 }
 
 /// The command that attaches to an existing session and nothing else.
@@ -817,6 +817,37 @@ fn launch_env(argv: &[String]) -> Vec<String> {
         .into_iter()
         .map(|(var, value)| format!("{var}={value}"))
         .collect()
+}
+
+/// Claude Code's fullscreen interface, asked for on every Claude cctop starts.
+///
+/// A tab is a screen of its own, and the fullscreen renderer is the one that
+/// owns a screen: it scrolls its transcript inside the pane, takes the mouse,
+/// and redraws in place, where the default one prints into scrollback that a
+/// pane does not keep and repaints the tail on every resize. `--settings`
+/// holds it for that session alone, above the user's own file and below
+/// managed policy, so an organisation that pins the interface still wins. An
+/// argv that already passes `--settings` is the person's own choice and left
+/// alone, since a second one would be a guess at how the two merge.
+pub fn launch_argv(argv: &[String]) -> Vec<String> {
+    let harness = argv.len() - crate::config::without_launch_prefix(argv).len();
+    let claude = argv
+        .get(harness)
+        .is_some_and(|argv0| crate::proc::is_claude_argv0(argv0));
+    let settled = argv
+        .iter()
+        .any(|a| a == "--settings" || a.starts_with("--settings="));
+    let mut out = argv.to_vec();
+    if claude && !settled {
+        out.splice(
+            harness + 1..harness + 1,
+            [
+                "--settings".to_string(),
+                r#"{"tui":"fullscreen"}"#.to_string(),
+            ],
+        );
+    }
+    out
 }
 
 /// Record on the session itself what this tab is called.
@@ -1689,6 +1720,29 @@ fn capture_bytes(raw: &[u8]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Claude starts fullscreen, under an account's prefix too; another
+    /// harness, or a Claude already given settings, is left as it was.
+    #[test]
+    fn claude_is_started_fullscreen() {
+        let argv = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let full = r#"{"tui":"fullscreen"}"#;
+        assert_eq!(
+            launch_argv(&argv(&["claude", "--resume", "abc"])),
+            argv(&["claude", "--settings", full, "--resume", "abc"])
+        );
+        assert_eq!(
+            launch_argv(&argv(&["env", "CLAUDE_CONFIG_DIR=/x", "claude"])),
+            argv(&["env", "CLAUDE_CONFIG_DIR=/x", "claude", "--settings", full])
+        );
+        for unchanged in [
+            argv(&["codex", "resume", "abc"]),
+            argv(&["claude", "--settings", "/my.json"]),
+            argv(&["claude", "--settings={}"]),
+        ] {
+            assert_eq!(launch_argv(&unchanged), unchanged);
+        }
+    }
 
     /// An agent typed into a shell tab is held by that tab's session, through
     /// the shell; one with no cctop pane above it is held by none.
