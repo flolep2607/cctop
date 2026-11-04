@@ -250,6 +250,10 @@ impl App {
         let Some(session) = self.selected_session().cloned() else {
             return;
         };
+        // As for `R`: root would start the new agent as root in their directory.
+        if let Some(owner) = &session.owner {
+            return self.set_status(cctop_core::inject::not_theirs(owner));
+        }
         // Where it can go, asked before anything is written: every (agent,
         // account) pair on this machine but the one the session is on. The
         // page's menu is the same list, so the two pickers never disagree
@@ -383,6 +387,11 @@ impl App {
         let Some(session) = self.selected_session() else {
             return;
         };
+        // Root's resume would start an agent as root in that user's directory,
+        // writing to their transcript, and leave root-owned files behind there.
+        if let Some(owner) = &session.owner {
+            return self.set_status(cctop_core::inject::not_theirs(owner));
+        }
         // Checked before `resume_argv` so the refusal names the real reason:
         // the row exists because a process does, and its `_pid_` id names no
         // conversation a harness could reopen.

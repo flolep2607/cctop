@@ -12,8 +12,9 @@
 //!   process happens to hold the number, which is the one failure mode worth
 //!   more care than the feature is worth. Run `cctop serve` on that machine.
 //! - **It refuses another user's row** wherever it would reach the agent's
-//!   keyboard. A `cctop serve` run as root lists every user's sessions; it
-//!   types into none of them — see [`crate::inject::not_theirs`].
+//!   keyboard or start one on their transcript. A `cctop serve` run as root
+//!   lists every user's sessions; it types into none of them, and resumes or
+//!   hands off none — see [`crate::inject::not_theirs`].
 //! - **It bounds what it will send.** A prompt is [`MAX_PROMPT_CHARS`] and no
 //!   control characters, because the receiving end is a terminal in raw mode and
 //!   an escape sequence typed into one is not a prompt — it is a keystroke the
@@ -299,7 +300,9 @@ pub fn yolo(session: &Session, on: bool, from: crate::yolo_log::Origin) -> Resul
 /// did not start: there is no pty to borrow, so the agent is launched afresh and
 /// handed the transcript by the harness's own resume command.
 pub fn resume(session: &Session) -> Result<Done, Failed> {
-    local(session)?;
+    // Another user's session would be resumed as root, in their directory, on
+    // their transcript — root-owned files left in a home that is not root's.
+    yours(session)?;
     // Checked before the liveness guard so the refusal says the true reason:
     // a `_pid_` row is always running, and "something is already running this
     // session" would imply there is a session to run.
@@ -577,7 +580,8 @@ pub fn handoff(
     agent: &str,
     account: Option<&str>,
 ) -> Result<Done, Failed> {
-    local(session)?;
+    // As for `resume`: the new agent would run as root in their directory.
+    yours(session)?;
     // The agent has to be one cctop knows, not a command from the request. A
     // string that reaches `Command::new` from a socket is a remote shell with
     // extra steps, however well the token in front of it is kept.
@@ -924,7 +928,8 @@ fn local(session: &Session) -> Result<(), Failed> {
 
 /// [`local`], and not another user's: every action that reaches an agent's
 /// keyboard — a line, a key, YOLO's standing answer, a terminal link — asks
-/// this. Root is shown every user's sessions, and its keys would reach theirs
+/// this, and so does every one that starts an agent on their transcript, a
+/// resume or a handoff. Root is shown every user's sessions, and its keys would reach theirs
 /// as their own; see [`crate::inject::not_theirs`].
 fn yours(session: &Session) -> Result<(), Failed> {
     local(session)?;
@@ -1260,6 +1265,9 @@ mod tests {
             answer(&theirs, "allow").unwrap_err(),
             yolo(&theirs, true, crate::yolo_log::Origin::Web).unwrap_err(),
             terminal(&theirs, None, false).unwrap_err(),
+            // Not a keyboard, but an agent started as root on their transcript.
+            resume(&theirs).unwrap_err(),
+            handoff(&theirs, None, "claude", None).unwrap_err(),
         ] {
             assert_eq!(status, 403);
             assert_eq!(message, crate::inject::not_theirs("ana"));
