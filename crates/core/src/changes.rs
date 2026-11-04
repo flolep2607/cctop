@@ -172,10 +172,18 @@ pub fn read(dir: &Path, started: Option<i64>) -> Result<Option<Changes>, String>
 /// `git -C root`, scrubbed of the environment that would aim it elsewhere, and
 /// without the optional locks: cctop only ever looks at this checkout, and an
 /// index refresh holding `index.lock` would fail a commit the agent is making.
+///
+/// And without `core.fsmonitor`, which names a program git runs on a read of
+/// the working tree. A person typing `git diff` chose to run whatever the
+/// checkout's config says; selecting a row is not that choice.
 fn git(root: &Path) -> Command {
     let mut cmd = crate::worktree::git_in(root);
-    cmd.env("GIT_OPTIONAL_LOCKS", "0")
-        .args(["-c", "core.quotepath=off"]);
+    cmd.env("GIT_OPTIONAL_LOCKS", "0").args([
+        "-c",
+        "core.quotepath=off",
+        "-c",
+        "core.fsmonitor=false",
+    ]);
     cmd
 }
 
