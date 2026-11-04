@@ -27,6 +27,18 @@ pub(super) enum Request {
         dir: std::path::PathBuf,
         started: Option<i64>,
     },
+    /// Check a checkout's branch for `p`. `title` is the session's own, for
+    /// the title box to start from.
+    PullRequestCheck {
+        dir: std::path::PathBuf,
+        title: Option<String>,
+    },
+    /// Push the checked branch and open its pull request.
+    PullRequestOpen {
+        plan: Box<cctop_core::pull_request::Plan>,
+        title: String,
+        body: String,
+    },
     Terminate {
         session_key: String,
         pid: u32,
@@ -112,6 +124,8 @@ pub(super) enum Response {
         key: String,
         result: Result<Option<cctop_core::changes::Changes>, String>,
     },
+    /// A step of `p`, or how it ended.
+    PullRequest(super::pull_request::Event),
     Quota(Box<Quota>),
     /// One vendor's status page answered, or could not be reached.
     ProviderStatus(
@@ -540,6 +554,34 @@ pub(super) fn spawn_worker(
                     loader.gently_spawn(move || {
                         let result = cctop_core::changes::read(&dir, started);
                         let _ = tx.send(Response::Changes { key, result });
+                    });
+                }
+                // A thread each, not the gentle pool: a push can take its whole
+                // deadline on a slow link, and the extractions queued there are
+                // what the panels are waiting for.
+                Request::PullRequestCheck { dir, title } => {
+                    let tx = tx.clone();
+                    spawner.spawn(move || {
+                        let send = |e| {
+                            let _ = tx.send(Response::PullRequest(e));
+                        };
+                        let gh = cctop_core::pull_request::GH;
+                        send(super::pull_request::check(
+                            &dir,
+                            title.as_deref(),
+                            gh,
+                            &send,
+                        ));
+                    });
+                }
+                Request::PullRequestOpen { plan, title, body } => {
+                    let tx = tx.clone();
+                    spawner.spawn(move || {
+                        let send = |e| {
+                            let _ = tx.send(Response::PullRequest(e));
+                        };
+                        let gh = cctop_core::pull_request::GH;
+                        send(super::pull_request::open(&plan, &title, &body, gh, &send));
                     });
                 }
                 // Root reads other users' homes and never writes to them, and a

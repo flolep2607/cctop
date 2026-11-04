@@ -218,6 +218,19 @@ impl App {
             Mode::CostFilter => self.on_key_cost(key),
             Mode::SendKeys => self.on_key_send(key),
             Mode::NewWorktree => self.on_key_worktree(key),
+            Mode::PullRequestUncommitted => match key.code {
+                KeyCode::Char('y') => self.mode = Mode::PullRequestTitle,
+                _ => self.pull_request_cancel(),
+            },
+            Mode::PullRequestTitle => match key.code {
+                KeyCode::Esc => self.pull_request_cancel(),
+                KeyCode::Enter => self.pull_request_send(),
+                _ => {
+                    self.pull_request
+                        .title
+                        .key(key, super::pull_request::TITLE_MAX);
+                }
+            },
             Mode::RenameTab => self.on_key_rename(key),
             Mode::SwitchTab => self.on_key_switch(key),
             Mode::AddAccount => self.on_key_add_account(key),
@@ -398,6 +411,13 @@ impl App {
             }
             Mode::NewWorktree => {
                 paste_into(&mut self.worktree_input, text, BRANCH_MAX);
+            }
+            Mode::PullRequestTitle => {
+                paste_into(
+                    &mut self.pull_request.title,
+                    text,
+                    super::pull_request::TITLE_MAX,
+                );
             }
             Mode::RenameAddress => self.paste_address(text),
             Mode::RenameTab => {
@@ -617,6 +637,7 @@ impl App {
             | Mode::CostFilter
             | Mode::SendKeys
             | Mode::NewWorktree
+            | Mode::PullRequestTitle
             | Mode::RenameTab
             | Mode::RenameAddress
             | Mode::SwitchTab
@@ -1646,6 +1667,7 @@ impl App {
             Action::Send => self.send_prompt(),
             Action::Yolo => self.toggle_yolo(),
             Action::Handoff => self.handoff_selected(),
+            Action::PullRequest => self.pull_request_selected(),
             Action::Read => self.open_conversation(),
             Action::Expand => self.toggle_expanded(),
             Action::Mark => self.toggle_mark(),
@@ -1775,6 +1797,9 @@ impl App {
             // which refreshes; capital `T` is the nearest free spelling.
             KeyCode::Char('T') => self.toggle_tree(),
             KeyCode::Char('F') => self.worktree_prompt(),
+            // `p` for pull request: the step after `F`, once the work in the
+            // worktree is committed.
+            KeyCode::Char('p') => self.pull_request_selected(),
             KeyCode::Char(' ') => self.toggle_mark(),
             KeyCode::Char('e') => self.toggle_expanded(),
             KeyCode::Char('E') => self.toggle_expanded_all(),

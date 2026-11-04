@@ -176,7 +176,7 @@ pub fn read(dir: &Path, started: Option<i64>) -> Result<Option<Changes>, String>
 /// And without `core.fsmonitor`, which names a program git runs on a read of
 /// the working tree. A person typing `git diff` chose to run whatever the
 /// checkout's config says; selecting a row is not that choice.
-fn git(root: &Path) -> Command {
+pub(crate) fn git(root: &Path) -> Command {
     let mut cmd = crate::worktree::git_in(root);
     cmd.env("GIT_OPTIONAL_LOCKS", "0").args([
         "-c",
@@ -335,7 +335,7 @@ fn head_at(log: &str, started: i64) -> Option<(String, BaseKind)> {
 
 /// `git diff --numstat -z` without renames: `<added>\t<removed>\t<path>\0`,
 /// with `-` for both counts of a binary file.
-fn parse_numstat(out: &str) -> Vec<FileChange> {
+pub(crate) fn parse_numstat(out: &str) -> Vec<FileChange> {
     out.split('\0')
         .filter_map(|record| {
             let mut parts = record.splitn(3, '\t');

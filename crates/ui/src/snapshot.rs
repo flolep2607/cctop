@@ -1046,6 +1046,17 @@ fn new_worktree() {
     snap("new_worktree", &mut app);
 }
 
+/// `p`'s title box, over a checkout with work left uncommitted, which the box
+/// says again under the field.
+#[test]
+fn pull_request_title() {
+    let mut app = fixture();
+    app.pull_request.plan = Some(Box::new(super::pull_request::sample()));
+    app.pull_request.title = "Fix the login hint".into();
+    app.mode = Mode::PullRequestTitle;
+    snap("pull_request_title", &mut app);
+}
+
 #[test]
 fn delete_confirm() {
     let mut app = fixture();

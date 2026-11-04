@@ -119,6 +119,10 @@ pub(crate) fn draw_help(frame: &mut Frame, area: Rect, app: &mut App) {
             "Fork a git worktree and launch an agent in it",
         ),
         item(
+            "{pull_request}",
+            "Push its branch and open a pull request (gh)",
+        ),
+        item(
             "  Enter / Space",
             "Fold or unfold the group under the cursor",
         ),

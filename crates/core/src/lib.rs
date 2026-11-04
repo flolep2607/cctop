@@ -65,6 +65,7 @@ pub mod priority;
 pub mod proc;
 pub mod program_status;
 pub mod provider_status;
+pub mod pull_request;
 pub mod quota;
 /// How to reach the machine a remote row came from: ssh or a sibling.
 pub mod reach;

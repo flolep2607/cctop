@@ -234,7 +234,7 @@ pub fn lines(state: &State, width: usize) -> (Vec<Line<'static>>, Vec<Option<usi
         Span::raw(" "),
         Span::styled(format!("−{removed}"), minus()),
         Span::styled(
-            "   [ ] pick a file, v opens its diff",
+            "   [ ] pick a file, v opens its diff, p a pull request",
             Style::default().fg(theme::colors().dimmer),
         ),
     ]));
