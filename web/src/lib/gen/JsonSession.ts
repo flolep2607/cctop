@@ -77,6 +77,11 @@ worktree?: string | null,
  */
 permission?: string | null, models: Array<string>, plan: string, running: boolean, 
 /**
+ * Present, and true, when the agent is in a cctop tab on this machine,
+ * so another machine reading this can say it is already open here.
+ */
+in_tab?: boolean, 
+/**
  * CPU and resident memory across the session's process tree. Absent where
  * no per-session process exists to measure.
  */

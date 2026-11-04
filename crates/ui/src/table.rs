@@ -323,6 +323,7 @@ pub(super) fn draw_table(frame: &mut Frame, area: Rect, app: &mut App, layout: &
                             },
                         },
                         indent,
+                        tab: TabMark::of(s, app.tab_of(s).is_some()),
                     },
                     &now,
                 ),
@@ -404,6 +405,44 @@ struct RowState<'a> {
     expand: Option<char>,
     /// The tree's glyphs ahead of the label, empty in the flat table.
     indent: &'a str,
+    /// Whether the session is already open in a tab, and where.
+    tab: Option<TabMark>,
+}
+
+/// Where a session is already open in a tab, for the mark ahead of its label.
+///
+/// Two, because a remote row has two places a tab can be: one here, which
+/// `R` switches to, and one on its own machine, which `R` would attach a
+/// second window to from here. A row of this machine has only the first —
+/// every cctop on a machine shares one rmux, so a tab any of them opened is
+/// one this cctop shows too.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TabMark {
+    /// A tab here: opening it switches to that tab.
+    Here,
+    /// A tab on the session's own machine, and none here.
+    There,
+}
+
+impl TabMark {
+    /// Squares, for a tab: filled for the one you can switch to, hollow for
+    /// the one only its machine has. Not a dot — the status column's dots and
+    /// the bell's `◉` are about the agent, and this is about a window on it.
+    pub(crate) fn glyph(self) -> char {
+        match self {
+            TabMark::Here => '▣',
+            TabMark::There => '□',
+        }
+    }
+
+    /// The mark for `s`, given whether this cctop has a tab on it.
+    pub(crate) fn of(s: &cctop_core::session::Session, here: bool) -> Option<TabMark> {
+        match (here, s.in_tab, s.remote.is_some()) {
+            (true, _, _) | (false, true, false) => Some(TabMark::Here),
+            (false, true, true) => Some(TabMark::There),
+            (false, false, _) => None,
+        }
+    }
 }
 
 fn session_row(
@@ -423,6 +462,7 @@ fn session_row(
         query,
         expand,
         indent,
+        tab,
     } = row;
     let age_secs = util::parse_ts(&s.last_active).map(|d| (now.timestamp() - d.timestamp()).max(0));
     let base = if selected {
@@ -463,10 +503,17 @@ fn session_row(
         } else if c.id == ColumnId::Project {
             // Prefixed on the label rather than given a column of its own: one
             // more column costs every row two cells of width to serve the few
-            // rows that have children.
+            // rows that have children. The tab mark rides the same way, after
+            // the expansion marker so the tree's glyphs stay in one column.
+            let tab = tab.map(|t| format!("{} ", t.glyph())).unwrap_or_default();
             Cow::Owned(match expand {
-                Some(glyph) => format!("{indent}{glyph} {}", columns::render_cell(c.id, s, now)),
-                None => format!("{indent}{}", columns::render_cell(c.id, s, now)),
+                Some(glyph) => {
+                    format!(
+                        "{indent}{glyph} {tab}{}",
+                        columns::render_cell(c.id, s, now)
+                    )
+                }
+                None => format!("{indent}{tab}{}", columns::render_cell(c.id, s, now)),
             })
         } else {
             columns::render_cell(c.id, s, now)
@@ -925,6 +972,7 @@ mod tests {
             query: "",
             expand: None,
             indent: "",
+            tab: None,
         };
         let quiet = session_row(&s, &cols, &widths, &row(false), &now);
         let rang = session_row(&s, &cols, &widths, &row(true), &now);
@@ -955,6 +1003,7 @@ mod tests {
             query: "",
             expand: None,
             indent: "",
+            tab: None,
         };
         let seen = session_row(&s, &cols, &widths, &row(false, None), &now);
         assert_eq!(seen.spans[0].content, "● ");
@@ -985,6 +1034,7 @@ mod tests {
             query: "",
             expand: None,
             indent: "",
+            tab: None,
         };
         let looping = row(false, Some(cctop_core::alert::Kind::Errors));
         let line = session_row(&s, &cols, &widths, &looping, &now);
@@ -1052,6 +1102,7 @@ mod tests {
                 query: "",
                 expand: Some('▾'),
                 indent: "",
+                tab: None,
             },
             &now,
         );
@@ -1162,6 +1213,7 @@ mod tests {
                 query: "",
                 expand: None,
                 indent: "├─ ",
+                tab: None,
             },
             &now,
         );
@@ -1242,7 +1294,98 @@ mod tests {
             query: "",
             expand: None,
             indent: "",
+            tab: None,
         }
+    }
+
+    /// Which mark a row wears: a tab here wins wherever the row is from; a
+    /// row of this machine in its rmux is a tab here too, since every cctop
+    /// on it shares one; a remote row its machine has a tab on is the hollow
+    /// one; and a remote row from a peer too old to say has none.
+    #[test]
+    fn a_row_is_marked_by_where_its_tab_is() {
+        let local = cctop_core::session::Session::new(Provider::Claude, "a".into());
+        let mut far = local.clone();
+        far.remote = Some(cctop_core::session::Remote {
+            host: "procdb".into(),
+            ..Default::default()
+        });
+        assert_eq!(TabMark::of(&local, false), None);
+        assert_eq!(TabMark::of(&local, true), Some(TabMark::Here));
+        assert_eq!(TabMark::of(&far, false), None, "an old peer says nothing");
+        assert_eq!(TabMark::of(&far, true), Some(TabMark::Here));
+
+        let (mut local, mut far) = (local, far);
+        local.in_tab = true;
+        far.in_tab = true;
+        assert_eq!(TabMark::of(&local, false), Some(TabMark::Here));
+        assert_eq!(TabMark::of(&far, false), Some(TabMark::There));
+        assert_eq!(TabMark::of(&far, true), Some(TabMark::Here));
+    }
+
+    /// The mark leads the label, after any expansion marker.
+    #[test]
+    fn the_tab_mark_leads_the_label() {
+        let now = chrono::Utc::now();
+        let cols = [column(ColumnId::Project)];
+        let widths = [30];
+        let mut s = cctop_core::session::Session::new(Provider::Claude, "a".into());
+        s.label_source = "/w/api".into();
+        s.abbrev_label = "api".into();
+        let text = |row: &RowState| {
+            session_row(&s, &cols, &widths, row, &now)
+                .spans
+                .iter()
+                .map(|s| s.content.to_string())
+                .collect::<String>()
+        };
+        let here = RowState {
+            tab: Some(TabMark::Here),
+            ..state()
+        };
+        assert!(text(&here).starts_with("▣ api"), "{}", text(&here));
+        let there = RowState {
+            tab: Some(TabMark::There),
+            expand: Some('▸'),
+            ..state()
+        };
+        assert!(text(&there).starts_with("▸ □ api"), "{}", text(&there));
+        assert!(text(&state()).starts_with("api"), "{}", text(&state()));
+    }
+
+    /// `tab_of` finds the tab a row is open in: a remote row by the name `R`
+    /// gives its tab, a local one by its agent's pid.
+    #[test]
+    fn a_rows_tab_is_found_by_name_or_pid() {
+        let mut app = crate::tests::test_app();
+        let mut far = cctop_core::session::Session::new(Provider::Claude, "p2".into());
+        far.remote = Some(cctop_core::session::Remote {
+            host: "procdb".into(),
+            ..Default::default()
+        });
+        let mut local = cctop_core::session::Session::new(Provider::Claude, "a".into());
+        local.process = Some(cctop_core::proc::ProcInfo {
+            process_list: vec![cctop_core::proc::ProcEntry {
+                pid: 4321,
+                is_root: true,
+                ghost: false,
+                cpu: 0.0,
+                memory: 0,
+                args: String::new(),
+            }],
+            ..Default::default()
+        });
+        assert_eq!(app.tab_of(&far), None);
+        assert_eq!(app.tab_of(&local), None);
+
+        let mut pane = crate::tabs::Pane::for_test("procdb · p2");
+        pane.pid = 1;
+        pane.resumed = Some(cctop_core::remote_open::tab_name("procdb", "claude", "p2"));
+        app.tabs.push(crate::tabs::Tab::new(pane));
+        app.tabs
+            .push(crate::tabs::Tab::new(crate::tabs::Pane::for_test("claude")));
+        assert_eq!(app.tab_of(&far), Some(0));
+        assert_eq!(app.tab_of(&local), Some(1));
     }
 
     fn column(id: ColumnId) -> &'static columns::Column {

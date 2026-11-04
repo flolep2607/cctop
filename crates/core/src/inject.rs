@@ -89,6 +89,8 @@ impl Input<'_> {
 pub enum Untypeable {
     /// On another machine: its pid means nothing here.
     Remote(String),
+    /// Another user's, as root sees it — see [`not_theirs`].
+    Owner(String),
     /// No live root process — ended, or never seen running.
     NotLive,
     /// Its agent is the same process as a row already being sent to, so a
@@ -102,10 +104,23 @@ impl Untypeable {
     pub fn short(&self) -> String {
         match self {
             Untypeable::Remote(host) => format!("on {host}"),
+            Untypeable::Owner(owner) => format!("{owner}'s session"),
             Untypeable::NotLive => "not live".into(),
             Untypeable::SameTerminal(other) => format!("same terminal as {other}"),
         }
     }
+}
+
+/// Why another user's session is refused, in the words every door says it.
+///
+/// Root reads every home so it can show every session, and stops there. Its
+/// keys reach any terminal — `TIOCSTI` and a `cctop run` socket ask nothing of
+/// who is typing — so a line sent to another user's agent would arrive as that
+/// user's own keyboard, with nothing on their screen to say it came from root.
+/// Delete refuses the same row in its own words: cctop never changes another
+/// user's files.
+pub fn not_theirs(owner: &str) -> String {
+    format!("{owner}'s session — cctop never types into another user's agent")
 }
 
 /// Whether `s` can be typed into from here, and if not, why.
@@ -114,6 +129,11 @@ pub fn untypeable(s: &crate::session::Session) -> Option<Untypeable> {
     // wrong about an agent that is running fine on its own machine.
     if let Some(r) = &s.remote {
         return Some(Untypeable::Remote(r.host.clone()));
+    }
+    // Before the pid too: whether the agent is running is beside the point
+    // when it would not be this user's to type into if it were.
+    if let Some(owner) = &s.owner {
+        return Some(Untypeable::Owner(owner.clone()));
     }
     if s.root_pid().is_none() {
         return Some(Untypeable::NotLive);
@@ -354,6 +374,42 @@ pub(crate) fn list_panes() -> Option<Vec<(u32, String)>> {
 mod tests {
     use super::*;
     use crate::test_wait::{PATIENCE, wait_asking, wait_until};
+
+    fn running(pid: u32) -> crate::session::Session {
+        let mut s =
+            crate::session::Session::new(crate::pricing::Provider::Claude, "sid".to_string());
+        s.process = Some(crate::proc::ProcInfo {
+            process_list: vec![crate::proc::ProcEntry {
+                pid,
+                is_root: true,
+                ghost: false,
+                cpu: 0.0,
+                memory: 0,
+                args: String::new(),
+            }],
+            ..Default::default()
+        });
+        s
+    }
+
+    /// Root sees another user's live agent and must not type into it: the
+    /// one question `s`, `P` and `send_prompt` all ask says so, with the
+    /// owner's name, and says it even of an agent that has ended.
+    #[test]
+    fn another_users_session_is_untypeable() {
+        let me = std::process::id();
+        assert_eq!(untypeable(&running(me)), None);
+
+        let mut theirs = running(me);
+        theirs.owner = Some("ana".into());
+        assert_eq!(untypeable(&theirs), Some(Untypeable::Owner("ana".into())));
+        theirs.process = None;
+        assert_eq!(untypeable(&theirs), Some(Untypeable::Owner("ana".into())));
+        assert_eq!(
+            not_theirs("ana"),
+            "ana's session — cctop never types into another user's agent"
+        );
+    }
 
     /// The Enter must reach the agent as its own write. Appended to the text it
     /// can land in the same read, where a TUI takes it for the newline inside a

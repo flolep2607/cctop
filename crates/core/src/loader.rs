@@ -358,6 +358,17 @@ impl Loader {
             s.harness = harness_from_process(&s, &pm.command).into();
             sessions.push(s);
         }
+
+        // Here because every path to a table passes through here — the full
+        // walk, the cached one and the light refresh — and a tab is as much a
+        // fact about the process as its liveness is. One listing for every
+        // row, and none at all when nothing is running to be in a tab.
+        let live = sessions.iter().any(|s| s.root_pid().is_some());
+        let panes = match live {
+            true => crate::rmux::running(),
+            false => Vec::new(),
+        };
+        stamp_tabs(sessions, &panes, crate::hook::ancestors_of);
     }
 
     /// Read the last tool and context usage from transcript tails.
@@ -638,6 +649,24 @@ fn read_tail(s: &Session, want_context: bool) -> TailRead {
 ///
 /// Shared by the full walk and the light refresh so the two can never disagree
 /// about what a row's numbers mean.
+/// Set [`Session::in_tab`] on every row from one listing of cctop's rmux.
+///
+/// `ancestors` is only walked for a live row whose own pid no pane holds —
+/// an agent typed into a shell in a tab — so a table of agents cctop started
+/// costs one listing and no reads of `/proc`. A remote row is left as its
+/// machine said: its pid is a number on that machine.
+fn stamp_tabs(
+    sessions: &mut [Session],
+    panes: &[crate::rmux::Running],
+    ancestors: impl Fn(u32) -> Vec<u32>,
+) {
+    for s in sessions.iter_mut().filter(|s| s.remote.is_none()) {
+        s.in_tab = !panes.is_empty()
+            && s.root_pid()
+                .is_some_and(|pid| crate::rmux::holding_in(panes, pid, &ancestors).is_some());
+    }
+}
+
 fn annotate(s: &mut Session, data: &SessionData, plan: Plan) {
     let m = &data.metrics;
     s.input_tokens = data.tokens.all_input();
@@ -1075,6 +1104,64 @@ pub fn compute_stats(sessions: &[Session]) -> Stats {
 mod tests {
     use super::*;
     use crate::pricing::Provider;
+
+    fn live_as(id: &str, pid: u32) -> Session {
+        let mut s = Session::new(Provider::Claude, id.into());
+        s.process = Some(crate::proc::ProcInfo {
+            process_list: vec![crate::proc::ProcEntry {
+                pid,
+                is_root: true,
+                ghost: false,
+                cpu: 0.0,
+                memory: 0,
+                args: String::new(),
+            }],
+            ..Default::default()
+        });
+        s
+    }
+
+    /// A row is in a tab when a pane holds its agent or a process above it,
+    /// and only a live row with a pid of this machine's can be. The process
+    /// tree is walked only for a row no pane holds by its own pid.
+    #[test]
+    fn a_row_is_in_a_tab_when_a_pane_holds_its_agent() {
+        let mut pane = crate::rmux::Running::unrecorded("cctop-claude");
+        pane.pid = Some(10);
+        let mut shell = crate::rmux::Running::unrecorded("cctop-shell");
+        shell.pid = Some(20);
+        let panes = [pane, shell];
+
+        let mut remote = live_as("far", 10);
+        remote.remote = Some(crate::session::Remote {
+            host: "procdb".into(),
+            ..Default::default()
+        });
+        remote.in_tab = true;
+        let mut rows = vec![
+            live_as("direct", 10),
+            live_as("typed-in-a-shell", 21),
+            live_as("plain-terminal", 30),
+            Session::new(Provider::Claude, "ended".into()),
+            remote,
+        ];
+        let walked = std::cell::RefCell::new(Vec::new());
+        stamp_tabs(&mut rows, &panes, |pid| {
+            walked.borrow_mut().push(pid);
+            match pid {
+                21 => vec![20, 1],
+                _ => vec![1],
+            }
+        });
+        let in_tab: Vec<bool> = rows.iter().map(|s| s.in_tab).collect();
+        assert_eq!(in_tab, [true, true, false, false, true]);
+        assert_eq!(*walked.borrow(), [21, 30]);
+
+        // No rmux: nothing is in a tab, and a row that was is told so.
+        stamp_tabs(&mut rows, &[], |_| unreachable!());
+        assert!(!rows[0].in_tab && !rows[1].in_tab);
+        assert!(rows[4].in_tab, "a remote row keeps its machine's word");
+    }
 
     fn session_with_day(day: &str, amount: f64) -> Session {
         let mut s = Session::new(Provider::Claude, "x".into());

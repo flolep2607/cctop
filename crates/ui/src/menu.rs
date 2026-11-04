@@ -84,6 +84,12 @@ pub fn items(app: &App) -> Vec<Item> {
     // so everything that reaches into this filesystem is refused with the host
     // named — the same answer, from the same place, as pressing the key.
     let far = |also: Option<String>| remote.clone().or(also);
+    // Another user's agent is refused every keyboard, as the keys refuse it.
+    let theirs = session.owner.as_deref().map(cctop_core::inject::not_theirs);
+    // Already open in a tab here: the entry that would open one switches to
+    // it instead — `R` for a remote row, `a` for one of this machine's — and
+    // says so rather than promising a new tab.
+    let open_here = app.tab_of(session).is_some();
 
     let mut items = vec![
         // On a remote row these two open it on its own machine, which
@@ -91,9 +97,10 @@ pub fn items(app: &App) -> Vec<Item> {
         // the far side says what it could do.
         Item {
             action: Action::Resume,
-            label: match session.remote.is_some() {
-                true => "Open it on its machine, in a tab",
-                false => "Resume in a tab",
+            label: match (session.remote.is_some(), open_here) {
+                (true, true) => "Switch to its tab",
+                (true, false) => "Open it on its machine, in a tab",
+                (false, _) => "Resume in a tab",
             },
             key: "R",
             blocked: match session.remote.is_some() {
@@ -126,11 +133,14 @@ pub fn items(app: &App) -> Vec<Item> {
         },
         Item {
             action: Action::Attach,
-            label: "Attach to it",
+            label: match session.remote.is_none() && open_here {
+                true => "Switch to its tab",
+                false => "Attach to it",
+            },
             key: "a",
             blocked: match subagent {
                 true => Some("a subagent has no terminal of its own".to_string()),
-                false => None,
+                false => theirs.clone(),
             },
             rule: false,
         },
@@ -140,6 +150,7 @@ pub fn items(app: &App) -> Vec<Item> {
             key: "s",
             blocked: far(match () {
                 _ if subagent => Some("a subagent cannot be typed into on its own".into()),
+                _ if theirs.is_some() => theirs.clone(),
                 _ if !has_pid => Some("no local process to type into".into()),
                 _ => None,
             }),
@@ -159,6 +170,7 @@ pub fn items(app: &App) -> Vec<Item> {
                 true => None,
                 false => far(match () {
                     _ if subagent => Some("YOLO is for the session, not a subagent".into()),
+                    _ if theirs.is_some() => theirs.clone(),
                     _ if !has_pid => Some("no local process to answer for".into()),
                     _ if !matches!(
                         session.provider,
@@ -318,6 +330,51 @@ mod tests {
     fn the_cursor_opens_on_the_first_thing_that_works() {
         let items = [item(Some("no")), item(None), item(None)];
         assert_eq!(first_enabled(&items), 1);
+    }
+
+    fn on(app: &App, action: Action) -> Item {
+        items(app)
+            .into_iter()
+            .find(|i| i.action == action)
+            .expect("every entry is always present")
+    }
+
+    /// Another user's row: every entry that reaches the agent's keyboard is
+    /// refused with the reason the key gives.
+    #[test]
+    fn another_users_row_offers_no_keyboard() {
+        let mut app = crate::tests::test_app();
+        let mut s = crate::tests::session("a", true, "ops");
+        s.owner = Some("ana".into());
+        app.sessions = vec![s];
+        app.refilter();
+        app.selected = 0;
+        let why = Some("ana's session — cctop never types into another user's agent".to_string());
+        for action in [Action::Attach, Action::Send, Action::Yolo] {
+            assert_eq!(on(&app, action).blocked, why, "{action:?}");
+        }
+    }
+
+    /// A remote row already open here says `R` switches to its tab.
+    #[test]
+    fn a_row_open_here_says_its_tab_is_switched_to() {
+        let mut app = crate::tests::test_app();
+        let mut s = crate::tests::session("p2", true, "api");
+        s.remote = Some(cctop_core::session::Remote {
+            host: "procdb".into(),
+            ..Default::default()
+        });
+        app.sessions = vec![s];
+        app.refilter();
+        app.selected = 0;
+        assert_eq!(
+            on(&app, Action::Resume).label,
+            "Open it on its machine, in a tab"
+        );
+        let mut pane = crate::tabs::Pane::for_test("procdb · api");
+        pane.resumed = Some(cctop_core::remote_open::tab_name("procdb", "claude", "p2"));
+        app.tabs.push(crate::tabs::Tab::new(pane));
+        assert_eq!(on(&app, Action::Resume).label, "Switch to its tab");
     }
 
     #[test]

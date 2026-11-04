@@ -419,8 +419,9 @@ pub fn asking(session: &Session, tabs: &[crate::rmux::Running]) -> bool {
 
 /// Why `session` may not be typed at by an agent, or `None` when it may.
 ///
-/// Everything [`inject::untypeable`](crate::inject::untypeable) refuses, then
-/// another user's session, then one holding a question.
+/// Everything [`inject::untypeable`](crate::inject::untypeable) refuses —
+/// another machine's, another user's, one not running — then one holding a
+/// question.
 pub fn refusal(session: &Session, tabs: &[crate::rmux::Running]) -> Option<String> {
     use crate::inject::Untypeable;
     match crate::inject::untypeable(session) {
@@ -429,13 +430,13 @@ pub fn refusal(session: &Session, tabs: &[crate::rmux::Running]) -> Option<Strin
                 "that session is on {host}; send_prompt only types into this machine's sessions"
             ));
         }
+        Some(Untypeable::Owner(owner)) => {
+            return Some(format!(
+                "that session belongs to {owner}; send_prompt only types into your own"
+            ));
+        }
         Some(_) => return Some("that session is not running".into()),
         None => {}
-    }
-    if let Some(owner) = &session.owner {
-        return Some(format!(
-            "that session belongs to {owner}; send_prompt only types into your own"
-        ));
     }
     if asking(session, tabs) {
         return Some(

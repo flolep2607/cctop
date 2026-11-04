@@ -54,6 +54,13 @@ are in a cctop tab or the root path applies. An agent you started inside your
 own rmux or tmux is yours, and cctop does not reach into it: the alias above is
 how it becomes typeable.
 
+Run as root, cctop shows every user's sessions and types into none of theirs.
+The root path above would reach their terminals as readily as yours, and a
+line arriving there would read as that user's own keyboard — so `s`, `P`, `a`,
+`W`, YOLO and the web page's send, answer and terminal all refuse another
+user's row with *ana's session — cctop never types into another user's
+agent*, as delete refuses to touch their files.
+
 ## One prompt to several agents
 
 `Space` marks rows, and `P` opens the same box as `s` over all of them: type

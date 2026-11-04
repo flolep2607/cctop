@@ -119,6 +119,9 @@ impl App {
             });
             let request = Request::SendKeys {
                 pid,
+                // `send_targets` reaches only rows `untypeable` passed, and it
+                // refuses every row with an owner.
+                owner: None,
                 text: text.clone(),
                 tag,
             };
@@ -235,10 +238,18 @@ mod tests {
                     pid,
                     text,
                     tag: Some(tag),
+                    ..
                 } => Some((pid, text, tag.label)),
                 _ => None,
             })
             .collect()
+    }
+
+    /// A live session of another user's, as root's table shows it.
+    fn theirs(id: &str, label: &str, pid: u32, owner: &str) -> Session {
+        let mut s = live(id, label, pid);
+        s.owner = Some(owner.into());
+        s
     }
 
     fn remote(id: &str, label: &str, host: &str) -> Session {
@@ -257,6 +268,7 @@ mod tests {
             live("b", "web", 102),
             session("c", false, "docs"),
             remote("d", "infra", "procdb"),
+            theirs("e", "ops", 103, "ana"),
         ]);
         app.send_marked_prompt();
         assert_eq!(app.mode, Mode::SendKeys);
@@ -273,9 +285,10 @@ mod tests {
             ]
         );
         let status = app.status().unwrap_or_default().to_string();
-        assert!(status.starts_with("Sending to 2 of 4"), "{status}");
+        assert!(status.starts_with("Sending to 2 of 5"), "{status}");
         assert!(status.contains("docs (not live)"), "{status}");
         assert!(status.contains("infra (on procdb)"), "{status}");
+        assert!(status.contains("ops (ana's session)"), "{status}");
 
         // The account is finished by the worker's replies, one of which failed.
         let tag = |label: &str| {
@@ -290,14 +303,14 @@ mod tests {
         app.keys_sent(web, Err("no way into its terminal".into()));
         assert!(app.fanout.is_none());
         let status = app.status().unwrap_or_default().to_string();
-        assert!(status.starts_with("Sent to 1 of 4"), "{status}");
+        assert!(status.starts_with("Sent to 1 of 5"), "{status}");
         assert!(
             status.contains("web (no way into its terminal)"),
             "{status}"
         );
         assert!(status.contains("docs (not live)"), "{status}");
         // Marks stay: the next prompt to the same set is one key away.
-        assert_eq!(app.marked.len(), 4);
+        assert_eq!(app.marked.len(), 5);
     }
 
     /// Two rows on one agent process — a transcript the agent moved on from,
@@ -336,6 +349,7 @@ mod tests {
             live("a", "api", 1),
             session("c", false, "docs"),
             remote("d", "infra", "procdb"),
+            theirs("e", "ops", 2, "ana"),
         ] {
             let typeable = cctop_core::inject::untypeable(&s).is_none();
             let mut app = test_app();
@@ -346,6 +360,30 @@ mod tests {
             assert_eq!(app.mode == Mode::SendKeys, typeable);
             assert!(!app.send_to_marked);
         }
+    }
+
+    /// `s` on another user's row says whose it is and why, in delete's voice;
+    /// and the worker refuses a send carrying an owner even if a key let one
+    /// through, as it refuses their delete.
+    #[test]
+    fn another_users_agent_is_never_typed_into() {
+        let mut app = test_app();
+        app.sessions = vec![theirs("e", "ops", 2, "ana")];
+        app.refilter();
+        app.selected = 0;
+        let refusal = Some("ana's session — cctop never types into another user's agent");
+        app.send_prompt();
+        assert_eq!(app.mode, Mode::List);
+        assert_eq!(app.status(), refusal);
+        // `a` and `W` hand over a keyboard on the agent too.
+        let tabs = app.tabs.len();
+        app.set_status("");
+        app.attach_selected();
+        assert_eq!(app.status(), refusal);
+        assert_eq!(app.tabs.len(), tabs);
+        app.set_status("");
+        app.share_selected();
+        assert_eq!(app.status(), refusal);
     }
 
     /// A reply from a fan-out that a newer one replaced is not counted.

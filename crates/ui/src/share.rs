@@ -204,6 +204,11 @@ impl App {
             return;
         };
         let label = session.display_label().to_string();
+        // A share's operator link types into the agent, so it is held to what
+        // `s` is held to.
+        if let Some(owner) = &session.owner {
+            return self.set_status(cctop_core::inject::not_theirs(owner));
+        }
         let Some(pid) = session.root_pid() else {
             self.set_status("Selected session has no local process");
             return;

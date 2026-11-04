@@ -62,6 +62,9 @@ pub(super) enum Request {
     /// when it is one of a fan-out's sends, and comes back on the reply.
     SendKeys {
         pid: u32,
+        /// The row's owner when it is another user's, for the worker to
+        /// refuse — see [`cctop_core::inject::not_theirs`].
+        owner: Option<String>,
         text: String,
         tag: Option<super::fanout::SendTag>,
     },
@@ -705,8 +708,15 @@ pub(super) fn spawn_worker(
                         break;
                     }
                 }
-                Request::SendKeys { pid, text, tag } => {
-                    let result = cctop_core::inject::send_line(pid, &text);
+                // Refused here as well as at `s` and `P`, as a delete is: no
+                // path to another user's agent should get round it.
+                Request::SendKeys {
+                    pid,
+                    owner,
+                    text,
+                    tag,
+                } => {
+                    let result = send_keys(pid, owner.as_deref(), &text);
                     if tx.send(Response::KeysSent { tag, result }).is_err() {
                         break;
                     }
@@ -932,9 +942,29 @@ fn agent_note(why: &str) -> cctop_core::chat::Conversation {
     }
 }
 
+/// The worker's half of `s` and `P`: another user's row is refused before a
+/// key leaves, whatever the key path in front of it checked.
+fn send_keys(pid: u32, owner: Option<&str>, text: &str) -> Result<(), String> {
+    match owner {
+        Some(owner) => Err(cctop_core::inject::not_theirs(owner)),
+        None => cctop_core::inject::send_line(pid, text),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A send that names an owner never reaches the injector: the pid here is
+    /// this test's own, so had it been tried the error would be about the
+    /// terminal, not the owner.
+    #[test]
+    fn a_send_to_another_users_agent_is_refused_at_the_worker() {
+        assert_eq!(
+            send_keys(std::process::id(), Some("ana"), "hello"),
+            Err("ana's session — cctop never types into another user's agent".into())
+        );
+    }
 
     /// A transcript holding `refactor` holds `refacto`, so a query being typed
     /// only has to read the sessions that could still match. This is what makes

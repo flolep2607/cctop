@@ -200,6 +200,11 @@ pub struct JsonSession {
     models: Vec<String>,
     plan: &'static str,
     running: bool,
+    /// Present, and true, when the agent is in a cctop tab on this machine,
+    /// so another machine reading this can say it is already open here.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    #[cfg_attr(feature = "ts", ts(optional = nullable))]
+    in_tab: bool,
     /// CPU and resident memory across the session's process tree. Absent where
     /// no per-session process exists to measure.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -363,6 +368,7 @@ pub fn sessions(sessions: &[Session], plan: Plan, store: &crate::cache::Store) -
                 models: data.models.clone(),
                 plan: plan.as_str(),
                 running: s.is_running(),
+                in_tab: s.in_tab,
                 process: s.process.as_ref().map(|p| JsonProcess {
                     cpu: p.cpu,
                     memory: p.memory,

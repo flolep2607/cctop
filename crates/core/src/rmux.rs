@@ -1608,7 +1608,7 @@ pub fn holding(pid: u32) -> Option<String> {
 }
 
 /// [`holding`] over a given pane list and process tree.
-fn holding_in(
+pub(crate) fn holding_in(
     panes: &[Running],
     pid: u32,
     ancestors: impl FnOnce(u32) -> Vec<u32>,

@@ -73,6 +73,24 @@ nothing about the cctop on your phone, so seen-ness is kept in memory and not
 written anywhere. It also only marks a turn it watched end: a cctop started
 after an agent went quiet has no news to report about it.
 
+### Already open in a tab
+
+A square ahead of a session's label says it is already open in a tab, so you
+do not open a second window on one agent:
+
+- `▣` — in a tab here. For a session on this machine, its agent is in one of
+  cctop's tabs: this cctop's, or any other cctop's on the machine, since they
+  all share one rmux (see [tabs outlive cctop](driving-agents.md#tabs-outlive-cctop)).
+  For a session on another machine, this cctop has a tab open on it. Either
+  way `a` or `R` switches to that tab rather than opening another, and the row
+  menu says *Switch to its tab*.
+- `□` — on another machine's row only: no tab here, but that machine's cctop
+  has the agent in a tab. Opening it from here attaches a second window to the
+  same agent, which works, but the two share one size.
+
+The far machine says whether its agent is in a tab along with the rest of the
+row; one running a cctop too old to say shows no `□`.
+
 A session past one of the `alert_*` thresholds you have set wears that alert
 in place of its dot for as long as it stays past it: `$` for its cost or burn
 rate, a red `!` for an error loop, `◌` for a working agent that has written

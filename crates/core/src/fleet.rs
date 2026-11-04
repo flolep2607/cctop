@@ -523,6 +523,9 @@ fn row(host: &str, v: &Value) -> Option<Session> {
     // row still has to read as live and still has the far side's figures. The
     // liveness inference is the same door Cursor sessions already come through.
     s.inferred_running = v.get("running").and_then(Value::as_bool).unwrap_or(false);
+    // Whether it is in a tab over there. Absent from an older peer and for
+    // every row not in one, which read the same: nobody said it was.
+    s.in_tab = v.get("in_tab").and_then(Value::as_bool) == Some(true);
     if let Some(p) = v.get("process") {
         s.process = Some(crate::proc::ProcInfo {
             pids: num(p, "pids") as usize,
@@ -778,7 +781,26 @@ mod tests {
         assert_eq!(unknown_harness("never-polled"), 0);
         assert_eq!(rows[0].session_id, "x");
         assert!(!rows[0].is_running());
+        assert!(!rows[0].in_tab, "a peer too old to say is in no tab");
         assert!(crate::branch::branch_of(&rows[0]).is_none());
+    }
+
+    /// Whether a session is in a tab over there crosses with the row: what
+    /// `--json` writes for it is what the reader here takes back.
+    #[test]
+    fn a_tab_on_the_far_side_crosses_with_the_row() {
+        let mut open = Session::new(Provider::Claude, "open".into());
+        open.in_tab = true;
+        let shut = Session::new(Provider::Claude, "shut".into());
+        let store = crate::cache::Store::default();
+        let doc = crate::json::sessions(&[open, shut], crate::pricing::Plan::Retail, &store);
+        let json = serde_json::to_string(&doc).unwrap();
+        let rows = parse("far", &json).expect("parses");
+        let in_tab: Vec<(&str, bool)> = rows
+            .iter()
+            .map(|s| (s.session_id.as_str(), s.in_tab))
+            .collect();
+        assert_eq!(in_tab, [("open", true), ("shut", false)]);
     }
 
     /// The answers a real far side gives, as ssh hands them back.
