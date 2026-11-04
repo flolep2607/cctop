@@ -49,6 +49,48 @@ pub(crate) fn draw_resume_confirm(frame: &mut Frame, area: Rect, app: &App, layo
 
 const RESUME_KEYS: &str = " [y] resume anyway    [n / Esc] cancel";
 
+/// `p` found uncommitted work in the checkout. Asked rather than refused, and
+/// never committed for anyone: see [`crate::pull_request`].
+pub(crate) fn draw_pull_request_uncommitted(
+    frame: &mut Frame,
+    area: Rect,
+    app: &App,
+    layout: &mut Layout,
+) {
+    let Some(plan) = app.pull_request.plan.as_deref() else {
+        return;
+    };
+    let lines = vec![
+        Line::from(Span::styled(
+            format!(
+                " {} uncommitted — they are not in the pull request.",
+                util::plural(plan.uncommitted, "file")
+            ),
+            Style::default().fg(theme::colors().cost_mid),
+        )),
+        Line::default(),
+        Line::from(Span::raw(format!(
+            " Only the {} on {} are pushed.",
+            util::plural(plan.commits.len() + plan.more_commits, "commit"),
+            util::truncate(&plan.branch, 30),
+        ))),
+        Line::from(Span::styled(
+            " Commit what belongs in it first, or open it without them.",
+            theme::dim(),
+        )),
+        Line::default(),
+    ];
+    Confirm {
+        title: "Open it anyway?",
+        width: 64,
+        hint: PULL_REQUEST_KEYS,
+        keys: &yes_no(),
+    }
+    .draw(frame, area, layout, lines);
+}
+
+const PULL_REQUEST_KEYS: &str = " [y] open it anyway    [n / Esc] cancel";
+
 /// The key a chip stands for: `[y]` is `y`.
 fn ch(c: char) -> KeyEvent {
     KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)

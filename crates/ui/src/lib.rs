@@ -45,6 +45,7 @@ pub mod panels;
 mod panes;
 mod preview;
 mod profiles;
+mod pull_request;
 mod qr;
 mod rave;
 mod reader;
@@ -123,6 +124,12 @@ pub enum Mode {
     /// Naming the branch `F` forks into a new worktree. Enter creates it and
     /// hands over to [`Mode::Launch`], pointed at the new checkout.
     NewWorktree,
+    /// Asking whether to open a pull request that leaves uncommitted work
+    /// out. See [`pull_request`] for why it asks rather than refuses.
+    PullRequestUncommitted,
+    /// The pull request's title, prefilled and editable; Enter pushes and
+    /// opens it.
+    PullRequestTitle,
     /// Picking which agent a new tab or split should run.
     Launch,
     /// Everything that can be done to the selected row, in one list.
@@ -715,6 +722,9 @@ pub struct App {
     pub tool_owners: Vec<Option<String>>,
     /// The Changes panel: its answer, its cursor and the diff it has open.
     pub changes: changes::State,
+    /// A pull request on its way from `p`: the check's answer and the title
+    /// being edited.
+    pub pull_request: pull_request::Flow,
     /// What the Subagents panel sorts by, and its direction — with the
     /// table's reading of each column: ascending for `Last` is newest-first
     /// (`columns::compare`).
@@ -1223,6 +1233,7 @@ impl App {
             tool_expanded: None,
             tool_owners: Vec::new(),
             changes: changes::State::default(),
+            pull_request: pull_request::Flow::default(),
             subagent_sort: (
                 panels::SubagentSort::parse(&prefs.subagent_sort_col),
                 prefs.subagent_sort_asc,

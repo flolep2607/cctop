@@ -676,6 +676,7 @@ fn event_loop(
                     }
                 }
                 Ok(Response::Changes { key, result }) => app.got_changes(key, result),
+                Ok(Response::PullRequest(event)) => app.got_pull_request(event),
                 Ok(Response::Quota(q)) => {
                     // Before the new reading replaces the old: the notifier's
                     // edge is between the two, so it has to see this one first.

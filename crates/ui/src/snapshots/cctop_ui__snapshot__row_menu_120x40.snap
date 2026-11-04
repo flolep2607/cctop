@@ -15,21 +15,21 @@ expression: screen
 │●     7m     2h     $2.87   ▓░29%   0.4 sonnet-4-5     ─          ─        local                ─            api      │
 │○     3h     1h     $0.19       ─     ─ haiku-4-5      ─          ─        local                ─            docs     │
 │○     2d    12h     $7.03       ─     ─ gpt-5-codex    ─          ─        local                ─            infra    │
-│                            ╭ Fix the checkout redirect loop ────────────────────────────╮                            │
-│                            │ Resume in a tab                                          R │                            │
-│                            │ Restart it in its tab      it is not running in a tab here │                            │
-│                            │ Attach to it                                             a │                            │
-│                            │ Type into it                                             s │                            │
-│                            │ Allow every prompt (YOLO)                                  │                            │
-│                            │ Hand off to agent/account                                O │                            │
-│                            │ Read the conversation                                    i │                            │
-│                            │ Show its subagents                                       e │                            │
-╰────────────────────────────│ Mark for a batch action                              space │────────────────────────────╯
-╭ Info  Performance  Processe│ ────────────────────────────────────────────────────────── │hanges  ────────────────────╮
-│Root /usr/bin/claude --model│ Terminate the agent                                 ctrl+k │                            │
-│    PID    CPU%       MEM  C│ Delete the transcript                  it is still running │                            │
-│   4101    9.8%    360.0M  c╰ ↑↓ Enter · Esc ────────────────────────────────────────────╯                            │
-│   4188    2.4%     44.0M  node mcp-server.js                                                                         │
+│                          ╭ Fix the checkout redirect loop ───────────────────────────────╮                           │
+│                          │ Resume in a tab                                             R │                           │
+│                          │ Restart it in its tab         it is not running in a tab here │                           │
+│                          │ Attach to it                                                a │                           │
+│                          │ Type into it                                                s │                           │
+│                          │ Allow every prompt (YOLO)                                     │                           │
+│                          │ Hand off to agent/account                                   O │                           │
+│                          │ Push and open a pull request  its directory is gone from here │                           │
+│                          │ Read the conversation                                       i │                           │
+╰──────────────────────────│ Show its subagents                                          e │───────────────────────────╯
+╭ Info  Performance  Proces│ Mark for a batch action                                 space │anges  ────────────────────╮
+│Root /usr/bin/claude --mod│ ───────────────────────────────────────────────────────────── │                           │
+│    PID    CPU%       MEM │ Terminate the agent                                    ctrl+k │                           │
+│   4101    9.8%    360.0M │ Delete the transcript                     it is still running │                           │
+│   4188    2.4%     44.0M ╰ ↑↓ Enter · Esc ───────────────────────────────────────────────╯                           │
 │   4290    0.3%      8.0M  bash -c npm test                                                                           │
 │                                                                                                                      │
 │                                                                                                                      │

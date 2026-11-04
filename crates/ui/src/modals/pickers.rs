@@ -489,6 +489,70 @@ pub(crate) fn draw_new_worktree(frame: &mut Frame, area: Rect, app: &App) {
     modal(frame, area, "New worktree", lines, 64);
 }
 
+/// The pull request's title, prefilled and editable, before `p` pushes. The
+/// branch, its base and what the body lists are above it, so the last look
+/// before anything leaves the machine is at what is leaving.
+///
+/// When the branch has a pull request open already there is no title to
+/// write: the box says where it is and offers the push to it instead.
+pub(crate) fn draw_pull_request_title(frame: &mut Frame, area: Rect, app: &App) {
+    let Some(plan) = app.pull_request.plan.as_deref() else {
+        return;
+    };
+    let commits = plan.commits.len() + plan.more_commits;
+    let mut lines = vec![Line::from(vec![
+        Span::raw(" "),
+        Span::styled(util::truncate(&plan.branch, 30), theme::value()),
+        Span::styled(format!(" → {}", plan.base), theme::dim()),
+        Span::styled(
+            format!(
+                "   {}, {}",
+                util::plural(commits, "commit"),
+                util::plural(plan.files.len(), "file")
+            ),
+            theme::dim(),
+        ),
+    ])];
+    let enter = match &plan.existing {
+        Some(url) => {
+            lines.push(Line::from(Span::styled(
+                " Already has a pull request open:",
+                theme::dim(),
+            )));
+            lines.push(Line::from(Span::styled(
+                format!(" {}", util::truncate(url, 60)),
+                theme::value(),
+            )));
+            " Enter push to it and copy its URL   Esc cancel"
+        }
+        None => {
+            lines.push(Line::from(Span::styled(
+                " Pushed to origin, then opened with gh. The body lists the",
+                theme::dim(),
+            )));
+            lines.push(Line::from(Span::styled(
+                " commits and files — nothing from the conversation.",
+                theme::dim(),
+            )));
+            lines.push(Line::default());
+            lines.push(input_line(&app.pull_request.title));
+            " Enter push and open   Esc cancel"
+        }
+    };
+    lines.push(Line::default());
+    if plan.uncommitted > 0 {
+        lines.push(Line::from(Span::styled(
+            format!(
+                " {} left out, uncommitted.",
+                util::plural(plan.uncommitted, "file")
+            ),
+            Style::default().fg(theme::colors().cost_mid),
+        )));
+    }
+    lines.push(Line::from(Span::styled(enter, theme::dim())));
+    modal(frame, area, "Pull request", lines, 64);
+}
+
 /// Naming and painting a workspace tab, opened by right-clicking it in the bar.
 ///
 /// The old name is shown rather than pre-filled into the field: the reason to

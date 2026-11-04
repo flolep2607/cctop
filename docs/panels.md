@@ -204,7 +204,7 @@ leave cctop for.
 
 ```
 Since 3f2a91c, HEAD when the session started
-3 files  +14 −3   [ ] pick a file, v opens its diff
+3 files  +14 −3   [ ] pick a file, v opens its diff, p a pull request
 ▾ src/app.rs             +12 −3
     @@ -1,3 +1,4 @@
      fn main() {
@@ -250,3 +250,56 @@ with a line saying what was cut. A session in a directory outside any repository
 says so, and so does a row from [another
 machine](integrations.md#more-than-one-machine), whose checkout is there and not
 here.
+
+### Landing it as a pull request
+
+When the work is committed, `p` pushes the session's branch to `origin` and
+opens a GitHub pull request for it with [`gh`](https://cli.github.com). It is
+the step after `F`: fork a worktree, let the agent work and commit, read the
+diff here, then `p`. The row menu (`Enter`) has it too.
+
+Each step is said on the status line as it happens — checking the branch,
+checking `gh`, looking for an open pull request, pushing, opening — and all of
+it runs off the drawing thread. Before anything is pushed a box shows the
+branch, the base it goes into, how many commits and files, and the title, which
+you can edit:
+
+```
+╭ Pull request ────────────────────────────────────────────────╮
+│ fix-login → main   2 commits, 1 file                         │
+│ Pushed to origin, then opened with gh. The body lists the    │
+│ commits and files — nothing from the conversation.           │
+│                                                              │
+│ > Fix the login hint█                                        │
+│                                                              │
+│ 3 files left out, uncommitted.                               │
+│ Enter push and open   Esc cancel                             │
+╰──────────────────────────────────────────────────────────────╯
+```
+
+The title starts as the session's own title, or the commit's subject when there
+is one commit, or the branch name made readable. The body lists the commits and
+the files they change against the base. It never quotes the conversation: a
+prompt is private and a pull request may be public.
+
+It says no, and why, when the session is not in a git repository, is on a
+detached `HEAD` or on the default branch (`origin/HEAD`, else `main` or
+`master`), has no commits the default branch lacks, has no `origin`, or when
+`gh` is missing or not logged in (`gh auth login`). It also refuses a row from
+another machine, another user's session, and a subagent.
+
+**Uncommitted work is asked about, not committed.** If `git status` shows
+anything, you are asked first — `3 files uncommitted — they are not in the pull
+request` — and `y` goes on without them. An agent's checkout nearly always has
+something loose in it that does not belong in the pull request, so a refusal
+would only send you off to tidy up. Committing them for you would put work in
+the pull request that nobody chose.
+
+If the branch already has an open pull request, the box shows its URL instead
+of a title, and `Enter` only pushes to it. Either way the pull request's URL
+ends up on the clipboard.
+
+It never force-pushes and never merges. A push that the remote turns down
+because its branch has moved on is reported with git's reason, and nothing more
+is tried. Nothing it runs can prompt: git and `gh` run with their prompts off,
+with no terminal, and under a deadline.

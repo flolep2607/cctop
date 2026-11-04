@@ -408,6 +408,7 @@ nothing about why.
 │ Attach to it                                           a │
 │ Type into it               no local process to type into │
 │ Hand off to another agent                              O │
+│ Push and open a pull request                           p │
 │ Show its subagents                                     e │
 │ Mark for a batch action                            space │
 │ ──────────────────────────────────────────────────────── │
@@ -486,6 +487,7 @@ reach them was to remember which key pressed which one.
 | `L` | Toggle the Tool Activity live filter |
 | `T` | Tree view: group by repository and worktree (see above) |
 | `F` | Fork a git worktree and launch an agent in it (see above) |
+| `p` | Push its branch and open a GitHub pull request with `gh`, title editable first (see [Changes](panels.md#landing-it-as-a-pull-request)) |
 | `+` | Add a Claude account, by running its login or `setup-token` in a tab |
 | `Space` | Mark / unmark the selected session |
 | `D`, `K` | Delete / terminate all marked sessions (with confirmation); in the idle view `K` stops the idle ones |

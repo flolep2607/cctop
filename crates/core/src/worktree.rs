@@ -181,7 +181,7 @@ fn origin_url(common: &Path) -> Option<String> {
 /// where git resolves a relative remote) and lexically normalised: so a clone
 /// of `/srv/up` has the key `/srv/up` itself has, and two unrelated repos that
 /// both spell their origin `../up` do not share one.
-fn normalise_url(url: &str, base: &Path) -> String {
+pub(crate) fn normalise_url(url: &str, base: &Path) -> String {
     let (rest, scheme) = match url.split_once("://") {
         Some((scheme, rest)) => (rest, Some(scheme)),
         None => (url, None),

@@ -32,6 +32,7 @@ pub enum Action {
     Send,
     Yolo,
     Handoff,
+    PullRequest,
     Read,
     Expand,
     Mark,
@@ -180,6 +181,13 @@ pub fn items(app: &App) -> Vec<Item> {
             label: "Hand off to agent/account",
             key: "O",
             blocked: far(subagent.then(|| "hand off the session, not a subagent".to_string())),
+            rule: false,
+        },
+        Item {
+            action: Action::PullRequest,
+            label: "Push and open a pull request",
+            key: "p",
+            blocked: app.pull_request_refusal(session),
             rule: false,
         },
         Item {
