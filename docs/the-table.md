@@ -48,6 +48,15 @@ response is waiting for your input, and red when the newest transcript event is
 an API error. A hollow grey dot is a stopped session, and a filled `◉` is the
 session that rang in the last 30 seconds.
 
+The dot is read from the transcript, corrected by the agent's hooks where it
+has them. For an agent open in one of cctop's tabs there is a third witness:
+its screen, read by [herdr](https://github.com/herdrdev/herdr)'s per-agent
+detection manifests. A permission prompt on that screen puts the row in
+*asking* when no hook speaks for the session — an agent without hooks, or
+whose hooks have gone quiet — and rings the bell the way a hook's prompt does.
+A session whose hooks are reporting keeps their word. See [tabs and
+splits](driving-agents.md#tabs-and-splits) for the order the tab bar asks in.
+
 A live session whose turn ended while you were not looking at it wears a `✓`
 in the accent colour instead of its amber dot: *done, unseen*. Amber says the
 prompt is yours, which is true of most agents most of the time; the check says

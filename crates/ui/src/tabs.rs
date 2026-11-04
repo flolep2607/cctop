@@ -35,6 +35,17 @@ const PROGRAM_EVERY: Duration = Duration::from_millis(1000);
 // tiebreak.
 const QUIET_IS_IDLE: Duration = Duration::from_secs(2);
 
+/// How long a screen a manifest reads as idle has to hold before it is
+/// believed — a fraction of [`QUIET_IS_IDLE`], because here the agent's own
+/// prompt is on screen rather than merely nothing moving.
+///
+/// Not zero: an agent repaints its whole screen between two steps of a turn,
+/// and a frame drawn mid-repaint can show the prompt box without the spinner
+/// above it yet. herdr holds the same transition for three confirmations over
+/// up to 700 ms; half a second without a redraw is the same guard said with
+/// the one clock a pane has.
+const SETTLED_IDLE: Duration = Duration::from_millis(500);
+
 /// How often a rmux-backed pane re-asks rmux which process the agent is, until
 /// it gets an answer.
 ///
@@ -326,7 +337,7 @@ type ScreenPlace = (Instant, u16, usize);
 /// `None` for the signal is not an answer, it is an absence — the still-screen
 /// fallback in [`Pane::read_screen`] is what turns it into one, and that is
 /// decided by a clock rather than by the pixels.
-type ScreenReading = (Option<cctop_core::hook::Signal>, Option<String>, bool);
+pub type ScreenReading = (Option<cctop_core::hook::Signal>, Option<String>, bool);
 
 impl Pane {
     /// A pane labelled `label` with no process behind it, for tests elsewhere
@@ -437,15 +448,18 @@ impl Pane {
 
     /// What this pane's agent says it is doing, read off its screen.
     ///
-    /// Only for a harness with a row in [`cctop_core::screen::FOOTERS`]: that row is what makes a
-    /// pane an agent worth reading, where `is_agent` only knows the harnesses
-    /// cctop aliases, and `Esc to cancel` in a shell is nobody's question.
+    /// Only for a harness [`cctop_core::screen::screenable`] knows — one with a
+    /// detection manifest or a footer row: that is what makes a pane an agent
+    /// worth reading, where `is_agent` only knows the harnesses cctop aliases,
+    /// and `Esc to cancel` in a shell is nobody's question.
     ///
-    /// A screen none of its rules match is idle once it has gone still — the
-    /// same inference the tab bar makes from silence, and sound for the same
-    /// reason: every one of these harnesses ticks a timer or a spinner while it
-    /// works, so a still screen with no working hint on it is a turn that ended.
-    /// Still, and not merely unmatched: see [`cctop_core::screen::FOOTERS`] for the frame mid-turn
+    /// A screen its manifest reads as idle is idle once it has held for
+    /// [`SETTLED_IDLE`]. A screen nothing recognises is idle once it has gone
+    /// still for [`QUIET_IS_IDLE`] — the same inference the tab bar makes from
+    /// silence, and sound for the same reason: every one of these harnesses
+    /// ticks a timer or a spinner while it works, so a still screen with no
+    /// working hint on it is a turn that ended. Still, and not merely
+    /// unmatched: see `cctop_core::screen`'s footers for the frame mid-turn
     /// that has neither.
     pub fn read_screen(&mut self) -> Option<cctop_core::peek::Screened> {
         // A dead agent's last frame is not a turn it is in.
@@ -466,44 +480,111 @@ impl Pane {
                 Some(&rows),
             ));
         }
-        if !cctop_core::screen::screenable(self.harness()) {
-            return None;
-        }
-        // Only a screen that has changed since the last reading can have a
-        // different answer, so an unchanged one is answered from what was
-        // already read. This is the per-tick path: `runloop` asks every pane
-        // every tick, sixty times a second inside a tab, and laying the screen
-        // out again for the same pixels is what made it expensive.
-        //
-        // "Changed" is the last draw, the width the rows are cut to, and how far
-        // back the screen is scrolled: the rows a read sees are the visible
-        // window, and a resize or a scrollback move changes that window without
-        // the agent having drawn anything.
-        let screen = self.view.parser.screen();
-        let (_, cols) = screen.size();
-        let at = (self.drew_at, cols, screen.scrollback());
-        let read = match self.read.as_ref() {
-            Some((where_, found)) if *where_ == at => found.clone(),
-            _ => {
-                let rows: Vec<String> = screen.rows(0, cols).collect();
-                let signal = cctop_core::screen::screen_state(self.harness(), &rows);
-                let asking = signal == Some(cctop_core::hook::Signal::NeedsInput);
-                let ask = asking
-                    .then(|| cctop_core::screen::screen_ask(self.harness(), &rows))
-                    .flatten();
-                let question = asking && cctop_core::screen::screen_question(self.harness(), &rows);
-                let found = (signal, ask, question);
-                self.read = Some((at, found.clone()));
-                found
-            }
-        };
-        let (signal, ask, question) = read;
-        let signal = signal.or_else(|| self.idle().then_some(cctop_core::hook::Signal::Idle))?;
+        let (signal, ask, question) = self.reading()?;
+        let signal = self
+            .settled(signal)
+            .or_else(|| self.idle().then_some(cctop_core::hook::Signal::Idle))?;
         Some(cctop_core::peek::Screened {
             signal,
             ask,
             question,
         })
+    }
+
+    /// What the recognizer makes of this pane's screen as it stands, laid out
+    /// again only when the screen has moved. `None` for a harness it has no
+    /// rules for; a `None` signal inside is a screen it read and did not
+    /// recognise.
+    ///
+    /// Only a screen that has changed since the last reading can have a
+    /// different answer, so an unchanged one is answered from what was
+    /// already read. This is the per-tick path: `runloop` asks every pane
+    /// every tick, sixty times a second inside a tab, and laying the screen
+    /// out again for the same pixels is what made it expensive.
+    ///
+    /// "Changed" is the last draw, the width the rows are cut to, and how far
+    /// back the screen is scrolled: the rows a read sees are the visible
+    /// window, and a resize or a scrollback move changes that window without
+    /// the agent having drawn anything. A title or a progress report arrives
+    /// as output, so it is a draw too.
+    ///
+    /// The title and progress go in only for a pane on cctop's own pty. Under
+    /// rmux the client is sent rmux's title for the outer terminal — none at
+    /// all with `set-titles` off, as cctop's sessions have it, and with it on a
+    /// format around the pane's — and a manifest that reads any title as idle
+    /// (Codex's does) would take that for the agent's.
+    ///
+    /// ponytail: a tab on rmux reads the screen alone; the agent's own title
+    /// is in rmux as `#{pane_title}`, one round trip away, unasked.
+    pub fn reading(&mut self) -> Option<ScreenReading> {
+        if !cctop_core::screen::screenable(self.harness()) {
+            return None;
+        }
+        let at = self.place();
+        if let Some((_, found)) = self.read.as_ref().filter(|(where_, _)| *where_ == at) {
+            return Some(found.clone());
+        }
+        let screen = self.view.parser.screen();
+        let (_, cols) = screen.size();
+        let rows: Vec<String> = screen.rows(0, cols).collect();
+        let (title, progress) = match self.rmux {
+            None => (self.view.title(), self.view.progress()),
+            Some(_) => ("", ""),
+        };
+        let harness = self.harness();
+        let signal = cctop_core::screen::screen_state_with(harness, &rows, title, progress);
+        let asking = signal == Some(cctop_core::hook::Signal::NeedsInput);
+        let ask = asking
+            .then(|| cctop_core::screen::screen_ask(harness, &rows))
+            .flatten();
+        let question = asking && cctop_core::screen::screen_question(harness, &rows);
+        let found = (signal, ask, question);
+        self.read = Some((at, found.clone()));
+        Some(found)
+    }
+
+    /// Where the screen is now, as [`Self::reading`] keys its cache.
+    fn place(&self) -> ScreenPlace {
+        let screen = self.view.parser.screen();
+        (self.drew_at, screen.size().1, screen.scrollback())
+    }
+
+    /// A reading's signal, once it can be believed: an idle one only after
+    /// the screen has held for [`SETTLED_IDLE`].
+    fn settled(
+        &self,
+        signal: Option<cctop_core::hook::Signal>,
+    ) -> Option<cctop_core::hook::Signal> {
+        match signal {
+            Some(cctop_core::hook::Signal::Idle) if self.drew_at.elapsed() < SETTLED_IDLE => None,
+            signal => signal,
+        }
+    }
+
+    /// What the last [`Self::reading`] said of the screen as it still is, if
+    /// it recognised anything — for [`Tab::attention`], which only borrows the
+    /// pane and so cannot lay the screen out itself. The run loop takes a
+    /// reading of every pane every tick (see `App::read_screens`), so this is
+    /// at most a tick old; a reading of a screen that has since moved is no
+    /// answer, and the clock is asked instead.
+    fn screen_signal(&self) -> Option<cctop_core::hook::Signal> {
+        let (at, (signal, _, _)) = self.read.as_ref()?;
+        if *at != self.place() {
+            return None;
+        }
+        self.settled(*signal)
+    }
+
+    /// What a pane nobody has reported on wants, read off its screen: asking
+    /// or idle where its manifest or footer says so, nothing while it says
+    /// working, and the still-screen guess where it says nothing at all.
+    fn screen_attention(&self) -> Option<Attention> {
+        match self.screen_signal() {
+            Some(cctop_core::hook::Signal::NeedsInput) => Some(Attention::NeedsInput),
+            Some(cctop_core::hook::Signal::Idle) => Some(Attention::Idle),
+            Some(_) => None,
+            None => self.idle().then_some(Attention::Idle),
+        }
     }
 
     /// The agent's report from rmux, asked again once [`PROGRAM_EVERY`] has
@@ -1511,16 +1592,21 @@ impl Tab {
                 // way. Claude Code, Gemini and Cursor all tick an elapsed timer
                 // while a tool runs, so in practice the screen is only still
                 // when the agent is blocked.
-                Some(cctop_core::hook::Signal::Acting) => {
-                    pane.idle().then_some(Attention::NeedsInput)
-                }
+                //
+                // A screen that shows the prompt outright says so sooner than
+                // the clock can.
+                Some(cctop_core::hook::Signal::Acting) => (pane.idle()
+                    || pane.screen_signal() == Some(cctop_core::hook::Signal::NeedsInput))
+                .then_some(Attention::NeedsInput),
                 // Reported as working — compacting and just-started included:
                 // the screen is irrelevant, and this is the case the heuristic
                 // gets wrong for an agent that thinks quietly.
                 Some(signal) if signal.is_working() => None,
                 // Its turn is over, or the session is.
                 Some(_) => Some(Attention::Idle),
-                None => pane.idle().then_some(Attention::Idle),
+                // Nothing reported: the screen, by the agent's manifest where
+                // it has one, by stillness where it does not.
+                None => pane.screen_attention(),
             })
             // A held question outranks a finished turn: one of them is blocking
             // an agent, the other is only waiting on you when you get to it.
@@ -1856,7 +1942,7 @@ Enter to select · ↑/↓ to navigate · Esc to cancel",
     /// overlap stay apart.
     #[test]
     fn each_harness_is_read_by_its_own_words() {
-        use cctop_core::hook::Signal::{Busy, NeedsInput};
+        use cctop_core::hook::Signal::{Busy, Idle, NeedsInput};
         let read = |harness: &str, text: &str| {
             let rows: Vec<String> = text.lines().map(String::from).collect();
             cctop_core::screen::screen_state(harness, &rows)
@@ -1891,7 +1977,8 @@ Enter to select · ↑/↓ to navigate · Esc to cancel",
                 "Approve once\nSelect · Confirm · Esc cancel",
                 Some(NeedsInput),
             ),
-            ("devin", "❭ \n  Context: 12% used", None),
+            // Devin's live prompt footer is idle by its manifest.
+            ("devin", "❭ \n  Context: 12% used", Some(Idle)),
             ("droid", "⠋ Thinking…  (esc to stop)", Some(Busy)),
             (
                 "droid",
@@ -1969,7 +2056,11 @@ Enter to select · ↑/↓ to navigate · Esc to cancel",
   ⏸ manual mode on · ? for shortcuts
 
 ";
-        assert_eq!(screen(idle), None, "idle is stillness, not a phrase");
+        assert_eq!(
+            screen(idle),
+            Some(Signal::Idle),
+            "the empty prompt box, by Claude Code's manifest"
+        );
         let busy = "\
 ✢ Quantumizing… (2s · thinking)
 ────────────────────────────
@@ -2287,6 +2378,32 @@ Enter to select · ↑/↓ to navigate · Esc to cancel";
             Tab::new(rang).attention(false, unreported),
             Some(Attention::NeedsInput)
         );
+    }
+
+    /// With nothing reported, the tab is read off the agent's screen by its
+    /// manifest before the clock is asked: a prompt drawn this instant is
+    /// asking, a spinner that has not moved for seconds is still a turn, and
+    /// an empty prompt box is idle without the two-second wait. A screen the
+    /// manifest has no word for falls back to stillness, as before.
+    #[test]
+    fn an_unreported_tab_is_read_by_its_manifest_before_its_stillness() {
+        let unreported = &|_: u32| None;
+        let read = |label: &str, ago: u64, text: &str| {
+            let mut pane = pane(label, true, ago);
+            pane.view.parser.process(text.as_bytes());
+            // What the run loop does every tick, before anything is drawn.
+            pane.reading();
+            Tab::new(pane).attention(false, unreported)
+        };
+        let prompt = " Do you want to proceed?\r\n \u{276f} 1. Yes\r\n\r\n Esc to cancel \u{b7} Tab to amend";
+        assert_eq!(read("claude", 0, prompt), Some(Attention::NeedsInput));
+        let spinner = "\u{2722} Quantumizing\u{2026} (2s \u{b7} thinking)\r\n";
+        assert_eq!(read("claude", 5, spinner), None, "still, but working");
+        let idle = "\u{2500}\u{2500}\u{2500}\r\n\u{276f} \r\n\u{2500}\u{2500}\u{2500}\r\n";
+        assert_eq!(read("claude", 1, idle), Some(Attention::Idle));
+        assert_eq!(read("claude", 0, idle), None, "not yet settled");
+        assert_eq!(read("claude", 5, "hello"), Some(Attention::Idle));
+        assert_eq!(read("claude", 1, "hello"), None);
     }
 
     /// What counts as an agent is the list the aliases are built from, so a

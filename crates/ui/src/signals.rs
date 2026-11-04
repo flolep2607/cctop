@@ -354,15 +354,30 @@ impl App {
             .collect();
         let peeked = &self.peeked;
         let screens = &self.screen_read;
+        let detected = &self.detected;
+        let reports = &self.reports;
         for session in &mut self.sessions {
             // The screen, when it is being read and says something, outranks
             // every report: it is what the agent is showing *now*, where a hook
             // event is what it said last — late for a permission prompt, stale
             // for a question already answered, absent when hooks are not
             // installed at all. See [`App::read_screens`] and [`Self::screened`].
-            let screened = session
-                .root_pid()
-                .and_then(|pid| peeked.get(&pid).or_else(|| screens.get(&pid)));
+            //
+            // With `read_screen` off the screen still speaks, but second: a
+            // prompt it shows is stamped only on a session no current hook
+            // report speaks for — an agent without hooks, or whose hooks have
+            // gone quiet — so a hooked session is exactly as it was.
+            let unhooked = || {
+                reports
+                    .report(&session.session_id)
+                    .is_none_or(|reported| !reported.is_current())
+            };
+            let screened = session.root_pid().and_then(|pid| {
+                peeked
+                    .get(&pid)
+                    .or_else(|| screens.get(&pid))
+                    .or_else(|| detected.get(&pid).filter(|_| unhooked()))
+            });
             // What closed it was a screen with no prompt on it, so it goes in
             // as one: a screen reading outranks the report, and one at work
             // takes a row out of asking, as a read screen always has.
@@ -456,8 +471,12 @@ impl App {
             self.peeked.clear();
             self.peeked_at = None;
             self.peeked_listing = None;
-            return had;
+            let detected = self.detect_prompts();
+            let moved = detected != self.detected;
+            self.detected = detected;
+            return had || moved;
         }
+        self.detected.clear();
         let now = Instant::now();
         let mut read: HashMap<u32, cctop_core::peek::Screened> = HashMap::new();
         let mut unprompted: HashMap<u32, Instant> = HashMap::new();
@@ -544,6 +563,41 @@ impl App {
         let changed = peeked_changed || read != self.screen_read;
         self.screen_read = read;
         changed
+    }
+
+    /// The prompts the tabs' agents show on screen, by agent pid, read
+    /// whatever `read_screen` says — the default half of screen reading.
+    ///
+    /// Every pane is read here, every tick, because [`Tab::attention`] reads
+    /// the tab dot off the same cached reading and only borrows the pane: the
+    /// reading has to be taken somewhere that can lay the screen out, and the
+    /// cache makes an unchanged screen free. What is kept is only a prompt,
+    /// because that is the one thing a row is stamped with from here: a
+    /// working or idle reading colours the tab, and the row keeps what its
+    /// transcript says. See [`Self::apply_reports`] for the hook winning.
+    ///
+    /// A pane that is not an agent is read for nothing: `Esc to cancel` in a
+    /// shell is nobody's question.
+    fn detect_prompts(&mut self) -> HashMap<u32, cctop_core::peek::Screened> {
+        let mut found = HashMap::new();
+        for pane in self.tabs.iter_mut().flat_map(|tab| tab.panes.iter_mut()) {
+            if pane.dead.is_some() || !pane.is_agent() {
+                continue;
+            }
+            if let Some((Some(cctop_core::hook::Signal::NeedsInput), ask, question)) =
+                pane.reading()
+            {
+                found.insert(
+                    pane.agent(),
+                    cctop_core::peek::Screened {
+                        signal: cctop_core::hook::Signal::NeedsInput,
+                        ask,
+                        question,
+                    },
+                );
+            }
+        }
+        found
     }
 
     /// Mark the subagents whose own hook has reported them finished.
@@ -1098,8 +1152,9 @@ mod tests {
     }
 
     /// The whole way from bytes on a pane to a verdict: a Claude tab whose
-    /// footer holds a prompt reads as asking, but only with the setting on; the
-    /// same words are a turn in flight in Gemini; and a shell is not read.
+    /// footer holds a prompt reads as asking — outranking the hooks only with
+    /// the setting on, and only where no hook speaks with it off; the same
+    /// words are a turn in flight in Gemini; and a shell is not read.
     #[test]
     fn a_tab_is_read_off_its_screen_when_asked() {
         use super::tabs::{Pane, Tab};
@@ -1112,8 +1167,13 @@ mod tests {
         };
         let mut app = test_app();
         app.tabs = vec![tab("claude", footer)];
-        assert!(!app.read_screens(), "off unless the file says so");
-        assert!(app.screen_read.is_empty());
+        assert!(app.read_screens(), "a prompt is read with the setting off");
+        assert!(app.screen_read.is_empty(), "but does not outrank the hooks");
+        assert_eq!(
+            app.detected.get(&4321).map(|s| s.signal),
+            Some(Signal::NeedsInput)
+        );
+        assert!(!app.read_screens(), "the same prompt twice is no change");
 
         app.settings.read_screen = Some(true);
         assert!(app.read_screens(), "a new verdict is a change");
@@ -1135,6 +1195,62 @@ mod tests {
         app.tabs = vec![tab("zsh", footer)];
         assert!(app.read_screens());
         assert!(app.screen_read.is_empty(), "a shell has no footer to read");
+    }
+
+    /// With `read_screen` off, a prompt on screen is the row's question only
+    /// where no hook speaks for the session: the hook's word stands where
+    /// there is one, and the screen fills in where there is none.
+    #[test]
+    fn a_prompt_on_screen_fills_in_only_where_no_hook_speaks() {
+        use super::tabs::{Pane, Tab};
+        use cctop_core::hook::Signal;
+        use cctop_core::session::ActivityState;
+        let mut app = test_app();
+        let mut row = session("a", true, "proj");
+        row.process.as_mut().unwrap().process_list = vec![cctop_core::proc::ProcEntry {
+            pid: 4321,
+            is_root: true,
+            ghost: false,
+            cpu: 0.0,
+            memory: 0,
+            args: String::new(),
+        }];
+        row.activity_state = ActivityState::Working;
+        app.sessions = vec![row];
+        let mut pane = Pane::for_test("claude");
+        pane.view.parser.process(
+            " Do you want to proceed?\r\n \u{276f} 1. Yes\r\n\r\n Esc to cancel \u{b7} Tab to amend"
+                .as_bytes(),
+        );
+        app.tabs = vec![Tab::new(pane)];
+
+        // No hooks at all: the screen's prompt is the row's.
+        assert!(app.read_screens());
+        app.apply_reports();
+        assert_eq!(app.sessions[0].activity_state, ActivityState::Asking);
+        assert_eq!(app.pane_signal(4321), Some(Signal::NeedsInput));
+
+        // A hook that says the agent is at work wins over the same screen.
+        app.sessions[0].activity_state = ActivityState::Working;
+        app.apply_hooks(vec![cctop_core::hook::Event {
+            session_id: "a".into(),
+            pids: Vec::new(),
+            reported: cctop_core::hook::Reported {
+                call: None,
+                signal: Signal::Busy,
+                cwd: "/w/proj".into(),
+                permission: None,
+                ask: None,
+                question: false,
+                at: std::time::Instant::now(),
+                provisional: false,
+            },
+            finished_agent: None,
+            sandbox: None,
+            agent: None,
+        }]);
+        app.apply_reports();
+        assert_ne!(app.sessions[0].activity_state, ActivityState::Asking);
     }
 
     /// With the screen read, what it shows outranks what the hook last said —

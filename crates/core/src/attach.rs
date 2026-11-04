@@ -35,6 +35,15 @@ pub struct Signals {
     note: Option<String>,
     /// Whether the agent asked to be sent keys that have no legacy encoding.
     extended_keys: bool,
+    /// The last window title the agent set (OSC 0 or 2). Several agents put
+    /// their state there — Claude Code's title starts with its spinner while
+    /// a turn runs — and the detection manifests read it; see
+    /// [`crate::detect`].
+    title: String,
+    /// The last OSC 9 payload after `9;`, which is a progress report when it
+    /// starts `4;` — `4;3;` indeterminate, `4;0;` cleared. Kept as sent, the
+    /// shape the manifests match.
+    progress: String,
 }
 
 impl Signals {
@@ -43,9 +52,14 @@ impl Signals {
         self.rang
     }
 
-    /// What the agent said when it rang, if it said anything.
-    fn into_note(self) -> Option<String> {
-        self.note
+    /// The last window title the agent set, or `""`.
+    pub fn title(&self) -> &str {
+        &self.title
+    }
+
+    /// The last OSC 9 payload, or `""`.
+    pub fn progress(&self) -> &str {
+        &self.progress
     }
 
     fn ring(&mut self, note: Option<String>) {
@@ -70,6 +84,17 @@ impl Signals {
 /// its semicolons, so progress arrives here as three or more parameters and a
 /// notification as exactly two; matching the shape is what keeps a progress bar
 /// from ringing the bell a hundred times a turn.
+/// An OSC string the agent sent, as text fit to match against: control
+/// characters dropped and the length bounded, since a title is whatever the
+/// model last wrote into it. herdr bounds it at the same 256 characters.
+fn osc_text(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes)
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(256)
+        .collect()
+}
+
 fn notification(params: &[&[u8]]) -> Option<String> {
     let text = match params {
         [b"9", text] => text,
@@ -96,9 +121,17 @@ impl vt100::Callbacks for Signals {
     }
 
     fn unhandled_osc(&mut self, _: &mut vt100::Screen, params: &[&[u8]]) {
+        if let [b"9", rest @ ..] = params {
+            // vt100 split the payload on its semicolons; put them back.
+            self.progress = osc_text(&rest.join(&b';'));
+        }
         if let Some(note) = notification(params) {
             self.ring(Some(note));
         }
+    }
+
+    fn set_window_title(&mut self, _: &mut vt100::Screen, title: &[u8]) {
+        self.title = osc_text(title);
     }
 
     /// The agent asked the terminal to copy — Claude Code's copy writes
@@ -412,8 +445,24 @@ impl Attach {
     /// Answer the agent's signal, because it has now been seen, and hand back
     /// whatever it said — which is worth showing exactly once, to whoever just
     /// looked.
+    ///
+    /// Only the bell and its note are answered: what else the agent told the
+    /// terminal — its title, its keyboard protocol — is still true after
+    /// someone looked.
     pub fn answer(&mut self) -> Option<String> {
-        std::mem::take(self.parser.callbacks_mut()).into_note()
+        let signals = self.parser.callbacks_mut();
+        signals.rang = None;
+        signals.note.take()
+    }
+
+    /// The last window title the agent set, or `""`.
+    pub fn title(&self) -> &str {
+        self.parser.callbacks().title()
+    }
+
+    /// The last OSC 9 payload the agent sent, or `""`.
+    pub fn progress(&self) -> &str {
+        self.parser.callbacks().progress()
     }
 
     /// An `Attach` with a sink where its socket would be, for tests elsewhere
@@ -1639,6 +1688,28 @@ mod tests {
         attach.parser.process(b"\x1b]0;claude: editing\x07");
         attach.parser.process(b"\x1b]2;claude: done\x07");
         assert!(attach.rang().is_none());
+    }
+
+    /// The title and the progress report are kept for the detection
+    /// manifests, as sent — and answering a bell leaves them, and the
+    /// keyboard protocol the agent asked for, where they were.
+    #[test]
+    fn the_title_and_progress_are_kept_past_a_bell() {
+        let (mut attach, _) = probe();
+        attach
+            .parser
+            .process(b"\x1b]0;\xe2\x9c\xb3 Claude Code\x07");
+        attach.parser.process(b"\x1b]9;4;3;\x07");
+        attach.parser.process(b"\x1b[>1u");
+        attach.parser.process(b"\x07");
+        assert_eq!(attach.title(), "✳ Claude Code");
+        assert_eq!(attach.progress(), "4;3;");
+        assert!(attach.answer().is_none());
+        assert!(attach.rang().is_none());
+        assert_eq!(attach.title(), "✳ Claude Code");
+        assert!(attach.extended_keys(), "a look is not a new agent");
+        attach.parser.process(b"\x1b]9;4;0;\x1b\\");
+        assert_eq!(attach.progress(), "4;0;");
     }
 
     /// A clipboard write is not a signal either — and it must reach the

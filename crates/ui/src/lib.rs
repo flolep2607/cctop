@@ -853,6 +853,11 @@ pub struct App {
     /// detached tab's answer is in `peeked`, and the two are looked up together
     /// rather than copied into one map every tick.
     pub screen_read: HashMap<u32, cctop_core::peek::Screened>,
+    /// The prompts each tab's agent shows on its own screen, by agent pid,
+    /// while `read_screen` is off — read the same way, but only ever stamped
+    /// onto a row whose session has no hook speaking for it. See
+    /// [`App::read_screens`].
+    pub(crate) detected: HashMap<u32, cctop_core::peek::Screened>,
     /// What detached tabs' screens last said, by agent pid.
     ///
     /// Kept apart from the pane reads because it is refreshed on a slower
@@ -1288,6 +1293,7 @@ impl App {
             yolo: cctop_core::yolo::Auto::new(false),
             yolo_at: None,
             screen_read: HashMap::new(),
+            detected: HashMap::new(),
             peeked: HashMap::new(),
             peeked_at: None,
             answered_at: None,

@@ -233,11 +233,37 @@ drawing. That needs cctop to hold the pty, so it works for sessions started with
 start from a shell. On attaching, the shim replays its recent output so the
 screen is rebuilt immediately rather than at the agent's next repaint.
 
-A tab you are not looking at is marked **green** when its agent has stopped
-drawing — its turn is over and the prompt is yours — and blinks **amber** only
-when it has explicitly asked a question and is blocked on the answer. Amber wins
-when a tab has both. The tab you are on never blinks, since its focused pane is
-already in front of you.
+A tab you are not looking at is marked **green** when its agent's turn is over
+and the prompt is yours, and blinks **amber** only when it is blocked on a
+question — a permission prompt, a choice, a trust dialog. Amber wins when a tab
+has both. The tab you are on never blinks, since its focused pane is already in
+front of you.
+
+Where the colour comes from, first answer wins:
+
+1. **The agent ringing the bell**, which is it asking outright.
+2. **Its hooks** — Claude Code, Codex, Gemini CLI, Cursor and OpenCode report
+   each turn and each permission prompt as it happens (see
+   [letting the agents tell cctop
+   directly](integrations.md#letting-the-agents-tell-cctop-directly)) — or,
+   failing those, a question or a finished turn its transcript shows.
+3. **Its screen, read by its manifest.** cctop reads the agent's screen with
+   [herdr](https://github.com/herdrdev/herdr)'s detection manifests — one rule
+   set per agent, for 22 agents (Claude Code, Codex, Gemini CLI, OpenCode,
+   Cursor, Devin, Droid, Pi, Amp, Copilot, Kimi, Qwen and more) — and takes
+   amber from a permission menu on screen, green from the agent's empty prompt
+   box once it has held for half a second, and nothing from a spinner, however
+   long it sits there. A tab on cctop's own pty also has the window title read,
+   which several agents put their state in.
+4. **Stillness**, for a screen the manifest has no word for, or an agent it
+   does not know: green once the screen has stopped changing for two seconds.
+
+The screen fills in, it does not overrule: a session whose hooks are reporting
+keeps their word, and the screen speaks for the ones whose hooks are not
+installed, have gone quiet, or never existed. A prompt it finds goes onto the
+session's row as well, so the bell and the web page hear about it the same way
+they hear about a hook's. To have the screen outrank the hooks instead, see
+[reading the agents' screens instead](integrations.md#reading-the-agents-screens-instead).
 
 Green is most tabs most of the time, so a turn that ended while you were
 somewhere else says so a second way: the label turns the accent colour and
