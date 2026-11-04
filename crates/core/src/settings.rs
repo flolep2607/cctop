@@ -202,7 +202,7 @@ pub const PASTE_DEBOUNCE_MS: u64 = 250;
 /// pane's belong to the agent.
 ///
 // ponytail: dashboard keys only; extend to modals if someone asks to rebind one.
-pub const BINDINGS: [(&str, &str, &str); 53] = [
+pub const BINDINGS: [(&str, &str, &str); 54] = [
     ("quit", "q", "Quit"),
     ("help", "?", "Help"),
     ("settings", ",", "The settings tab, at the end of the bar"),
@@ -247,6 +247,11 @@ pub const BINDINGS: [(&str, &str, &str); 53] = [
     ("unmark_all", "U", "Clear all marks"),
     ("delete_marked", "D", "Delete all marked sessions"),
     ("kill_marked", "K", "Terminate all marked sessions"),
+    (
+        "send_marked",
+        "P",
+        "Type one line into every marked session",
+    ),
     ("search", "/", "Filter"),
     ("sort", "S", "Sort by a column"),
     ("cost_floor", "#", "Only sessions costing at least $X"),

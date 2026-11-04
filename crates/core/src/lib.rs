@@ -92,6 +92,7 @@ pub mod tunnel;
 pub mod update;
 pub mod util;
 pub mod watch;
+pub mod webpush;
 pub mod worktree;
 pub mod ws;
 pub mod yolo;

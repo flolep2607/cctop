@@ -137,6 +137,41 @@ after it leaves the state and re-enters. The POST is made on a spawned thread
 with a five-second deadline, and a dead endpoint is reported once on stderr and
 then stays silent — a webhook that never answers costs the refresh loop nothing.
 
+### On your phone, with the page closed
+
+A browser puts a background tab to sleep, and a phone does it within minutes,
+so the page's own notifications stop the moment you pocket it. Where the
+browser supports Web Push, **Notify** subscribes it instead: cctop sends the
+push itself on the same crossing — a session going from working to waiting or
+asking — and the page's service worker (`/sw.js`) shows it with the page closed
+and the screen locked. Tapping it opens that session's page. Turning Notify off
+unsubscribes the device. Where Web Push is not on offer, Notify falls back to
+the in-page notifications, which work while the page is open.
+
+- **It needs the full link** and a secure origin: the tunnel's https address,
+  or `localhost`/`127.0.0.1` on the machine itself. A read-only link can still
+  use the in-page notifications.
+- **On an iPhone or iPad**, Safari only offers Web Push to a page added to the
+  home screen: Share → Add to Home Screen, open it from there, then Notify.
+  The manifest at `/manifest.webmanifest` is what makes it installable.
+- **What leaves the machine**: the title ("Waiting on you" or "Needs
+  permission"), the session's label as the table shows it, and its id, for
+  the tap. Nothing out of the transcript — not the prompt, not the agent's
+  question. It goes to the push service of the browser that subscribed —
+  Google's for Chrome and Android, Apple's for Safari, Mozilla's for Firefox —
+  encrypted to that browser's own key (RFC 8291), so the service carries it
+  without being able to read it, and signed with this machine's key (RFC 8292)
+  so nobody else can push to the subscription.
+- **What is kept**: that signing key and the subscriptions, sealed in
+  `secrets.enc` beside the other secrets (see `cctop doctor`). Both survive a
+  restart, so a subscribed phone stays subscribed. A subscription the push
+  service reports gone — the browser unsubscribed, or its site data was
+  cleared — is dropped on the next push.
+
+Both kinds of serve send it: `cctop serve`, and the one the dashboard hosts
+with `B`. They share `secrets.enc`, so two serves running on one machine
+both send it, and the phone hears it twice.
+
 ## The report
 
 Click any row, or go straight to `/session/<id>` (any unambiguous prefix of the

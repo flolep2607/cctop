@@ -1321,10 +1321,16 @@ impl App {
             KeyCode::Esc => self.mode = Mode::List,
             KeyCode::Enter => {
                 let text = self.send_input.to_string();
-                if !text.is_empty()
-                    && let Some(pid) = self.selected_session().and_then(|s| s.root_pid())
-                {
-                    let _ = self.tx.send(Request::SendKeys { pid, text });
+                if text.is_empty() {
+                    // Nothing typed is nothing sent, to one row or to many.
+                } else if self.send_to_marked {
+                    self.send_marked(text);
+                } else if let Some(pid) = self.selected_session().and_then(|s| s.root_pid()) {
+                    let _ = self.tx.send(Request::SendKeys {
+                        pid,
+                        text,
+                        tag: None,
+                    });
                     self.set_status("Sending…");
                 }
                 self.mode = Mode::List;
@@ -1677,13 +1683,23 @@ impl App {
             self.set_status("A subagent cannot be typed into on its own");
             return;
         }
-        match self.selected_session() {
-            Some(s) if s.root_pid().is_some() => {
+        // The same question the fan-out asks of each marked row, so the two
+        // keys cannot disagree about which sessions can be typed into.
+        let Some(s) = self.selected_session() else {
+            return;
+        };
+        match App::untypeable(s) {
+            None => {
                 self.send_input = "continue".into();
+                self.send_to_marked = false;
                 self.mode = Mode::SendKeys;
             }
+            Some(crate::fanout::Untypeable::Remote(_)) => {
+                if let Some(why) = App::remote_refusal(s) {
+                    self.set_status(why);
+                }
+            }
             Some(_) => self.set_status("Selected session has no local process to type into"),
-            None => {}
         }
     }
 
@@ -1765,6 +1781,9 @@ impl App {
             KeyCode::Char('U') => self.unmark_all(),
             KeyCode::Char('V') => self.switch_to_installed(),
             KeyCode::Char('D') => self.batch(BatchKind::Delete),
+            // `P` for prompt: `s` is the one-row send, `S` was taken by the
+            // sort panel long before, and the marked-row keys are capitals.
+            KeyCode::Char('P') => self.send_marked_prompt(),
             // In the idle view `K` stops what the view found, skipping what is
             // in use, rather than refusing the batch over one row: the view is
             // the selection, and that is the question it was opened to answer.

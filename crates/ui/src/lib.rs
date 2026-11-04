@@ -22,6 +22,7 @@ mod connect;
 mod dirs;
 mod drunk;
 mod effects;
+mod fanout;
 mod filter;
 mod harness_opts;
 mod high;
@@ -539,6 +540,14 @@ pub struct App {
     pub launch_opt_input: line_edit::LineEdit,
     /// Line being typed into the selected session's terminal.
     pub send_input: line_edit::LineEdit,
+    /// Whether the send box is the marked sessions' (`P`) rather than the
+    /// selected row's (`s`). One box and one mode for both, so pasting, F9 and
+    /// the line editor behave the same whichever key opened it.
+    pub send_to_marked: bool,
+    /// The fan-out still waiting on the worker's replies, and the id the next
+    /// one will take. See the `fanout` module.
+    fanout: Option<fanout::Fanout>,
+    fanout_seq: u64,
     /// The branch being named for `F`, the checkout it forks from, and the
     /// main repository whose `.claude/worktrees/` it lands in.
     ///
@@ -1154,6 +1163,9 @@ impl App {
             menu_cursor: 0,
             cost_input: Default::default(),
             send_input: Default::default(),
+            send_to_marked: false,
+            fanout: None,
+            fanout_seq: 0,
             worktree_input: Default::default(),
             worktree_base: Default::default(),
             worktree_repo: Default::default(),

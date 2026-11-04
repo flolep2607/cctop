@@ -34,20 +34,14 @@ impl Webhook {
         Webhook { target, link_base }
     }
 
-    /// The sessions in `after` that just started needing someone, as
-    /// `(event, session)` pairs.
-    ///
-    /// A session that stopped is a crossing to core, but not one a webhook is
-    /// sent for — see [`notify::Reason::event`].
-    pub fn crossed<'a>(
+    /// [`crossed`], for the tests that hold a webhook.
+    #[cfg(test)]
+    fn crossed<'a>(
         &self,
         before: &[Session],
         after: &'a [Session],
     ) -> Vec<(&'static str, &'a Session)> {
-        notify::crossings(before, after)
-            .into_iter()
-            .filter_map(|(reason, session)| Some((reason.event()?, session)))
-            .collect()
+        crossed(before, after)
     }
 
     /// POST one crossing, on a thread of its own.
@@ -57,6 +51,18 @@ impl Webhook {
     pub fn post(&self, event: &'static str, session: &Session) {
         notify::post_session(self.target.clone(), event, session, Some(&self.link_base));
     }
+}
+
+/// The sessions in `after` that just started needing someone, as
+/// `(event, session)` pairs — what the webhook and Web Push are both sent for.
+///
+/// A session that stopped is a crossing to core, but not one either is sent
+/// for — see [`notify::Reason::event`].
+pub fn crossed<'a>(before: &[Session], after: &'a [Session]) -> Vec<(&'static str, &'a Session)> {
+    notify::crossings(before, after)
+        .into_iter()
+        .filter_map(|(reason, session)| Some((reason.event()?, session)))
+        .collect()
 }
 
 #[cfg(test)]

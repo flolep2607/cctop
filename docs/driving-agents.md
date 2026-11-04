@@ -54,6 +54,24 @@ are in a cctop tab or the root path applies. An agent you started inside your
 own rmux or tmux is yours, and cctop does not reach into it: the alias above is
 how it becomes typeable.
 
+## One prompt to several agents
+
+`Space` marks rows, and `P` opens the same box as `s` over all of them: type
+"rebase on main and rerun the tests" once and it is typed into each marked
+session's terminal, by the same route `s` takes for one. The box's title says
+how many will get it and names them, so a stray `Enter` is never five agents
+typed into without your having seen which five.
+
+A marked row that `s` would refuse is refused here too, and named rather than
+dropped: one on another machine (`on <host>`), one with no live process
+(`not live`), and a second row on an agent process already being sent to
+(`same terminal as …`), which would otherwise get the line twice. The rest
+still get it — a prompt destroys nothing, so one ended session is no reason
+to hold back the other four. When the last delivery is back the status line
+says how many got it and lists the ones that did not, with why, including any
+the terminal itself turned away. The marks stay, so the next prompt to the
+same set is one key away; `U` clears them.
+
 ## Resuming a session
 
 `R` reopens the selected session in a tab of its own, running the harness's own
@@ -509,6 +527,12 @@ The session that rang keeps a bell marker (`◉`) on its row for 30 seconds, and
 the footer keeps naming it (`Bell: ◉ cctop · waiting for input · 12s ago`)
 until you select it. `b` jumps straight there. A bell out of a dozen panes is
 never a mystery, even if you were away when it rang.
+
+Neither reaches you once you have walked away from the machine. For that,
+serve the dashboard (`B`, or `cctop serve`) and press **Notify** on the page
+from your phone: it subscribes to Web Push, and the same crossing reaches the
+phone with the page closed. [The serve guide](serve.md#on-your-phone-with-the-page-closed)
+says what that sends and to whom.
 
 One thing it deliberately does *not* ring for: an agent that has simply
 finished its turn and is sitting at its prompt. In the transcript that looks
