@@ -1,5 +1,5 @@
 ---
-source: src/ui/snapshot.rs
+source: crates/ui/src/snapshot.rs
 expression: screen
 ---
  1:Dashboard │ + Tab (t) ───────────────────────────────────────────── Settings
@@ -14,7 +14,7 @@ expression: screen
 │●     7m│  docs                                                      │        │
 │○     3h│  33333333-cccc-4000-8000-000000000003                      │s       ┃
 ╰────────│                                                            │────────╯
-╭ Info  T│  This permanently removes the transcript from disk.        │────────╮
+╭ Info  T│  This permanently removes the transcript from disk.        │es  ────╮
 │This tra│                                                            │        │
 │        │  [y] delete    [n / Esc] cancel                            │        │
 │        ╰────────────────────────────────────────────────────────────╯        │

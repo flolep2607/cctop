@@ -25,7 +25,7 @@ expression: screen
 │                            │    · Fix the checkout redirect loop — busy (12% CPU)       │                            │
 │                            │                                                            │                            │
 ╰────────────────────────────│  Each is sent SIGTERM and exits cleanly; R resumes it.     │────────────────────────────╯
-╭ Info  Performance  Processe│  A prompt typed into one and not sent is lost.             │────────────────────────────╮
+╭ Info  Performance  Processe│  A prompt typed into one and not sent is lost.             │hanges  ────────────────────╮
 │Root /usr/bin/claude --model│                                                            │                            │
 │    PID    CPU%       MEM  C│  [y] stop 1    [n / Esc] cancel                            │                            │
 │   4101    9.8%    360.0M  c╰────────────────────────────────────────────────────────────╯                            │

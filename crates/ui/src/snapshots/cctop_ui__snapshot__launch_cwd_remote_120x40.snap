@@ -25,7 +25,7 @@ expression: screen
 │                            │   ~/src/cctop  read-only on the host                       │                            │
 │                            │   ~/src/web                                                │                            │
 ╰────────────────────────────│ Enter accept  Tab fill in  ↑/↓ pick  Esc cancel            │────────────────────────────╯
-╭ Info  Performance  Processe╰────────────────────────────────────────────────────────────╯────────────────────────────╮
+╭ Info  Performance  Processe╰────────────────────────────────────────────────────────────╯hanges  ────────────────────╮
 │Root /usr/bin/claude --model opus                                                                                     │
 │    PID    CPU%       MEM  COMMAND                                                                                    │
 │   4101    9.8%    360.0M  claude --model opus                                                                        │

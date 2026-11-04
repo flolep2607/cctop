@@ -23,6 +23,8 @@ pub mod branch;
 pub mod burn;
 pub mod cache;
 pub mod cast;
+/// What a session changed in its repository, for the Changes panel.
+pub mod changes;
 /// The conversation reader, which the dashboard's reader, the page, `--chat`
 /// and the handoff brief all draw from.
 pub mod chat;

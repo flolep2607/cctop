@@ -288,7 +288,7 @@ All of it, searchable, at **[flolep2607.github.io/cctop](https://flolep2607.gith
   tabs and splits, notifications
 - [In a browser](docs/serve.md): `cctop serve`, tunnels, phones, several
   machines
-- [The bottom panels](docs/panels.md): Tool Activity and the context breakdown
+- [The bottom panels](docs/panels.md): Tool Activity, the context breakdown, and Changes — the diff of what an agent did to its repository
 - [Installing cctop](docs/install.md) · [troubleshooting](docs/troubleshooting.md)
 - [Telemetry, and how to turn it off](docs/telemetry.md)
 

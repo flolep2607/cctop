@@ -92,8 +92,8 @@ pub(super) fn draw_bottom(frame: &mut Frame, area: Rect, app: &mut App, layout: 
     // not — they say so rather than draw as zeroes: a Cost panel reporting
     // $0.00 next to a `$` column reporting $12 is not an empty panel, it is a
     // wrong one. Performance and Processes are readings of a process tree,
-    // which is on the other machine and never crosses at all. Info is built
-    // from the row itself.
+    // which is on the other machine and never crosses at all, and so is the
+    // checkout Changes would diff. Info is built from the row itself.
     if app.bottom_tab != 0
         && let Some(host) = app
             .selected_session()
@@ -105,6 +105,10 @@ pub(super) fn draw_bottom(frame: &mut Frame, area: Rect, app: &mut App, layout: 
             (1 | 2, _, _) => Some(format!(
                 "cctop reads that machine's sessions {via}; their processes stay there. \
                  Info has everything that crossed."
+            )),
+            (crate::changes::TAB, _, _) => Some(format!(
+                "cctop reads that machine's sessions {via}; their checkouts stay there, \
+                 so there is nothing here to diff. Info has everything that crossed."
             )),
             (_, Some(_), _) => None,
             (_, None, Some(why)) => Some(format!(
@@ -139,6 +143,8 @@ pub(super) fn draw_bottom(frame: &mut Frame, area: Rect, app: &mut App, layout: 
     }
 
     let mut tool_owners: Vec<Option<String>> = Vec::new();
+    let mut change_owners: Vec<Option<usize>> = Vec::new();
+    let mut change_cursor = 0;
 
     // Build the panel's lines under an immutable borrow, then release it before
     // touching the scroll state below. `Line<'static>` owns its text, so nothing
@@ -188,6 +194,12 @@ pub(super) fn draw_bottom(frame: &mut Frame, area: Rect, app: &mut App, layout: 
             ),
             5 => (panels::cost(session, data, app.plan), app.cost_scroll),
             6 => (panels::config(session), app.config_scroll),
+            crate::changes::TAB => {
+                let (lines, owners, cursor) = crate::changes::lines(&app.changes, width);
+                change_owners = owners;
+                change_cursor = cursor;
+                (lines, app.changes.scroll)
+            }
             _ => (
                 panels::context(session, data, width, inner.height as usize),
                 app.context_scroll,
@@ -216,6 +228,27 @@ pub(super) fn draw_bottom(frame: &mut Frame, area: Rect, app: &mut App, layout: 
             app.tool_scroll = max_scroll;
         }
         app.tool_scroll.min(max_scroll)
+    } else if app.bottom_tab == crate::changes::TAB {
+        app.changes.owners = std::mem::take(&mut change_owners);
+        layout.tool_log = Some((target.x, target.y, target.height));
+        // After a step or a toggle, scroll just far enough that the cursor's
+        // file is on screen — and its open diff too, as much of it as fits.
+        if std::mem::take(&mut app.changes.reveal) {
+            let file = app.changes.cursor;
+            let end = app.changes.owners[change_cursor..]
+                .iter()
+                .position(|o| *o != Some(file))
+                .map_or(app.changes.owners.len(), |n| change_cursor + n);
+            let height = target.height as usize;
+            let mut top = app.changes.scroll as usize;
+            if end > top + height {
+                top = end.saturating_sub(height);
+            }
+            top = top.min(change_cursor);
+            app.changes.scroll = top as u16;
+        }
+        app.changes.scroll = app.changes.scroll.min(max_scroll);
+        app.changes.scroll
     } else {
         scroll.min(max_scroll)
     };

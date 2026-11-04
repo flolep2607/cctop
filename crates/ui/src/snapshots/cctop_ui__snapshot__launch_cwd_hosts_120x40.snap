@@ -25,7 +25,7 @@ expression: screen
 │                            │   /home/me/src/api                                         │                            │
 │                            │ › nz-b-procurementdb1:  ssh host · procdb                  │                            │
 ╰────────────────────────────│   devbox:  ssh host                                        │────────────────────────────╯
-╭ Info  Performance  Processe│ Enter accept  Tab fill in  ↑/↓ pick  Esc cancel            │────────────────────────────╮
+╭ Info  Performance  Processe│ Enter accept  Tab fill in  ↑/↓ pick  Esc cancel            │hanges  ────────────────────╮
 │Root /usr/bin/claude --model╰────────────────────────────────────────────────────────────╯                            │
 │    PID    CPU%       MEM  COMMAND                                                                                    │
 │   4101    9.8%    360.0M  claude --model opus                                                                        │

@@ -94,7 +94,8 @@ pub struct Layout {
     pub(super) menu_rows: Vec<(u16, usize)>,
     /// Tool Activity sidebar: `(x_end, y_start, first_index, row_count)`.
     pub(super) tool_sidebar: Option<(u16, u16, usize, usize)>,
-    /// Tool Activity log area: `(x_start, y_start, height)`.
+    /// The clickable log area of Tool Activity, or of Changes:
+    /// `(x_start, y_start, height)`.
     pub(super) tool_log: Option<(u16, u16, u16)>,
     /// The session table's scrollbar track, while the table overflows.
     pub(super) table_track: Option<Rect>,

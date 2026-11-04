@@ -15,6 +15,7 @@
 mod address;
 mod ansi;
 mod batch;
+mod changes;
 mod codes;
 pub mod columns;
 mod connect;
@@ -703,6 +704,8 @@ pub struct App {
     pub tool_expanded: Option<String>,
     /// Which invocation owns each rendered line, so a click maps to an entry.
     pub tool_owners: Vec<Option<String>>,
+    /// The Changes panel: its answer, its cursor and the diff it has open.
+    pub changes: changes::State,
     /// What the Subagents panel sorts by, and its direction — with the
     /// table's reading of each column: ascending for `Last` is newest-first
     /// (`columns::compare`).
@@ -1207,6 +1210,7 @@ impl App {
             tool_show_diff: prefs.tool_show_diff,
             tool_expanded: None,
             tool_owners: Vec::new(),
+            changes: changes::State::default(),
             subagent_sort: (
                 panels::SubagentSort::parse(&prefs.subagent_sort_col),
                 prefs.subagent_sort_asc,

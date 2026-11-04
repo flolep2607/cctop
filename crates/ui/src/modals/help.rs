@@ -143,7 +143,7 @@ pub(crate) fn draw_help(frame: &mut Frame, area: Rect, app: &mut App) {
         section("Bottom panels"),
         item("←  →", "Move between bottom panels"),
         item("Tab / Shift+Tab", "Same, either direction"),
-        item("1 – 9", "Jump to a panel directly"),
+        item("1 – 9  0", "Jump to a panel directly (0 is Changes)"),
         item(
             "{panel_up} / {panel_down}",
             "Scroll inside the active panel",
@@ -154,10 +154,13 @@ pub(crate) fn draw_help(frame: &mut Frame, area: Rect, app: &mut App) {
         ),
         item(
             "{tool_filter_prev} / {tool_filter_next}",
-            "Move through the Tool Activity filter",
+            "Move through the Tool Activity filter, or the Changes files",
         ),
         item("{live_filter}", "Toggle the Tool Activity live filter"),
-        item("{diffs}", "Toggle inline diffs for edits"),
+        item(
+            "{diffs}",
+            "Toggle inline diffs for edits; in Changes, the file's",
+        ),
         gap(),
         section("Tabs and splits"),
         item(

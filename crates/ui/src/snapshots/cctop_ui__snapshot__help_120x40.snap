@@ -25,7 +25,7 @@ expression: screen
 │                     │                                                                          │                     │
 │                     │Acting on the selected session                                            │                     │
 ╰─────────────────────│  a                Open its terminal in a tab                             │─────────────────────╯
-╭ Info  Performance  P│  R                Resume it in a tab of its own                          │─────────────────────╮
+╭ Info  Performance  P│  R                Resume it in a tab of its own                          │ ────────────────────╮
 │Root /usr/bin/claude │  s                Type a line into its terminal                          │                     │
 │    PID    CPU%      │  O                Hand its context to another agent or account           │                     │
 │   4101    9.8%    36│  i                Read its conversation (works on remote rows)           │                     │

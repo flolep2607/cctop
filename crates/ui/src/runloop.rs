@@ -675,6 +675,7 @@ fn event_loop(
                         app.needs_redraw = true;
                     }
                 }
+                Ok(Response::Changes { key, result }) => app.got_changes(key, result),
                 Ok(Response::Quota(q)) => {
                     // Before the new reading replaces the old: the notifier's
                     // edge is between the two, so it has to see this one first.
@@ -854,6 +855,7 @@ fn event_loop(
         }
 
         app.sync_panel_data();
+        app.sync_changes();
         app.tick_scan();
 
         // Every tab, not just the visible one: an agent whose output nobody

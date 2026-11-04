@@ -438,6 +438,11 @@ impl App {
             6 => bump(&mut self.config_scroll),
             // Preview is a screen clipped to the panel, not a list of lines.
             super::preview::TAB => {}
+            super::changes::TAB => {
+                bump(&mut self.changes.scroll);
+                // Scrolled by hand: the cursor's row is the reader's to leave.
+                self.changes.reveal = false;
+            }
             _ => bump(&mut self.context_scroll),
         }
         self.needs_redraw = true;

@@ -1810,9 +1810,10 @@ impl App {
             KeyCode::Tab => self.cycle_tab(1),
             KeyCode::BackTab => self.cycle_tab(-1),
             // Bounded by the tab list rather than a literal range, so a panel
-            // added to `panels::TABS` gets its number key for free.
-            KeyCode::Char(c @ '1'..='9') => {
-                let tab = c as usize - '1' as usize;
+            // added to `panels::TABS` gets its number key for free. `0` is the
+            // tenth, where it sits on the keyboard.
+            KeyCode::Char(c @ '0'..='9') => {
+                let tab = (c as usize - '0' as usize + 9) % 10;
                 if tab < super::panels::TABS.len() && self.tab_available(tab) {
                     self.bottom_tab = tab;
                     self.save_prefs();
@@ -1914,6 +1915,12 @@ impl App {
                 self.tool_live_only = !self.tool_live_only;
                 self.save_prefs();
             }
+            // On the Changes panel the same three keys do there what they do
+            // for Tool Activity: `[` `]` move through its list, and `v` shows
+            // a diff — the one file's, rather than every edit's.
+            KeyCode::Char('v') if self.bottom_tab == super::changes::TAB => self.toggle_change(),
+            KeyCode::Char('[') if self.bottom_tab == super::changes::TAB => self.step_change(-1),
+            KeyCode::Char(']') if self.bottom_tab == super::changes::TAB => self.step_change(1),
             KeyCode::Char('v') => {
                 self.tool_show_diff = !self.tool_show_diff;
                 self.save_prefs();
@@ -2400,6 +2407,10 @@ impl App {
                     && let Some(offset) = layout.tool_log_row_at(ev.column, ev.row)
                 {
                     self.toggle_tool_expansion(offset);
+                } else if self.bottom_tab == super::changes::TAB
+                    && let Some(offset) = layout.tool_log_row_at(ev.column, ev.row)
+                {
+                    self.click_change(offset);
                 } else if let Some(idx) = layout.tool_sidebar_at(ev.column, ev.row) {
                     self.tool_tab = idx;
                     self.tool_follow = true;
@@ -3201,12 +3212,13 @@ mod tests {
         app.sessions = vec![session("a", true, "/x")];
         app.refilter();
         for (i, _) in panels::TABS.iter().enumerate() {
-            let digit = char::from_digit(i as u32 + 1, 10).unwrap();
+            let digit = char::from_digit((i as u32 + 1) % 10, 10).unwrap();
             app.on_key(key(KeyCode::Char(digit)));
             assert_eq!(app.bottom_tab, i, "key {digit} must select panel {i}");
         }
-        // Nine panels spend every digit; a tenth would have no key of its own.
-        assert!(panels::TABS.len() <= 9, "a panel past 9 has no number key");
+        // Ten panels spend every digit, `0` last; an eleventh would have no key
+        // of its own.
+        assert!(panels::TABS.len() <= 10, "a panel past 0 has no number key");
         // One past the end changes nothing rather than selecting a phantom tab —
         // asked while there is a digit past the end to press.
         if let Some(past) = char::from_digit(panels::TABS.len() as u32 + 1, 10) {

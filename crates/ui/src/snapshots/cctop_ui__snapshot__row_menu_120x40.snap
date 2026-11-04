@@ -25,7 +25,7 @@ expression: screen
 │                            │ Read the conversation                                    i │                            │
 │                            │ Show its subagents                                       e │                            │
 ╰────────────────────────────│ Mark for a batch action                              space │────────────────────────────╯
-╭ Info  Performance  Processe│ ────────────────────────────────────────────────────────── │────────────────────────────╮
+╭ Info  Performance  Processe│ ────────────────────────────────────────────────────────── │hanges  ────────────────────╮
 │Root /usr/bin/claude --model│ Terminate the agent                                 ctrl+k │                            │
 │    PID    CPU%       MEM  C│ Delete the transcript                  it is still running │                            │
 │   4101    9.8%    360.0M  c╰ ↑↓ Enter · Esc ────────────────────────────────────────────╯                            │

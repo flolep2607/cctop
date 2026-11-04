@@ -678,6 +678,19 @@ fn context_panel() {
     snap("context", &mut app);
 }
 
+/// The Changes panel with the first file's diff open: the base on the first
+/// line, the counts, and each kind of row. The answer is put in place rather
+/// than read, since a read is git in a checkout, and the fixture's directories
+/// do not exist.
+#[test]
+fn changes_panel() {
+    let mut app = fixture();
+    app.bottom_tab = tab("Changes");
+    app.changes.result = Some(Ok(Some(super::changes::sample())));
+    app.changes.open = Some("src/app.rs".into());
+    snap("changes", &mut app);
+}
+
 /// A filter that is on narrows the table and brings `Esc` onto the footer.
 #[test]
 fn filter_active() {

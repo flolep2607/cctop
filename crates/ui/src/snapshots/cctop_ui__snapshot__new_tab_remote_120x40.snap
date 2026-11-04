@@ -25,7 +25,7 @@ expression: screen
 │                            │ in procdb:~/proj  (c to change)                            │                            │
 │                            │ codex can't run commands on a remote host yet              │                            │
 ╰────────────────────────────│ ↑/↓  c change folder  Esc cancel                           │────────────────────────────╯
-╭ Info  Performance  Processe╰────────────────────────────────────────────────────────────╯────────────────────────────╮
+╭ Info  Performance  Processe╰────────────────────────────────────────────────────────────╯hanges  ────────────────────╮
 │Root /usr/bin/claude --model opus                                                                                     │
 │    PID    CPU%       MEM  COMMAND                                                                                    │
 │   4101    9.8%    360.0M  claude --model opus                                                                        │

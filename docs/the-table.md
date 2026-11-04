@@ -470,7 +470,7 @@ reach them was to remember which key pressed which one.
 | `W` | Share the agent's terminal to a browser (an agent in a cctop tab, see [Driving agents](driving-agents.md#sharing-an-agent-to-a-browser)) |
 | `b` | Jump to the session that rang last |
 | `←`, `→`, `Tab` | Move between bottom panels, `Shift+Tab` the other way |
-| `1`–`9` | Jump to a panel directly; `9` is Preview, the selected row's tab live (see [The bottom panels](panels.md#preview)) |
+| `1`–`9`, `0` | Jump to a panel directly; `9` is Preview, the selected row's tab live (see [The bottom panels](panels.md#preview)), and `0` is Changes, what the session did to its repository (see [Changes](panels.md#changes)) |
 | `Shift+↑`/`↓` | Scroll inside the active panel |
 | `Shift+Home`/`End` | Jump to the top / bottom of that panel |
 | `f` | Follow mode: keep the selection centered |
@@ -481,8 +481,8 @@ reach them was to remember which key pressed which one.
 | `,` | Settings and keybinds (see below) |
 | `` ` `` | Show only running sessions |
 | `I` | Idle view: live sessions quiet for `idle_after` hours, most memory first (see above) |
-| `[`, `]` | Move through the Tool Activity tool filter |
-| `v` | Toggle inline diffs for edits |
+| `[`, `]` | Move through the Tool Activity tool filter, or the Changes panel's files |
+| `v` | Toggle inline diffs for edits; on the Changes panel, open or close the file's diff |
 | `L` | Toggle the Tool Activity live filter |
 | `T` | Tree view: group by repository and worktree (see above) |
 | `F` | Fork a git worktree and launch an agent in it (see above) |
