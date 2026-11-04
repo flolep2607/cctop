@@ -265,7 +265,13 @@ mod tests {
     #[test]
     fn the_sweep_lists_no_threads() {
         let (stop, stopped) = std::sync::mpsc::channel::<()>();
-        let thread = std::thread::spawn(move || stopped.recv());
+        let (told, tid) = std::sync::mpsc::channel();
+        let thread = std::thread::spawn(move || {
+            // SAFETY: gettid has no preconditions.
+            let _ = told.send(unsafe { libc::gettid() });
+            stopped.recv()
+        });
+        let tid = tid.recv().unwrap();
         let mut peek = Peek::new();
         peek.sweep();
         assert!(
@@ -273,11 +279,12 @@ mod tests {
                 .process(sysinfo::get_current_pid().unwrap())
                 .is_some()
         );
+        // The thread by its own id, not any `thread_kind`: kernel threads have
+        // one too, and they are processes, listed either way.
         assert!(
             peek.sys
-                .processes()
-                .values()
-                .all(|p| p.thread_kind().is_none())
+                .process(sysinfo::Pid::from_u32(tid as u32))
+                .is_none()
         );
         drop(stop);
         let _ = thread.join();
