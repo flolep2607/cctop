@@ -619,7 +619,31 @@ pub fn decide(
     Step::Resume
 }
 
-/// `cctop mux open PROVIDER ID [DIR]`: on the machine that has the session,
+/// The rmux session to attach to, when it can be named without the scan.
+///
+/// Finding one session means loading every session on the machine, every
+/// provider's every transcript — about three seconds on a busy server, more
+/// with a cold disk — and the commonest open needs none of it: the session is
+/// already in a tab there, under the name any cctop's resume gives it, or
+/// under one cctop started it with, which its agent's pid finds. `pid` is
+/// that agent's, from a serve on this machine that already holds the rows;
+/// the ssh transport has none to give. Only what is not open yet, and has to
+/// be resumed, still pays for the scan.
+pub fn before_scan(
+    provider: &str,
+    id: &str,
+    pid: Option<u32>,
+    holding: impl Fn(u32) -> Option<String>,
+    exists: impl Fn(&str) -> bool,
+) -> Option<String> {
+    let resumed = crate::rmux::name_for_session(provider, id);
+    if exists(&resumed) {
+        return Some(resumed);
+    }
+    pid.and_then(holding)
+}
+
+/// `cctop mux open PROVIDER ID [DIR | --pid PID]`: on the machine that has the session,
 /// attach to it, resume it, or say why not and be a shell — see the module
 /// docs. `--check` answers `ok`, which is how the ssh transport tells a cctop
 /// that has this from one that does not.
@@ -627,17 +651,21 @@ pub fn decide(
 /// Returns only on failure, or when the attach ends: every success path either
 /// becomes the rmux client or `exec`s the shell.
 pub fn open_here(args: &[String]) -> Result<(), String> {
-    let (provider, id, dir) = match args {
+    let (provider, id, dir, pid) = match args {
         [flag] if flag == "--check" => {
             println!("ok");
             return Ok(());
         }
-        [provider, id] => (provider, id, None),
-        [provider, id, dir] => (provider, id, Some(dir.as_str())),
-        _ => return Err("usage: cctop mux open PROVIDER SESSION-ID [DIR]".into()),
+        [provider, id] => (provider, id, None, None),
+        [provider, id, flag, pid] if flag == "--pid" => (provider, id, None, pid.parse().ok()),
+        [provider, id, dir] => (provider, id, Some(dir.as_str()), None),
+        _ => return Err("usage: cctop mux open PROVIDER SESSION-ID [DIR | --pid PID]".into()),
     };
     if !id_ok(id) {
         return Err(format!("{id:?} is not a session id"));
+    }
+    if let Some(name) = before_scan(provider, id, pid, crate::rmux::holding, crate::rmux::exists) {
+        return attach(&name);
     }
     let fallback_dir = dir.map(|d| PathBuf::from(crate::util::untildify(d)));
     eprint!("Finding the session on this machine…\r\n");
@@ -2029,6 +2057,36 @@ mod tests {
             decide(Some(&s), "abc", |_| Some("x".into()), |_| false),
             Step::Shell(why) if why.contains("did not start")
         ));
+    }
+
+    #[test]
+    fn an_open_tab_is_attached_before_any_scan() {
+        let resumed = crate::rmux::name_for_session("claude", "abc");
+        // Resumed by some cctop: found by its name.
+        assert_eq!(
+            before_scan("claude", "abc", None, |_| None, |n| n == resumed),
+            Some(resumed.clone())
+        );
+        // Started by cctop under a name of its own: found by the agent's pid.
+        assert_eq!(
+            before_scan(
+                "claude",
+                "abc",
+                Some(7),
+                |p| (p == 7).then(|| "cctop-claude-2".into()),
+                |_| false
+            ),
+            Some("cctop-claude-2".into())
+        );
+        // Neither, or no pid to go by: the scan decides.
+        assert_eq!(
+            before_scan("claude", "abc", Some(7), |_| None, |_| false),
+            None
+        );
+        assert_eq!(
+            before_scan("claude", "abc", None, |_| Some("x".into()), |_| false),
+            None
+        );
     }
 
     /// How a fake sibling answers one request.

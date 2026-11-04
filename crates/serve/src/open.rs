@@ -56,14 +56,19 @@ pub(crate) fn route(
     // to a shell for any id at all.
     let snapshot = current(shared);
     let known = cctop_core::remote_open::id_ok(id)
-        && snapshot
-            .sessions
-            .iter()
-            .any(|s| s.remote.is_none() && s.provider.as_str() == provider && s.session_id == id);
-    if !known {
+        .then(|| {
+            snapshot.sessions.iter().find(|s| {
+                s.remote.is_none() && s.provider.as_str() == provider && s.session_id == id
+            })
+        })
+        .flatten();
+    let Some(session) = known else {
         return http::respond_error(stream, Some(request), 404, NO_SESSION);
-    }
-    open_or_resume(stream, request, || open_argv(provider, id));
+    };
+    // The agent's pid, so `mux open` can attach to the tab holding it without
+    // loading every session again to find this one: this process already has.
+    let pid = session.is_running().then(|| session.root_pid()).flatten();
+    open_or_resume(stream, request, || open_argv(provider, id, pid));
 }
 
 /// `/api/new-term/<agent>/<permissions>/<model>/<dir>`: a *new* agent on this
@@ -454,9 +459,13 @@ const NO_SESSION: &str = "no such session on this machine";
 
 /// What the pty runs: this binary's `mux open`.
 #[cfg(not(test))]
-fn open_argv(provider: &str, id: &str) -> Vec<String> {
+fn open_argv(provider: &str, id: &str, pid: Option<u32>) -> Vec<String> {
     let exe = cctop_core::mux::own_exe().to_string_lossy().into_owned();
-    vec![exe, "mux".into(), "open".into(), provider.into(), id.into()]
+    let mut argv = vec![exe, "mux".into(), "open".into(), provider.into(), id.into()];
+    if let Some(pid) = pid {
+        argv.extend(["--pid".into(), pid.to_string()]);
+    }
+    argv
 }
 
 /// What the pty runs for a new agent: this binary's `mux new`.
@@ -509,7 +518,7 @@ fn new_argv(spec: &cctop_core::remote_open::NewAgent) -> Vec<String> {
 /// numbered lines in two bursts either side of a pause, and `flood` says more
 /// than [`resume::RING`] holds; each then echoes a line back.
 #[cfg(test)]
-fn open_argv(provider: &str, id: &str) -> Vec<String> {
+fn open_argv(provider: &str, id: &str, _pid: Option<u32>) -> Vec<String> {
     let script = match id {
         "count" => {
             r#"i=0; while [ $i -lt 600 ]; do echo "line $i"; i=$((i+1)); [ $i = 300 ] && sleep 0.2; done; read line; echo "got $line""#
