@@ -25,7 +25,7 @@ expression: screen
 │                                                                                                                      │
 │                                                                                                                      │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
-╭ Info  Tool Activity  Subagents  Cost  Config  Context  Preview  ─────────────────────────────────────────────────────╮
+╭ Info  Tool Activity  Subagents  Cost  Config  Context  Preview  Changes  ────────────────────────────────────────────╮
 │This session is on procdb.                                                                                            │
 │                                                                                                                      │
 │Reading this session over ssh…                                                                                        │

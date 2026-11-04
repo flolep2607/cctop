@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 
-pub const TABS: [&str; 9] = [
+pub const TABS: [&str; 10] = [
     "Info",
     "Performance",
     "Processes",
@@ -25,6 +25,7 @@ pub const TABS: [&str; 9] = [
     "Config",
     "Context",
     "Preview",
+    "Changes",
 ];
 
 fn label(text: &str) -> Span<'static> {

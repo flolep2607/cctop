@@ -20,6 +20,13 @@ pub(super) enum Request {
     /// `reach` is the machine to ask when the row is remote.
     Data(Box<Session>, Option<cctop_core::reach::Reach>),
     Delete(Box<Session>),
+    /// What a session changed in its checkout, for the Changes panel. `started`
+    /// is the session's start in seconds, which picks the base commit.
+    Changes {
+        key: String,
+        dir: std::path::PathBuf,
+        started: Option<i64>,
+    },
     Terminate {
         session_key: String,
         pid: u32,
@@ -100,6 +107,11 @@ pub(super) enum Response {
     Data(String, Arc<SessionData>),
     /// A remote row's machine could not give its data, and why.
     DataUnread(String, String),
+    /// The Changes panel's read, for the session `key` names.
+    Changes {
+        key: String,
+        result: Result<Option<cctop_core::changes::Changes>, String>,
+    },
     Quota(Box<Quota>),
     /// One vendor's status page answered, or could not be reached.
     ProviderStatus(
@@ -518,6 +530,16 @@ pub(super) fn spawn_worker(
                     loader.gently_spawn(move || {
                         let data = store.session_data_fresh(&session);
                         let _ = tx.send(Response::Data(session.key(), data));
+                    });
+                }
+                // On the gentle pool, like an extraction: a `git diff` of a big
+                // checkout is a disk walk, and the loop is what every keystroke's
+                // work waits behind.
+                Request::Changes { key, dir, started } => {
+                    let tx = tx.clone();
+                    loader.gently_spawn(move || {
+                        let result = cctop_core::changes::read(&dir, started);
+                        let _ = tx.send(Response::Changes { key, result });
                     });
                 }
                 // Root reads other users' homes and never writes to them, and a

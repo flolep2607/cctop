@@ -14,7 +14,7 @@ expression: screen
 │○     3m     $0.00 sonnet-4-5     ─        procdb     ─            /srv/api   │
 │○     3m     $0.00 sonnet-4-5     ─        procdb     ─            /srv/api   │
 ╰──────────────────────────────────────────────────────────────────────────────╯
-╭ Info  Tool Activity  Subagents  Cost  Config  Context  Preview  ─────────────╮
+╭ Info  Tool Activity  Subagents  Cost  Config  Context  Preview  Changes  ────╮
 │This session is on procdb.                                                    │
 │                                                                              │
 │Reading this session over ssh…                                                │

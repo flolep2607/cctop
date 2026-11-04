@@ -3,10 +3,10 @@
 [← back to the README](../README.md)
 
 The panel under the table describes whichever session the cursor is on. `←` and
-`→` move between panels, `1`–`9` jump to one, `Tab` cycles through them, and
-`Shift+↑`/`↓` scrolls inside the active one.
+`→` move between panels, `1`–`9` and `0` jump to one, `Tab` cycles through them,
+and `Shift+↑`/`↓` scrolls inside the active one.
 
-Three of them repay a closer look, and so does the conversation view `i` opens.
+A few of them repay a closer look, and so does the conversation view `i` opens.
 
 ## Tool Activity
 
@@ -174,7 +174,7 @@ window and it is the only view that can show one.
 
 ## Preview
 
-The last panel, `9`, is the selected row's tab, watched from the dashboard: the
+Panel `9`, Preview, is the selected row's tab, watched from the dashboard: the
 agent's screen as it is right now, updating while you look, without leaving the
 table to see whether it has finished or is asking you something.
 
@@ -194,3 +194,59 @@ A row with no tab says so in one line: `a` opens a running session's terminal in
 one, `R` resumes a stopped session in one, and either then shows here live. A
 row from [another machine](integrations.md#more-than-one-machine) has no tab
 here to show.
+
+## Changes
+
+The last panel, `0`, is what the session did to its repository: the files
+changed in its working directory's checkout since it started, with their line
+counts, and the diff of any one of them. It is the review you would otherwise
+leave cctop for.
+
+```
+Since 3f2a91c, HEAD when the session started
+3 files  +14 −3   [ ] pick a file, v opens its diff
+▾ src/app.rs             +12 −3
+    @@ -1,3 +1,4 @@
+     fn main() {
+    -    run();
+    +    run_with(args());
+    +    log();
+▸ assets/logo.png binary
+▸ notes.md           new  +2 −0
+```
+
+`[` and `]` move between files, `v` opens or closes the one the cursor is on,
+and a click on a row does both. The keys are Tool Activity's: there they move
+through its list and show diffs too.
+
+**The base is where `HEAD` was when the session started**, read from the
+checkout's reflog, and the first line names it. The diff runs from there to the
+working tree, so it holds the commits the agent made and what it left
+uncommitted alike, whichever branch it is on. The other candidate, the
+merge-base with the default branch, is right only for an agent on a branch of its
+own: on `main` there is no merge-base worth the name, and an agent handed
+someone else's branch would be charged with all of it. When the reflog cannot
+say, the first line says what stood in:
+
+- **where this checkout was made** — a worktree created after the session
+  started, usually by the agent for itself;
+- **the last commit before the session started** — a checkout with no reflog;
+- **nothing** — a repository with no commit from before the session, so every
+  file is new;
+- **HEAD** — a session whose start is not known, so only uncommitted changes.
+
+Untracked files the ignore rules let through are listed as `new`: an agent's new
+file is often its most important change, and `git diff` never shows one that was
+not added.
+
+It is the checkout's diff, not the agent's: a person editing the same checkout
+during the session, or another agent working in it, shows up here too. Tool
+Activity has the agent's own edits, call by call.
+
+It is read off the drawing thread, only while the panel is on show, and again
+whenever the session does something. Big changes are bounded rather than
+waited for: 300 files, 1 MiB of patch and 400 lines of any one file's diff, each
+with a line saying what was cut. A session in a directory outside any repository
+says so, and so does a row from [another
+machine](integrations.md#more-than-one-machine), whose checkout is there and not
+here.

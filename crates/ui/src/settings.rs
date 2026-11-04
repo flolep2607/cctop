@@ -161,7 +161,9 @@ pub const VIEWS: [(&str, &str, View); 10] = [
         "bottom_panel",
         "Which panel opens under the table",
         View::Choice {
-            value: |app| super::panels::TABS[app.bottom_tab.min(8)].to_string(),
+            value: |app| {
+                super::panels::TABS[app.bottom_tab.min(super::panels::TABS.len() - 1)].to_string()
+            },
             options: |_| super::panels::TABS.iter().map(|t| t.to_string()).collect(),
             set: |app, name| {
                 app.bottom_tab = super::panels::TABS

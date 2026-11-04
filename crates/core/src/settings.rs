@@ -277,10 +277,18 @@ pub const BINDINGS: [(&str, &str, &str); 54] = [
         "Provider status: does an outage explain the errors",
     ),
     ("refresh", "r", "Refresh now"),
-    ("tool_filter_prev", "[", "Previous Tool Activity filter"),
-    ("tool_filter_next", "]", "Next Tool Activity filter"),
+    (
+        "tool_filter_prev",
+        "[",
+        "Previous Tool Activity filter, or Changes file",
+    ),
+    (
+        "tool_filter_next",
+        "]",
+        "Next Tool Activity filter, or Changes file",
+    ),
     ("live_filter", "L", "Toggle the Tool Activity live filter"),
-    ("diffs", "v", "Toggle inline diffs"),
+    ("diffs", "v", "Toggle inline diffs; open a Changes file's"),
 ];
 
 /// What `config.toml` says, with anything it does not say left `None`.
