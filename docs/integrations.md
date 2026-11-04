@@ -267,11 +267,25 @@ in one of cctop's own tabs, there is a second way in:
 read_screen = true   # or toggle it with `,`
 ```
 
-cctop then reads the bottom of each agent tab's screen on every frame and takes
-the state from the key hints the agent draws there — a way to cancel a dialog
-holding the turn, a way to interrupt a turn in flight. The words differ per agent, and sometimes collide: `Esc to cancel` is a
-permission prompt in Claude Code and a turn in flight in Gemini CLI. So each
-harness has its own list:
+The screen is read either way — see [tabs and
+splits](driving-agents.md#tabs-and-splits) — but by default it only fills in
+where no hook speaks. With `read_screen = true` it goes first instead: what the
+screen shows outranks the hooks and the transcript.
+
+The reading is [herdr](https://github.com/herdrdev/herdr)'s: its detection
+manifests, one per agent, are compiled into cctop with the engine that runs
+them (Apache-2.0; see `NOTICE`). A manifest is a list of rules over regions of
+the screen — the last few lines, the body of the prompt box, the window title —
+each naming a state and a priority, so "a permission menu outranks the spinner
+left above it" is a number rather than a guess. They cover 22 agents: Amp,
+Antigravity, Claude Code, Cline, Codex, Copilot, Cursor, Devin, Droid, Gemini
+CLI, Grok, Hermes, Kilo, Kimi, Kiro, Letta, Maki, Muse, OpenCode, Pi, Qoder and
+Qwen. The words differ per agent, and sometimes collide: `Esc to cancel` is a
+permission prompt in Claude Code and a turn in flight in Gemini CLI, which is
+why the rules are per agent.
+
+cctop keeps a short list of its own beside them, captured off real screens, and
+asks it second — a prompt either finds is a prompt:
 
 | Harness | Asking | Working |
 |---|---|---|
@@ -285,17 +299,19 @@ harness has its own list:
 | Pi | — | `Working...` |
 
 Claude Code's (2.1.283) and Codex's (0.157.1) were captured from real screens;
-the rest come from [herdr](https://github.com/herdrdev/herdr)'s detection
-manifests. Idle has no phrase: a screen that matches neither column counts as
-idle once it has been still for two seconds, since every one of these agents
-ticks a timer while it works. A phrase would not do — Codex keeps `? for
-shortcuts` on screen while it works, and draws a frame mid-turn with no working
-line at all.
+the rest were taken from herdr's manifests before they were bundled whole. Idle
+comes from the manifests alone, and only from the agent's live prompt — Claude
+Code's empty prompt box, for one — held for half a second, since an agent
+repaints between two steps of a turn. Codex's manifest reads idle only from its
+window title, and with good reason: it keeps `? for shortcuts` on screen while
+it works and draws a frame mid-turn with no working line at all. A screen
+nothing recognises counts as idle once it has been still for two seconds, since
+every one of these agents ticks a timer while it works.
 
-When the screen says something, it outranks the hooks and the transcript, for
-the row, the tab bar and the bell. It is off by default because these phrases
-are each agent's UI, not a contract — a release that rewords its footer goes
-unread until cctop catches up.
+Outranking the hooks is off by default because all of this is each agent's UI,
+not a contract — a release that rewords its footer goes unread until the
+manifest catches up, and with the hooks first, a hooked agent is not exposed to
+that.
 
 The read reaches further than the tab you are looking at. A detached rmux tab's
 screen is borrowed with `capture-pane` once a second — no client is attached, so

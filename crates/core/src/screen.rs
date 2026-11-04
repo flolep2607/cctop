@@ -2,7 +2,15 @@
 //!
 //! The terminal UI reads a tab's screen through this, and so does `peek`,
 //! which reads the screen of an agent cctop is not drawing. Both ask the same
-//! questions of the same rows, so the table of footers lives below either.
+//! questions of the same rows, so the recognizer lives below either.
+//!
+//! Two sources answer, in this order: herdr's per-agent manifests
+//! ([`crate::detect`]), which know 22 agents in detail, and the table of
+//! footers below, which is cctop's own — phrases captured off real Claude Code
+//! and Codex screens, kept because a few of them (Claude Code's background
+//! workflow line, its spinner drawn under a subagent list) are shapes the
+//! manifests do not cover yet. See [`screen_state_with`] for how the two are
+//! combined.
 
 /// How one agent's screen says what it is doing.
 ///
@@ -29,15 +37,9 @@
 /// fewer lines: Claude Code's is the last two.
 ///
 /// Claude Code's phrases were captured from 2.1.283 and Codex's from 0.157.1,
-/// both off real screens. The rest are distilled from herdr's detection
-/// manifests (Apache-2.0,
-/// github.com/herdrdev/herdr, `src/detect/manifests/`, 2026-09), keeping the
-/// rules that are plain phrases and leaving out the ones that need a regex or
-/// the terminal title.
-///
-/// ponytail: phrases, not herdr's rule engine; a harness that rewords its
-/// footer reads as "nothing recognised" until its row here is updated, and the
-/// quiet-screen fallback in `ui::tabs::Pane::read_screen` carries it meanwhile.
+/// both off real screens. The rest were distilled from herdr's detection
+/// manifests before those were bundled whole in [`crate::detect`]; they stay
+/// as a second opinion the manifests are asked before.
 struct Footer {
     harness: &'static str,
     lines: usize,
@@ -139,17 +141,84 @@ const FOOTERS: &[Footer] = &[
     },
 ];
 
-/// Whether `harness` has a row in [`FOOTERS`] — the cheap half of the check a
-/// reader makes before paying for the screen itself.
+/// Whether `harness` has a manifest or a row in [`FOOTERS`] — the cheap half
+/// of the check a reader makes before paying for the screen itself.
 pub fn screenable(harness: &str) -> bool {
-    FOOTERS.iter().any(|f| f.harness == harness)
+    crate::detect::known(harness) || FOOTERS.iter().any(|f| f.harness == harness)
 }
 
-/// What `harness`'s own footer says it is doing, when it says so plainly.
-///
-/// `None` both for a harness with no row in [`FOOTERS`] and for a screen none
-/// of its rules match; `ui::tabs::Pane::read_screen` tells the two apart.
+/// What `harness`'s screen says it is doing, from its rows alone — for a
+/// screen read without the terminal title around it (a `capture-pane`, a
+/// shim's replay). See [`screen_state_with`].
 pub fn screen_state(harness: &str, rows: &[String]) -> Option<crate::hook::Signal> {
+    screen_state_with(harness, rows, "", "")
+}
+
+/// What `harness`'s screen says it is doing, given the rows and what the
+/// agent last set as the window `title` and its OSC 9 `progress`.
+///
+/// The manifest gives one answer, its highest-priority rule; the footer table
+/// gives its own; they are combined so that the person is never the one who
+/// loses a disagreement:
+///
+/// 1. A manifest that says the screen is its transcript viewer: `None`. That
+///    screen is history, and whatever was last read stands.
+/// 2. Either says blocked: [`Signal::NeedsInput`](crate::hook::Signal). A
+///    prompt nobody sees is the expensive mistake; a false one costs a glance.
+/// 3. Either says working: [`Signal::Busy`](crate::hook::Signal).
+/// 4. The manifest says idle: [`Signal::Idle`](crate::hook::Signal) — read off
+///    the agent's live prompt, not off silence. The footer table has no idle
+///    phrases (see [`Footer`]), and a caller with a clock should still let an
+///    idle reading settle before believing it: `ui::tabs::Pane::read_screen`
+///    does.
+/// 5. Otherwise `None`: no manifest or footer for this harness, or nothing on
+///    screen either recognises. `ui::tabs::Pane::read_screen` tells the two
+///    apart and falls back to a still screen.
+///
+/// The manifest's own arbitration is respected inside it: a manifest that
+/// ranks a spinner over a stale "Do you want to…" in the scrollback says
+/// working, and only the footer table's narrow bottom-line phrases can turn
+/// that into asking.
+pub fn screen_state_with(
+    harness: &str,
+    rows: &[String],
+    title: &str,
+    progress: &str,
+) -> Option<crate::hook::Signal> {
+    use crate::detect::State;
+    use crate::hook::Signal;
+    let manifest = if crate::detect::known(harness) {
+        let text = crate::detect::screen_text(rows);
+        crate::detect::detect(
+            harness,
+            crate::detect::Input {
+                screen: &text,
+                title,
+                progress,
+            },
+        )
+    } else {
+        None
+    };
+    if manifest.is_some_and(|d| d.skip) {
+        return None;
+    }
+    let state = manifest.map_or(State::Unknown, |d| d.state);
+    let footer = footer_state(harness, rows);
+    if state == State::Blocked || footer == Some(Signal::NeedsInput) {
+        Some(Signal::NeedsInput)
+    } else if state == State::Working || footer == Some(Signal::Busy) {
+        Some(Signal::Busy)
+    } else if state == State::Idle {
+        Some(Signal::Idle)
+    } else {
+        None
+    }
+}
+
+/// What `harness`'s footer row in [`FOOTERS`] says, when it says so plainly:
+/// asking, working, or `None`.
+fn footer_state(harness: &str, rows: &[String]) -> Option<crate::hook::Signal> {
     use crate::hook::Signal;
     let footer = FOOTERS.iter().find(|f| f.harness == harness)?;
     let bottom: Vec<String> = rows
@@ -396,7 +465,11 @@ mod tests {
             "────────────",
             "  ⏵⏵ accept edits on (shift+tab to cycle)",
         ]);
-        assert_eq!(screen_state("claude", &finished), None);
+        // Its empty prompt box, which the manifest reads as idle outright.
+        assert_eq!(
+            screen_state("claude", &finished),
+            Some(crate::hook::Signal::Idle)
+        );
 
         // The turn is over but what it started is not: Claude Code takes the
         // next turn itself when they finish. Off a real screen, a workflow

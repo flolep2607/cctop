@@ -1,0 +1,21 @@
+cctop
+Copyright the cctop contributors. Licensed under the MIT License (see LICENSE).
+
+This product includes software from herdr (https://github.com/herdrdev/herdr),
+licensed under the Apache License, Version 2.0.
+
+  - crates/core/src/detect/manifests/*.toml
+      herdr's per-agent detection manifests, copied unmodified from
+      src/detect/manifests/ at commit
+      ee5bfb5041bb3e4a49d591c72308aae3c81ecdde (herdr 0.9.5).
+
+  - crates/core/src/detect/mod.rs, crates/core/src/detect/tests.rs
+      A modified port of herdr's src/detect/manifest.rs and
+      src/detect/manifest/tests.rs from the same commit. The region extraction
+      and rule evaluation follow herdr's; the loading, the answer when no rule
+      matches, the public interface and the tests' fixtures were changed or
+      added for cctop.
+
+The full text of the Apache License 2.0 is in
+crates/core/src/detect/manifests/LICENSE, which ships inside the cctop-core
+crate beside the files it covers.

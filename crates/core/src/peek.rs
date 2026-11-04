@@ -183,7 +183,12 @@ fn finish(harness: &str, rows: &[String]) -> Option<Screened> {
     if !crate::screen::screenable(harness) {
         return None;
     }
-    let signal = crate::screen::screen_state(harness, rows)?;
+    // Not idle, even where a manifest reads the prompt box as idle: one
+    // snapshot cannot tell a finished turn from the frame between two steps
+    // of one, and a finished turn is the transcript's to report. See the
+    // module's ponytail.
+    let signal = crate::screen::screen_state(harness, rows)
+        .filter(|signal| *signal != crate::hook::Signal::Idle)?;
     // A prompt's detail is only worth reading when there is a prompt: the
     // extractor reads the same footer window the recognizer did.
     let asking = signal == crate::hook::Signal::NeedsInput;

@@ -35,6 +35,7 @@ pub mod cloudflare;
 pub mod collide;
 pub mod config;
 pub mod convert;
+pub mod detect;
 pub mod drive;
 pub mod elog;
 pub mod embed;
