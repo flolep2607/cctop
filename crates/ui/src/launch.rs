@@ -544,6 +544,39 @@ impl App {
     /// answers pane `0`, the slot [`Tab::attach`](tabs::Tab::attach) would put
     /// it in. Both halves, as [`open_view`](Self::open_view) asks them, because
     /// on the dashboard nearly every rmux-backed tab is the second kind.
+    /// The tab here that already has `s` open, if one does: for a row of this
+    /// machine, a tab holding its agent's process or named for resuming it;
+    /// for a remote row, the tab `R` would have opened on it.
+    ///
+    /// The question `a`, `R` and a remote open each ask before opening a
+    /// second window on one agent, asked of a row so the table can draw the
+    /// answer before a key is pressed.
+    pub(crate) fn tab_of(&self, s: &cctop_core::session::Session) -> Option<usize> {
+        let named = |name: &str| {
+            self.tabs.iter().position(|tab| {
+                tab.sessions().any(|open| open == name)
+                    || tab.panes.iter().any(|p| p.resumed.as_deref() == Some(name))
+            })
+        };
+        let provider = s.provider.as_str();
+        if let Some(remote) = &s.remote {
+            return named(&cctop_core::remote_open::tab_name(
+                &remote.host,
+                provider,
+                &s.session_id,
+            ));
+        }
+        let by_pid = s.root_pid().and_then(|pid| {
+            self.tab_running(pid).map(|(at, _)| at).or_else(|| {
+                self.tabs.iter().position(|tab| {
+                    tab.panes.iter().any(|p| p.pid == pid)
+                        || tab.extra.iter().any(|e| e.pid == Some(pid))
+                })
+            })
+        });
+        by_pid.or_else(|| named(&cctop_core::rmux::name_for_session(provider, &s.session_id)))
+    }
+
     pub(super) fn tab_running(&self, pid: u32) -> Option<(usize, usize)> {
         self.tabs.iter().enumerate().find_map(|(at, tab)| {
             if let Some(pane) = tab.panes.iter().position(|pane| pane.agent() == pid) {

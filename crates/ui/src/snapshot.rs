@@ -764,6 +764,42 @@ fn machine_selector() {
     snap("machine_selector", &mut app);
 }
 
+/// The marks for a session already open in a tab: `▣` on `web`, whose agent a
+/// tab on this machine holds, and on procdb's `p2`, open here in a tab of its
+/// own; `□` on procdb's `p1`, which only its machine has a tab on; none on
+/// procdb's `p3`.
+#[test]
+fn tab_marks() {
+    let mut app = fixture();
+    app.sessions[0].in_tab = true;
+    for (id, in_tab) in [("p1", true), ("p2", false), ("p3", false)] {
+        let mut s = session(
+            id,
+            &format!("/srv/{id}"),
+            "claude-sonnet-4-5",
+            Age::minutes(3),
+            Age::minutes(120),
+        );
+        s.in_tab = in_tab;
+        s.remote = Some(cctop_core::session::Remote {
+            host: "procdb".into(),
+            ..Default::default()
+        });
+        app.remotes.entry("procdb".into()).or_default().push(s);
+    }
+    let mut pane = tabs::Pane::for_test("procdb · p2");
+    pane.resumed = Some(cctop_core::remote_open::tab_name("procdb", "claude", "p2"));
+    app.tabs.push(tabs::Tab::new(pane));
+    // Pinned as `machine_selector` pins them, for the same reasons.
+    let cpu = app.stats.total_cpu;
+    app.merge_remotes();
+    app.stats.total_cpu = cpu;
+    if app.stats.monthly_daily.len() < 31 {
+        app.stats.monthly_daily.resize(31, 0.0);
+    }
+    snap("tab_marks", &mut app);
+}
+
 /// The search box open mid-typing, over the table it is narrowing.
 #[test]
 fn search_typing() {

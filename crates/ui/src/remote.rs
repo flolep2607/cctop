@@ -159,14 +159,8 @@ impl App {
         let name = remote_open::tab_name(&host, provider, &session.session_id);
         // Already open: switch to it, as a resume does — asked of the panes'
         // own record too, for a tab whose rmux name this cctop has no client
-        // on yet.
-        if let Some(at) = self.tabs.iter().position(|tab| {
-            tab.sessions().any(|open| open == name)
-                || tab
-                    .panes
-                    .iter()
-                    .any(|p| p.resumed.as_deref() == Some(&name))
-        }) {
+        // on yet. The same question the table's tab mark asks.
+        if let Some(at) = self.tab_of(session) {
             self.go_to_tab(at + 1);
             self.set_status(format!("Already open: {shown} on {host}"));
             return;

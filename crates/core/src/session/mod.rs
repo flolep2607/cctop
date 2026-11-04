@@ -511,6 +511,17 @@ pub struct Session {
     /// [`list_all`], which is the one place every provider's rows meet.
     pub owner: Option<String>,
 
+    /// Whether the agent is in a cctop tab on the machine the session is on:
+    /// its root process is held by that machine's cctop rmux, which every
+    /// cctop there shares.
+    ///
+    /// Stamped by the loader of the machine that owns the row, because only
+    /// it can ask its rmux; a remote row carries the far side's answer, so
+    /// the table here can say a session is already open over there before a
+    /// second tab is started on it. `false` from a peer too old to say,
+    /// which is what it said before it could.
+    pub in_tab: bool,
+
     // --- Rate tracking ---
     pub tokens_per_min: f64,
     pub cost_per_min: f64,
@@ -671,6 +682,7 @@ impl Session {
             sandbox: None,
             profile: None,
             owner: None,
+            in_tab: false,
             tokens_per_min: 0.0,
             cost_per_min: 0.0,
         }
