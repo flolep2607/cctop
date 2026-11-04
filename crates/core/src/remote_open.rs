@@ -34,7 +34,7 @@
 //! runs [`bridge_new`] (`cctop mux launch`), which opens the sibling's
 //! [`NEW_ROUTE`]; the sibling runs `cctop mux new` ([`new_here`]), which starts
 //! the agent in its rmux, in that directory, and attaches — or, asked for a
-//! [`SHELL`], becomes its own user's login shell there. What is asked for
+//! [`SHELL`], does the same with its own user's login shell. What is asked for
 //! travels as a [`NewAgent`] — words, never an argv — and the far side builds
 //! the command itself. A sibling too old to know the route answers "no such
 //! page", and the tab says to update it.
@@ -363,9 +363,9 @@ pub fn new_argv(machine: &str, exe: &Path, spec: &NewAgent) -> Result<Vec<String
 /// one of this machine's — the way the browser's launcher does, and attach to
 /// it. `--check` answers `ok`.
 ///
-/// In rmux, not on the pty this runs on, so the agent outlives the
-/// connection: the tab on the other machine closing detaches, and the agent
-/// is one this machine's dashboard lists and its `R` reattaches to.
+/// In rmux, not on the pty this runs on, so the agent — or the shell — outlives
+/// the connection: the tab on the other machine closing detaches, and it is a
+/// tab in every cctop on this machine.
 pub fn new_here(args: &[String]) -> Result<(), String> {
     if let [flag] = args
         && flag == "--check"
@@ -374,16 +374,24 @@ pub fn new_here(args: &[String]) -> Result<(), String> {
         return Ok(());
     }
     let spec = NewAgent::from_args(args)?;
-    // On this pty rather than in rmux: a shell is cheap to start again, and
-    // in rmux it would sit in this machine's launcher as if it were an agent.
-    // ponytail: a shell ends when its tab's terminal is let go (a drop longer
-    // than the resume grace); put it in rmux if shells need to outlive that.
+    // In rmux like an agent, not on this pty. A shell opened here from
+    // another machine is work someone means to come back to — open it at the
+    // office, walk home, and it should be in this machine's tab bar — and on
+    // this pty it ended with the connection, and no cctop here ever saw it.
+    // Without a daemon to put it in, the pty is still a shell.
     if spec.agent == SHELL {
         let dir = match spec.dir.trim() {
             "" => crate::config::HOME.clone(),
             dir => PathBuf::from(crate::util::untildify(dir)),
         };
-        return exec_login_shell(&dir);
+        let argv = login_shell(passwd_shell(), std::env::var("SHELL").ok());
+        return match keep_shell(&argv, &dir) {
+            Ok(name) => attach(&name),
+            Err(why) => {
+                eprint!("Not kept in this machine's tabs ({why}); a plain shell instead.\r\n");
+                exec_login_shell(&dir)
+            }
+        };
     }
     // Asked again here, not only by the route: this is what starts it, and a
     // name the route let through must still be an account by the time it does.
@@ -395,6 +403,21 @@ pub fn new_here(args: &[String]) -> Result<(), String> {
         Some(name) => attach(&name),
         None => Err(done.message),
     }
+}
+
+/// Start `argv`, a login shell, detached in this machine's rmux in `dir`, named
+/// and labelled after the shell — the way the launcher names a shell tab — and
+/// answer the session's name.
+fn keep_shell(argv: &[String], dir: &Path) -> Result<String, String> {
+    let label = Path::new(&argv[0])
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(SHELL)
+        .to_string();
+    let name = crate::rmux::free_name(&label);
+    crate::rmux::start_detached(argv, &name, Some(dir))?;
+    crate::rmux::set_label(&name, &label);
+    Ok(name)
 }
 
 /// The local rmux session a remote tab's transport runs in.
@@ -1958,6 +1981,29 @@ mod tests {
             String::from_utf8_lossy(&out.stdout).trim(),
             project.to_string_lossy()
         );
+    }
+
+    /// A shell opened here from another machine is kept in this machine's
+    /// rmux — so every cctop here has it as a tab — in the asked directory,
+    /// labelled as the shell it is.
+    #[test]
+    fn a_shell_from_another_machine_is_kept_as_a_tab_here() {
+        let _daemon = crate::mux::TestDaemon::new("remote-shell");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let argv = ["sleep".to_string(), "30".to_string()];
+        let name = keep_shell(&argv, dir.path()).expect("kept");
+        assert!(name.ends_with("-sleep"), "{name}");
+        let held = crate::rmux::running()
+            .into_iter()
+            .find(|r| r.name == name)
+            .expect("listed among this machine's tabs");
+        assert_eq!(held.label.as_deref(), Some("sleep"));
+        let canonical = |p: &Path| p.canonicalize().expect("canonical");
+        assert_eq!(
+            held.cwd.as_deref().map(canonical),
+            Some(canonical(dir.path()))
+        );
+        let _ = crate::rmux::kill(&name);
     }
 
     #[test]
