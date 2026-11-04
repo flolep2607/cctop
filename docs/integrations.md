@@ -428,6 +428,12 @@ What holds once it is on:
   permission mode, and cctop's YOLO is never switched on for it. It asks you
   for whatever its own configuration says it must. The prompt is one argument
   and may not start with `-`, so it cannot be read as an option.
+- **A message, never the keyboard.** A prompt or a typed line is one line, and
+  may not start with `/`, `!` or `#`. Typed into Claude Code or Codex those are
+  the person's: a slash command (`/yolo` included, which `cctop yolo-hook`
+  trusts because only a person types it), a shell command run with no
+  permission prompt, a note to the agent's standing memory. The same
+  characters further into the text are just text.
 - **This machine, your user.** The directory has to exist here and be yours;
   a session typed into has to be local, running, yours (cctop as root sees
   other users' sessions and refuses them here), and run by a process of
