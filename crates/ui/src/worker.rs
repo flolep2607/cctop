@@ -39,6 +39,21 @@ pub(super) enum Request {
         title: String,
         body: String,
     },
+    /// The session `id`'s checkpoints in its checkout, against how it is now.
+    Checkpoints {
+        key: String,
+        dir: std::path::PathBuf,
+        id: String,
+    },
+    /// Rewind the checkout to the session's checkpoint `n`. `owner` is the
+    /// session's other user, if it is one, for the refusal.
+    Rewind {
+        key: String,
+        dir: std::path::PathBuf,
+        id: String,
+        n: u64,
+        owner: Option<String>,
+    },
     Terminate {
         session_key: String,
         pid: u32,
@@ -126,6 +141,16 @@ pub(super) enum Response {
     },
     /// A step of `p`, or how it ended.
     PullRequest(super::pull_request::Event),
+    /// The Changes panel's checkpoint list.
+    Checkpoints {
+        key: String,
+        result: Result<Option<cctop_core::checkpoint::Survey>, String>,
+    },
+    /// A rewind's outcome.
+    Rewound {
+        key: String,
+        result: Result<cctop_core::checkpoint::Rewound, String>,
+    },
     Quota(Box<Quota>),
     /// One vendor's status page answered, or could not be reached.
     ProviderStatus(
@@ -582,6 +607,37 @@ pub(super) fn spawn_worker(
                         };
                         let gh = cctop_core::pull_request::GH;
                         send(super::pull_request::open(&plan, &title, &body, gh, &send));
+                    });
+                }
+                // A snapshot of the checkout to compare against, so a disk walk
+                // like the diff, and on the same pool.
+                Request::Checkpoints { key, dir, id } => {
+                    let tx = tx.clone();
+                    loader.gently_spawn(move || {
+                        let result = cctop_core::checkpoint::survey(&dir, &id);
+                        let _ = tx.send(Response::Checkpoints { key, result });
+                    });
+                }
+                // Refused here as well as at the key, as a delete is: a rewind
+                // rewrites another user's files, and no path to one should get
+                // round that.
+                Request::Rewind {
+                    key,
+                    owner: Some(owner),
+                    ..
+                } => {
+                    let result = Err(format!(
+                        "{owner}'s session is read-only: cctop never changes another user's files"
+                    ));
+                    let _ = tx.send(Response::Rewound { key, result });
+                }
+                Request::Rewind {
+                    key, dir, id, n, ..
+                } => {
+                    let tx = tx.clone();
+                    loader.gently_spawn(move || {
+                        let result = cctop_core::checkpoint::rewind(&dir, &id, n);
+                        let _ = tx.send(Response::Rewound { key, result });
                     });
                 }
                 // Root reads other users' homes and never writes to them, and a

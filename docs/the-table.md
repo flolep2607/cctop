@@ -484,6 +484,7 @@ reach them was to remember which key pressed which one.
 | `I` | Idle view: live sessions quiet for `idle_after` hours, most memory first (see above) |
 | `[`, `]` | Move through the Tool Activity tool filter, or the Changes panel's files |
 | `v` | Toggle inline diffs for edits; on the Changes panel, open or close the file's diff |
+| `u` | On the Changes panel: the session's checkpoints; `[` `]` pick one, `v` or `Enter` shows what a rewind to it changes, `y` rewinds, `Esc` backs out (see [Checkpoints and rewind](panels.md#checkpoints-and-rewind)) |
 | `L` | Toggle the Tool Activity live filter |
 | `T` | Tree view: group by repository and worktree (see above) |
 | `F` | Fork a git worktree and launch an agent in it (see above) |

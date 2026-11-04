@@ -18,7 +18,7 @@ use std::path::Path;
 
 /// Every `[settings]` key: its name, its default as the file would spell it,
 /// and what it does.
-pub const SETTINGS: [(&str, &str, &str); 24] = [
+pub const SETTINGS: [(&str, &str, &str); 25] = [
     (
         "theme",
         "\"auto\"",
@@ -96,6 +96,11 @@ pub const SETTINGS: [(&str, &str, &str); 24] = [
         "warn_agents",
         "false",
         "Tell an agent when a live peer just wrote its file",
+    ),
+    (
+        "checkpoints",
+        "false",
+        "Snapshot a session's checkout each turn, to rewind (0, u)",
     ),
     (
         "idle_after",
@@ -202,7 +207,7 @@ pub const PASTE_DEBOUNCE_MS: u64 = 250;
 /// pane's belong to the agent.
 ///
 // ponytail: dashboard keys only; extend to modals if someone asks to rebind one.
-pub const BINDINGS: [(&str, &str, &str); 55] = [
+pub const BINDINGS: [(&str, &str, &str); 56] = [
     ("quit", "q", "Quit"),
     ("help", "?", "Help"),
     ("settings", ",", "The settings tab, at the end of the bar"),
@@ -294,6 +299,11 @@ pub const BINDINGS: [(&str, &str, &str); 55] = [
     ),
     ("live_filter", "L", "Toggle the Tool Activity live filter"),
     ("diffs", "v", "Toggle inline diffs; open a Changes file's"),
+    (
+        "checkpoints",
+        "u",
+        "On Changes: the session's checkpoints, to rewind to",
+    ),
 ];
 
 /// What `config.toml` says, with anything it does not say left `None`.
@@ -333,6 +343,10 @@ pub struct Settings {
     /// says otherwise, because it is the one thing that makes the hook write
     /// to the agent's stdout on a tool call.
     pub warn_agents: Option<bool>,
+    /// Whether the hook snapshots a session's checkout at each turn — see
+    /// [`crate::checkpoint`]. Off unless the file says otherwise, because it
+    /// writes refs and objects into the user's repositories.
+    pub checkpoints: Option<bool>,
     /// Hours without activity before a live session is idle — see
     /// [`Settings::idle_after_ms`].
     pub idle_after: Option<f64>,
@@ -410,6 +424,7 @@ impl Settings {
                     "auto_update" => item.as_bool().map(|v| out.auto_update = Some(v)).is_none(),
                     "telemetry" => item.as_bool().map(|v| out.telemetry = Some(v)).is_none(),
                     "warn_agents" => item.as_bool().map(|v| out.warn_agents = Some(v)).is_none(),
+                    "checkpoints" => item.as_bool().map(|v| out.checkpoints = Some(v)).is_none(),
                     "read_screen" => item.as_bool().map(|v| out.read_screen = Some(v)).is_none(),
                     "compact_threshold" => item
                         .as_float()
@@ -511,6 +526,7 @@ impl Settings {
             "auto_update" => self.auto_update.map(|v| v.to_string()),
             "telemetry" => self.telemetry.map(|v| v.to_string()),
             "warn_agents" => self.warn_agents.map(|v| v.to_string()),
+            "checkpoints" => self.checkpoints.map(|v| v.to_string()),
             "read_screen" => self.read_screen.map(|v| v.to_string()),
             "compact_threshold" => self.compact_threshold.map(|v| format!("{}", v * 100.0)),
             "hide_columns" => self.hide_columns.as_ref().map(|v| format!("{v:?}")),

@@ -249,6 +249,12 @@ on `warn_agents` — a note on a file write that another running agent wrote the
 same file moments ago. See
 [Telling the second agent](the-table.md#telling-the-second-agent).
 
+With `checkpoints = true`, a prompt submitted or a turn ended also starts a
+detached `cctop checkpoint take` that snapshots the session's checkout. The hook
+does not wait for it, and never runs git itself: the child has its own session
+and no streams the agent could read, and whether it succeeds is never the
+agent's concern. See [Checkpoints and rewind](panels.md#checkpoints-and-rewind).
+
 ## Reading the agents' screens instead
 
 Hooks can fail in ways that look like an agent with nothing to say: not

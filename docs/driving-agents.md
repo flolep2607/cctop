@@ -107,6 +107,30 @@ says which and why. The stop is SIGTERM, so each agent exits cleanly and `R`
 brings it back whenever it is wanted again. See [idle
 sessions](the-table.md#idle-sessions-and-the-memory-they-hold) for the details.
 
+## Rolling back a bad turn
+
+An agent that spends one turn wrecking a file it had right the turn before is
+the case checkpoints are for. With `checkpoints = true` in `[settings]` (or on
+the settings tab, `,`), cctop's hook snapshots the session's checkout each time
+a prompt is submitted and each time a turn ends — for Claude Code, Codex,
+Gemini CLI, Cursor and OpenCode alike. On the [Changes
+panel](panels.md#checkpoints-and-rewind) (`0`), `u` lists them with how many
+files each differs from now; pick one, read what a rewind would change, and `y`
+puts the files back.
+
+Claude Code's own `/rewind` also takes the conversation back, and for a Claude
+session that is often the better tool; this is the one that works the same for
+every agent, and covers what an agent changed through a shell command as well as
+through its edit tool. Nothing here fights it: a snapshot only reads the
+checkout.
+
+A rewind restores files and nothing else. It saves the present as a checkpoint
+first, so it can be undone the same way; it never moves `HEAD` or undoes a
+commit, and it never touches files your ignore rules exclude. The snapshots are
+refs under `refs/cctop/checkpoints/`, the newest 50 per session and none older
+than a week — [what exactly it writes](panels.md#checkpoints-and-rewind). The
+agent is never kept waiting: the hook starts the snapshot detached and returns.
+
 ## Tabs and splits
 
 The session table is tab 1. `t` opens another: pick an agent — whichever of
