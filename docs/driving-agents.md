@@ -520,7 +520,9 @@ meeting it, 2 when the target names no session or more than one, and 124 on
 prints the outcome as one line of JSON: `session`, `pid`, `label`, `state`,
 `until`, `met`, `timed_out`, `waited_secs`. An agent can ask the same thing
 over MCP with `wait_for_session` — see
-[Letting agents see each other](integrations.md#letting-agents-see-each-other).
+[Letting agents see each other](integrations.md#letting-agents-see-each-other) —
+and, once you allow it, start the agent it waits on and type to it with
+`spawn_agent` and `send_prompt` ([Letting agents drive agents](integrations.md#letting-agents-drive-agents)).
 
 A Claude Code transcript cannot say that a turn is over — answering you and
 still thinking look the same on disk — so for Claude that answer comes from its

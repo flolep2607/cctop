@@ -79,6 +79,48 @@ impl Input<'_> {
     }
 }
 
+/// Why a session cannot be typed into from this machine.
+///
+/// Here rather than in the UI because more than one door asks it: the single
+/// row's `s`, the fan-out over marked rows, and an agent's `send_prompt` over
+/// MCP ([`crate::drive`]). A row refused by one is refused by the others, for
+/// the same reason, because they all ask [`untypeable`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Untypeable {
+    /// On another machine: its pid means nothing here.
+    Remote(String),
+    /// No live root process — ended, or never seen running.
+    NotLive,
+    /// Its agent is the same process as a row already being sent to, so a
+    /// second send would type the prompt twice into one terminal. Only the
+    /// fan-out has a "row already being sent to"; [`untypeable`] never says it.
+    SameTerminal(String),
+}
+
+impl Untypeable {
+    /// The reason as a status line says it, after the row's name.
+    pub fn short(&self) -> String {
+        match self {
+            Untypeable::Remote(host) => format!("on {host}"),
+            Untypeable::NotLive => "not live".into(),
+            Untypeable::SameTerminal(other) => format!("same terminal as {other}"),
+        }
+    }
+}
+
+/// Whether `s` can be typed into from here, and if not, why.
+pub fn untypeable(s: &crate::session::Session) -> Option<Untypeable> {
+    // Before the pid: a remote row has none here, and "not live" would be
+    // wrong about an agent that is running fine on its own machine.
+    if let Some(r) = &s.remote {
+        return Some(Untypeable::Remote(r.host.clone()));
+    }
+    if s.root_pid().is_none() {
+        return Some(Untypeable::NotLive);
+    }
+    None
+}
+
 /// Type `text` into the terminal running the agent at `pid`, then submit it.
 ///
 /// Backends are tried strongest first; each reports `None` when it doesn't apply

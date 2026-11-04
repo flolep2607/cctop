@@ -221,9 +221,16 @@ const FOREIGN: &[&str] = &[
 ];
 
 /// Whether `var` is one of the variables a pane must not inherit from cctop.
+///
+/// That includes the marks [`crate::drive`] puts on an agent an agent started.
+/// They are set per session, never inherited, and a daemon first started by
+/// such an agent's MCP server would otherwise hand them to every pane it ever
+/// makes — counting the person's own agents as spawned ones, and against the
+/// depth limit.
 fn foreign(var: &std::ffi::OsStr) -> bool {
-    var.to_str()
-        .is_some_and(|v| FOREIGN.contains(&v) || v.starts_with("RMUX_SDK_"))
+    var.to_str().is_some_and(|v| {
+        FOREIGN.contains(&v) || v.starts_with("RMUX_SDK_") || crate::drive::MARKS.contains(&v)
+    })
 }
 
 /// Start cctop's daemon unless one is answering already.

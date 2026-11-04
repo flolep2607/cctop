@@ -35,6 +35,7 @@ pub mod cloudflare;
 pub mod collide;
 pub mod config;
 pub mod convert;
+pub mod drive;
 pub mod elog;
 pub mod embed;
 /// A whole conversation as markdown: `--export`, and `/api/chat/<id>/markdown`.

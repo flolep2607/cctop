@@ -39,7 +39,7 @@ use serde::Serialize;
 /// Long enough for a real instruction with a path and a paragraph of context,
 /// and short of a paste that would be better written to a file and pointed at —
 /// which is the shape [`handoff`] already uses for exactly this reason.
-const MAX_PROMPT_CHARS: usize = 4000;
+pub const MAX_PROMPT_CHARS: usize = 4000;
 
 /// How long the launch of a handed-off agent is given before the brief is typed
 /// at it.
@@ -461,7 +461,7 @@ fn launch_under(
 }
 
 /// The launchable account `account` names for `agent`, `None` for none named.
-fn account_named(
+pub fn account_named(
     agent: &str,
     account: Option<&str>,
 ) -> Result<Option<&'static crate::config::Profile>, Failed> {
