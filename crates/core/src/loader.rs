@@ -662,9 +662,8 @@ fn stamp_tabs(
 ) {
     for s in sessions.iter_mut().filter(|s| s.remote.is_none()) {
         s.in_tab = !panes.is_empty()
-            && s.root_pid().is_some_and(|pid| {
-                crate::rmux::holding_in(panes, pid, |pid| ancestors(pid)).is_some()
-            });
+            && s.root_pid()
+                .is_some_and(|pid| crate::rmux::holding_in(panes, pid, &ancestors).is_some());
     }
 }
 
