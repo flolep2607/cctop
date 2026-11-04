@@ -290,7 +290,12 @@ const MAX_DEPTH: usize = 32;
 /// walking up from the agent.
 fn pane_for(pid: u32) -> Option<String> {
     let mut sys = System::new();
-    sys.refresh_processes_specifics(ProcessesToUpdate::All, false, ProcessRefreshKind::nothing());
+    // Without threads, as in `peek`: a walk up through parents never needs one.
+    sys.refresh_processes_specifics(
+        ProcessesToUpdate::All,
+        false,
+        ProcessRefreshKind::nothing().without_tasks(),
+    );
     pane_in(&sys, &list_panes()?, pid)
 }
 

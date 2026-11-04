@@ -105,10 +105,14 @@ impl Peek {
     /// Take the pane list and the process table again, once they are stale.
     fn sweep(&mut self) {
         if self.swept_at.elapsed() >= SWEEP_STALE {
+            // Processes only: on Linux sysinfo counts every thread as one of
+            // its own, reads each one's stat, and keeps that file open for the
+            // next sweep — ten thousand descriptors on a busy server, held for
+            // as long as cctop runs, to walk parents threads do not have.
             self.sys.refresh_processes_specifics(
                 ProcessesToUpdate::All,
                 false,
-                ProcessRefreshKind::nothing(),
+                ProcessRefreshKind::nothing().without_tasks(),
             );
             self.panes = crate::inject::list_panes();
             self.swept_at = std::time::Instant::now();
@@ -254,6 +258,37 @@ fn replay(capture: &crate::rmux::Capture) -> Vec<String> {
 mod tests {
     use super::*;
     use crate::rmux::Capture;
+
+    /// The sweep lists processes and leaves threads out — a thread of this
+    /// very test is running while it looks — so a long-lived cctop holds no
+    /// stat file per thread on the machine.
+    #[test]
+    fn the_sweep_lists_no_threads() {
+        let (stop, stopped) = std::sync::mpsc::channel::<()>();
+        let (told, tid) = std::sync::mpsc::channel();
+        let thread = std::thread::spawn(move || {
+            // SAFETY: gettid has no preconditions.
+            let _ = told.send(unsafe { libc::gettid() });
+            stopped.recv()
+        });
+        let tid = tid.recv().unwrap();
+        let mut peek = Peek::new();
+        peek.sweep();
+        assert!(
+            peek.sys
+                .process(sysinfo::get_current_pid().unwrap())
+                .is_some()
+        );
+        // The thread by its own id, not any `thread_kind`: kernel threads have
+        // one too, and they are processes, listed either way.
+        assert!(
+            peek.sys
+                .process(sysinfo::Pid::from_u32(tid as u32))
+                .is_none()
+        );
+        drop(stop);
+        let _ = thread.join();
+    }
 
     fn capture(rows: u16, cols: u16, lines: &[&str]) -> Capture {
         Capture {
