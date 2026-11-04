@@ -386,6 +386,54 @@ fn quit_on_signals() {
     }
 }
 
+/// Wait up to `wait` for input on the terminal at `fd`, and say whether it is
+/// still there: `false` once its other end has closed.
+///
+/// A closed ssh window sends SIGHUP, but only to the session the terminal
+/// controls, and a program a multiplexer started directly in a pane need not
+/// be in it — zellij closing a pane takes the pty away and tells cctop
+/// nothing. crossterm cannot be the one to notice: once the terminal hangs up,
+/// every read is an end of file or EIO, and its read loop retries those for
+/// ever, timeout or not. So `event::poll` never returns, the loop never gets
+/// to see a SIGTERM either, and cctop runs flat out until it is killed — one
+/// did for nineteen days on a shared server, still holding the account
+/// tunnel, so every newer cctop there got a quick tunnel instead. Asked here
+/// first, the hangup is in `poll`'s answer, and crossterm is only called once
+/// there is something real for it to read.
+fn terminal_waits(fd: libc::c_int, wait: Duration) -> bool {
+    let mut probe = libc::pollfd {
+        fd,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    let millis = libc::c_int::try_from(wait.as_millis()).unwrap_or(libc::c_int::MAX);
+    // SAFETY: one valid pollfd for the length of the call.
+    let ready = unsafe { libc::poll(&mut probe, 1, millis) };
+    !(ready > 0 && probe.revents & (libc::POLLHUP | libc::POLLNVAL) != 0)
+}
+
+/// Point the standard descriptors at /dev/null, for the way out once the
+/// terminal has gone.
+///
+/// The restore still runs on the way out, and ratatui reports a restore that
+/// failed with `eprintln!` — onto that same dead terminal, where the write
+/// fails, and a failed `eprintln!` panics, inside the panic hook that
+/// restores again. cctop would end in an abort instead of quitting. Written
+/// to /dev/null, every one of those writes succeeds at doing nothing.
+fn forget_terminal() {
+    if let Ok(null) = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/dev/null")
+    {
+        use std::os::fd::AsRawFd;
+        for fd in [libc::STDIN_FILENO, libc::STDOUT_FILENO, libc::STDERR_FILENO] {
+            // SAFETY: both descriptors are open; dup2 replaces the second.
+            unsafe { libc::dup2(null.as_raw_fd(), fd) };
+        }
+    }
+}
+
 /// `ratatui::restore` intentionally only disables raw mode and leaves the
 /// alternate screen; it does not restore cursor visibility. Keep this separate
 /// so regular exits, input errors, and panics all use the same cleanup path.
@@ -571,6 +619,9 @@ fn event_loop(
     // What the tab bar last looked like, while something on it was asking.
     let mut last_bar: Vec<ratatui::style::Style> = Vec::new();
     let mut last_bar_at = Instant::now();
+    // Asked once: a terminal that has hung up stops answering as one.
+    // SAFETY: isatty only inspects the descriptor.
+    let stdin_is_tty = unsafe { libc::isatty(libc::STDIN_FILENO) } == 1;
 
     loop {
         // Drain everything the workers have produced.
@@ -1055,7 +1106,23 @@ fn event_loop(
             .checked_sub(last_refresh.elapsed())
             .unwrap_or(Duration::ZERO)
             .min(idle_wait);
-        if event::poll(wait)? {
+        // crossterm reads standard input when it is a terminal; anything else
+        // and it opened /dev/tty, which there is no descriptor here to watch.
+        match stdin_is_tty {
+            true if !terminal_waits(libc::STDIN_FILENO, wait) => {
+                forget_terminal();
+                break;
+            }
+            true => {}
+            false => {
+                event::poll(wait)?;
+            }
+        }
+        // Everything ready, not one event: a read can parse into several, and
+        // what crossterm keeps back is invisible to the poll above. A resize
+        // arrives this way too, through crossterm's own signal pipe, so it
+        // waits at most one `wait` for the next turn.
+        while !app.should_quit && event::poll(Duration::ZERO)? {
             let event = event::read()?;
             cctop_core::elog::tui(&event);
             match event {
@@ -1120,4 +1187,36 @@ fn event_loop(
     // Quit was pressed rather than the agent exiting, so there is no exit code
     // to inherit.
     Ok(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::terminal_waits;
+    use std::time::{Duration, Instant};
+
+    /// A pty whose other end closes reads as gone, at once and with no signal
+    /// sent — the closed pane — and one still open is waited on.
+    #[test]
+    fn a_terminal_whose_other_end_closed_is_gone() {
+        let (mut master, mut slave) = (0, 0);
+        // SAFETY: both out-pointers are valid; the rest may be null.
+        let opened = unsafe {
+            libc::openpty(
+                &mut master,
+                &mut slave,
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                std::ptr::null(),
+            )
+        };
+        assert_eq!(opened, 0);
+        assert!(terminal_waits(slave, Duration::from_millis(10)));
+        // SAFETY: openpty handed us both fds and nothing else owns them.
+        unsafe { libc::close(master) };
+        let asked = Instant::now();
+        assert!(!terminal_waits(slave, Duration::from_secs(5)));
+        assert!(asked.elapsed() < Duration::from_secs(1));
+        // SAFETY: as above, and the master is already closed.
+        unsafe { libc::close(slave) };
+    }
 }
