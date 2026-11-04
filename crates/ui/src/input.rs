@@ -1710,13 +1710,13 @@ impl App {
         let Some(s) = self.selected_session() else {
             return;
         };
-        match App::untypeable(s) {
+        match cctop_core::inject::untypeable(s) {
             None => {
                 self.send_input = "continue".into();
                 self.send_to_marked = false;
                 self.mode = Mode::SendKeys;
             }
-            Some(crate::fanout::Untypeable::Remote(_)) => {
+            Some(cctop_core::inject::Untypeable::Remote(_)) => {
                 if let Some(why) = App::remote_refusal(s) {
                     self.set_status(why);
                 }

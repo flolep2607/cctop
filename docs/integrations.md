@@ -355,7 +355,8 @@ The server tells the agent at start-up what it is for, through MCP's own
 what makes an agent reach for `recall` unprompted, without cctop editing anybody's
 `CLAUDE.md` or `AGENTS.md`.
 
-Seven tools, all read-only:
+Seven tools, all read-only — and two more that act, off until you turn them on
+(see [Letting agents drive agents](#letting-agents-drive-agents)):
 
 - **`recall`** — the passages of past sessions, from any agent, that answer a
   question: why something was decided, what was found last time a test broke.
@@ -389,9 +390,64 @@ Seven tools, all read-only:
   hears a finished turn a second or two later, once a transcript or a running
   cctop has it.
 
-Nothing here starts, stops, or types at anything. An agent that can *drive*
-other agents is a much larger proposition than one that can *see* them, and the
-visibility is the half with no downside.
+None of those seven starts, stops, or types at anything. An agent that can
+*drive* other agents is a much larger proposition than one that can *see* them,
+and the visibility is the half with no downside.
+
+### Letting agents drive agents
+
+```toml
+[settings]
+mcp_drive = true    # off by default; also a switch in Settings (,)
+```
+
+adds two tools, so one agent can hand a piece of work to another and pick it up
+when it is done:
+
+- **`spawn_agent`** `{harness, dir, prompt, account?}` — starts `claude`,
+  `codex`, `devin` or `opencode` in a new cctop tab, in `dir`, with `prompt` as
+  its first prompt, and answers with the tab's name and the agent's pid. Either
+  goes to `wait_for_session`, then `get_session_context` or `send_prompt`. The
+  tab is in cctop's rmux, so it is in every cctop's tab bar on this machine
+  (see [Tabs outlive cctop](driving-agents.md#tabs-outlive-cctop)), where you
+  can watch it, type to it, and close it.
+- **`send_prompt`** `{session, text}` — types one line into a running session
+  and submits it, through the same path as `s`. The session is named as
+  `wait_for_session` takes it: an id or a prefix, a tab name, or a pid.
+
+With the setting off — the default — neither tool is listed, and a client that
+calls one anyway is answered with how to turn it on. The setting lives in
+cctop's own `config.toml`, which no tool writes, so an agent cannot switch it
+on for itself.
+
+What holds once it is on:
+
+- **Nothing is started with more permission than you would have given it.** A
+  spawned agent's command line is the harness and its prompt, nothing else:
+  no `--dangerously-skip-permissions`, no `--yolo` or `--full-auto`, no
+  permission mode, and cctop's YOLO is never switched on for it. It asks you
+  for whatever its own configuration says it must. The prompt is one argument
+  and may not start with `-`, so it cannot be read as an option.
+- **A message, never the keyboard.** A prompt or a typed line is one line, and
+  may not start with `/`, `!` or `#`. Typed into Claude Code or Codex those are
+  the person's: a slash command (`/yolo` included, which `cctop yolo-hook`
+  trusts because only a person types it), a shell command run with no
+  permission prompt, a note to the agent's standing memory. The same
+  characters further into the text are just text.
+- **This machine, your user.** The directory has to exist here and be yours;
+  a session typed into has to be local, running, yours (cctop as root sees
+  other users' sessions and refuses them here), and run by a process of
+  yours. A row from `--host` or a sibling is refused.
+- **No loops.** At most four agents started through `spawn_agent` run at once.
+  Each carries `CCTOP_SPAWNED_BY` (the tab or pid that asked) and
+  `CCTOP_SPAWN_DEPTH` in its environment; an agent you started is depth 0, and
+  one at depth 2 cannot spawn.
+- **Never into a question.** `send_prompt` refuses a session that is asking
+  for permission or holding a question with choices: a line typed there would
+  answer it, and that answer is yours.
+- **Visible.** The spawned agent is a tab; a sent line appears in the agent's
+  terminal. With `CCTOP_LOG` set, every spawn and send — refused or not — is
+  an event with `src: "drive"` in cctop's event log.
 
 ## More than one machine
 

@@ -102,6 +102,22 @@ pub fn prepare(argv: &[String], name: &str, cwd: Option<&Path>) {
 /// daemon's defaults (see `mux::defaults`). Starts the daemon if none is
 /// running. A session of that name already there is success.
 pub fn start_detached(argv: &[String], name: &str, cwd: Option<&Path>) -> Result<(), String> {
+    start_detached_with(argv, name, cwd, &[])
+}
+
+/// [`start_detached`], with `env` (as `VAR=value`) added to what the agent is
+/// started with.
+///
+/// Through the session's own environment rather than an `env VAR=value`
+/// prefix on the argv: a prefix is what an account launch already puts there
+/// ([`argv_under_profile`](crate::config::argv_under_profile)), and two of
+/// them stacked is an argv the tab's label no longer reads its agent out of.
+pub fn start_detached_with(
+    argv: &[String],
+    name: &str,
+    cwd: Option<&Path>,
+    env: &[String],
+) -> Result<(), String> {
     crate::elog::event(
         "rmux",
         "prepare",
@@ -118,7 +134,9 @@ pub fn start_detached(argv: &[String], name: &str, cwd: Option<&Path>) -> Result
         }
         let _ = kill(name);
     }
-    crate::mux::new_session(name, cwd, launch_env(argv), argv)
+    let mut environment = launch_env(argv);
+    environment.extend(env.iter().cloned());
+    crate::mux::new_session(name, cwd, environment, argv)
 }
 
 /// The command that attaches to an existing session and nothing else.

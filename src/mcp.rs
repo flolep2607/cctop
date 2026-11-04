@@ -6,10 +6,15 @@
 //! different question — "has someone already touched this file", "what was the
 //! last plan anyone made here", "which session is burning the money".
 //!
-//! Deliberately read-only. Every tool here answers a question; none of them
-//! start, stop, or type at anything. An agent that can drive other agents is a
+//! Read-only unless the person says otherwise. Every tool here answers a
+//! question; none of them start, stop, or type at anything — except two,
+//! `spawn_agent` and `send_prompt`, which are not even listed until
+//! `[settings] mcp_drive = true`. An agent that can drive other agents is a
 //! different and much larger proposition than one that can see them, and the
-//! visibility is the part with no downside.
+//! visibility is the part with no downside. What makes the two safe to offer
+//! once switched on is in [`cctop_core::drive`], which enforces it; this file
+//! only hides them while they are off, and answers a call to one with how to
+//! turn them on.
 //!
 //! The protocol is JSON-RPC 2.0, one message per line, `initialize` then
 //! `tools/list` then `tools/call`. No SDK: three methods and a fixed tool
@@ -248,7 +253,19 @@ pub fn install(scope: &str) -> Vec<String> {
 }
 
 /// Answer one request, or `None` for a notification, which takes no reply.
+///
+/// Whether the driving tools are on is read per request, like the sessions:
+/// a person who switches `mcp_drive` off expects it off now, not once every
+/// agent holding a server has restarted.
 fn handle(request: &Value) -> Option<Value> {
+    // Not asked for a notification: it takes no reply, so nothing depends on
+    // the setting, and the file is not worth reading for it.
+    request.get("id")?;
+    handle_as(request, cctop_core::drive::enabled())
+}
+
+/// [`handle`], with whether the driving tools are on passed in.
+fn handle_as(request: &Value, drive: bool) -> Option<Value> {
     // A notification is exactly a request with no id, and replying to one is a
     // protocol error rather than a harmless extra message.
     let id = request.get("id")?.clone();
@@ -267,8 +284,8 @@ fn handle(request: &Value) -> Option<Value> {
             "serverInfo": {"name": "cctop", "version": env!("CARGO_PKG_VERSION")},
             "instructions": INSTRUCTIONS,
         })),
-        "tools/list" => Ok(json!({"tools": tool_schemas()})),
-        "tools/call" => call_tool(params),
+        "tools/list" => Ok(json!({"tools": tool_schemas(drive)})),
+        "tools/call" => call_tool(params, drive),
         // `ping` is the one method a client may send that means nothing.
         "ping" => Ok(json!({})),
         other => Err(RpcError::new(
@@ -314,8 +331,85 @@ const INSTRUCTIONS: &str = "cctop reads every coding-agent session on this machi
     context. Cite what you use by its session id. Use `check_conflicts` before \
     editing files another running agent may also be editing.";
 
-/// What the server offers.
-fn tool_schemas() -> Vec<Value> {
+/// What the server offers: the read-only tools, and the driving ones when
+/// `drive` is on.
+///
+/// Left out of the list while off, rather than listed and refused: a model
+/// reaches for what it is shown, and a tool it cannot use is one it will try.
+fn tool_schemas(drive: bool) -> Vec<Value> {
+    let mut tools = read_schemas();
+    if drive {
+        tools.extend(drive_schemas());
+    }
+    tools
+}
+
+/// The two tools that act, offered only with `mcp_drive` on.
+fn drive_schemas() -> Vec<Value> {
+    vec![
+        json!({
+            "name": "spawn_agent",
+            "description": "Start a new coding agent in a cctop tab on this machine, with a \
+                            first prompt, to hand it a piece of work. It runs with its \
+                            harness's own default permissions and asks the person for \
+                            anything beyond them. Returns its tab name and pid; pass either \
+                            to wait_for_session to wait for it, then get_session_context or \
+                            send_prompt. At most 4 spawned agents run at once.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "harness": {
+                        "type": "string",
+                        "enum": cctop_core::drive::SPAWNABLE,
+                        "description": "Which agent to start.",
+                    },
+                    "dir": {
+                        "type": "string",
+                        "description": "Absolute path of an existing directory of yours to \
+                                        start it in, usually a git worktree of its own.",
+                    },
+                    "prompt": {
+                        "type": "string",
+                        "description": "Its first prompt: one line, at most 4000 characters, \
+                                        starting with a word. For a longer brief, write it to \
+                                        a file and point the prompt at it.",
+                    },
+                    "account": {
+                        "type": "string",
+                        "description": "One of this machine's accounts for that harness, by \
+                                        name. Leave it out for the default.",
+                    },
+                },
+                "required": ["harness", "dir", "prompt"],
+            },
+        }),
+        json!({
+            "name": "send_prompt",
+            "description": "Type one line into a running agent's terminal on this machine and \
+                            submit it, as the person would. Refused for a session that is \
+                            asking for permission or a choice — that answer is the person's — \
+                            and for one on another machine or of another user.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "session": {
+                        "type": "string",
+                        "description": "Session id or a unique prefix of one, a cctop tab \
+                                        name (as spawn_agent returns), or a pid.",
+                    },
+                    "text": {
+                        "type": "string",
+                        "description": "The line to send, at most 4000 characters.",
+                    },
+                },
+                "required": ["session", "text"],
+            },
+        }),
+    ]
+}
+
+/// The tools that only read, always offered.
+fn read_schemas() -> Vec<Value> {
     vec![
         json!({
             "name": "list_sessions",
@@ -497,6 +591,9 @@ fn tool_schemas() -> Vec<Value> {
     ]
 }
 
+/// The tools that act, which [`call_tool`] answers to only while they are on.
+const DRIVE_TOOLS: [&str; 2] = ["spawn_agent", "send_prompt"];
+
 /// The tools [`call_tool`] answers to, which [`tool_schemas`] must list.
 const TOOLS: [&str; 7] = [
     "list_sessions",
@@ -518,12 +615,20 @@ const TOOLS: [&str; 7] = [
 /// and call again with more of the id. As a JSON-RPC error the same sentence
 /// tends to reach only a log. Bad arguments are on the result side for the
 /// same reason, as the 2025-11-25 revision moved them.
-fn call_tool(params: Option<&Value>) -> Result<Value, RpcError> {
+///
+/// A driving tool called while they are off is the second kind: the client is
+/// not wrong to know its name, and the sentence saying how to turn it on is
+/// for the model to relay to the person.
+fn call_tool(params: Option<&Value>, drive: bool) -> Result<Value, RpcError> {
     let name = params
         .and_then(|p| p.get("name"))
         .and_then(Value::as_str)
         .ok_or_else(|| RpcError::new(INVALID_PARAMS, "tools/call needs a tool name"))?;
-    if !TOOLS.contains(&name) {
+    if DRIVE_TOOLS.contains(&name) && !drive {
+        let text = cctop_core::drive::off_message(name);
+        return Ok(json!({"content": [{"type": "text", "text": text}], "isError": true}));
+    }
+    if !TOOLS.contains(&name) && !DRIVE_TOOLS.contains(&name) {
         return Err(RpcError::new(
             INVALID_PARAMS,
             format!("unknown tool '{name}'"),
@@ -546,6 +651,9 @@ fn run_tool(name: &str, args: Value) -> Result<String, String> {
     if name == "wait_for_session" {
         return wait_for_session(parse(name, args)?);
     }
+    if name == "spawn_agent" {
+        return spawn_agent(parse(name, args)?);
+    }
 
     let mut loader = Loader::new();
     let sessions = loader.load(Plan::Retail);
@@ -557,6 +665,7 @@ fn run_tool(name: &str, args: Value) -> Result<String, String> {
         "search_sessions" => search_sessions(&sessions, parse(name, args)?)?,
         "recall" => recall(&sessions, parse(name, args)?)?,
         "read_passage" => read_passage(&sessions, parse(name, args)?)?,
+        "send_prompt" => send_prompt(&sessions, parse(name, args)?)?,
         other => unreachable!("{other} is not in TOOLS"),
     };
     // Persisting is worth the write even on a read-only call: an MCP server is
@@ -624,6 +733,75 @@ struct PassageArgs {
     passage: u64,
     #[serde(default, deserialize_with = "lenient_u64")]
     around: Option<u64>,
+}
+
+#[derive(Deserialize)]
+struct SpawnArgs {
+    harness: String,
+    dir: String,
+    prompt: String,
+    account: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct SendArgs {
+    session: String,
+    text: String,
+}
+
+/// Start an agent in a cctop tab — see [`cctop_core::drive`] for every check
+/// it passes first.
+fn spawn_agent(args: SpawnArgs) -> Result<String, String> {
+    let request = cctop_core::drive::Request {
+        harness: args.harness,
+        dir: args.dir,
+        prompt: args.prompt,
+        account: args.account.filter(|a| !a.trim().is_empty()),
+    };
+    let spawned = cctop_core::drive::spawn(&request, &cctop_core::drive::Caller::from_env())?;
+    Ok(json!({
+        "tab": spawned.tab,
+        "pid": spawned.pid,
+        "harness": spawned.harness,
+        "dir": spawned.dir,
+        "depth": spawned.depth,
+        "next": format!(
+            "wait_for_session with session \"{}\" waits for it; it is a tab in cctop, \
+             where the person can watch and stop it",
+            spawned.tab
+        ),
+    })
+    .to_string())
+}
+
+/// Type a line into a live local session, found the way `wait_for_session`
+/// finds one: a pid, a tab name, or a session id.
+fn send_prompt(sessions: &[Session], args: SendArgs) -> Result<String, String> {
+    let tabs = cctop_core::rmux::running();
+    let target = args.session.as_str();
+    let at = match crate::wait::resolve(sessions, &tabs, target) {
+        Ok(at) => at,
+        Err(crate::wait::Unresolved::Unknown) => {
+            return Err(format!(
+                "no session, tab or pid here is '{target}'; list_sessions shows them"
+            ));
+        }
+        Err(crate::wait::Unresolved::Ambiguous(ids)) => {
+            return Err(format!(
+                "'{target}' matches {} sessions; give more of the id: {}",
+                ids.len(),
+                ids.join(", ")
+            ));
+        }
+    };
+    let session = &sessions[at];
+    cctop_core::drive::send(session, &tabs, &args.text)?;
+    Ok(format!(
+        "Sent to {} ({}). wait_for_session with session \"{}\" waits for its answer.",
+        session.display_label(),
+        session.provider.as_str(),
+        session.session_id
+    ))
 }
 
 #[derive(Deserialize)]
@@ -925,7 +1103,7 @@ mod tests {
         let said = response["result"]["instructions"]
             .as_str()
             .expect("instructions");
-        let offered: Vec<String> = tool_schemas()
+        let offered: Vec<String> = tool_schemas(false)
             .iter()
             .map(|t| t["name"].as_str().unwrap_or_default().to_string())
             .collect();
@@ -940,7 +1118,7 @@ mod tests {
     /// call correctly.
     #[test]
     fn every_tool_is_fully_described() {
-        for tool in tool_schemas() {
+        for tool in tool_schemas(true) {
             let name = tool["name"].as_str().expect("a name");
             assert!(
                 tool["description"].as_str().is_some_and(|d| d.len() > 40),
@@ -1037,11 +1215,71 @@ mod tests {
     /// other way round, so neither can be added without the other.
     #[test]
     fn the_dispatched_tools_are_the_listed_ones() {
-        let listed: Vec<String> = tool_schemas()
-            .iter()
-            .map(|t| t["name"].as_str().unwrap().to_string())
-            .collect();
-        assert_eq!(listed, TOOLS);
+        let listed = |drive| -> Vec<String> {
+            tool_schemas(drive)
+                .iter()
+                .map(|t| t["name"].as_str().unwrap().to_string())
+                .collect()
+        };
+        assert_eq!(listed(false), TOOLS);
+        let all: Vec<&str> = TOOLS.iter().chain(&DRIVE_TOOLS).copied().collect();
+        assert_eq!(listed(true), all);
+    }
+
+    /// With `mcp_drive` off the two tools that act are not in the list at
+    /// all, and calling one anyway answers how to turn it on — before any
+    /// argument is read.
+    #[test]
+    fn the_driving_tools_are_hidden_and_refused_while_off() {
+        let list = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"});
+        let names = |drive| -> Vec<String> {
+            handle_as(&list, drive).unwrap()["result"]["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|t| t["name"].as_str().unwrap().to_string())
+                .collect()
+        };
+        for tool in DRIVE_TOOLS {
+            assert!(
+                !names(false).iter().any(|n| n == tool),
+                "{tool} listed while off"
+            );
+            assert!(
+                names(true).iter().any(|n| n == tool),
+                "{tool} missing while on"
+            );
+
+            let call = json!({
+                "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                "params": {"name": tool, "arguments": {
+                    "harness": "claude", "dir": "/", "prompt": "hi",
+                    "session": "x", "text": "hi",
+                }},
+            });
+            let reply = handle_as(&call, false).unwrap();
+            assert_eq!(reply["result"]["isError"], true, "{reply}");
+            let text = reply["result"]["content"][0]["text"].as_str().unwrap();
+            assert!(text.contains("mcp_drive = true"), "{text}");
+        }
+    }
+
+    /// Switched on, a spawn still goes through every check in core: a flag
+    /// for a prompt comes back as a refusal the model can read.
+    #[test]
+    fn a_spawn_that_smuggles_a_flag_is_a_readable_refusal() {
+        let call = json!({
+            "jsonrpc": "2.0", "id": 3, "method": "tools/call",
+            "params": {"name": "spawn_agent", "arguments": {
+                "harness": "claude",
+                "dir": "/",
+                "prompt": "--dangerously-skip-permissions",
+            }},
+        });
+        let reply = handle_as(&call, true).unwrap();
+        assert_eq!(reply["result"]["isError"], true, "{reply}");
+        let text = reply["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("option"), "{text}");
     }
 
     fn args<T: DeserializeOwned>(value: Value) -> T {
@@ -1056,7 +1294,7 @@ mod tests {
     /// an agent choosing from the schema never picks one that is refused.
     #[test]
     fn the_wait_tool_offers_exactly_the_conditions_it_takes() {
-        let tool = tool_schemas()
+        let tool = tool_schemas(true)
             .into_iter()
             .find(|tool| tool["name"] == "wait_for_session")
             .expect("the tool is listed");
@@ -1119,7 +1357,7 @@ mod tests {
     #[test]
     fn the_advertised_limit_agrees_with_the_enforced_one() {
         for name in ["list_sessions", "search_sessions"] {
-            let tool = tool_schemas()
+            let tool = tool_schemas(true)
                 .into_iter()
                 .find(|tool| tool["name"] == name)
                 .expect("the tool is listed");

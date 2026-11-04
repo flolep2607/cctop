@@ -18,7 +18,7 @@ use std::path::Path;
 
 /// Every `[settings]` key: its name, its default as the file would spell it,
 /// and what it does.
-pub const SETTINGS: [(&str, &str, &str); 25] = [
+pub const SETTINGS: [(&str, &str, &str); 26] = [
     (
         "theme",
         "\"auto\"",
@@ -101,6 +101,11 @@ pub const SETTINGS: [(&str, &str, &str); 25] = [
         "checkpoints",
         "false",
         "Snapshot a session's checkout each turn, to rewind (0, u)",
+    ),
+    (
+        "mcp_drive",
+        "false",
+        "Let agents start agents and type to them over MCP",
     ),
     (
         "idle_after",
@@ -347,6 +352,12 @@ pub struct Settings {
     /// [`crate::checkpoint`]. Off unless the file says otherwise, because it
     /// writes refs and objects into the user's repositories.
     pub checkpoints: Option<bool>,
+    /// Whether `cctop --mcp` offers `spawn_agent` and `send_prompt` — see
+    /// [`crate::drive`]. Off unless the file says otherwise, because they are
+    /// the only tools there that act rather than read: one agent starting
+    /// another, or typing at one, is a decision the person makes once, here,
+    /// and not one an agent can make for itself.
+    pub mcp_drive: Option<bool>,
     /// Hours without activity before a live session is idle — see
     /// [`Settings::idle_after_ms`].
     pub idle_after: Option<f64>,
@@ -425,6 +436,7 @@ impl Settings {
                     "telemetry" => item.as_bool().map(|v| out.telemetry = Some(v)).is_none(),
                     "warn_agents" => item.as_bool().map(|v| out.warn_agents = Some(v)).is_none(),
                     "checkpoints" => item.as_bool().map(|v| out.checkpoints = Some(v)).is_none(),
+                    "mcp_drive" => item.as_bool().map(|v| out.mcp_drive = Some(v)).is_none(),
                     "read_screen" => item.as_bool().map(|v| out.read_screen = Some(v)).is_none(),
                     "compact_threshold" => item
                         .as_float()
@@ -527,6 +539,7 @@ impl Settings {
             "telemetry" => self.telemetry.map(|v| v.to_string()),
             "warn_agents" => self.warn_agents.map(|v| v.to_string()),
             "checkpoints" => self.checkpoints.map(|v| v.to_string()),
+            "mcp_drive" => self.mcp_drive.map(|v| v.to_string()),
             "read_screen" => self.read_screen.map(|v| v.to_string()),
             "compact_threshold" => self.compact_threshold.map(|v| format!("{}", v * 100.0)),
             "hide_columns" => self.hide_columns.as_ref().map(|v| format!("{v:?}")),

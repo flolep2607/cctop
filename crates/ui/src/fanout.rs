@@ -16,31 +16,9 @@
 
 use super::*;
 
-/// Why a session cannot be typed into from this cctop.
-///
-/// The single-row `s` and the fan-out ask the same question here, so a row
-/// refused by one is refused by the other, for the same reason.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum Untypeable {
-    /// On another machine: its pid means nothing here.
-    Remote(String),
-    /// No live root process — ended, or never seen running.
-    NotLive,
-    /// Its agent is the same process as a row already being sent to, so a
-    /// second send would type the prompt twice into one terminal.
-    SameTerminal(String),
-}
-
-impl Untypeable {
-    /// The reason as the status line says it, after the row's name.
-    pub(super) fn short(&self) -> String {
-        match self {
-            Untypeable::Remote(host) => format!("on {host}"),
-            Untypeable::NotLive => "not live".into(),
-            Untypeable::SameTerminal(other) => format!("same terminal as {other}"),
-        }
-    }
-}
+/// Why a row cannot be typed into — core's, since an agent's `send_prompt`
+/// over MCP asks the same question.
+pub(super) use cctop_core::inject::Untypeable;
 
 /// Marked rows the prompt can be typed into, as (name, pid).
 pub(super) type Reachable = Vec<(String, u32)>;
@@ -70,19 +48,6 @@ pub(crate) struct Fanout {
 }
 
 impl App {
-    /// Whether `s` can be typed into from here, and if not, why.
-    pub(super) fn untypeable(s: &Session) -> Option<Untypeable> {
-        // Before the pid: a remote row has none here, and "not live" would be
-        // wrong about an agent that is running fine on its own machine.
-        if let Some(r) = &s.remote {
-            return Some(Untypeable::Remote(r.host.clone()));
-        }
-        if s.root_pid().is_none() {
-            return Some(Untypeable::NotLive);
-        }
-        None
-    }
-
     /// The marked sessions split into those the prompt can be typed into, as
     /// (name, pid), and those it cannot, as (name, why). In table order, so
     /// the box and the status line list them as the table does.
@@ -91,7 +56,7 @@ impl App {
         let mut refused = Refused::new();
         for s in self.marked_sessions() {
             let name = s.display_label().to_string();
-            match (Self::untypeable(s), s.root_pid()) {
+            match (cctop_core::inject::untypeable(s), s.root_pid()) {
                 (None, Some(pid)) => match to.iter().find(|(_, p)| *p == pid) {
                     Some((first, _)) => {
                         refused.push((name, Untypeable::SameTerminal(first.clone())))
@@ -372,7 +337,7 @@ mod tests {
             session("c", false, "docs"),
             remote("d", "infra", "procdb"),
         ] {
-            let typeable = App::untypeable(&s).is_none();
+            let typeable = cctop_core::inject::untypeable(&s).is_none();
             let mut app = test_app();
             app.sessions = vec![s];
             app.refilter();
