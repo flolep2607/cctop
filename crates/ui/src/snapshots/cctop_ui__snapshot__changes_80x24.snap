@@ -16,7 +16,7 @@ expression: screen
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ╭ Info  Performance  Processes  Tool Activity  Subagents  Cost  Config  Context╮
 │Since 3f2a91c, HEAD when the session started                                  ┃
-│3 files  +14 −3   [ ] pick a file, v opens its diff, p a pull request         ┃
+│3 files  +14 −3   [ ] pick, v diff, p pull request, u checkpoints             ┃
 │▾ src/app.rs             +12 −3                                               ┃
 │    @@ -1,3 +1,4 @@                                                           ┃
 │     fn main() {                                                              │

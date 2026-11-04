@@ -1926,6 +1926,24 @@ impl App {
             // much as show what the others do. It was free, it is what "open
             // this row" means everywhere else, and unlike a bare modifier every
             // terminal actually delivers it.
+            // The Changes panel's checkpoints: `u` for undo, and while its
+            // list or confirmation is up, Enter, `y` and Esc are theirs.
+            KeyCode::Char('u') if self.bottom_tab == super::changes::TAB => {
+                self.toggle_checkpoints()
+            }
+            KeyCode::Enter if self.changes_view() == Some(super::changes::View::Checkpoints) => {
+                self.toggle_change()
+            }
+            KeyCode::Char('y') if self.changes_view() == Some(super::changes::View::Confirm) => {
+                self.confirm_rewind()
+            }
+            KeyCode::Esc
+                if self
+                    .changes_view()
+                    .is_some_and(|v| v != super::changes::View::Files) =>
+            {
+                self.back_out_of_checkpoints()
+            }
             KeyCode::Enter if self.selected_session().is_some() => self.open_row_menu(),
             KeyCode::Char('d') => self.delete_selected(),
             KeyCode::Char('s') => self.send_prompt(),

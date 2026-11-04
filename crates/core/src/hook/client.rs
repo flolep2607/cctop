@@ -230,10 +230,48 @@ fn forward(args: &[String], advice: &std::sync::mpsc::Sender<Option<String>>) {
 
     let chain = ancestry();
     let _ = advice.send(crate::advise::consider(&name, &payload, &chain));
-    let Some(line) = envelope(&name, &payload, &chain) else {
+    let Some(event) = envelope_value(&name, &payload, &chain) else {
+        return;
+    };
+    checkpoint(&event);
+    let Some(line) = line_of(&event) else {
         return;
     };
     deliver(&line);
+}
+
+/// Hand a turn boundary to a detached `cctop checkpoint take`, when
+/// `[settings] checkpoints = true`.
+///
+/// Spawned rather than done here: a snapshot is a `git add -A` of the whole
+/// checkout, and this thread has a quarter of a second and an agent waiting on
+/// it. The spawn is a fork and an exec, which is what the agent just paid to
+/// start this process; the child is on its own from there, and whether git is
+/// installed, the checkout is a repository or the snapshot succeeds is never
+/// this process's concern. See [`crate::checkpoint`] for why not the TUI.
+///
+/// Before delivery, so a cctop that is slow to accept cannot cost the session
+/// its checkpoint; the settings file is read only on the turn boundaries, not
+/// on every tool call.
+fn checkpoint(event: &serde_json::Value) {
+    let field = |key: &str| event.get(key).and_then(|v| v.as_str()).unwrap_or_default();
+    let Some((why, session, dir)) = crate::checkpoint::hook_request(
+        field("event"),
+        field("session_id"),
+        field("cwd"),
+        field("agent_id"),
+    ) else {
+        return;
+    };
+    // Under test the executable is a test harness, which would read
+    // `checkpoint take …` as filters and run the suite again; and the
+    // settings file is the real one, which may well say yes.
+    if crate::under_test() || crate::settings::Settings::load().checkpoints != Some(true) {
+        return;
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        let _ = crate::checkpoint::spawn_take(&exe, session, dir, why);
+    }
 }
 
 /// The events [`announce_answer`] sends. Spelled so no harness could send them.
@@ -832,7 +870,11 @@ fn walk(pid: u32, mut parent: impl FnMut(u32) -> Option<u32>) -> Vec<u32> {
 /// Codex appears twice because it reports twice: its hook framework borrowed
 /// Claude Code's spelling wholesale, while the older `notify` program keeps its
 /// own.
-pub(super) fn envelope(name: &str, payload: &[u8], pids: &[u32]) -> Option<Vec<u8>> {
+///
+/// A value rather than the line itself, so the hook can read the facts it
+/// normalised — the event, session and directory a checkpoint needs — without
+/// a second parse of every harness's spelling; [`line_of`] frames it.
+fn envelope_value(name: &str, payload: &[u8], pids: &[u32]) -> Option<serde_json::Value> {
     let body: serde_json::Value = serde_json::from_slice(payload).ok()?;
     let field = |key: &str| body.get(key).and_then(|v| v.as_str()).unwrap_or_default();
     // The first of these keys the payload actually carries.
@@ -893,9 +935,20 @@ pub(super) fn envelope(name: &str, payload: &[u8], pids: &[u32]) -> Option<Vec<u
         // next turn by itself: see [`waiting_on`].
         "waiting_on": waiting_on(&body),
     });
-    let mut line = serde_json::to_vec(&event).ok()?;
+    Some(event)
+}
+
+/// An envelope as the one line the wire carries.
+fn line_of(event: &serde_json::Value) -> Option<Vec<u8>> {
+    let mut line = serde_json::to_vec(event).ok()?;
     line.push(b'\n');
     Some(line)
+}
+
+/// [`envelope_value`] framed, as the tests deliver and read it.
+#[cfg(test)]
+pub(super) fn envelope(name: &str, payload: &[u8], pids: &[u32]) -> Option<Vec<u8>> {
+    line_of(&envelope_value(name, payload, pids)?)
 }
 
 /// How many of a Stop's `background_tasks` Claude Code will wake the session

@@ -166,6 +166,10 @@ pub(crate) fn draw_help(frame: &mut Frame, area: Rect, app: &mut App) {
             "{diffs}",
             "Toggle inline diffs for edits; in Changes, the file's",
         ),
+        item(
+            "{checkpoints}",
+            "In Changes: checkpoints to rewind to (v picks, y confirms)",
+        ),
         gap(),
         section("Tabs and splits"),
         item(

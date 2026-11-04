@@ -691,6 +691,30 @@ fn changes_panel() {
     snap("changes", &mut app);
 }
 
+/// The Changes panel's checkpoint list, the cursor on the second: how far
+/// each is from now, and the one from before the agent committed marked.
+#[test]
+fn checkpoints_panel() {
+    let mut app = fixture();
+    app.bottom_tab = tab("Changes");
+    app.changes.view = super::changes::View::Checkpoints;
+    app.changes.survey = Some(Ok(Some(super::changes::sample_survey())));
+    app.changes.point = 1;
+    snap("checkpoints", &mut app);
+}
+
+/// The confirmation before a rewind to a checkpoint from before a commit:
+/// the files, what is left alone, and the way back.
+#[test]
+fn rewind_confirm() {
+    let mut app = fixture();
+    app.bottom_tab = tab("Changes");
+    app.changes.view = super::changes::View::Confirm;
+    app.changes.survey = Some(Ok(Some(super::changes::sample_survey())));
+    app.changes.point = 2;
+    snap("rewind_confirm", &mut app);
+}
+
 /// A filter that is on narrows the table and brings `Esc` onto the footer.
 #[test]
 fn filter_active() {

@@ -28,6 +28,8 @@ pub mod changes;
 /// The conversation reader, which the dashboard's reader, the page, `--chat`
 /// and the handoff brief all draw from.
 pub mod chat;
+/// Snapshots of a session's working tree at each turn, and the rewind to one.
+pub mod checkpoint;
 pub mod clipboard;
 pub mod cloudflare;
 pub mod collide;

@@ -204,7 +204,7 @@ leave cctop for.
 
 ```
 Since 3f2a91c, HEAD when the session started
-3 files  +14 −3   [ ] pick a file, v opens its diff, p a pull request
+3 files  +14 −3   [ ] pick, v diff, p pull request, u checkpoints
 ▾ src/app.rs             +12 −3
     @@ -1,3 +1,4 @@
      fn main() {
@@ -303,3 +303,83 @@ It never force-pushes and never merges. A push that the remote turns down
 because its branch has moved on is reported with git's reason, and nothing more
 is tried. Nothing it runs can prompt: git and `gh` run with their prompts off,
 with no terminal, and under a deadline.
+
+### Checkpoints and rewind
+
+With checkpoints on, cctop snapshots a session's checkout at each turn, and `u`
+on this panel lists the snapshots so one bad turn can be rolled back:
+
+```
+Checkpoints, newest first   [ ] pick one, v rewinds to it, u back to the diff
+  #3   7m ago  turn ended        same as now
+▸ #2  22m ago  prompt submitted  2 files differ
+  #1   2h ago  prompt submitted  3 files differ  HEAD moved since
+```
+
+`[` and `]` pick one, and `v` or `Enter` shows what a rewind to it would change,
+file by file, before anything does:
+
+```
+Rewind to checkpoint #1, 2h ago (prompt submitted)?   y rewinds, Esc goes back
+3 files change:
+  ~ src/app.rs    back to how it was
+  − notes.md      removed: not in the checkpoint
+  + src/legacy.rs restored
+HEAD has moved since #1 (commits were made). Only files are restored; HEAD,
+branches and commits stay as they are.
+Ignored files are left alone, and the index is set to match the checkpoint.
+How it is now is saved first as a checkpoint of its own, so this can be undone.
+```
+
+`y` rewinds, `Esc` backs out a step. The status line names the checkpoint that
+holds what was there before, which is the way back.
+
+Claude Code has `/rewind` of its own, and for a Claude session it knows more —
+the conversation goes back with the files. This is for every harness cctop
+watches: Codex, Gemini CLI, Cursor and OpenCode as much as Claude, and it works
+from the repository's side, so a file an agent changed through a shell command
+is covered too. The two do not interfere: cctop's snapshots never touch the
+files `/rewind` restores.
+
+It is off by default, because it writes into your repositories. Turn it on on
+the settings tab (`,`) or in `config.toml`:
+
+```toml
+[settings]
+checkpoints = true
+```
+
+**When.** At the turn boundaries the [hooks](integrations.md) report: a prompt
+submitted (Claude Code's and Codex's `UserPromptSubmit`, Gemini's
+`BeforeAgent`, Cursor's `beforeSubmitPrompt`) and a turn ended (`Stop`,
+`AfterAgent`, `stop`, OpenCode's `session.idle`, Codex's `notify`). A snapshot
+that would be the same as the session's newest one is not taken. The hook
+itself never runs git: it starts `cctop checkpoint take` detached, at low
+priority, and returns at once, so a large checkout costs the agent nothing.
+
+**What it writes into a repository.** One ref per checkpoint,
+`refs/cctop/checkpoints/<session id>/<n>`, naming a commit by `cctop
+<cctop@localhost>` whose parent is `HEAD` at the time and whose tree is the
+working tree — everything `git add -A` would add, so ignored files are left out.
+It is made with a temporary index: your index, working tree, `HEAD`, branches
+and stash are never touched, and no git hook or fsmonitor runs. The refs are
+outside `refs/heads` and `refs/tags`, so branch lists and pushes never show
+them (`git log --all` does). The newest 50 per session are kept and anything
+older than 7 days is dropped, each time one is taken; the objects are left to
+`git gc`. To remove them all: `git for-each-ref --format='delete %(refname)'
+refs/cctop/ | git update-ref --stdin`.
+
+**What a rewind does.** It first takes a checkpoint of how things are now — so
+a rewind can itself be rewound — then puts the working tree and the index back
+to the checkpoint's tree, and removes files that are untracked now and were not
+in the checkpoint. It never moves `HEAD` and never undoes a commit: if the agent
+committed since, the confirmation says so, and only the files go back. Ignored
+files are never touched. A row from another machine or another user's session
+has no checkpoints here.
+
+The same from a shell, for a session id and a directory in its checkout:
+
+```bash
+cctop checkpoint list <session> [dir]
+cctop checkpoint rewind <session> <n> [dir]
+```

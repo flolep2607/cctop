@@ -176,6 +176,16 @@ fn main() -> anyhow::Result<()> {
         }
     }
 
+    // `cctop checkpoint` alongside `doctor`, and for the same reason. Its
+    // `take` is what `cctop hook` spawns, detached, at each turn boundary —
+    // see `cctop_core::checkpoint` — so it needs nothing set up either.
+    {
+        let argv: Vec<String> = std::env::args().collect();
+        if argv.get(1).map(String::as_str) == Some("checkpoint") {
+            std::process::exit(cctop_core::checkpoint::run_cli(&argv[2..]));
+        }
+    }
+
     // `cctop why` alongside `doctor`, and for the same reason: a bare word, and
     // cctop has no positionals for clap to read one as.
     {
