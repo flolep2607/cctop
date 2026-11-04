@@ -1346,9 +1346,12 @@ impl App {
                     // Nothing typed is nothing sent, to one row or to many.
                 } else if self.send_to_marked {
                     self.send_marked(text);
-                } else if let Some(pid) = self.selected_session().and_then(|s| s.root_pid()) {
+                } else if let Some(s) = self.selected_session()
+                    && let Some(pid) = s.root_pid()
+                {
                     let _ = self.tx.send(Request::SendKeys {
                         pid,
+                        owner: s.owner.clone(),
                         text,
                         tag: None,
                     });
@@ -1720,6 +1723,9 @@ impl App {
                 if let Some(why) = App::remote_refusal(s) {
                     self.set_status(why);
                 }
+            }
+            Some(cctop_core::inject::Untypeable::Owner(owner)) => {
+                self.set_status(cctop_core::inject::not_theirs(&owner));
             }
             Some(_) => self.set_status("Selected session has no local process to type into"),
         }

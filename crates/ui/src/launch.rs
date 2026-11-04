@@ -1363,6 +1363,11 @@ impl App {
         let Some(session) = self.selected_session() else {
             return;
         };
+        // An attached pane is a keyboard on the agent, and root's would reach
+        // another user's through their `cctop run` socket as readily as its own.
+        if let Some(owner) = &session.owner {
+            return self.set_status(cctop_core::inject::not_theirs(owner));
+        }
         let label = format!("{} · {}", session.abbrev_label, session.model);
         let title = session.display_label().to_string();
         // How a resume names this same session. Recorded on the pane below so

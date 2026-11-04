@@ -309,8 +309,10 @@ pub fn build(session: &Session, data: &SessionData, plan: Plan) -> Report {
         running: session.is_running(),
         // The same reach `actions::terminal` checks on click: a remote row's
         // pid belongs to another machine, and an agent not in the multiplexer
-        // is on no terminal a second viewer can be pointed at.
+        // is on no terminal a second viewer can be pointed at. Another user's
+        // agent is refused there, so it is offered nowhere.
         terminal: session.remote.is_none()
+            && session.owner.is_none()
             && session.root_pid().and_then(crate::rmux::holding).is_some(),
         state: match session.activity_state {
             crate::session::ActivityState::Working => "working",

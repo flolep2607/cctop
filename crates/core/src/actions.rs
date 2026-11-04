@@ -11,6 +11,9 @@
 //!   directory on *that* machine. Typing at that pid here reaches whatever local
 //!   process happens to hold the number, which is the one failure mode worth
 //!   more care than the feature is worth. Run `cctop serve` on that machine.
+//! - **It refuses another user's row** wherever it would reach the agent's
+//!   keyboard. A `cctop serve` run as root lists every user's sessions; it
+//!   types into none of them — see [`crate::inject::not_theirs`].
 //! - **It bounds what it will send.** A prompt is [`MAX_PROMPT_CHARS`] and no
 //!   control characters, because the receiving end is a terminal in raw mode and
 //!   an escape sequence typed into one is not a prompt — it is a keystroke the
@@ -129,7 +132,7 @@ fn done(message: impl Into<String>) -> Result<Done, Failed> {
 /// surface whose whole job is to be trusted with a prompt is worse than a
 /// refusal that says why.
 pub fn send(session: &Session, text: &str) -> Result<Done, Failed> {
-    local(session)?;
+    yours(session)?;
     let text = text.trim();
     if text.is_empty() {
         return Err((400, "nothing to send".into()));
@@ -180,7 +183,7 @@ pub fn send(session: &Session, text: &str) -> Result<Done, Failed> {
 /// which is "Yes" in both and the only one that never widens what is allowed.
 pub fn answer(session: &Session, choice: &str) -> Result<Done, Failed> {
     use crate::inject::Key;
-    local(session)?;
+    yours(session)?;
     let allow = match choice {
         "allow" => true,
         "deny" => false,
@@ -249,7 +252,7 @@ pub fn answer(session: &Session, choice: &str) -> Result<Done, Failed> {
 /// [`crate::yolo_log`].
 pub fn yolo(session: &Session, on: bool, from: crate::yolo_log::Origin) -> Result<Done, Failed> {
     if on {
-        local(session)?;
+        yours(session)?;
         if !matches!(
             session.provider,
             crate::pricing::Provider::Claude | crate::pricing::Provider::Codex
@@ -919,6 +922,18 @@ fn local(session: &Session) -> Result<(), Failed> {
     }
 }
 
+/// [`local`], and not another user's: every action that reaches an agent's
+/// keyboard — a line, a key, YOLO's standing answer, a terminal link — asks
+/// this. Root is shown every user's sessions, and its keys would reach theirs
+/// as their own; see [`crate::inject::not_theirs`].
+fn yours(session: &Session) -> Result<(), Failed> {
+    local(session)?;
+    match &session.owner {
+        Some(owner) => Err((403, crate::inject::not_theirs(owner))),
+        None => Ok(()),
+    }
+}
+
 /// The frontend a page asked its terminal to open in: its own origin's copy of
 /// rmux's app at `/term/`. Only a bare `http(s)://host[:port]` is taken — a
 /// path, a query or another scheme is a request this page never sends — and
@@ -958,7 +973,7 @@ pub fn terminal(
     frontend: Option<&str>,
     fresh: bool,
 ) -> Result<Terminal, Failed> {
-    local(session)?;
+    yours(session)?;
     let Some(pid) = session.root_pid() else {
         return Err((
             409,
@@ -1217,6 +1232,40 @@ mod tests {
             assert_eq!(status, 409);
             assert!(message.contains("build-box"), "{message}");
         }
+    }
+
+    /// Root is shown another user's sessions and never reaches their agent's
+    /// keyboard: not a line, not a key, not YOLO's standing answer, not a
+    /// terminal. Refused even though this test's process is running and is
+    /// the tester's own, so only the owner can be the reason.
+    #[test]
+    fn every_way_into_an_agent_refuses_another_users() {
+        let _base = crate::config::claim_test_runtime_base("actions-theirs");
+        let mut theirs = session();
+        theirs.owner = Some("ana".into());
+        theirs.activity_state = crate::session::ActivityState::Asking;
+        theirs.process = Some(crate::proc::ProcInfo {
+            process_list: vec![crate::proc::ProcEntry {
+                pid: std::process::id(),
+                is_root: true,
+                ghost: false,
+                cpu: 0.0,
+                memory: 0,
+                args: String::new(),
+            }],
+            ..Default::default()
+        });
+        for (status, message) in [
+            send(&theirs, "hello").unwrap_err(),
+            answer(&theirs, "allow").unwrap_err(),
+            yolo(&theirs, true, crate::yolo_log::Origin::Web).unwrap_err(),
+            terminal(&theirs, None, false).unwrap_err(),
+        ] {
+            assert_eq!(status, 403);
+            assert_eq!(message, crate::inject::not_theirs("ana"));
+        }
+        // Off is still the way out, whoever's it is.
+        assert!(yolo(&theirs, false, crate::yolo_log::Origin::Web).is_ok());
     }
 
     /// The agent name reaches `Command::new`, so it is checked against what
