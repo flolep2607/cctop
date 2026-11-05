@@ -1146,6 +1146,7 @@ mod tests {
             cctop_core::settings::SETTINGS.len()
                 + VIEWS.len()
                 + app.tunnel_rows().len() // the Cloudflare account's rows
+                + app.schedules.len() + 1 // the schedules, and the line that adds one
                 + cctop_core::settings::BINDINGS.len(),
             "a source is missing rows"
         );

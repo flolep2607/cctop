@@ -1076,6 +1076,11 @@ impl App {
             (false, KeyCode::Enter | KeyCode::Char(' ')) => self.settings_activate(),
             (false, KeyCode::Backspace | KeyCode::Delete) => self.settings_reset(),
             (false, KeyCode::Char('e')) => self.edit_settings(),
+            (false, KeyCode::Char('n')) => {
+                if let Some(super::settings::Item::Schedule(i)) = self.settings_item() {
+                    self.schedule_run_now(i);
+                }
+            }
             (false, KeyCode::Char('q')) => self.request_quit(),
             // `,` toggles, as it always has: pressed again it is the way back
             // to where you came from, which is the table more often than not.

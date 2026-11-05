@@ -181,6 +181,13 @@ pub(crate) fn spawn_refresher(
         // contract, so they are only looked for when the file says so.
         let mut peek = cctop_core::peek::Peek::new();
         let read_screen = cctop_core::settings::Settings::load().read_screen == Some(true);
+        // A serve-only machine has no dashboard to notice a new [[schedule]],
+        // so it installs them as it starts; logged, since it has no status line.
+        std::thread::spawn(|| {
+            if let Some(said) = cctop_core::schedule::sync_if_changed() {
+                cctop_core::elog::event("schedule", "sync", serde_json::json!({ "said": said }));
+            }
+        });
         loader.set_hook_claims(reports.claims.clone());
         // The YOLO switch, read on every pass. Only a serve that may act
         // competes to answer for it — see [`cctop_core::yolo`] for why only one

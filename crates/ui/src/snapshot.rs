@@ -633,6 +633,44 @@ fn settings_page() {
 /// without anybody noticing. Filtered to the bindings, because on an unfiltered
 /// page the `[keys]` section is below the fold and a style snapshot of rows
 /// nobody can see proves nothing.
+/// The schedules, filtered to: one on with its next run, one switched off, and
+/// the line that adds another — the cursor on the first.
+#[test]
+fn settings_schedules() {
+    use super::schedules::ScheduleRow;
+    use super::settings::Item;
+    use cctop_core::schedule::Schedule;
+    let mut app = fixture();
+    app.settings_open = true;
+    let schedule = |name: &str, when: &str, harness: &str, enabled: bool| Schedule {
+        name: name.into(),
+        when: when.into(),
+        dir: "~/src/app".into(),
+        harness: harness.into(),
+        account: None,
+        model: None,
+        prompt: "Bump outdated dependencies and run the tests".into(),
+        enabled,
+    };
+    app.schedules = vec![
+        ScheduleRow {
+            schedule: schedule("deps", "Mon..Fri 08:00", "claude", true),
+            next: Some("Fri 2026-11-06 08:00:00 NZDT".into()),
+        },
+        ScheduleRow {
+            schedule: schedule("triage", "daily", "codex", false),
+            next: None,
+        },
+    ];
+    app.settings_filter = "schedule".into();
+    app.settings_cursor = app
+        .settings_shown()
+        .iter()
+        .position(|i| *i == Item::Schedule(0))
+        .expect("the schedule's row");
+    snap("settings_schedules", &mut app);
+}
+
 #[test]
 fn settings_keys_styles() {
     let mut app = fixture();

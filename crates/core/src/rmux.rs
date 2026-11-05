@@ -1502,6 +1502,12 @@ pub fn ended() -> Vec<Ended> {
     out
 }
 
+/// Whether a session called `name` is there with its agent still running —
+/// not merely kept to show how it ended.
+pub fn live(name: &str) -> bool {
+    exists(name) && !ended_one(name)
+}
+
 /// Whether the session called `name` is one whose agent has exited.
 fn ended_one(name: &str) -> bool {
     let listing = crate::mux::list_panes(name, "#{session_name}\t#{pane_dead}");

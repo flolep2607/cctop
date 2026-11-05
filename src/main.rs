@@ -186,6 +186,16 @@ fn main() -> anyhow::Result<()> {
         }
     }
 
+    // `cctop schedule` alongside `checkpoint`: what a systemd timer runs
+    // (`schedule run NAME`), with nothing set up first and no flags of
+    // cctop's to read — see `cctop_core::schedule`.
+    {
+        let argv: Vec<String> = std::env::args().collect();
+        if argv.get(1).map(String::as_str) == Some("schedule") {
+            std::process::exit(cctop_core::schedule::run_cli(&argv[2..]));
+        }
+    }
+
     // `cctop why` alongside `doctor`, and for the same reason: a bare word, and
     // cctop has no positionals for clap to read one as.
     {
