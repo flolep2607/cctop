@@ -285,7 +285,7 @@ All of it, searchable, at **[flolep2607.github.io/cctop](https://flolep2607.gith
 - [Reading the table](docs/the-table.md): every column, the status dot,
   filtering, settings and the full key list
 - [Driving agents](docs/driving-agents.md): typing into sessions, resuming,
-  tabs and splits, notifications
+  tabs and splits, notifications, agents that start on a schedule
 - [In a browser](docs/serve.md): `cctop serve`, tunnels, phones, several
   machines
 - [The bottom panels](docs/panels.md): Tool Activity, the context breakdown, and Changes — the diff of what an agent did to its repository

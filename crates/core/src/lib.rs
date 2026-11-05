@@ -82,6 +82,7 @@ pub mod remote_open;
 pub mod report;
 pub mod rmux;
 pub mod sandbox;
+pub mod schedule;
 pub mod screen;
 pub mod secrets;
 pub mod session;

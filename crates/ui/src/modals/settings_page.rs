@@ -642,6 +642,42 @@ fn settings_lines(
         value_w.set(VALUE_W);
     }
 
+    if wanted(|r| matches!(r, Item::Schedule(_) | Item::ScheduleAdd)) {
+        lines.push(Line::default());
+        lines.push(section("config.toml · [[schedule]]"));
+        for (at, entry) in rows.iter().enumerate() {
+            match entry {
+                Item::Schedule(i) => {
+                    let s = &app.schedules[*i].schedule;
+                    row(
+                        &mut lines,
+                        at,
+                        &s.name,
+                        ValueKind::Bool(s.enabled),
+                        String::new(),
+                        // On is the default, so off is the value that was set.
+                        !s.enabled,
+                        &app.schedule_what(*i),
+                        theme::dim(),
+                        Kind::Plain,
+                    );
+                }
+                Item::ScheduleAdd => row(
+                    &mut lines,
+                    at,
+                    "add",
+                    ValueKind::Text,
+                    "↵ edit file".to_string(),
+                    false,
+                    "an agent that starts on its own: [[schedule]] in config.toml",
+                    theme::dim(),
+                    Kind::Plain,
+                ),
+                _ => {}
+            }
+        }
+    }
+
     if wanted(|r| matches!(r, Item::Key(_))) {
         lines.push(Line::default());
         lines.push(section("config.toml · [keys], on the session table"));
@@ -681,11 +717,16 @@ fn settings_lines(
     }
 
     lines.push(Line::default());
+    // A schedule has one more thing to do than a setting, and says so only
+    // where it applies rather than on every row it does not.
+    let keys = match app.settings_item() {
+        Some(Item::Schedule(_)) => {
+            "  ↵ on/off   n run now   e open the file in an editor   Esc back to the table"
+        }
+        _ => "  ↵ change   ⌫ reset   e open the file in an editor   Esc back to the table",
+    };
     lines.push(Line::from(Span::styled(
-        util::truncate(
-            "  ↵ change   ⌫ reset   e open the file in an editor   Esc back to the table",
-            width,
-        ),
+        util::truncate(keys, width),
         theme::dim(),
     )));
     (lines, cursor_line, item_lines)

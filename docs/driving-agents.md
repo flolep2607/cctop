@@ -526,6 +526,69 @@ deliberately not answered; the shim relays bytes rather than parsing them, so
 it does not know where the cursor is, and a made-up position would put an
 agent's first frame in the wrong place.
 
+## Agents that start on their own
+
+A schedule starts an agent at a time you set, in a directory you name, with a
+prompt you wrote — a dependency bump every weekday morning, new issues triaged
+at night — and it starts whether or not any cctop is open. Write it in cctop's
+`config.toml` (`,` then `e` opens it):
+
+```toml
+[[schedule]]
+name = "deps"                  # letters, digits, - and _
+when = "Mon..Fri 08:00"        # a systemd calendar time
+dir = "~/src/app"
+harness = "claude"             # claude, codex, devin or opencode
+prompt = "Bump outdated dependencies, run the tests, and stop before committing"
+# account = "work"             # one of this machine's accounts for that harness
+# model = "sonnet"             # claude, codex and opencode take one
+# enabled = false              # keep it written down, but off
+```
+
+`when` is anything `systemd-analyze calendar` reads: `daily`, `Mon..Fri
+08:00`, `Sat 10:00`, `*-*-* 02:30`, `hourly`. A time it cannot read is reported
+and that schedule is not installed; the others are.
+
+**How it runs.** Each schedule becomes a systemd user timer,
+`cctop-schedule-<name>.timer`, which runs `cctop schedule run <name>`. That
+starts the agent as a tab in cctop's rmux named after the schedule, so it is in
+every cctop's tab bar on the machine, and the first cctop you open finds it
+already at work. A machine that was off at the time runs it once when it next
+comes up. If the previous run is still going, the new one is skipped rather
+than started beside it: two agents of one schedule in one directory would be
+editing the same files. A browser subscribed to `cctop serve`'s notifications
+gets a push when one starts.
+
+**What it may do.** Exactly what an agent you started from a shell may do,
+and no more. There is deliberately no permission setting: no
+`--dangerously-skip-permissions`, no YOLO, no plan or auto mode. A scheduled
+agent that needs permission asks, and waits in its tab until you answer. The
+prompt is one argument that may not start with `-`, `/`, `!` or `#`, the same
+rules as [`spawn_agent`](integrations.md#letting-agents-drive-agents).
+
+**Installing them.** The dashboard installs, changes and removes the timers
+itself when it reads a `config.toml` whose schedules changed; `cctop serve`
+does the same when it starts. By hand:
+
+```bash
+cctop schedule list              # each schedule, its next and last run
+cctop schedule sync              # install the timers for what config.toml says now
+cctop schedule run deps --now    # run one now, even if it is switched off
+```
+
+The Settings tab (`,`) lists them under `[[schedule]]`: Enter switches one on
+or off, `n` runs it now.
+
+The unit files go in `~/.config/systemd/user/`, each starting with a comment
+saying cctop wrote it. cctop only ever changes or removes files that start with
+that line, so a unit of your own with a similar name is left alone.
+
+**Where it does not work.** It needs a user systemd. On WSL that means
+`systemd=true` under `[boot]` in `/etc/wsl.conf`, and the timers only fire
+while WSL is running. On a server, `loginctl enable-linger $USER` keeps your
+timers running while you are logged out. Without systemd, `cctop schedule sync`
+says so and installs nothing; there is no fallback to cron.
+
 ## Waiting for an agent to finish
 
 ```bash

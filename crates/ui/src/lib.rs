@@ -52,6 +52,7 @@ mod reader;
 mod remote;
 pub mod render;
 mod runloop;
+mod schedules;
 mod scrollbar;
 mod seen;
 mod select;
@@ -645,6 +646,8 @@ pub struct App {
     /// The file's mtime when it was last read, so an edit made in an editor is
     /// picked up at the next key without a restart.
     pub settings_stamp: u64,
+    /// The `[[schedule]]` entries of that file, with when each fires next.
+    pub schedules: Vec<schedules::ScheduleRow>,
     /// Whether the settings page is the body on screen.
     ///
     /// Its own field rather than an index, which is the correction this needed:
@@ -1218,6 +1221,7 @@ impl App {
             keymap: Default::default(),
             settings_file: None,
             settings_stamp: 0,
+            schedules: Vec::new(),
             settings_scroll: 0,
             settings_max_scroll: 0,
             settings_open: false,
@@ -2235,6 +2239,8 @@ mod tests {
                     Item::View(i) => super::settings::VIEWS[*i].0 == name,
                     Item::Key(i) => cctop_core::settings::BINDINGS[*i].0 == name,
                     Item::Tunnel(row) => row.name() == name,
+                    Item::Schedule(i) => app.schedules[*i].schedule.name == name,
+                    Item::ScheduleAdd => name == "add schedule",
                 }
             })
             .unwrap_or_else(|| panic!("no row called {name}"))

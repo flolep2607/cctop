@@ -40,6 +40,11 @@ pub enum Item {
     /// One row of `[tunnel]`, the Cloudflare account `t` and `W` use. Which
     /// rows there are depends on the account: see [`App::tunnel_rows`].
     Tunnel(super::connect::Row),
+    /// A `[[schedule]]` entry, by index into [`App::schedules`].
+    Schedule(usize),
+    /// The line under the schedules that says how to add one: they are
+    /// written in the file, and a page that showed none would not say so.
+    ScheduleAdd,
 }
 
 /// How a view choice is read and changed.
@@ -350,6 +355,13 @@ impl App {
         // `[tunnel]` is in the same file, and `cctop tunnel setup` in another
         // terminal is a change to it like any other.
         self.refresh_connected();
+        // So is `[[schedule]]`: a schedule written here is a timer installed,
+        // without a second command. Nothing is asked of systemd unless the
+        // schedules changed since the last sync, which is most reloads.
+        if let Some(said) = cctop_core::schedule::sync_if_changed() {
+            self.set_status(said);
+        }
+        self.refresh_schedules();
     }
 
     /// Re-read which day and month the Overview counts.
@@ -454,6 +466,8 @@ impl App {
             .map(Item::Setting)
             .chain((0..VIEWS.len()).map(Item::View))
             .chain(self.tunnel_rows().into_iter().map(Item::Tunnel))
+            .chain((0..self.schedules.len()).map(Item::Schedule))
+            .chain(std::iter::once(Item::ScheduleAdd))
             .chain((0..cctop_core::settings::BINDINGS.len()).map(Item::Key))
             .collect()
     }
@@ -490,6 +504,14 @@ impl App {
                             self.settings.key_for(action)
                         )
                     }
+                    Item::Schedule(i) => {
+                        format!(
+                            "schedule {} {}",
+                            self.schedules[*i].schedule.name,
+                            self.schedule_what(*i)
+                        )
+                    }
+                    Item::ScheduleAdd => "schedule add timer systemd".to_string(),
                     Item::Tunnel(row) => {
                         let shown = self.tunnel_view(*row);
                         format!(
@@ -567,6 +589,8 @@ impl App {
             Item::View(i) => self.view_activate(i),
             Item::Setting(i) => self.setting_activate(cctop_core::settings::SETTINGS[i].0),
             Item::Tunnel(row) => self.tunnel_activate(row),
+            Item::Schedule(i) => self.schedule_toggle(i),
+            Item::ScheduleAdd => self.edit_settings(),
         }
     }
 
@@ -684,6 +708,11 @@ impl App {
             Item::Key(i) => self.write_setting("keys", cctop_core::settings::BINDINGS[i].0, None),
             Item::View(i) => self.view_reset(i),
             Item::Tunnel(row) => self.tunnel_reset(row),
+            // Nothing to put back to a default: a schedule is its own entry,
+            // and taking it out is an edit to the file.
+            Item::Schedule(_) | Item::ScheduleAdd => {
+                self.set_status("A schedule is removed by deleting it from config.toml (e)")
+            }
         }
     }
 

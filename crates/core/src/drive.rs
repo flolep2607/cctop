@@ -288,19 +288,9 @@ pub fn plan(request: &Request, caller: &Caller, alive: usize) -> Result<Plan, St
             SPAWNABLE.join(", ")
         ));
     }
-    let prompt = check_prompt(&request.prompt)?;
+    check_prompt(&request.prompt)?;
     let dir = check_dir(&request.dir)?;
-    let profile = crate::actions::account_named(harness, request.account.as_deref())
-        .map_err(|(_, why)| why)?;
-    let argv = crate::handoff::opening_argv(&[harness.to_string()], prompt)
-        .ok_or_else(|| format!("cctop does not know how to give {harness} a prompt"))?;
-    let argv = match profile {
-        Some(profile) => crate::config::argv_under_profile(argv, profile),
-        None => argv,
-    };
-    if escalates(&argv) {
-        return Err("refusing a launch that would widen the agent's permissions".into());
-    }
+    let argv = launch_argv(harness, &request.prompt, request.account.as_deref(), None)?;
     Ok(Plan {
         harness: harness.to_string(),
         argv,
@@ -310,6 +300,41 @@ pub fn plan(request: &Request, caller: &Caller, alive: usize) -> Result<Plan, St
         ],
         dir,
     })
+}
+
+/// The command line that starts `harness` on `prompt`, under `account` and on
+/// `model` when given: every rule above about what a launch may carry, in the
+/// one place both doors use — `spawn_agent` and a
+/// [`schedule`](crate::schedule), which is the person's own launch run later
+/// and gets no more than an agent's.
+///
+/// The model is the only thing a schedule adds, and it goes through
+/// [`Options::flags`](crate::launch_opts::Options::flags), which refuses a
+/// model that is not one and a harness that takes none.
+pub fn launch_argv(
+    harness: &str,
+    prompt: &str,
+    account: Option<&str>,
+    model: Option<&str>,
+) -> Result<Vec<String>, String> {
+    let prompt = check_prompt(prompt)?;
+    let profile = crate::actions::account_named(harness, account).map_err(|(_, why)| why)?;
+    let options = crate::launch_opts::Options {
+        model: model.map(str::to_string),
+        ..Default::default()
+    };
+    let mut base = vec![harness.to_string()];
+    base.extend(options.flags(harness)?);
+    let argv = crate::handoff::opening_argv(&base, prompt)
+        .ok_or_else(|| format!("cctop does not know how to give {harness} a prompt"))?;
+    let argv = match profile {
+        Some(profile) => crate::config::argv_under_profile(argv, profile),
+        None => argv,
+    };
+    if escalates(&argv) {
+        return Err("refusing a launch that would widen the agent's permissions".into());
+    }
+    Ok(argv)
 }
 
 /// A spawned agent, as `spawn_agent` answers it: what to wait on.
