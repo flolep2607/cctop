@@ -6,22 +6,22 @@ expression: screen
 ╭ Overview ────────────────────────────────────────────────────────────────────╮
 │Live rate         $0.04                               ⡀  Models               │
 │Today             $8.97                               ⡀  Sessions  4 · 2 live │
-│This month        $0.00                               ⡀  Agent CPU   3.2%     │
-│All ti╭ Fix the checkout redirect loop ───────────────────────────────╮MB     │
-╰──────│ Resume in a tab                                             R │───────╯
-╭ Sessi│ Restart it in its tab         it is not running in a tab here │───────╮
-│   LAS│ Attach to it                                                a │ECT    │
-│●    n│ Type into it                                                s │the ch…┃
-│●     │ Allow every prompt (YOLO)                                     │       │
-╰──────│ Hand off to agent/account                                   O │───────╯
-╭ Info │ Push and open a pull request  its directory is gone from here │Context╮
-│Root /│ Read the conversation                                       i │       │
-│    PI│ Show its subagents                                          e │       │
-│   410│ Mark for a batch action                                 space │       │
-│   418│ ───────────────────────────────────────────────────────────── │       │
-│   429│ Terminate the agent                                    ctrl+k │       │
-│      │ Delete the transcript                     it is still running │       │
-╰──────╰ ↑↓ Enter · Esc ───────────────────────────────────────────────╯───────╯
+│This ╭ Fix the checkout redirect loop ──────────────────────────────────╮     │
+│All t│ Resume in a tab                                                R │     │
+╰─────│ Restart it in its tab            it is not running in a tab here │─────╯
+╭ Sess│ Attach to it                                                   a │─────╮
+│   LA│ Type into it                                                   s │T    │
+│●    │ Allow every prompt (YOLO)                                        │e ch…┃
+│●    │ Hand off to agent/account                                      O │     │
+╰─────│ Push and open a pull request     its directory is gone from here │─────╯
+╭ Info│ Move it to another machine    its transcript is not on this mac… │ntext╮
+│Root │ Read the conversation                                          i │     │
+│    P│ Show its subagents                                             e │     │
+│   41│ Mark for a batch action                                    space │     │
+│   41│ ──────────────────────────────────────────────────────────────── │     │
+│   42│ Terminate the agent                                       ctrl+k │     │
+│     │ Delete the transcript                        it is still running │     │
+╰─────╰ ↑↓ Enter · Esc ──────────────────────────────────────────────────╯─────╯
 ╭ Limits ─────────────────────────────────────────────────────────── + account ╮
 │Claude checking…                        Codex checking…                       │
 ╰──────────────────────────────────────────────────────────────────────────────╯

@@ -40,5 +40,5 @@ expression: screen
 │  footer_hide       ""               Footer items to hide, e.g. "sort,follow" or "share"                              │
 │  footer_note       ""               A note always shown on the footer, e.g. "on-call shift"                          │
 │  footer_command    ""               A command whose first line is shown on the footer, refreshed every 30s           │
-╰ 97   ↑↓ scroll   / filter   Esc back ────────────────────────────────────────────────────────────────────────────────╯
+╰ 98   ↑↓ scroll   / filter   Esc back ────────────────────────────────────────────────────────────────────────────────╯
 / Filter ↵ Change ⌫ Reset e Edit file , Back Alt+←→ Tabs F1 Help F10 Quit                                       ⧉ share

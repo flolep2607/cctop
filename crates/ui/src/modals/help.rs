@@ -122,6 +122,7 @@ pub(crate) fn draw_help(frame: &mut Frame, area: Rect, app: &mut App) {
             "{pull_request}",
             "Push its branch and open a pull request (gh)",
         ),
+        item("{move}", "Move it to another machine, files and all"),
         item(
             "  Enter / Space",
             "Fold or unfold the group under the cursor",

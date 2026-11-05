@@ -312,6 +312,11 @@ pub fn resume(session: &Session) -> Result<Done, Failed> {
             "no transcript claims this process — there is nothing to resume".into(),
         ));
     }
+    // Moved to another machine and running there: a resume here would be a
+    // second agent on one conversation, just further apart.
+    if let Some(moved) = crate::migrate::moved_to(session.provider, &session.session_id) {
+        return Err((409, crate::migrate::moved_refusal(&moved)));
+    }
     let Some(argv) = session.resume_argv() else {
         return Err((
             409,

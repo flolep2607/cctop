@@ -55,6 +55,8 @@ pub mod letterbox;
 /// A remote tab's link health, from its bridge to the dashboard.
 pub mod link_health;
 pub mod loader;
+/// Moving a session to another machine, files and all.
+pub mod migrate;
 pub mod mux;
 pub mod notes;
 pub mod notify;
@@ -80,6 +82,7 @@ pub mod remote_launch;
 pub mod remote_open;
 /// The per-session postmortem: `--report`, and `/api/report`.
 pub mod report;
+pub mod repos;
 pub mod rmux;
 pub mod sandbox;
 pub mod schedule;

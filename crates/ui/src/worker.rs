@@ -47,6 +47,22 @@ pub(super) enum Request {
         title: String,
         body: String,
     },
+    /// Ask `host` where the session would land, for `X`'s confirmation.
+    MoveCheck {
+        session: Box<Session>,
+        host: cctop_core::fleet::Host,
+    },
+    /// The person typed another directory: ask about that one.
+    MoveReplan {
+        plan: Box<cctop_core::migrate::send::Plan>,
+        dir: String,
+        host: cctop_core::fleet::Host,
+    },
+    /// Move it.
+    MoveRun {
+        plan: Box<cctop_core::migrate::send::Plan>,
+        host: cctop_core::fleet::Host,
+    },
     /// The session `id`'s checkpoints in its checkout, against how it is now.
     Checkpoints {
         key: String,
@@ -157,6 +173,8 @@ pub(super) enum Response {
     },
     /// A step of `p`, or how it ended.
     PullRequest(super::pull_request::Event),
+    /// A step of `X`, or how it ended.
+    Move(super::moving::Event),
     /// The Changes panel's checkpoint list.
     Checkpoints {
         key: String,
@@ -642,6 +660,34 @@ pub(super) fn spawn_worker(
                         send(super::pull_request::open(&plan, &title, &body, gh, &send));
                     });
                 }
+                // A thread each, as for a pull request: every step is a round
+                // trip to another machine, and a move can take minutes.
+                Request::MoveCheck { session, host } => {
+                    let tx = tx.clone();
+                    spawner.spawn(move || {
+                        let _ = tx.send(Response::Move(super::moving::check(&session, host)));
+                    });
+                }
+                Request::MoveReplan { plan, dir, host } => {
+                    let tx = tx.clone();
+                    spawner.spawn(move || {
+                        let _ = tx.send(Response::Move(super::moving::replan(*plan, &dir, host)));
+                    });
+                }
+                Request::MoveRun { plan, host } => {
+                    let tx = tx.clone();
+                    spawner.spawn(move || {
+                        let tx_steps = std::sync::Mutex::new(tx.clone());
+                        let send = |e| {
+                            let _ = tx_steps
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .send(Response::Move(e));
+                        };
+                        let event = super::moving::run(&plan, host, &send);
+                        let _ = tx.send(Response::Move(event));
+                    });
+                }
                 // A snapshot of the checkout to compare against, so a disk walk
                 // like the diff, and on the same pool.
                 Request::Checkpoints { key, dir, id } => {
@@ -918,7 +964,7 @@ pub(super) fn spawn_worker(
                     // this loop is what every refresh and every keystroke's work
                     // queues behind.
                     let home = cctop_core::config::HOME.clone();
-                    let found = loader.gently(move || super::dirs::repos_under(&home));
+                    let found = loader.gently(move || cctop_core::repos::repos_under(&home));
                     if tx.send(Response::Repos(found)).is_err() {
                         break;
                     }

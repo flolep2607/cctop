@@ -1144,6 +1144,18 @@ fn new_worktree() {
     snap("new_worktree", &mut app);
 }
 
+/// `X`'s last look: where it lands, the directory editable, and that the
+/// agent here stops.
+#[test]
+fn move_confirm() {
+    let mut app = fixture();
+    let plan = super::moving::sample();
+    app.moving.dir = plan.placement.dir.clone().into();
+    app.moving.plan = Some(Box::new(plan));
+    app.mode = Mode::MoveConfirm;
+    snap("move_confirm", &mut app);
+}
+
 /// `p`'s title box, over a checkout with work left uncommitted, which the box
 /// says again under the field.
 #[test]

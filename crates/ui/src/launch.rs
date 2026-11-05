@@ -392,6 +392,14 @@ impl App {
         if let Some(owner) = &session.owner {
             return self.set_status(cctop_core::inject::not_theirs(owner));
         }
+        // Moved to another machine and running there: a resume here would be
+        // a second agent on one conversation.
+        if let Some(moved) = cctop_core::migrate::moved_to(session.provider, &session.session_id) {
+            return self.set_status(format!(
+                "Not resumed: {}",
+                cctop_core::migrate::moved_refusal(&moved)
+            ));
+        }
         // Checked before `resume_argv` so the refusal names the real reason:
         // the row exists because a process does, and its `_pid_` id names no
         // conversation a harness could reopen.
