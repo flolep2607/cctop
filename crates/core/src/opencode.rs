@@ -159,12 +159,69 @@ fn tabs_off_from(env: &dyn Fn(&str) -> Option<String>) -> String {
     serde_json::to_string(&root).unwrap_or_else(|_| TABS_OFF.into())
 }
 
+/// The variable OpenCode reads inline config from, above its files.
+const CONFIG_ENV: &str = "OPENCODE_CONFIG_CONTENT";
+
+/// cctop's MCP server as inline config for an OpenCode cctop starts, merged
+/// into any inline config of the person's own; `None` for anything else.
+///
+/// OpenCode takes no server on its command line, but reads
+/// `OPENCODE_CONFIG_CONTENT` above every config file, and merges it with them,
+/// so the person's own servers are still there beside this one.
+pub fn mcp_env(argv: &[String], exe: &str) -> Option<(String, String)> {
+    mcp_env_from(argv, exe, &|key| std::env::var(key).ok())
+}
+
+/// [`mcp_env`] with the environment handed in, for the reason
+/// [`tabs_off_from`] has.
+fn mcp_env_from(
+    argv: &[String],
+    exe: &str,
+    env: &dyn Fn(&str) -> Option<String>,
+) -> Option<(String, String)> {
+    let harness = crate::config::without_launch_prefix(argv).first()?;
+    if !is_opencode(harness) {
+        return None;
+    }
+    let mut root = env(CONFIG_ENV)
+        .as_deref()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+        .filter(serde_json::Value::is_object)
+        .unwrap_or_else(|| serde_json::json!({}));
+    let object = root.as_object_mut()?;
+    let servers = object.entry("mcp").or_insert_with(|| serde_json::json!({}));
+    if !servers.is_object() {
+        *servers = serde_json::json!({});
+    }
+    servers.as_object_mut()?.insert(
+        "cctop".into(),
+        serde_json::json!({ "type": "local", "command": [exe, "--mcp"], "enabled": true }),
+    );
+    Some((CONFIG_ENV.to_string(), root.to_string()))
+}
+
 /// What [`tabs_off`] writes when there is nothing of the user's to merge with.
 const TABS_OFF: &str = r#"{"tabs":{"mode":"off"}}"#;
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// cctop's server is added beside the person's own inline servers, and
+    /// only for OpenCode.
+    #[test]
+    fn opencode_is_handed_cctops_server_beside_its_own() {
+        let argv = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let theirs = r#"{"mcp":{"mine":{"type":"local","command":["x"]}},"theme":"dark"}"#;
+        let (var, value) =
+            mcp_env_from(&argv(&["opencode"]), "/bin/cctop", &|_| Some(theirs.into())).unwrap();
+        assert_eq!(var, "OPENCODE_CONFIG_CONTENT");
+        let value: serde_json::Value = serde_json::from_str(&value).unwrap();
+        assert_eq!(value["theme"], "dark");
+        assert_eq!(value["mcp"]["mine"]["command"][0], "x");
+        assert_eq!(value["mcp"]["cctop"]["command"][1], "--mcp");
+        assert!(mcp_env_from(&argv(&["claude"]), "/bin/cctop", &|_| None).is_none());
+    }
 
     #[test]
     fn a_version_is_read_out_of_whatever_shape_it_is_printed_in() {
