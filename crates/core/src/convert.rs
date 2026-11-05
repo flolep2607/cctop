@@ -917,7 +917,7 @@ fn free_id_claude(home: &Path, wanted: &str) -> (String, bool) {
     (new_uuid(), false)
 }
 
-fn claude_id_taken(home: &Path, id: &str) -> bool {
+pub(crate) fn claude_id_taken(home: &Path, id: &str) -> bool {
     let projects = home.join("projects");
     config::list_dir(&projects)
         .iter()

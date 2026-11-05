@@ -691,6 +691,8 @@ pub fn draw(frame: &mut Frame, app: &mut App) -> Layout {
             modals::draw_pull_request_uncommitted(frame, area, app, &mut layout)
         }
         Mode::PullRequestTitle => modals::draw_pull_request_title(frame, area, app),
+        Mode::MovePick => modals::draw_move_pick(frame, area, app),
+        Mode::MoveConfirm => modals::draw_move_confirm(frame, area, app),
         Mode::RenameTab => modals::draw_rename_tab(frame, area, app, &mut layout),
         Mode::SwitchTab => modals::draw_switch_tab(frame, area, app, &mut layout),
         // The same modal: the directory field replaces one line of it, so the

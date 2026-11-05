@@ -553,6 +553,76 @@ pub(crate) fn draw_pull_request_title(frame: &mut Frame, area: Rect, app: &App) 
     modal(frame, area, "Pull request", lines, 64);
 }
 
+/// Which machine `X` moves the session to, when there is more than one.
+pub(crate) fn draw_move_pick(frame: &mut Frame, area: Rect, app: &App) {
+    let mut lines = vec![Line::from(Span::styled(
+        " Move it to which machine?",
+        theme::dim(),
+    ))];
+    lines.push(Line::default());
+    for (i, host) in app.moving.machines.iter().enumerate() {
+        let style = match i == app.moving.cursor {
+            true => theme::selected(),
+            false => theme::value(),
+        };
+        lines.push(Line::from(Span::styled(
+            format!(" {} ", util::truncate(&host.target, 50)),
+            style,
+        )));
+    }
+    lines.push(Line::default());
+    lines.push(Line::from(Span::styled(
+        " ↑↓ pick   Enter ask it   Esc cancel",
+        theme::dim(),
+    )));
+    modal(frame, area, "Move", lines, 56);
+}
+
+/// The last look before a session leaves: where it would land there, what
+/// travels, and that the agent here stops. The directory is editable; a
+/// changed one is asked about before anything moves.
+pub(crate) fn draw_move_confirm(frame: &mut Frame, area: Rect, app: &App) {
+    let Some(plan) = app.moving.plan.as_deref() else {
+        return;
+    };
+    let mut lines = vec![Line::from(vec![
+        Span::raw(" "),
+        Span::styled(util::truncate(&plan.title, 36), theme::value()),
+        Span::styled(format!(" → {}", plan.machine), theme::dim()),
+    ])];
+    lines.push(Line::from(Span::styled(
+        format!(" {}", util::truncate(&crate::moving::landing(plan), 60)),
+        theme::dim(),
+    )));
+    if let Some(branch) = &plan.repo.branch {
+        lines.push(Line::from(Span::styled(
+            format!(" on {branch}, with the uncommitted work as it is now"),
+            theme::dim(),
+        )));
+    }
+    if let Some(note) = &plan.placement.note {
+        lines.push(Line::from(Span::styled(
+            format!(" {}", util::truncate(note, 60)),
+            Style::default().fg(theme::colors().cost_mid),
+        )));
+    }
+    lines.push(Line::default());
+    lines.push(input_line(&app.moving.dir));
+    lines.push(Line::default());
+    lines.push(Line::from(Span::styled(
+        match plan.pid {
+            Some(_) => " Once it runs there, the agent here is stopped.",
+            None => " It is resumed there; nothing is running here.",
+        },
+        theme::dim(),
+    )));
+    lines.push(Line::from(Span::styled(
+        " Enter move it   Esc cancel",
+        theme::dim(),
+    )));
+    modal(frame, area, "Move to another machine", lines, 66);
+}
+
 /// Naming and painting a workspace tab, opened by right-clicking it in the bar.
 ///
 /// The old name is shown rather than pre-filled into the field: the reason to

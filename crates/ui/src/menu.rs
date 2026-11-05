@@ -33,6 +33,7 @@ pub enum Action {
     Yolo,
     Handoff,
     PullRequest,
+    Move,
     Read,
     Expand,
     Mark,
@@ -200,6 +201,13 @@ pub fn items(app: &App) -> Vec<Item> {
             label: "Push and open a pull request",
             key: "p",
             blocked: app.pull_request_refusal(session),
+            rule: false,
+        },
+        Item {
+            action: Action::Move,
+            label: "Move it to another machine",
+            key: "X",
+            blocked: app.move_refusal(session),
             rule: false,
         },
         Item {

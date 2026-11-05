@@ -39,6 +39,7 @@ mod machine;
 mod markdown;
 pub mod menu;
 mod modals;
+mod moving;
 pub mod note;
 mod outage;
 pub mod panels;
@@ -132,6 +133,11 @@ pub enum Mode {
     /// The pull request's title, prefilled and editable; Enter pushes and
     /// opens it.
     PullRequestTitle,
+    /// Which machine `X` moves the session to. See [`moving`].
+    MovePick,
+    /// Where the moved session would land, the directory editable; Enter
+    /// moves it.
+    MoveConfirm,
     /// Writing a note in an agent tab's sidebar (`Alt+e`).
     Note,
     /// Picking which agent a new tab or split should run.
@@ -737,6 +743,8 @@ pub struct App {
     /// A pull request on its way from `p`: the check's answer and the title
     /// being edited.
     pub pull_request: pull_request::Flow,
+    /// `X`'s move, from the machine list to the answer.
+    pub moving: moving::Flow,
     /// What the Subagents panel sorts by, and its direction — with the
     /// table's reading of each column: ascending for `Last` is newest-first
     /// (`columns::compare`).
@@ -1255,6 +1263,7 @@ impl App {
             sidebar_folded: prefs.sidebar_folded,
             notes: cctop_core::notes::Notes::load(),
             pull_request: pull_request::Flow::default(),
+            moving: moving::Flow::default(),
             subagent_sort: (
                 panels::SubagentSort::parse(&prefs.subagent_sort_col),
                 prefs.subagent_sort_asc,

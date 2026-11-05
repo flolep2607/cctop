@@ -14,22 +14,22 @@ expression: screen
 │●    now     1h    $18.42   ▓▓90%  12.5 opus-4-1       ─          ─        local                ─            Fix the …│
 │●     7m     2h     $2.87   ▓░29%   0.4 sonnet-4-5     ─          ─        local                ─            api      │
 │○     3h     1h     $0.19       ─     ─ haiku-4-5      ─          ─        local                ─            docs     │
-│○     2d    12h     $7.03       ─     ─ gpt-5-codex    ─          ─        local                ─            infra    │
-│                          ╭ Fix the checkout redirect loop ───────────────────────────────╮                           │
-│                          │ Resume in a tab                                             R │                           │
-│                          │ Restart it in its tab         it is not running in a tab here │                           │
-│                          │ Attach to it                                                a │                           │
-│                          │ Type into it                                                s │                           │
-│                          │ Allow every prompt (YOLO)                                     │                           │
-│                          │ Hand off to agent/account                                   O │                           │
-│                          │ Push and open a pull request  its directory is gone from here │                           │
-│                          │ Read the conversation                                       i │                           │
-╰──────────────────────────│ Show its subagents                                          e │───────────────────────────╯
-╭ Info  Performance  Proces│ Mark for a batch action                                 space │anges  ────────────────────╮
-│Root /usr/bin/claude --mod│ ───────────────────────────────────────────────────────────── │                           │
-│    PID    CPU%       MEM │ Terminate the agent                                    ctrl+k │                           │
-│   4101    9.8%    360.0M │ Delete the transcript                     it is still running │                           │
-│   4188    2.4%     44.0M ╰ ↑↓ Enter · Esc ───────────────────────────────────────────────╯                           │
+│○     2d    12h     $7.03╭ Fix the checkout redirect loop ──────────────────────────────────╮   ─            infra    │
+│                         │ Resume in a tab                                                R │                         │
+│                         │ Restart it in its tab            it is not running in a tab here │                         │
+│                         │ Attach to it                                                   a │                         │
+│                         │ Type into it                                                   s │                         │
+│                         │ Allow every prompt (YOLO)                                        │                         │
+│                         │ Hand off to agent/account                                      O │                         │
+│                         │ Push and open a pull request     its directory is gone from here │                         │
+│                         │ Move it to another machine    its transcript is not on this mac… │                         │
+│                         │ Read the conversation                                          i │                         │
+╰─────────────────────────│ Show its subagents                                             e │─────────────────────────╯
+╭ Info  Performance  Proce│ Mark for a batch action                                    space │ges  ────────────────────╮
+│Root /usr/bin/claude --mo│ ──────────────────────────────────────────────────────────────── │                         │
+│    PID    CPU%       MEM│ Terminate the agent                                       ctrl+k │                         │
+│   4101    9.8%    360.0M│ Delete the transcript                        it is still running │                         │
+│   4188    2.4%     44.0M╰ ↑↓ Enter · Esc ──────────────────────────────────────────────────╯                         │
 │   4290    0.3%      8.0M  bash -c npm test                                                                           │
 │                                                                                                                      │
 │                                                                                                                      │

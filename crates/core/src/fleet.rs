@@ -240,6 +240,56 @@ impl Host {
         }
         String::from_utf8(out.stdout).map_err(|_| "output was not UTF-8".to_string())
     }
+
+    /// [`Host::run`], with `feed` writing the far command's stdin.
+    ///
+    /// For what does not fit on a command line: ssh joins its arguments into
+    /// one line for the far shell, so a path with a space in it would arrive
+    /// as two words, and a moved session's files are no argument at all.
+    /// `feed` runs on a thread of its own while the answer is read, so a far
+    /// side that answers before it has read everything cannot deadlock it.
+    pub fn run_input(
+        &self,
+        args: &[&str],
+        feed: impl FnOnce(&mut std::process::ChildStdin) -> std::io::Result<()> + Send,
+    ) -> Result<String, String> {
+        use std::process::Stdio;
+        let argv = self.ssh_argv(args);
+        let mut child = Command::new(&argv[0])
+            .args(&argv[1..])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("could not run ssh: {e}"))?;
+        let mut stdin = child.stdin.take().ok_or("ssh has no stdin")?;
+        let (fed, out) = std::thread::scope(|scope| {
+            let writer = scope.spawn(move || {
+                let fed = feed(&mut stdin);
+                drop(stdin);
+                fed
+            });
+            let out = child.wait_with_output();
+            (writer.join(), out)
+        });
+        let out = out.map_err(|e| format!("ssh: {e}"))?;
+        if !out.status.success() {
+            let why = String::from_utf8_lossy(&out.stderr);
+            let why = why.lines().next_back().unwrap_or("").trim();
+            return Err(match why.is_empty() {
+                true => format!("{} exited {}", self.command, out.status),
+                false => why.to_string(),
+            });
+        }
+        // A broken pipe after a complete answer is the far side refusing
+        // early, which the answer itself says; anything else is the reason.
+        if let Ok(Err(e)) = fed
+            && e.kind() != std::io::ErrorKind::BrokenPipe
+        {
+            return Err(format!("sending: {e}"));
+        }
+        String::from_utf8(out.stdout).map_err(|_| "output was not UTF-8".to_string())
+    }
 }
 
 /// What the far side's `cctop --version` came back as.

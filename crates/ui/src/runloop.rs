@@ -729,6 +729,7 @@ fn event_loop(
                 Ok(Response::Changes { key, result }) => app.got_changes(key, result),
                 Ok(Response::Sidebar { key, answer }) => app.got_sidebar(key, answer),
                 Ok(Response::PullRequest(event)) => app.got_pull_request(event),
+                Ok(Response::Move(event)) => app.got_move(event),
                 Ok(Response::Checkpoints { key, result }) => app.got_checkpoints(key, result),
                 Ok(Response::Rewound { key, result }) => app.got_rewound(key, result),
                 Ok(Response::Quota(q)) => {

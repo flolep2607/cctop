@@ -196,6 +196,19 @@ fn main() -> anyhow::Result<()> {
         }
     }
 
+    // `cctop move` alongside `checkpoint`: what another machine's cctop runs
+    // over ssh to hand a session here — see `cctop_core::migrate`. Its
+    // parameters arrive on stdin, so there is nothing for clap to read.
+    {
+        let argv: Vec<String> = std::env::args().collect();
+        if argv.get(1).map(String::as_str) == Some("move") {
+            std::process::exit(cctop_core::migrate::receive::run_cli(
+                &argv[2..],
+                env!("CARGO_PKG_VERSION"),
+            ));
+        }
+    }
+
     // `cctop why` alongside `doctor`, and for the same reason: a bare word, and
     // cctop has no positionals for clap to read one as.
     {

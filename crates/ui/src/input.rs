@@ -231,6 +231,24 @@ impl App {
                         .key(key, super::pull_request::TITLE_MAX);
                 }
             },
+            Mode::MovePick => match key.code {
+                KeyCode::Up | KeyCode::Char('k') => {
+                    self.moving.cursor = self.moving.cursor.saturating_sub(1);
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    let last = self.moving.machines.len().saturating_sub(1);
+                    self.moving.cursor = (self.moving.cursor + 1).min(last);
+                }
+                KeyCode::Enter => self.move_pick(),
+                _ => self.move_cancel(),
+            },
+            Mode::MoveConfirm => match key.code {
+                KeyCode::Esc => self.move_cancel(),
+                KeyCode::Enter => self.move_confirm(),
+                _ => {
+                    self.moving.dir.key(key, super::moving::DIR_MAX);
+                }
+            },
             Mode::RenameTab => self.on_key_rename(key),
             Mode::Note => self.on_key_note(key),
             Mode::SwitchTab => self.on_key_switch(key),
@@ -419,6 +437,9 @@ impl App {
                     text,
                     super::pull_request::TITLE_MAX,
                 );
+            }
+            Mode::MoveConfirm => {
+                paste_into(&mut self.moving.dir, text, super::moving::DIR_MAX);
             }
             Mode::RenameAddress => self.paste_address(text),
             Mode::Note => {
@@ -646,6 +667,7 @@ impl App {
             | Mode::SendKeys
             | Mode::NewWorktree
             | Mode::PullRequestTitle
+            | Mode::MoveConfirm
             | Mode::RenameTab
             | Mode::RenameAddress
             | Mode::SwitchTab
@@ -1689,6 +1711,7 @@ impl App {
             Action::Yolo => self.toggle_yolo(),
             Action::Handoff => self.handoff_selected(),
             Action::PullRequest => self.pull_request_selected(),
+            Action::Move => self.move_selected(),
             Action::Read => self.open_conversation(),
             Action::Expand => self.toggle_expanded(),
             Action::Mark => self.toggle_mark(),
@@ -1824,6 +1847,9 @@ impl App {
             // `p` for pull request: the step after `F`, once the work in the
             // worktree is committed.
             KeyCode::Char('p') => self.pull_request_selected(),
+            // `X` for exit to another machine: `m` is the machine filter and
+            // every nearer letter is taken.
+            KeyCode::Char('X') => self.move_selected(),
             KeyCode::Char(' ') => self.toggle_mark(),
             KeyCode::Char('e') => self.toggle_expanded(),
             KeyCode::Char('E') => self.toggle_expanded_all(),
