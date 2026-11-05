@@ -57,6 +57,7 @@ mod seen;
 mod select;
 mod settings;
 mod share;
+mod sidebar;
 mod signals;
 #[cfg(test)]
 mod snapshot;
@@ -130,6 +131,8 @@ pub enum Mode {
     /// The pull request's title, prefilled and editable; Enter pushes and
     /// opens it.
     PullRequestTitle,
+    /// Writing a note in an agent tab's sidebar (`Alt+e`).
+    Note,
     /// Picking which agent a new tab or split should run.
     Launch,
     /// Everything that can be done to the selected row, in one list.
@@ -722,6 +725,12 @@ pub struct App {
     pub tool_owners: Vec<Option<String>>,
     /// The Changes panel: its answer, its cursor and the diff it has open.
     pub changes: changes::State,
+    /// The column down the right of an agent's tab; see [`sidebar`].
+    pub sidebar: sidebar::State,
+    /// Whether that column is folded to its strip of counts (`Alt+i`).
+    pub sidebar_folded: bool,
+    /// Your notes on sessions, shown in the sidebar.
+    pub notes: cctop_core::notes::Notes,
     /// A pull request on its way from `p`: the check's answer and the title
     /// being edited.
     pub pull_request: pull_request::Flow,
@@ -1238,6 +1247,9 @@ impl App {
             tool_expanded: None,
             tool_owners: Vec::new(),
             changes: changes::State::default(),
+            sidebar: sidebar::State::default(),
+            sidebar_folded: prefs.sidebar_folded,
+            notes: cctop_core::notes::Notes::load(),
             pull_request: pull_request::Flow::default(),
             subagent_sort: (
                 panels::SubagentSort::parse(&prefs.subagent_sort_col),
@@ -1362,6 +1374,7 @@ impl App {
         self.prefs.agent_live_filter = self.tool_live_only;
         self.prefs.tool_show_diff = self.tool_show_diff;
         self.prefs.tab_overview_hidden = !render::tab_overview();
+        self.prefs.sidebar_folded = self.sidebar_folded;
         // Sorted so the file does not churn on every save purely because a
         // HashSet iterated in a different order.
         let mut expanded: Vec<String> = self.expanded.iter().cloned().collect();

@@ -332,6 +332,16 @@ pub fn tool_detail(name: &str, input: &Value) -> (String, Option<String>) {
             let full = (full_differs(&short, p)).then(|| p.to_string());
             return (short, full);
         }
+        // Claude's task names its step in `subject`, which is what a plan
+        // reads back (see `crate::plan`); the description under it is what
+        // the clipboard keeps. OpenCode's `task` has only the description.
+        "TaskCreate" if !str_field(input, "subject").is_empty() => {
+            let d = str_field(input, "description");
+            return (
+                flatten(str_field(input, "subject"), 200),
+                (!d.is_empty()).then(|| d.to_string()),
+            );
+        }
         "TaskCreate" | "task" => {
             let d = str_field(input, "description");
             let short = flatten(d, 200);
@@ -415,42 +425,55 @@ pub fn tool_detail(name: &str, input: &Value) -> (String, Option<String>) {
                 flatten(raw, 200)
             }
         }
+        // Codex's plan and Claude's older checklist are the same thing under
+        // two spellings: a list of steps, each with a status.
         "update_plan" => {
             let Some(steps) = input.get("plan").and_then(Value::as_array) else {
                 return (String::new(), None);
             };
-            let done = steps
-                .iter()
-                .filter(|s| s.get("status").and_then(Value::as_str) == Some("completed"))
-                .count();
-            // The step actually being worked on is the informative one.
-            let current = steps
-                .iter()
-                .find(|s| s.get("status").and_then(Value::as_str) == Some("in_progress"))
-                .or_else(|| steps.first())
-                .and_then(|s| s.get("step"))
-                .and_then(Value::as_str)
-                .unwrap_or("");
-            let full = steps
-                .iter()
-                .filter_map(|s| {
-                    let step = s.get("step").and_then(Value::as_str)?;
-                    let status = s.get("status").and_then(Value::as_str).unwrap_or("");
-                    Some(format!("[{status}] {step}"))
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
-            let short = format!(
-                "{}/{} → {}",
-                done,
-                steps.len(),
-                crate::util::clip(current, 120)
-            );
-            return (short, (!full.is_empty()).then_some(full));
+            return checklist(steps, "step");
+        }
+        "TodoWrite" | "todo_write" => {
+            let Some(steps) = input.get("todos").and_then(Value::as_array) else {
+                return (String::new(), None);
+            };
+            return checklist(steps, "content");
         }
         _ => generic_detail(input),
     };
     (s, None)
+}
+
+/// A plan's steps as a progress summary — done of total, and the step being
+/// worked on, which is the informative one — with every step kept whole as
+/// `[status] text`, one per line, for whatever reads the plan back.
+fn checklist(steps: &[Value], text_key: &str) -> (String, Option<String>) {
+    fn status(step: &Value) -> &str {
+        step.get("status").and_then(Value::as_str).unwrap_or("")
+    }
+    let done = steps.iter().filter(|s| status(s) == "completed").count();
+    let current = steps
+        .iter()
+        .find(|s| status(s) == "in_progress")
+        .or_else(|| steps.first())
+        .and_then(|s| s.get(text_key))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let full = steps
+        .iter()
+        .filter_map(|s| {
+            let text = s.get(text_key).and_then(Value::as_str)?;
+            Some(format!("[{}] {text}", status(s)))
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let short = format!(
+        "{}/{} → {}",
+        done,
+        steps.len(),
+        crate::util::clip(current, 120)
+    );
+    (short, (!full.is_empty()).then_some(full))
 }
 
 /// Summarise the meaningful target of Codex's bundled web tool. Its payload
@@ -751,6 +774,23 @@ mod tests {
         let (short, full) = tool_detail("update_plan", &input);
         assert_eq!(short, "1/3 → Add p1/p25 tracking");
         assert!(full.unwrap().contains("[completed] Inspect metrics"));
+    }
+
+    /// Claude's checklist reads like Codex's plan, and a task is its subject.
+    #[test]
+    fn claude_plans_show_progress_too() {
+        let input = json!({"todos":[
+            {"content":"Read auth.rs","status":"completed","activeForm":"Reading"},
+            {"content":"Write tests","status":"in_progress","activeForm":"Writing"}
+        ]});
+        let (short, full) = tool_detail("TodoWrite", &input);
+        assert_eq!(short, "1/2 → Write tests");
+        assert_eq!(
+            full.unwrap(),
+            "[completed] Read auth.rs\n[in_progress] Write tests"
+        );
+        let input = json!({"activeForm":"Writing","subject":"Write tests","description":"…"});
+        assert_eq!(tool_detail("TaskCreate", &input).0, "Write tests");
     }
 
     #[test]
