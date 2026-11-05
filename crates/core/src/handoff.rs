@@ -269,7 +269,7 @@ type ToolDetails = std::collections::HashMap<String, Vec<ToolDetail>>;
 /// Edit counts come from the tool details, which name their target file; the
 /// line counts are the session's totals and cannot be split per file, so they
 /// are reported once on the section instead of invented per row.
-fn touched_files(details: &ToolDetails) -> Vec<FileTouch> {
+pub fn touched_files(details: &ToolDetails) -> Vec<FileTouch> {
     let mut counts: BTreeMap<String, FileTouch> = BTreeMap::new();
     for name in EDIT_TOOLS {
         let Some(list) = details.get(*name) else {

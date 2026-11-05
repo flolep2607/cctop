@@ -692,6 +692,9 @@ pub struct UiPrefs {
     pub tool_show_diff: bool,
     /// Whether a terminal tab gives the Overview's rows to its agent (`F4`).
     pub tab_overview_hidden: bool,
+    /// Whether an agent tab's sidebar is folded to its strip (`Alt+i`): how
+    /// someone likes their screen, so it holds across runs.
+    pub sidebar_folded: bool,
     /// Session keys whose subagents are shown as child rows.
     ///
     /// Unlike the table's sort, this is worth persisting: expanding a session is
@@ -788,6 +791,7 @@ impl Default for UiPrefs {
             agent_live_filter: false,
             tool_show_diff: false,
             tab_overview_hidden: false,
+            sidebar_folded: false,
             expanded: Vec::new(),
             subagent_sort_col: "last".into(),
             // Ascending for `last` is newest-first, so this default keeps the

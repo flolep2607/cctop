@@ -27,6 +27,14 @@ pub(super) enum Request {
         dir: std::path::PathBuf,
         started: Option<i64>,
     },
+    /// An agent tab's sidebar: the session's plan, and what it changed in
+    /// `dir` — or, where there is no checkout to read, in its transcript.
+    Sidebar {
+        key: String,
+        session: Box<Session>,
+        dir: Result<std::path::PathBuf, String>,
+        started: Option<i64>,
+    },
     /// Check a checkout's branch for `p`. `title` is the session's own, for
     /// the title box to start from.
     PullRequestCheck {
@@ -141,6 +149,11 @@ pub(super) enum Response {
     Changes {
         key: String,
         result: Result<Option<cctop_core::changes::Changes>, String>,
+    },
+    /// The sidebar's read, for the session `key` names.
+    Sidebar {
+        key: String,
+        answer: super::sidebar::Answer,
     },
     /// A step of `p`, or how it ended.
     PullRequest(super::pull_request::Event),
@@ -582,6 +595,23 @@ pub(super) fn spawn_worker(
                     loader.gently_spawn(move || {
                         let result = cctop_core::changes::read(&dir, started);
                         let _ = tx.send(Response::Changes { key, result });
+                    });
+                }
+                // The same pool for the same reason, and the extraction is the
+                // store's: one already read for a panel is not read again.
+                Request::Sidebar {
+                    key,
+                    session,
+                    dir,
+                    started,
+                } => {
+                    let store = loader.store_shared();
+                    let tx = tx.clone();
+                    loader.gently_spawn(move || {
+                        let data = store.session_data_fresh(&session);
+                        let answer =
+                            super::sidebar::read(&data, dir, started, &session.label_source);
+                        let _ = tx.send(Response::Sidebar { key, answer });
                     });
                 }
                 // A thread each, not the gentle pool: a push can take its whole

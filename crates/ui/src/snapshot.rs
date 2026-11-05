@@ -1181,6 +1181,53 @@ fn dead_pane() {
     snap("dead_pane", &mut app);
 }
 
+/// An agent's tab with its sidebar: the plan part done, the files it changed
+/// and a note — open beside the pane at the wide size, folded to its strip of
+/// counts at the narrow one, where the agent cannot spare the columns.
+#[test]
+fn agent_sidebar() {
+    use cctop_core::plan::{Status, Step};
+    let mut app = fixture();
+    let session = &app.sessions[0];
+    let key = session.key();
+    let mut pane = tabs::Pane::for_test("claude");
+    pane.resumed = Some(cctop_core::rmux::name_for_session(
+        session.provider.as_str(),
+        &session.session_id,
+    ));
+    pane.view
+        .parser
+        .process(b"> wire the refresh into the client\r\n\r\n  Writing tests...\r\n");
+    app.tabs.push(tabs::Tab::new(pane));
+    app.tab = 1;
+    app.sync_sidebar();
+    let step = |text: &str, status| Step {
+        text: text.into(),
+        status,
+    };
+    app.sidebar.plan = vec![
+        step("Read auth.rs", Status::Done),
+        step("Add token refresh", Status::Done),
+        step("Wire into the client", Status::Done),
+        step("Write tests", Status::Active),
+        step("Update the docs", Status::Pending),
+    ];
+    let file = |path: &str, added, removed| super::sidebar::File {
+        path: path.into(),
+        added: Some(added),
+        removed: Some(removed),
+    };
+    app.sidebar.files = Some(Ok(vec![
+        file("src/auth.rs", 96, 20),
+        file("src/client.rs", 41, 9),
+        file("tests/auth.rs", 45, 0),
+    ]));
+    app.notes
+        .set(&key, 0, "ask Sam about token expiry")
+        .unwrap();
+    snap("agent_sidebar", &mut app);
+}
+
 /// Tabs on other machines: a session opened on a sibling through its
 /// Cloudflare tunnel, and an agent launched on an ssh host, each marked before
 /// its label beside a local one.

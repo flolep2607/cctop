@@ -86,7 +86,7 @@ pub enum View {
 
 /// The checkout a session's changes are read from, or the sentence saying why
 /// there is none here.
-fn checkout_of(session: &Session) -> Result<PathBuf, String> {
+pub(super) fn checkout_of(session: &Session) -> Result<PathBuf, String> {
     // As `branch_of` reasons: a stopped sandbox's directory was the host's,
     // mounted for as long as the agent ran, and the same path here now is
     // something else.
@@ -782,11 +782,11 @@ fn truncate_line(line: Line<'static>, width: usize) -> Line<'static> {
     Line::from(spans).style(style)
 }
 
-fn plus() -> Style {
+pub(super) fn plus() -> Style {
     Style::default().fg(theme::colors().cost_low)
 }
 
-fn minus() -> Style {
+pub(super) fn minus() -> Style {
     Style::default().fg(theme::colors().cost_high)
 }
 
@@ -810,7 +810,7 @@ fn diff_line(line: &str, width: usize) -> Line<'static> {
 
 /// `path` cut from the left, keeping the file name: in a deep tree the
 /// directories are what repeat and the name is what differs.
-fn truncate_left(path: &str, width: usize) -> String {
+pub(super) fn truncate_left(path: &str, width: usize) -> String {
     let len = path.chars().count();
     if len <= width {
         return path.to_string();

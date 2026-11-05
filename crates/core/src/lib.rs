@@ -56,12 +56,14 @@ pub mod letterbox;
 pub mod link_health;
 pub mod loader;
 pub mod mux;
+pub mod notes;
 pub mod notify;
 pub mod opencode;
 pub mod paste;
 pub mod peek;
 /// The other cctops on this Cloudflare account, found and read with no host list.
 pub mod peer;
+pub mod plan;
 /// Predictive local echo for a remote tab.
 pub mod predict;
 pub mod pricing;

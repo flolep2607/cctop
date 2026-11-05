@@ -97,6 +97,9 @@ pub struct Layout {
     /// The clickable log area of Tool Activity, or of Changes:
     /// `(x_start, y_start, height)`.
     pub(super) tool_log: Option<(u16, u16, u16)>,
+    /// An agent tab's sidebar, while it is drawn: a click there folds or
+    /// opens it, and must not reach the pane beside it.
+    pub(super) sidebar: Option<Rect>,
     /// The session table's scrollbar track, while the table overflows.
     pub(super) table_track: Option<Rect>,
     /// The active bottom panel's scrollbar track, while it overflows.
@@ -387,7 +390,10 @@ fn pane_size_in(frame: Rect) -> (u16, u16) {
     // Less the workspace bar, as `draw` takes it — with the side bar at the
     // width it was last drawn, since the titles that decide it are the App's.
     let (_, _, body) = split_bar(frame, SIDE_WIDTH.get());
-    let inner = Block::bordered().inner(tab_chunks(body)[1]);
+    // Less the sidebar as last drawn, which is what an agent's tab will give it.
+    let mut panes = tab_chunks(body)[1];
+    panes.width = panes.width.saturating_sub(SIDEBAR_WIDTH.get());
+    let inner = Block::bordered().inner(panes);
     (inner.width.max(1), inner.height.max(1))
 }
 
@@ -429,6 +435,13 @@ const SIDE_WIDTH_MAX: u16 = 28;
 thread_local! {
     static TAB_BAR: std::cell::Cell<TabBar> = const { std::cell::Cell::new(TabBar::Top) };
     static SIDE_WIDTH: std::cell::Cell<u16> = const { std::cell::Cell::new(SIDE_WIDTH_MIN) };
+    static SIDEBAR_WIDTH: std::cell::Cell<u16> = const { std::cell::Cell::new(0) };
+}
+
+/// The width an agent tab's sidebar was last drawn at, so a new agent is
+/// started at the width it will have beside it — see [`pane_size`].
+pub(super) fn set_sidebar_width(width: u16) {
+    SIDEBAR_WIDTH.set(width);
 }
 
 pub fn set_tab_bar(at: TabBar) {
@@ -561,7 +574,12 @@ pub fn draw(frame: &mut Frame, app: &mut App) -> Layout {
         let chunks = tab_chunks(area);
         let footer = under_bar(at, chunks[2]);
         draw_overview(frame, chunks[0], app);
-        draw_panes(frame, chunks[1], app, &mut layout);
+        let (panes, side) = super::sidebar::split(app, chunks[1]);
+        draw_panes(frame, panes, app, &mut layout);
+        if let Some(side) = side {
+            super::sidebar::draw(frame, side, app);
+            layout.sidebar = Some(side);
+        }
         draw_footer(frame, footer, app, &mut layout);
         match app.mode {
             Mode::Launch | Mode::LaunchCwd | Mode::LaunchOptions => {
@@ -687,7 +705,8 @@ pub fn draw(frame: &mut Frame, app: &mut App) -> Layout {
         Mode::Wrapped => super::wrapped::draw(frame, area, app),
         Mode::Conversation => super::reader::draw(frame, area, app),
         Mode::AddAccount => modals::draw_add_account(frame, area, app, &mut layout),
-        Mode::List => {}
+        // Typed in the sidebar itself, which is only drawn in a tab.
+        Mode::Note | Mode::List => {}
     }
     // Over everything, modals included: a few seconds of confirmation for a
     // key that has already acted, in a corner nothing else owns.
@@ -2343,6 +2362,7 @@ mod tests {
             machine_spans: vec![(5, 20, 25, crate::machine::Machine::Local)],
             tool_sidebar: Some((18, 21, 0, 3)),
             tool_log: Some((19, 21, 4)),
+            sidebar: None,
             table_track: None,
             panel_track: None,
             modal_rect: Some(Rect::new(10, 8, 20, 6)),

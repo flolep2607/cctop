@@ -727,6 +727,7 @@ fn event_loop(
                     }
                 }
                 Ok(Response::Changes { key, result }) => app.got_changes(key, result),
+                Ok(Response::Sidebar { key, answer }) => app.got_sidebar(key, answer),
                 Ok(Response::PullRequest(event)) => app.got_pull_request(event),
                 Ok(Response::Checkpoints { key, result }) => app.got_checkpoints(key, result),
                 Ok(Response::Rewound { key, result }) => app.got_rewound(key, result),
@@ -907,6 +908,7 @@ fn event_loop(
 
         app.sync_panel_data();
         app.sync_changes();
+        app.sync_sidebar();
         app.tick_scan();
 
         // Every tab, not just the visible one: an agent whose output nobody

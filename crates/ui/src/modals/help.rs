@@ -194,6 +194,11 @@ pub(crate) fn draw_help(frame: &mut Frame, area: Rect, app: &mut App) {
         item("Right-click / Alt+r", "Rename or recolour a tab"),
         item("Alt+o", "Move focus to the next pane"),
         item("Alt+z", "Zoom the pane to fill the tab, or unzoom"),
+        item("Alt+i", "Fold the agent's sidebar (plan, files, notes)"),
+        item(
+            "Alt+e",
+            "Write a note on the agent's session; ↑↓ to edit one",
+        ),
         item("Alt+w", "Close the pane and stop its agent"),
         item("Alt+Shift+W", "The same, by a name that says so"),
         item(

@@ -558,12 +558,25 @@ Tabs and splits, from anywhere including inside a running agent:
 | `Alt+r` | Rename or recolour the tab you are on |
 | `Alt+o` | Move focus to the next pane |
 | `Alt+z` | Zoom the focused pane to fill the tab, or put the split back (see below) |
+| `Alt+i` | Fold the agent's sidebar to a strip of counts, or open it (see below) |
+| `Alt+e` | Write a note on the agent's session, in the sidebar; `↑`/`↓` pick one to change, emptied removes it |
 | `Alt+w` | Close the focused pane and stop its agent |
 | `Alt+Shift+W` | The same thing, by a name that says so |
 | `Alt+Shift+R` | Restart the pane's agent on the same session, after an update; on the dashboard, the selected row's tab |
 | `Alt+Shift+C` | Record the focused pane to an asciinema `.cast`; again to stop (see [Recording a pane](driving-agents.md#recording-a-pane)) |
 | `F9` | Paste the clipboard's image (see below) |
 | `F12` | Back to the dashboard, leaving everything running |
+
+An agent's tab has a sidebar down its right: the **plan** the agent is
+working to (Claude's tasks or checklist, Codex's plan) with each step ticked
+`✓`, current `▶` or ahead `·`; the **files** it has changed since the session
+started, with their `+`/`−` lines, read from the checkout as the Changes panel
+(`0`) reads it, or from the transcript's edits outside a repository; and your
+own **notes** on the session, kept in `~/.local/share/cctop/notes.json` across
+runs. `Alt+i` folds it to a strip of counts and back, and the choice is
+remembered. It is about the focused pane, is not drawn beside a shell or an
+agent on another machine, and folds itself on a terminal too narrow to spare
+the columns.
 
 `Alt+z` zooms the focused pane over the whole tab, and the bar marks the tab
 `⤢` while it is. The other panes keep running out of sight — their output is

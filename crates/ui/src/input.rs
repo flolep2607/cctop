@@ -232,6 +232,7 @@ impl App {
                 }
             },
             Mode::RenameTab => self.on_key_rename(key),
+            Mode::Note => self.on_key_note(key),
             Mode::SwitchTab => self.on_key_switch(key),
             Mode::AddAccount => self.on_key_add_account(key),
             Mode::Launch => self.on_key_launch(key),
@@ -420,6 +421,13 @@ impl App {
                 );
             }
             Mode::RenameAddress => self.paste_address(text),
+            Mode::Note => {
+                paste_into(
+                    &mut self.sidebar.note_input,
+                    text,
+                    cctop_core::notes::NOTE_MAX,
+                );
+            }
             Mode::RenameTab => {
                 // The clipboard a right-click brought along with it, not a
                 // paste anyone asked for. See `rename_opened_by_click`.
@@ -641,6 +649,7 @@ impl App {
             | Mode::RenameTab
             | Mode::RenameAddress
             | Mode::SwitchTab
+            | Mode::Note
             | Mode::LaunchCwd => true,
             Mode::LaunchOptions => self.launch_opt_edit.is_some(),
             Mode::AddAccount => {
@@ -701,6 +710,10 @@ impl App {
             // dashboard there is no terminal to record, so the key is not
             // taken there.
             KeyCode::Char('C') if self.tab > 0 => self.toggle_recording(),
+            // The sidebar beside an agent's pane: `i` for what is in it, `e`
+            // to write in it. Only in a tab, which is the only place it is.
+            KeyCode::Char('i') if self.tab > 0 => self.toggle_sidebar(),
+            KeyCode::Char('e') if self.tab > 0 => self.edit_note(),
             _ => return false,
         }
         true
@@ -2285,6 +2298,21 @@ impl App {
         // and switching tabs on a hover means the pointer resting anywhere near
         // the bar drags you out of the agent you are typing into.
         if self.on_mouse_workspace(ev, layout) {
+            return;
+        }
+
+        // The sidebar beside an agent's pane is cctop's, not the agent's: a
+        // click on its fold or its top line folds or opens it, and nothing in
+        // it reaches the pane.
+        if let Some(side) = layout
+            .sidebar
+            .filter(|r| r.contains(ratatui::layout::Position::new(ev.column, ev.row)))
+        {
+            if ev.kind == MouseEventKind::Down(MouseButton::Left)
+                && (self.sidebar_folded || ev.row == side.y)
+            {
+                self.toggle_sidebar();
+            }
             return;
         }
 
