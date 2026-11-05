@@ -18,7 +18,7 @@ use std::path::Path;
 
 /// Every `[settings]` key: its name, its default as the file would spell it,
 /// and what it does.
-pub const SETTINGS: [(&str, &str, &str); 26] = [
+pub const SETTINGS: [(&str, &str, &str); 27] = [
     (
         "theme",
         "\"auto\"",
@@ -106,6 +106,11 @@ pub const SETTINGS: [(&str, &str, &str); 26] = [
         "mcp_drive",
         "false",
         "Let agents start agents and type to them over MCP",
+    ),
+    (
+        "mcp_launch",
+        "true",
+        "Give every agent cctop starts cctop's MCP tools",
     ),
     (
         "idle_after",
@@ -358,6 +363,11 @@ pub struct Settings {
     /// another, or typing at one, is a decision the person makes once, here,
     /// and not one an agent can make for itself.
     pub mcp_drive: Option<bool>,
+    /// Whether an agent cctop starts is handed `cctop --mcp` as a server of
+    /// its own — see [`crate::rmux::launch_argv`]. On unless the file says
+    /// otherwise: without [`Self::mcp_drive`] every tool there only reads, and
+    /// an agent started from cctop is the one most likely to want them.
+    pub mcp_launch: Option<bool>,
     /// Hours without activity before a live session is idle — see
     /// [`Settings::idle_after_ms`].
     pub idle_after: Option<f64>,
@@ -437,6 +447,7 @@ impl Settings {
                     "warn_agents" => item.as_bool().map(|v| out.warn_agents = Some(v)).is_none(),
                     "checkpoints" => item.as_bool().map(|v| out.checkpoints = Some(v)).is_none(),
                     "mcp_drive" => item.as_bool().map(|v| out.mcp_drive = Some(v)).is_none(),
+                    "mcp_launch" => item.as_bool().map(|v| out.mcp_launch = Some(v)).is_none(),
                     "read_screen" => item.as_bool().map(|v| out.read_screen = Some(v)).is_none(),
                     "compact_threshold" => item
                         .as_float()
@@ -540,6 +551,7 @@ impl Settings {
             "warn_agents" => self.warn_agents.map(|v| v.to_string()),
             "checkpoints" => self.checkpoints.map(|v| v.to_string()),
             "mcp_drive" => self.mcp_drive.map(|v| v.to_string()),
+            "mcp_launch" => self.mcp_launch.map(|v| v.to_string()),
             "read_screen" => self.read_screen.map(|v| v.to_string()),
             "compact_threshold" => self.compact_threshold.map(|v| format!("{}", v * 100.0)),
             "hide_columns" => self.hide_columns.as_ref().map(|v| format!("{v:?}")),

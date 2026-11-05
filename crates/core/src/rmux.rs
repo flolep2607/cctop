@@ -813,37 +813,87 @@ fn record(name: &str, option: &str, value: &str) {
 
 /// What the agent is started with beyond its argv, as `VAR=value` pairs.
 fn launch_env(argv: &[String]) -> Vec<String> {
+    let mcp = mcp_launch()
+        .then(|| crate::opencode::mcp_env(argv, &crate::mux::own_exe().to_string_lossy()))
+        .flatten();
     crate::opencode::launch_env(argv)
         .into_iter()
+        .chain(mcp)
         .map(|(var, value)| format!("{var}={value}"))
         .collect()
 }
 
-/// Claude Code's fullscreen interface, asked for on every Claude cctop starts.
-///
-/// A tab is a screen of its own, and the fullscreen renderer is the one that
-/// owns a screen: it scrolls its transcript inside the pane, takes the mouse,
-/// and redraws in place, where the default one prints into scrollback that a
-/// pane does not keep and repaints the tail on every resize. `--settings`
-/// holds it for that session alone, above the user's own file and below
-/// managed policy, so an organisation that pins the interface still wins. An
-/// argv that already passes `--settings` is the person's own choice and left
-/// alone, since a second one would be a guess at how the two merge.
+/// What an agent cctop starts is given on its command line, beyond what it
+/// was asked to run: Claude's fullscreen interface, and cctop's own MCP
+/// server for the harnesses that take one there.
 pub fn launch_argv(argv: &[String]) -> Vec<String> {
+    let mcp = mcp_launch().then(|| crate::mux::own_exe().to_string_lossy().into_owned());
+    launch_argv_with(argv, mcp.as_deref())
+}
+
+/// Whether agents are handed cctop's MCP server — see
+/// [`Settings::mcp_launch`](crate::settings::Settings::mcp_launch).
+fn mcp_launch() -> bool {
+    !crate::under_test() && crate::settings::Settings::load().mcp_launch != Some(false)
+}
+
+/// [`launch_argv`], with the binary that serves MCP handed in, or `None`
+/// when it is not to be offered.
+///
+/// Claude is asked for its fullscreen interface. A tab is a screen of its
+/// own, and the fullscreen renderer is the one that owns a screen: it scrolls
+/// its transcript inside the pane, takes the mouse, and redraws in place,
+/// where the default one prints into scrollback that a pane does not keep
+/// and repaints the tail on every resize. `--settings` holds it for that
+/// session alone, above the user's own file and below managed policy, so an
+/// organisation that pins the interface still wins. An argv that already
+/// passes `--settings` is the person's own choice and left alone, since a
+/// second one would be a guess at how the two merge.
+///
+/// cctop's MCP server goes in for the session only, beside whatever servers
+/// the person has configured: Claude's `--mcp-config` adds to them rather than
+/// replacing them, and Codex's `-c` overrides one key of its config. Claude's
+/// flag takes any number of values, so it goes last, where there is nothing
+/// after it to swallow; a prompt written after it would have been read as a
+/// second config. Codex's `-c` is a global option and goes before any
+/// subcommand.
+pub fn launch_argv_with(argv: &[String], mcp: Option<&str>) -> Vec<String> {
     let harness = argv.len() - crate::config::without_launch_prefix(argv).len();
-    let claude = argv
-        .get(harness)
-        .is_some_and(|argv0| crate::proc::is_claude_argv0(argv0));
-    let settled = argv
-        .iter()
-        .any(|a| a == "--settings" || a.starts_with("--settings="));
+    let Some(argv0) = argv.get(harness) else {
+        return argv.to_vec();
+    };
     let mut out = argv.to_vec();
-    if claude && !settled {
+    if crate::proc::is_claude_argv0(argv0) {
+        let settled = argv
+            .iter()
+            .any(|a| a == "--settings" || a.starts_with("--settings="));
+        if !settled {
+            out.splice(
+                harness + 1..harness + 1,
+                [
+                    "--settings".to_string(),
+                    r#"{"tui":"fullscreen"}"#.to_string(),
+                ],
+            );
+        }
+        if let Some(exe) = mcp {
+            let config = serde_json::json!({
+                "mcpServers": { "cctop": { "command": exe, "args": ["--mcp"] } }
+            });
+            out.extend(["--mcp-config".to_string(), config.to_string()]);
+        }
+    } else if crate::proc::command_stem(argv0) == "codex"
+        && let Some(exe) = mcp
+    {
+        // A TOML value: a JSON string is a valid TOML basic string.
+        let command = serde_json::Value::from(exe).to_string();
         out.splice(
             harness + 1..harness + 1,
             [
-                "--settings".to_string(),
-                r#"{"tui":"fullscreen"}"#.to_string(),
+                "-c".to_string(),
+                format!("mcp_servers.cctop.command={command}"),
+                "-c".to_string(),
+                r#"mcp_servers.cctop.args=["--mcp"]"#.to_string(),
             ],
         );
     }
@@ -1734,11 +1784,11 @@ mod tests {
         let argv = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         let full = r#"{"tui":"fullscreen"}"#;
         assert_eq!(
-            launch_argv(&argv(&["claude", "--resume", "abc"])),
+            launch_argv_with(&argv(&["claude", "--resume", "abc"]), None),
             argv(&["claude", "--settings", full, "--resume", "abc"])
         );
         assert_eq!(
-            launch_argv(&argv(&["env", "CLAUDE_CONFIG_DIR=/x", "claude"])),
+            launch_argv_with(&argv(&["env", "CLAUDE_CONFIG_DIR=/x", "claude"]), None),
             argv(&["env", "CLAUDE_CONFIG_DIR=/x", "claude", "--settings", full])
         );
         for unchanged in [
@@ -1746,8 +1796,43 @@ mod tests {
             argv(&["claude", "--settings", "/my.json"]),
             argv(&["claude", "--settings={}"]),
         ] {
-            assert_eq!(launch_argv(&unchanged), unchanged);
+            assert_eq!(launch_argv_with(&unchanged, None), unchanged);
         }
+    }
+
+    /// cctop's MCP server is offered to Claude last, where its many-valued
+    /// flag swallows nothing, and to Codex before the subcommand.
+    #[test]
+    fn agents_are_handed_cctops_mcp_server() {
+        let argv = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let claude = launch_argv_with(&argv(&["claude", "fix the bug"]), Some("/bin/cctop"));
+        assert_eq!(
+            claude[..4],
+            argv(&[
+                "claude",
+                "--settings",
+                r#"{"tui":"fullscreen"}"#,
+                "fix the bug"
+            ])
+        );
+        assert_eq!(claude[4], "--mcp-config");
+        let config: serde_json::Value = serde_json::from_str(&claude[5]).unwrap();
+        assert_eq!(config["mcpServers"]["cctop"]["command"], "/bin/cctop");
+        assert_eq!(claude.len(), 6);
+        assert_eq!(
+            launch_argv_with(&argv(&["codex", "resume", "abc"]), Some("/bin/cctop")),
+            argv(&[
+                "codex",
+                "-c",
+                r#"mcp_servers.cctop.command="/bin/cctop""#,
+                "-c",
+                r#"mcp_servers.cctop.args=["--mcp"]"#,
+                "resume",
+                "abc"
+            ])
+        );
+        let shell = argv(&["zsh"]);
+        assert_eq!(launch_argv_with(&shell, Some("/bin/cctop")), shell);
     }
 
     /// An agent typed into a shell tab is held by that tab's session, through

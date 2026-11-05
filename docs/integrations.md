@@ -410,6 +410,23 @@ None of those seven starts, stops, or types at anything. An agent that can
 *drive* other agents is a much larger proposition than one that can *see* them,
 and the visibility is the half with no downside.
 
+### Agents cctop starts already have it
+
+An agent cctop starts — a tab, a resume, a handoff, a schedule, a
+`spawn_agent` — is handed `cctop --mcp` for that session, with nothing to
+install: Claude through `--mcp-config`, Codex through `-c mcp_servers.cctop.*`,
+OpenCode through `OPENCODE_CONFIG_CONTENT`. Each adds to the servers you have
+configured rather than replacing them. `--install-mcp` is still how an agent
+you start yourself gets it.
+
+```toml
+[settings]
+mcp_launch = false   # on by default; also a switch in Settings (,)
+```
+
+ponytail: Devin, Pi and Vibe are started without it; none of them takes a
+server for one session on its command line or in its environment.
+
 ### Letting agents drive agents
 
 ```toml

@@ -171,7 +171,7 @@ fn basename(s: &str) -> &str {
 }
 
 /// Strip a path and any `.js`/`.exe` suffix to get a comparable command name.
-fn command_stem(s: &str) -> String {
+pub(crate) fn command_stem(s: &str) -> String {
     let base = basename(s);
     base.strip_suffix(".js")
         .or_else(|| base.strip_suffix(".exe"))
