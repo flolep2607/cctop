@@ -300,6 +300,16 @@ pub fn run(
 
     restore_terminal();
 
+    // An agent a move left stopped — quit mid-move, or a far side that could
+    // not say whether it kept a copy — stays stopped: continuing it here could
+    // make two agents writing one conversation. Said, so it is not a mystery.
+    if let Some((pid, machine)) = cctop_core::migrate::send::in_flight() {
+        eprintln!(
+            "A move to {machine} did not finish. {}",
+            cctop_core::migrate::send::left_stopped(pid, &machine)
+        );
+    }
+
     // After the restore, so it lands on the terminal the user is handed back
     // rather than inside the alternate screen that is about to be torn down.
     if !left_running.is_empty() {

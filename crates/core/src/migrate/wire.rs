@@ -173,6 +173,17 @@ pub const ROUTE: &str = "/api/move/";
 /// starting the agent and seeing it stay up — before this side stops asking.
 const COMMIT_WAIT: std::time::Duration = std::time::Duration::from_secs(10 * 60);
 
+/// How long `status` may go unanswered before the move is given up on there.
+const UNHEARD_WAIT: std::time::Duration = std::time::Duration::from_secs(2 * 60);
+
+/// Why a `status` question did not end the wait.
+enum Status {
+    /// The far cctop answered: the receive failed, for this reason.
+    Said(String),
+    /// No answer from it reached here.
+    Unheard(String),
+}
+
 /// The name a body goes by on the path: its sha256, in hex.
 pub fn body_sha(body: &[u8]) -> String {
     use sha2::Digest;
@@ -283,6 +294,22 @@ impl Tunnel {
         Ok(())
     }
 
+    /// One `status` question: the far cctop's own answer, or no answer.
+    fn status(&self, id: &str) -> Result<Option<Receipt>, Status> {
+        let path = format!("{ROUTE}status/{id}/{}", body_sha(b"{}"));
+        let answer = self
+            .0
+            .send("POST", &path, "", Some(b"{}"))
+            .map_err(Status::Unheard)?;
+        if answer.status != 200 {
+            return Err(Status::Unheard(crate::peer::refusal(&answer)));
+        }
+        serde_json::from_slice::<Answer<Option<Receipt>>>(&answer.body)
+            .map_err(|_| Status::Unheard("an answer that was not one".into()))?
+            .into_result()
+            .map_err(Status::Said)
+    }
+
     fn ticket(&self, word: &str, ticket: &str) -> Result<(), String> {
         let t = Ticket {
             protocol: PROTOCOL,
@@ -322,14 +349,26 @@ impl Wire for Tunnel {
             return Err(why);
         }
         let asked = std::time::Instant::now();
+        // A request that never got an answer — a 502 from the edge, the
+        // client's own timeout — says nothing about the move, and the far
+        // side keeps its answer until `finish` or `abort`: so it is asked
+        // again. Only an answer from that cctop ends the wait.
+        let mut unheard = None;
         loop {
-            let status: Option<Receipt> = self.post(&format!("status/{id}"), b"{}")?;
-            if let Some(receipt) = status {
-                return Ok(receipt);
+            match self.status(&id) {
+                Ok(Some(receipt)) => return Ok(receipt),
+                Ok(None) => unheard = None,
+                Err(Status::Said(why)) => return Err(why),
+                Err(Status::Unheard(why)) => {
+                    let since = *unheard.get_or_insert_with(std::time::Instant::now);
+                    if since.elapsed() > UNHEARD_WAIT {
+                        return Err(format!("{}: {why}", self.0.machine));
+                    }
+                }
             }
             if asked.elapsed() > COMMIT_WAIT {
                 return Err(format!(
-                    "{} took too long to say whether it arrived — look there before moving again",
+                    "{} took too long to say whether it arrived",
                     self.0.machine
                 ));
             }

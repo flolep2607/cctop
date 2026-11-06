@@ -25,7 +25,9 @@
 //!    what it did (`finish`).
 //!
 //! At no point are there two live writers: before the far agent starts, this
-//! one is frozen; after it is confirmed, this one is gone.
+//! one is frozen; after it is confirmed, this one is gone. A move that fails
+//! once its bytes have left thaws this one only after the far side has said,
+//! by the move's id, that nothing of it runs there — see [`send`].
 //!
 //! # What can move
 //!
@@ -37,7 +39,7 @@
 //!
 //! Over ssh to a `--host` ([`wire`]), every parameter as JSON on stdin: the far
 //! side's shell joins argv into one line, and a path with a space in it would
-//! become two words. The tunnel transport for siblings is not here yet.
+//! become two words. Over a sibling's tunnel, in signed chunks — see [`wire`].
 
 pub mod place;
 pub mod receive;

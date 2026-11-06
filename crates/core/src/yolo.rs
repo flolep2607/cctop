@@ -194,7 +194,7 @@ impl Agent {
 ///
 /// Read from `/proc` directly, as [`crate::hook`]'s ancestry walk is: the hook
 /// asks this on the agent's time.
-fn start_time(pid: u32) -> Option<u64> {
+pub(crate) fn start_time(pid: u32) -> Option<u64> {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     // `comm` is parenthesised and may hold spaces and parens of its own, so
     // fields are counted from the last `)`: state is the first after it, and
