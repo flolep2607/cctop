@@ -543,6 +543,12 @@ impl App {
 
     /// `Alt+e`: write a new note on the focused pane's session.
     pub(super) fn edit_note(&mut self) {
+        self.edit_note_at(None);
+    }
+
+    /// Write the note at `at` on the focused pane's session, or a new one: a
+    /// click on a note, or on the Notes header.
+    pub(super) fn edit_note_at(&mut self, at: Option<usize>) {
         let Some(key) = self.sidebar.key().filter(|_| self.sidebar.shown) else {
             return self.set_status(match self.sidebar.shown {
                 true => "No session to note yet — the agent has not written its transcript",
@@ -550,8 +556,17 @@ impl App {
             });
         };
         self.sidebar_folded = false;
-        self.sidebar.note_at = self.notes.of(&key).len();
-        self.sidebar.note_input.clear();
+        let notes = self.notes.of(&key);
+        match at.and_then(|i| notes.get(i).map(|text| (i, text.clone()))) {
+            Some((i, text)) => {
+                self.sidebar.note_at = i;
+                self.sidebar.note_input.set(text);
+            }
+            None => {
+                self.sidebar.note_at = notes.len();
+                self.sidebar.note_input.clear();
+            }
+        }
         self.sidebar.note_key = Some(key);
         self.mode = Mode::Note;
         self.needs_redraw = true;
@@ -762,6 +777,8 @@ pub(super) enum Target {
     Folder(String),
     /// Open this file's diff.
     File(String),
+    /// Write a note: the one at this index, or a new one.
+    Note(Option<usize>),
 }
 
 /// A line, and what a click on it does, if anything.
@@ -809,7 +826,7 @@ fn open(
     out.extend(fit(files, room.saturating_sub(plan_room)));
     let files = (files_at, out.len());
     out.push((Line::default(), None));
-    out.extend(untagged(notes));
+    out.extend(notes);
     let targets = out
         .iter()
         .enumerate()
@@ -1009,20 +1026,22 @@ fn row_line(row: Row, width: usize) -> Tagged {
     (Line::from(spans), folder)
 }
 
-fn notes_lines(
-    notes: &[String],
-    editing: Option<(&LineEdit, usize)>,
-    width: usize,
-) -> Vec<Line<'static>> {
-    let mut out = vec![header(
-        "Notes",
-        vec![Span::styled(
-            match editing {
-                Some(_) => "  ↵ keep · ↑↓ pick · Esc",
-                None => "  Alt+e",
-            },
-            theme::dim(),
-        )],
+/// The notes, each line tagged with the note a click on it writes: the
+/// header and the empty line start a new one, a note's own lines change it.
+fn notes_lines(notes: &[String], editing: Option<(&LineEdit, usize)>, width: usize) -> Vec<Tagged> {
+    let new = Some(Target::Note(None));
+    let mut out = vec![(
+        header(
+            "Notes",
+            vec![Span::styled(
+                match editing {
+                    Some(_) => "  ↵ keep · ↑↓ pick · Esc",
+                    None => "  click or Alt+e",
+                },
+                theme::dim(),
+            )],
+        ),
+        new.clone(),
     )];
     let text_width = width.saturating_sub(2);
     let input = |field: &LineEdit| {
@@ -1034,23 +1053,27 @@ fn notes_lines(
         Line::from(spans)
     };
     for (i, note) in notes.iter().enumerate() {
+        let this = Some(Target::Note(Some(i)));
         match editing {
-            Some((field, at)) if at == i => out.push(input(field)),
+            Some((field, at)) if at == i => out.push((input(field), this)),
             _ => {
                 for (n, line) in wrap(note, text_width).into_iter().enumerate() {
                     let lead = if n == 0 { "• " } else { "  " };
-                    out.push(Line::from(vec![
-                        Span::styled(lead, theme::dim()),
-                        Span::styled(line, theme::value()),
-                    ]));
+                    out.push((
+                        Line::from(vec![
+                            Span::styled(lead, theme::dim()),
+                            Span::styled(line, theme::value()),
+                        ]),
+                        this.clone(),
+                    ));
                 }
             }
         }
     }
     match editing {
-        Some((field, at)) if at >= notes.len() => out.push(input(field)),
+        Some((field, at)) if at >= notes.len() => out.push((input(field), new)),
         None if notes.is_empty() => {
-            out.push(Line::from(Span::styled("  none yet", theme::dim())));
+            out.push((Line::from(Span::styled("  none yet", theme::dim())), new));
         }
         _ => {}
     }
@@ -1157,6 +1180,28 @@ mod tests {
         );
         let turned: HashSet<String> = ["docs".to_string()].into();
         assert_eq!(rows(&root, files.len(), &turned).len(), 23);
+    }
+
+    /// Every line of the notes is a click: the header and the empty line start
+    /// a new note, and each of a note's lines — wrapped ones too — opens that
+    /// note.
+    #[test]
+    fn a_click_on_a_note_writes_that_note() {
+        let notes = vec!["ask Sam about expiry".to_string(), "rerun ci".to_string()];
+        let lines = notes_lines(&notes, None, 14);
+        let targets: Vec<_> = lines.iter().map(|(_, t)| t.clone()).collect();
+        assert_eq!(targets[0], Some(Target::Note(None)), "the header adds");
+        assert!(lines.len() > 3, "the first note wraps: {}", lines.len());
+        assert!(
+            targets[1..lines.len() - 1]
+                .iter()
+                .all(|t| *t == Some(Target::Note(Some(0))))
+        );
+        assert_eq!(targets.last().unwrap(), &Some(Target::Note(Some(1))));
+
+        let empty = notes_lines(&[], None, 14);
+        assert_eq!(empty.len(), 2);
+        assert!(empty.iter().all(|(_, t)| *t == Some(Target::Note(None))));
     }
 
     /// A name too long for the sidebar is cut at its end, so where it is —
