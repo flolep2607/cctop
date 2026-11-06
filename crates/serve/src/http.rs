@@ -80,6 +80,12 @@ const MAX_IMAGE_BYTES: usize = 12 * 1024 * 1024;
 /// The path that carries images, and so the one that may be large.
 const IMAGE_PATH: &str = "/api/act/image/";
 
+/// The other one: a moved session's bytes, two MiB to a request and half as
+/// much again in base64. Under the same bound as an image, which is no more
+/// than an unauthenticated client could already make this server read — the
+/// body is read before the signature is checked.
+const MOVE_CHUNK_PATH: &str = "/api/move/chunk/";
+
 /// How long a client has to finish sending its request line and headers.
 ///
 /// Deliberately short. A connection that has been accepted but has not asked
@@ -335,7 +341,7 @@ impl Request {
         let mut body = Vec::new();
         if method == "POST" {
             let want = length.ok_or((411, "a POST needs a Content-Length"))?;
-            let cap = match path.starts_with(IMAGE_PATH) {
+            let cap = match path.starts_with(IMAGE_PATH) || path.starts_with(MOVE_CHUNK_PATH) {
                 true => MAX_IMAGE_BYTES,
                 false => MAX_BODY_BYTES,
             };

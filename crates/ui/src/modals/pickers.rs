@@ -560,15 +560,20 @@ pub(crate) fn draw_move_pick(frame: &mut Frame, area: Rect, app: &App) {
         theme::dim(),
     ))];
     lines.push(Line::default());
-    for (i, host) in app.moving.machines.iter().enumerate() {
-        let style = match i == app.moving.cursor {
-            true => theme::selected(),
-            false => theme::value(),
+    for (i, machine) in app.moving.machines.iter().enumerate() {
+        let style = match (i == app.moving.cursor, machine.reach.is_ok()) {
+            (true, _) => theme::selected(),
+            (false, true) => theme::value(),
+            (false, false) => theme::dim(),
         };
-        lines.push(Line::from(Span::styled(
-            format!(" {} ", util::truncate(&host.target, 50)),
-            style,
-        )));
+        let via = match &machine.reach {
+            Ok(reach) => reach.via().to_string(),
+            Err(why) => why.clone(),
+        };
+        lines.push(Line::from(vec![
+            Span::styled(format!(" {} ", util::truncate(&machine.name, 24)), style),
+            Span::styled(util::truncate(&via, 28), theme::dim()),
+        ]));
     }
     lines.push(Line::default());
     lines.push(Line::from(Span::styled(

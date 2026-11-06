@@ -92,6 +92,8 @@ mod invites;
 mod markdown;
 /// `/metrics`, the snapshot in Prometheus's text format.
 mod metrics;
+/// `/api/move/…`: a session moving here from a sibling on the account.
+mod migrate;
 /// The `--notify` webhook. Its send is `cctop_core::notify::post`, which the
 /// TUI POSTs crossings to `$CCTOP_NOTIFY_URL` through too — one transport, two
 /// triggers.
@@ -1528,6 +1530,12 @@ fn serve_connection(shared: &Shared, stream: &mut TcpStream) {
     // same reason: see `NEW_AS_ROUTE`.
     if let Some(rest) = path.strip_prefix(cctop_core::remote_open::NEW_AS_ROUTE) {
         return open::route_new(shared, stream, &request, rest, access, true);
+    }
+    // A session moving here from a sibling — see [`migrate`]. Before the
+    // relay: it is about this machine's disk, and `forward` refuses to carry
+    // it on.
+    if let Some(rest) = path.strip_prefix(cctop_core::migrate::wire::ROUTE) {
+        return migrate::route(shared, stream, &request, rest, from_peer);
     }
     // A sibling on the account, through this server — see [`forward`]. The
     // page never talks to another origin, so the content policy stays as it
@@ -3809,6 +3817,126 @@ mod tests {
             serde_json::from_str(config.split("\r\n\r\n").nth(1).unwrap()).unwrap();
         assert_eq!(body["token"], "", "a sibling is never handed a token");
         assert_eq!(body["actions"], true);
+    }
+
+    /// A move is a sibling's to send and nobody else's: refused to every link
+    /// and login, never relayed by a hub, its body pinned by the sha the
+    /// signature covers, and only a chunk may be large.
+    #[test]
+    fn a_move_is_taken_only_from_a_sibling_and_only_as_signed() {
+        let b = sibling();
+        let now = cctop_core::peer::now();
+        let post = |path: &str, auth: &str, body: &str| {
+            response_of(
+                &b,
+                "POST",
+                path,
+                &format!(
+                    "{auth}Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+                    body.len()
+                ),
+            )
+        };
+        let body = "{}";
+        let sha = cctop_core::migrate::wire::body_sha(body.as_bytes());
+        let path = format!("/api/move/plan/{sha}");
+
+        // The full link may do anything else here, but not this.
+        let link = post(&format!("{path}?t=full"), "", body);
+        assert!(link.starts_with("HTTP/1.1 403"), "{link}");
+        // Signed, it is understood: an answer, a refusal of the question
+        // included, rather than a status.
+        let ok = post(&path, &signed("POST", &path, SIBLING_SECRET, now), body);
+        assert!(ok.starts_with("HTTP/1.1 200"), "{ok}");
+        assert!(ok.contains("\"error\""), "{ok}");
+        let hello = response_of(
+            &b,
+            "GET",
+            "/api/move/hello",
+            &signed("GET", "/api/move/hello", SIBLING_SECRET, now),
+        );
+        assert!(hello.contains("\"protocol\""), "{hello}");
+        // A body other than the one the signed path names.
+        let swapped = post(
+            &path,
+            &signed("POST", &path, SIBLING_SECRET, now),
+            r#"{"x":1}"#,
+        );
+        assert!(swapped.starts_with("HTTP/1.1 400"), "{swapped}");
+        // Too large for anything but a chunk, and a chunk no larger than an
+        // image.
+        for (target, size) in [
+            (path.clone(), 64 * 1024 + 1),
+            (format!("/api/move/chunk/x/0/{sha}"), 12 * 1024 * 1024 + 1),
+        ] {
+            let raw = response_of(
+                &b,
+                "POST",
+                &target,
+                &format!(
+                    "{}Content-Type: application/json\r\nContent-Length: {size}\r\n",
+                    signed("POST", &target, SIBLING_SECRET, now)
+                ),
+            );
+            assert!(raw.starts_with("HTTP/1.1 413"), "{target}: {raw}");
+        }
+        // A hub never carries one on, whoever asks it to.
+        cctop_core::peer::set_known(vec![Arc::new(cctop_core::peer::Peer::fixed(
+            "box",
+            "http://127.0.0.1:9",
+            SIBLING_SECRET,
+        ))]);
+        let relayed = response_of(
+            &shared("full", "view"),
+            "GET",
+            "/api/peer/box/api/move/hello?t=full",
+            "",
+        );
+        assert!(relayed.starts_with("HTTP/1.1 404"), "{relayed}");
+        // And a cctop started read-only takes none.
+        let read_only = Shared {
+            actions: false,
+            ..sibling()
+        };
+        let raw = response_of(
+            &read_only,
+            "GET",
+            "/api/move/hello",
+            &signed("GET", "/api/move/hello", SIBLING_SECRET, now),
+        );
+        assert!(raw.starts_with("HTTP/1.1 403"), "{raw}");
+    }
+
+    /// The sending side's tunnel speaks to a sibling's serve for real: signs,
+    /// names each body by its sha, and reads the answers.
+    #[test]
+    fn a_tunnel_reaches_a_siblings_move_routes() {
+        use cctop_core::migrate::wire::{Tunnel, Wire};
+        let b = Arc::new(sibling());
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        {
+            let b = Arc::clone(&b);
+            std::thread::spawn(move || {
+                for stream in listener.incoming() {
+                    let Ok(mut stream) = stream else { return };
+                    serve_connection(&b, &mut stream);
+                }
+            });
+        }
+        let tunnel = Tunnel(Arc::new(cctop_core::peer::Peer::fixed(
+            "box",
+            &format!("http://127.0.0.1:{port}"),
+            SIBLING_SECRET,
+        )));
+        let hello = tunnel.hello().expect("hello");
+        assert_eq!(hello.protocol, cctop_core::migrate::PROTOCOL);
+        // A ticket nobody holds: the far side's own refusal, carried back
+        // as its words rather than as a status.
+        let gone = tunnel
+            .finish("0b4e8a54-8d39-4f4e-8a39-6b8a3c1c2d01")
+            .unwrap_err();
+        assert!(!gone.contains("HTTP"), "{gone}");
     }
 
     /// The hub relays a sibling's API for its own page: a read for any link,

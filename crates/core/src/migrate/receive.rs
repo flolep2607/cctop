@@ -232,30 +232,8 @@ pub fn receive(input: &mut impl BufRead) -> Result<Receipt, String> {
         .map_err(|e| format!("the manifest: {e}"))?;
     let m: Manifest =
         serde_json::from_str(line.trim()).map_err(|e| format!("the manifest: {e}"))?;
-    protocol(m.protocol)?;
-    installed(m.harness)?;
-    if !crate::remote_open::id_ok(&m.session_id) || !crate::remote_open::id_ok(&m.move_id) {
-        return Err("the manifest names a session id that is not one".into());
-    }
-    let total = m.bundle.len.saturating_add(m.transcript.len);
-    if total > MAX_TOTAL {
-        return Err(format!(
-            "{} is more than a move carries ({})",
-            human(total),
-            human(MAX_TOTAL)
-        ));
-    }
+    check(&m, 1)?;
     let base = staging();
-    std::fs::create_dir_all(&base).map_err(|e| format!("{}: {e}", base.display()))?;
-    if let Some(free) = free_bytes(&base)
-        && free < total.saturating_add(SPARE_DISK)
-    {
-        return Err(format!(
-            "only {} free here, and the move is {}",
-            human(free),
-            human(total)
-        ));
-    }
     // One at a time: two moves into one checkout would each undo into the
     // other's state.
     let _lock = crate::util::lock_within(&base.join("lock"), Duration::ZERO).map_err(|_| {
@@ -307,6 +285,40 @@ pub fn receive(input: &mut impl BufRead) -> Result<Receipt, String> {
         let _ = std::fs::remove_dir_all(&dir);
     }
     result
+}
+
+/// Everything a manifest can be refused for before a byte of it arrives,
+/// answering how many bytes follow it.
+///
+/// `copies` is how many times those bytes are kept here at once: one over
+/// ssh, where they stream straight into the ticket, and two over the tunnel,
+/// where the upload is held until [`commit`] streams it into the ticket.
+fn check(m: &Manifest, copies: u64) -> Result<u64, String> {
+    protocol(m.protocol)?;
+    installed(m.harness)?;
+    if !crate::remote_open::id_ok(&m.session_id) || !crate::remote_open::id_ok(&m.move_id) {
+        return Err("the manifest names a session id that is not one".into());
+    }
+    let total = m.bundle.len.saturating_add(m.transcript.len);
+    if total > MAX_TOTAL {
+        return Err(format!(
+            "{} is more than a move carries ({})",
+            human(total),
+            human(MAX_TOTAL)
+        ));
+    }
+    let base = staging();
+    std::fs::create_dir_all(&base).map_err(|e| format!("{}: {e}", base.display()))?;
+    if let Some(free) = free_bytes(&base)
+        && free < total.saturating_mul(copies).saturating_add(SPARE_DISK)
+    {
+        return Err(format!(
+            "only {} free here, and the move is {}",
+            human(free),
+            human(total)
+        ));
+    }
+    Ok(total)
 }
 
 /// Place, install, resume — each step journalled. `store` is the harness's
@@ -401,6 +413,170 @@ fn copy_exact(input: &mut impl Read, path: &Path, blob: &super::Blob) -> Result<
     }
 }
 
+// ---------------------------------------------------------------------------
+// The same receive, over a sibling's tunnel
+// ---------------------------------------------------------------------------
+//
+// Over ssh the manifest and the bytes are one stream into one process. Over
+// the tunnel they are many requests — no single one may outlast the asking
+// side's timeout — so the bytes are held in an upload until the last one is
+// in, and then poured into [`receive`] as the same stream ssh would have
+// carried. Everything [`receive`] checks and undoes is then checked and undone
+// the same way, by the same code.
+
+/// The most one tunnel request carries of a move's bytes.
+pub const CHUNK: u64 = 2 * 1024 * 1024;
+
+/// Where uploads are held until they are committed.
+fn uploads() -> PathBuf {
+    staging().join("uploads")
+}
+
+/// The upload `id` names, if it is one.
+fn upload_dir(id: &str) -> Result<PathBuf, String> {
+    match crate::config::is_full_uuid(id) {
+        true => Ok(uploads().join(id)),
+        false => Err("that is not a move upload".into()),
+    }
+}
+
+/// How an upload ended, once [`commit`] has run it.
+const RESULT: &str = "result.json";
+
+/// `begin`: check the manifest as `receive` would, and open an upload for
+/// its bytes. Only one upload at a time — as only one receive — and one left
+/// behind by a sender that went away stops counting after [`STALE`].
+pub fn begin(m: &Manifest) -> Result<String, String> {
+    check(m, 2)?;
+    open_upload(m)
+}
+
+/// [`begin`] once the manifest has passed.
+fn open_upload(m: &Manifest) -> Result<String, String> {
+    let base = uploads();
+    std::fs::create_dir_all(&base).map_err(|e| format!("{}: {e}", base.display()))?;
+    for entry in std::fs::read_dir(&base).into_iter().flatten().flatten() {
+        // By its newest file, not the directory: a chunk appends to `data`,
+        // which leaves the directory's own time where it was, and a slow
+        // uplink can take longer than [`STALE`] to send a large one.
+        let fresh = std::fs::read_dir(entry.path())
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter_map(|file| file.metadata().and_then(|m| m.modified()).ok())
+            .any(|t| t.elapsed().is_ok_and(|e| e < STALE));
+        match fresh {
+            true => {
+                return Err(
+                    "another move is arriving here right now — try again in a moment".into(),
+                );
+            }
+            false => {
+                let _ = std::fs::remove_dir_all(entry.path());
+            }
+        }
+    }
+    let id = crate::util::new_uuid();
+    let dir = base.join(&id);
+    std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+    }
+    let manifest = serde_json::to_string(m).map_err(|e| e.to_string())?;
+    std::fs::write(dir.join("manifest.json"), manifest)
+        .and_then(|()| std::fs::write(dir.join("data"), b""))
+        .map_err(|e| format!("{}: {e}", dir.display()))?;
+    Ok(id)
+}
+
+/// `chunk`: the `seq`th [`CHUNK`] of an upload's bytes, in order. A chunk out
+/// of order, too long, or past what the manifest declared is refused; the
+/// sender then aborts.
+pub fn chunk(id: &str, seq: u64, data: &[u8]) -> Result<(), String> {
+    let dir = upload_dir(id)?;
+    let m = upload_manifest(&dir)?;
+    let total = m.bundle.len.saturating_add(m.transcript.len);
+    let path = dir.join("data");
+    let had = std::fs::metadata(&path)
+        .map(|meta| meta.len())
+        .map_err(|_| "no such upload — it may have been given up on".to_string())?;
+    if data.len() as u64 > CHUNK || seq.checked_mul(CHUNK) != Some(had) {
+        return Err(format!("chunk {seq} is not the one expected next"));
+    }
+    if had + data.len() as u64 > total {
+        return Err("more arrived than the manifest declared".into());
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    file.write_all(data)
+        .map_err(|e| format!("{}: {e}", path.display()))
+}
+
+fn upload_manifest(dir: &Path) -> Result<Manifest, String> {
+    let text = std::fs::read_to_string(dir.join("manifest.json"))
+        .map_err(|_| "no such upload — it may have been given up on".to_string())?;
+    serde_json::from_str(&text).map_err(|e| format!("the manifest: {e}"))
+}
+
+/// `commit`: every byte is in, so run [`receive`] on it — on a thread of its
+/// own, since placing a large repository and waiting out the agent's start
+/// can take longer than one request may. [`status`] answers it.
+pub fn commit(id: &str) -> Result<(), String> {
+    let dir = upload_dir(id)?;
+    let m = upload_manifest(&dir)?;
+    let total = m.bundle.len.saturating_add(m.transcript.len);
+    let had = std::fs::metadata(dir.join("data")).map_or(0, |meta| meta.len());
+    if had != total {
+        let _ = std::fs::remove_dir_all(&dir);
+        return Err(format!(
+            "{} of {} arrived — nothing was kept here",
+            human(had),
+            human(total)
+        ));
+    }
+    if dir.join("committing").exists() || dir.join(RESULT).exists() {
+        return Err("that upload is already being received".into());
+    }
+    std::fs::write(dir.join("committing"), b"").map_err(|e| e.to_string())?;
+    std::thread::spawn(move || {
+        let answer = Answer::from(pour(&dir, &m));
+        let _ = std::fs::remove_file(dir.join("data"));
+        if let Ok(text) = serde_json::to_string(&answer) {
+            let _ = std::fs::write(dir.join(RESULT), text);
+        }
+    });
+    Ok(())
+}
+
+/// The upload as the one stream [`receive`] reads: the manifest line, then
+/// the bytes.
+fn pour(dir: &Path, m: &Manifest) -> Result<Receipt, String> {
+    let line = serde_json::to_string(m).map_err(|e| e.to_string())? + "\n";
+    let data = std::fs::File::open(dir.join("data")).map_err(|e| e.to_string())?;
+    let mut stream = std::io::BufReader::new(std::io::Cursor::new(line).chain(data));
+    receive(&mut stream)
+}
+
+/// `status`: `None` while the commit is still running, else how it ended —
+/// after which the upload is gone.
+pub fn status(id: &str) -> Result<Option<Receipt>, String> {
+    let dir = upload_dir(id)?;
+    let Ok(text) = std::fs::read_to_string(dir.join(RESULT)) else {
+        return match dir.join("committing").exists() {
+            true => Ok(None),
+            false => Err("no such upload — it may have been given up on".into()),
+        };
+    };
+    let _ = std::fs::remove_dir_all(&dir);
+    serde_json::from_str::<Answer<Receipt>>(&text)
+        .map_err(|e| format!("its answer: {e}"))?
+        .into_result()
+        .map(Some)
+}
+
 /// `finish`: keep it.
 pub fn finish(t: &Ticket) -> Result<(), String> {
     let mut journal = Journal::load(ticket_dir(t)?.join("journal.json"))?;
@@ -409,8 +585,19 @@ pub fn finish(t: &Ticket) -> Result<(), String> {
     Ok(())
 }
 
-/// `abort`: take it all back.
+/// `abort`: take it all back. An upload not yet committed is simply
+/// dropped; a received move is undone from its journal.
 pub fn abort(t: &Ticket) -> Result<(), String> {
+    if let Ok(dir) = upload_dir(&t.ticket)
+        && dir.is_dir()
+    {
+        protocol(t.protocol)?;
+        if dir.join("committing").exists() && !dir.join(RESULT).exists() {
+            return Err("it is being received right now — abort its ticket once it is".into());
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+        return Ok(());
+    }
     let mut journal = Journal::load(ticket_dir(t)?.join("journal.json"))?;
     let failed = journal.undo_all();
     let _ = std::fs::remove_dir_all(ticket_dir(t)?);
@@ -604,6 +791,101 @@ mod tests {
         let ok = |_: &crate::session::Session| -> Result<String, String> { Ok("tab".into()) };
         let (got, tab, cwd) = land(&m, &bundle, &transcript, &store, &ok, &mut journal).unwrap();
         assert_eq!((got.as_str(), tab.as_str(), cwd), (id, "tab", dest.clone()));
+    }
+
+    /// An upload takes its bytes in order and no more than declared, admits
+    /// no second upload beside it, and is poured into the same `receive` an
+    /// ssh stream feeds — which checks what arrived exactly as it would have.
+    #[test]
+    fn a_tunnel_upload_arrives_in_order_and_is_received_like_a_stream() {
+        let mut m = sample_manifest();
+        m.bundle = crate::migrate::Blob {
+            len: 5,
+            sha256: "0".repeat(64),
+        };
+        m.transcript = crate::migrate::Blob {
+            len: 3,
+            sha256: "0".repeat(64),
+        };
+        let id = open_upload(&m).unwrap();
+        let second = open_upload(&m).unwrap_err();
+        assert!(second.contains("another move"), "{second}");
+
+        assert!(chunk(&id, 1, b"x").is_err(), "out of order");
+        assert!(chunk(&id, 0, b"123456789").is_err(), "more than declared");
+        assert!(chunk("../../etc", 0, b"x").is_err());
+        let early = commit(&id).unwrap_err();
+        assert!(early.contains("0 KB of 1 KB"), "{early}");
+
+        let id = open_upload(&m).unwrap();
+        chunk(&id, 0, b"bundltra").unwrap();
+        commit(&id).unwrap();
+        assert!(commit(&id).is_err(), "committed once only");
+        let started = std::time::Instant::now();
+        let ended = loop {
+            match status(&id) {
+                Ok(None) if started.elapsed() < Duration::from_secs(20) => {
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                other => break other,
+            }
+        };
+        // The made-up checksums are what refuses it — or, on a machine with
+        // no `claude`, the harness before them: `receive`'s own checks either
+        // way, and nothing kept.
+        let why = ended.unwrap_err();
+        assert!(
+            why.contains("checksum") || why.contains("not installed"),
+            "{why}"
+        );
+        assert!(!uploads().join(&id).exists());
+
+        // An upload the sender gives up on is dropped by its abort.
+        let id = open_upload(&m).unwrap();
+        abort(&Ticket {
+            protocol: PROTOCOL,
+            ticket: id.clone(),
+        })
+        .unwrap();
+        assert!(!uploads().join(&id).exists());
+    }
+
+    fn sample_manifest() -> Manifest {
+        Manifest {
+            protocol: PROTOCOL,
+            harness: Harness::Claude,
+            session_id: "0b4e8a54-8d39-4f4e-8a39-6b8a3c1c2d01".into(),
+            repo: crate::migrate::Repo {
+                origin: None,
+                key: "example.com/o/app".into(),
+                name: "app".into(),
+                head: "0".repeat(40),
+                branch: Some("main".into()),
+                rel_cwd: String::new(),
+            },
+            placement: Placement {
+                kind: crate::migrate::Kind::Clone,
+                dir: "/nowhere/app".into(),
+                root: None,
+                has_head: false,
+                note: None,
+            },
+            snapshot: "0".repeat(40),
+            move_id: "mv1".into(),
+            bundle: crate::migrate::Blob {
+                len: 0,
+                sha256: String::new(),
+            },
+            transcript: crate::migrate::Blob {
+                len: 0,
+                sha256: String::new(),
+            },
+            transcript_meta: crate::migrate::transcript::Meta {
+                old_cwd: "/x".into(),
+                codex_dated: None,
+                codex_prefix: None,
+            },
+        }
     }
 
     #[test]
