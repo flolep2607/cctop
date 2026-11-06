@@ -387,9 +387,7 @@ impl App {
         }
         self.sidebar.asked = stamp.to_string();
         self.sidebar.in_flight = true;
-        let started = chrono::DateTime::parse_from_rfc3339(&session.started_at)
-            .ok()
-            .map(|t| t.timestamp());
+        let started = cctop_core::changes::since(session);
         let _ = self.tx.send(super::worker::Request::Sidebar {
             key: session.key(),
             dir: changes::checkout_of(session),

@@ -844,6 +844,9 @@ pub struct App {
 
     /// Workspace tabs beyond the dashboard, each holding one or more terminals.
     pub tabs: Vec<tabs::Tab>,
+    /// The tabs visited most recently, newest first, by the first rmux session
+    /// each stands for — see [`App::go_to_tab`] for why they stay attached.
+    pub recent_tabs: Vec<String>,
     /// The last screen the Preview panel read off a detached tab, kept between
     /// captures so each one replays into the same parser.
     preview: preview::Capture,
@@ -1320,6 +1323,7 @@ impl App {
             prefs,
             tx,
             tabs: Vec::new(),
+            recent_tabs: Vec::new(),
             preview: preview::Capture::default(),
             tab: 0,
             shared_at: None,

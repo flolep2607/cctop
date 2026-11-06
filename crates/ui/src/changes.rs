@@ -127,9 +127,7 @@ impl App {
         let key = session.key();
         let stamp = session.touched().to_string();
         let checkout = checkout_of(session);
-        let started = chrono::DateTime::parse_from_rfc3339(&session.started_at)
-            .ok()
-            .map(|t| t.timestamp());
+        let started = cctop_core::changes::since(session);
 
         let state = &mut self.changes;
         if key != state.key {

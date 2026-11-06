@@ -18,7 +18,7 @@ use std::path::Path;
 
 /// Every `[settings]` key: its name, its default as the file would spell it,
 /// and what it does.
-pub const SETTINGS: [(&str, &str, &str); 27] = [
+pub const SETTINGS: [(&str, &str, &str); 28] = [
     (
         "theme",
         "\"auto\"",
@@ -111,6 +111,11 @@ pub const SETTINGS: [(&str, &str, &str); 27] = [
         "mcp_launch",
         "true",
         "Give every agent cctop starts cctop's MCP tools",
+    ),
+    (
+        "tabs_kept",
+        "3",
+        "Recent tabs kept open behind the one on screen; 0 = none",
     ),
     (
         "idle_after",
@@ -381,6 +386,9 @@ pub struct Settings {
     /// How close an identical paste must follow the last to be dropped — see
     /// [`Settings::paste_debounce`].
     pub paste_debounce_ms: Option<u64>,
+    /// How many recently visited tabs keep their rmux client while another is
+    /// on screen — see `ui::panes::App::go_to_tab`.
+    pub tabs_kept: Option<u64>,
     /// Whether a remote tab draws typed letters before the far side echoes
     /// them — see [`crate::predict`]. One of [`crate::predict::Mode::NAMES`].
     pub predictive_echo: Option<String>,
@@ -497,6 +505,11 @@ impl Settings {
                         .and_then(|n| u64::try_from(n).ok())
                         .map(|v| out.paste_debounce_ms = Some(v))
                         .is_none(),
+                    "tabs_kept" => item
+                        .as_integer()
+                        .and_then(|n| u64::try_from(n).ok())
+                        .map(|v| out.tabs_kept = Some(v))
+                        .is_none(),
                     "alert_error_calls" => item
                         .as_integer()
                         .and_then(|n| u64::try_from(n).ok())
@@ -564,6 +577,7 @@ impl Settings {
             "alert_stall" => self.alert_stall.map(|v| v.to_string()),
             "idle_after" => self.idle_after.map(|v| v.to_string()),
             "paste_debounce_ms" => self.paste_debounce_ms.map(|v| v.to_string()),
+            "tabs_kept" => self.tabs_kept.map(|v| v.to_string()),
             "predictive_echo" => self.predictive_echo.as_ref().map(|v| format!("{v:?}")),
             "footer_hide" => self.footer_hide.as_ref().map(|v| format!("{v:?}")),
             "footer_note" => self.footer_note.as_ref().map(|v| format!("{v:?}")),
