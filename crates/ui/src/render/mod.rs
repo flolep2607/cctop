@@ -823,6 +823,10 @@ const REC: &str = "● REC ";
 /// has to say "this one is new" to someone who cannot tell two greens apart.
 const DONE: &str = "✓ ";
 
+/// What a tab carries while its agent looks stuck in a loop — the same glyph
+/// as the row's status, so the two are seen as one warning.
+const LOOPING: &str = "⟳ ";
+
 /// What a tab carries after its label while one of its panes is zoomed, so a
 /// split whose other panes have vanished says where they went.
 const ZOOM: &str = "⤢ ";
@@ -895,13 +899,15 @@ fn bar_parts(app: &App) -> BarParts {
             let tab = i.checked_sub(1).and_then(|t| app.tabs.get(t));
             let zoomed = tab.is_some_and(tabs::Tab::zoomed);
             let done = app.tab_attention(i) == Some(tabs::Attention::Done);
+            let looping = app.tab_looping(i);
             format!(
-                "{}{}{}",
+                "{}{}{}{}",
                 match down[i] {
                     Some(cctop_core::link_health::State::Lost) => LOST,
                     Some(cctop_core::link_health::State::Reconnecting) => RECONNECTING,
                     _ => "",
                 },
+                if looping { LOOPING } else { "" },
                 if done { DONE } else { "" },
                 if zoomed { ZOOM } else { "" }
             )

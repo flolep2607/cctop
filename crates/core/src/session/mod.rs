@@ -464,6 +464,14 @@ pub struct Session {
     /// so two harnesses' spellings of one path compare equal.
     pub recent_writes: Vec<String>,
 
+    /// What the tool history says about going round in circles — see
+    /// [`crate::stuck`] and [`Session::looping`].
+    pub stuck: crate::stuck::Evidence,
+    /// The last hour's spend by unix minute, oldest first: what the "spending
+    /// without progress" check sums a window of. Copied off the extraction on
+    /// every annotation, as `cost_hour` is.
+    pub recent_minutes: Vec<(i64, f64)>,
+
     /// How close another live session is to this one's work, as
     /// [`crate::collide`] last measured it. `None` is the ordinary case: no
     /// other running agent shares this repository.
@@ -611,6 +619,25 @@ fn distil_recent_writes(details: &HashMap<String, Vec<ToolDetail>>) -> Vec<Strin
 }
 
 impl Session {
+    /// Why this session looks stuck in a loop, if it does — see
+    /// [`crate::stuck`]. Asked of the row as it is now: only a working local
+    /// agent can be looping.
+    pub fn looping(&self) -> Option<crate::stuck::Looping> {
+        let working = self.is_running()
+            && self.remote.is_none()
+            && self.activity_state == ActivityState::Working;
+        if !working {
+            return None;
+        }
+        crate::stuck::verdict(
+            &self.stuck,
+            &self.recent_minutes,
+            working,
+            unix_minute(&chrono::Utc::now()),
+            &crate::stuck::config(),
+        )
+    }
+
     /// When this session went into ultracode, while it is still in it.
     pub fn in_ultracode(&self) -> Option<&str> {
         let on = self.ultracode_at.as_deref()?;
@@ -677,6 +704,8 @@ impl Session {
             yolo: None,
             converted_from: None,
             recent_writes: Vec::new(),
+            stuck: Default::default(),
+            recent_minutes: Vec::new(),
             conflict: None,
             remote: None,
             sandbox: None,
@@ -2409,6 +2438,10 @@ pub struct SessionData {
     /// too big to load. Bounded by [`MAX_RECENT_WRITES`].
     #[serde(default)]
     pub recent_writes: Vec<String>,
+    /// What the tool history says about looping, distilled in `finalize`
+    /// for the same reason as `recent_writes` — see [`crate::stuck`].
+    #[serde(default)]
+    pub stuck: crate::stuck::Evidence,
     /// Whether this carries the fields `finalize` fills but the cache drops.
     ///
     /// False for anything deserialized, which is what tells the panel path that
@@ -2576,6 +2609,14 @@ impl SessionData {
         last_hour(&self.costs_by_minute, now)
     }
 
+    /// The last hour's spend by minute, for [`Session::recent_minutes`].
+    pub fn minutes_last_hour(&self, now: &chrono::DateTime<chrono::Utc>) -> Vec<(i64, f64)> {
+        self.costs_by_minute
+            .range(unix_minute(now) - 59..)
+            .map(|(m, c)| (*m, *c))
+            .collect()
+    }
+
     /// Record one priced event in every time bucket at once.
     ///
     /// The day, hour and minute maps are three views of the same spend; filling
@@ -2612,6 +2653,7 @@ impl SessionData {
         trim_tool_details(&mut self.metrics.tool_details);
         trim_minutes(&mut self.costs_by_minute);
         self.recent_writes = distil_recent_writes(&self.metrics.tool_details);
+        self.stuck = crate::stuck::evidence(&self.metrics.tool_details);
         self.complete = true;
     }
 

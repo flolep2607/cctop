@@ -49,6 +49,9 @@ pub enum Reason {
     /// Blocked on a permission prompt or an elicitation.
     Asking,
     Stopped,
+    /// Working, but going round in circles — see [`crate::stuck`]. Rung once
+    /// per episode: when the verdict appears, not for as long as it holds.
+    Looping,
 }
 
 impl Reason {
@@ -59,6 +62,7 @@ impl Reason {
         match self {
             Reason::NeedsInput => Some("waiting"),
             Reason::Asking => Some("asking"),
+            Reason::Looping => Some("looping"),
             Reason::Stopped => None,
         }
     }
@@ -96,6 +100,9 @@ pub struct Notifier {
     /// webhook can carry a link that opens the session it is about. `None`
     /// while nothing is being served; the dashboard sets it on each refresh.
     pub link_base: Option<String>,
+    /// The running sessions that were looping at the previous refresh — the
+    /// other half of the edge [`Reason::Looping`] fires on.
+    looping: std::collections::HashSet<String>,
     /// Last state of every session that was running at the previous refresh,
     /// with the label to name it by. The label is carried because a session
     /// that exits between refreshes still has to be nameable, and by then the
@@ -147,10 +154,25 @@ impl Notifier {
         // the map holds a handful of entries, not one per transcript ever
         // written, and only those few need a formatted key per refresh.
         let mut next = HashMap::with_capacity(self.watched.len());
+        let mut looping = std::collections::HashSet::new();
         for session in sessions.iter().filter(|s| s.is_running()) {
             let key = session.key();
             let state = state_of(session);
             let label = session.display_label().to_string();
+            // An edge, like every other ring: the first refresh the verdict
+            // holds, and not again until it has cleared and come back.
+            if session.looping().is_some() {
+                if !self.looping.contains(&key) {
+                    crossed.push(Rang {
+                        key: key.clone(),
+                        label: label.clone(),
+                        reason: Reason::Looping,
+                        at: Instant::now(),
+                    });
+                    posts.push(("looping", session));
+                }
+                looping.insert(key.clone());
+            }
             // Removing as we go leaves `watched` holding exactly the sessions
             // that were running last time and are not running now.
             // Only out of `Busy`, so answering a permission prompt and having
@@ -192,6 +214,7 @@ impl Notifier {
             }
         }
         self.watched = next;
+        self.looping = looping;
 
         if let Some(target) = &self.webhook {
             for (event, session) in posts {
@@ -303,6 +326,7 @@ impl Notifier {
                 Reason::NeedsInput => "waiting for input",
                 Reason::Asking => "needs permission",
                 Reason::Stopped => "stopped",
+                Reason::Looping => "looks stuck in a loop",
             }
         ))
     }
@@ -454,11 +478,18 @@ pub fn crossing(before: State, after: State) -> Option<Reason> {
 /// session left to hand back — which [`Notifier::observe`] covers with its
 /// own memory of labels.
 pub fn crossings<'a>(before: &[Session], after: &'a [Session]) -> Vec<(Reason, &'a Session)> {
-    let was: HashMap<String, State> = before.iter().map(|s| (s.key(), state_of(s))).collect();
+    let was: HashMap<String, (State, bool)> = before
+        .iter()
+        .map(|s| (s.key(), (state_of(s), s.looping().is_some())))
+        .collect();
     after
         .iter()
         .filter_map(|session| {
-            let reason = crossing(*was.get(&session.key())?, state_of(session))?;
+            let (state, looped) = *was.get(&session.key())?;
+            if !looped && session.looping().is_some() {
+                return Some((Reason::Looping, session));
+            }
+            let reason = crossing(state, state_of(session))?;
             Some((reason, session))
         })
         .collect()
@@ -499,6 +530,7 @@ fn crossing_text(rang: &Rang, extra: usize) -> String {
         Reason::NeedsInput => "is waiting for input",
         Reason::Asking => "needs permission",
         Reason::Stopped => "stopped",
+        Reason::Looping => "looks stuck in a loop",
     };
     format!("{} {what}{}", rang.label, more(extra))
 }
@@ -766,6 +798,44 @@ mod tests {
             Some(first.at),
             "a session that is still waiting must not ring again"
         );
+    }
+
+    /// A loop rings once when it starts, stays quiet while it goes on, and
+    /// rings again only after it cleared and came back.
+    #[test]
+    fn a_loop_rings_once_per_episode() {
+        let mut n = Notifier {
+            enabled: true,
+            ..Default::default()
+        };
+        let mut looping = session("a", true, ActivityState::Working);
+        looping.stuck.repeat = Some(crate::stuck::Repeat {
+            tool: "Bash".into(),
+            call: "cargo test".into(),
+            count: 4,
+            first: "2026-11-06T10:00:00Z".into(),
+            last: "2026-11-06T10:04:00Z".into(),
+        });
+        let calm = session("a", true, ActivityState::Working);
+
+        n.observe(std::slice::from_ref(&looping));
+        assert_eq!(n.pending.len(), 1, "{:?}", n.pending);
+        assert!(n.pending[0].contains("loop"), "{}", n.pending[0]);
+        n.pending.clear();
+
+        n.observe(std::slice::from_ref(&looping));
+        assert!(n.pending.is_empty(), "still the same loop: {:?}", n.pending);
+
+        n.observe(std::slice::from_ref(&calm));
+        n.observe(std::slice::from_ref(&looping));
+        assert_eq!(n.pending.len(), 1, "a new episode rings again");
+
+        // The webhook and Web Push edge, read off a pair of snapshots.
+        let crossed = crossings(std::slice::from_ref(&calm), std::slice::from_ref(&looping));
+        assert_eq!(crossed.len(), 1);
+        assert_eq!(crossed[0].0, Reason::Looping);
+        assert_eq!(Reason::Looping.event(), Some("looping"));
+        assert!(crossings(&[looping.clone()], &[looping]).is_empty());
     }
 
     #[test]

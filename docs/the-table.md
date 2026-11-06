@@ -157,6 +157,34 @@ the chart draws those identically. From three compactions on, the panel says how
 often: `↺ one compaction every 15m`. Claude Code only, since no other transcript
 records that a compaction happened.
 
+## `⟳` — an agent going round in circles
+
+`ERR%` is a rate over the whole session; this is the moment it is happening. A
+working agent is marked `⟳` in the status column and on its tab, rings once
+(with Web Push and the webhook, as a waiting agent does), and the Info panel
+says why, when it is doing one of three things:
+
+- **the same failing call, again** — the same command or tool call failing
+  `stuck_repeat` times in a row (3). Reading files between attempts does not
+  break the run; an edit, a call that worked, or a different failing call does,
+  so a test-fix loop that changes code between runs is never flagged;
+- **spending with nothing written** — `stuck_burn` (`"$2 / 10m"`) spent with no
+  edit and no passing test run (a shell call that runs a test runner and did not
+  fail) in that window;
+- **an edit made and unmade** — the same change applied and reverted twice on
+  one file.
+
+Only a working agent on this machine is ever marked: one at its prompt is not
+looping, whatever its last turn did. It clears by itself once the agent does
+something else. `stuck_detect = false` turns it off. An agent driving another
+over MCP sees it too: `wait_for_session` answers with `"looping": {"reason": …}`
+and `get_session_context` opens with it.
+
+What it does not catch: an agent that only ever reads (exploring and being lost
+look alike from outside), and a command that fails a different way each time —
+the error text is not kept, so "the same call failed again" stands in for "the
+same error again".
+
 ## `!` — when two agents are in one repository
 
 Two agents editing one checkout is not a merge conflict. Git would at least

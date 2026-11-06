@@ -121,6 +121,7 @@ fn payload(event: &str, session: &Session) -> Payload {
     Payload {
         title: match event {
             "asking" => "Needs permission",
+            "looping" => "Going round in circles",
             _ => "Waiting on you",
         }
         .to_string(),

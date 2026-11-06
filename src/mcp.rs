@@ -1055,10 +1055,22 @@ fn get_session_context(
     };
 
     let data = loader.store().session_data(session);
-    Ok(cctop_core::handoff::rendered(&cctop_core::handoff::build(
-        session,
-        Some(&data),
-    )))
+    let brief = cctop_core::handoff::rendered(&cctop_core::handoff::build(session, Some(&data)));
+    // A supervising agent reads this to decide whether to step in, and a loop
+    // is the reason it most needs to: said first, with what shows it.
+    Ok(match session.looping() {
+        Some(looping) => format!(
+            "Looping: {}\n{}\n\n{brief}",
+            looping.reason,
+            looping
+                .evidence
+                .iter()
+                .map(|e| format!("- {e}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        ),
+        None => brief,
+    })
 }
 
 /// Passages of past sessions, with the caller's own session left out.

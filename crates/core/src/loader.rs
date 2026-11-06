@@ -708,6 +708,8 @@ fn annotate(s: &mut Session, data: &SessionData, plan: Plan) {
     s.subagents_cost = data.subagents.iter().map(|sa| sa.cost).sum();
     s.subagents = data.subagents.clone();
     s.recent_writes = recent_writes(&data.recent_writes, &s.label_source);
+    s.stuck = data.stuck.clone();
+    s.recent_minutes = data.minutes_last_hour(&Utc::now());
 }
 
 /// Resolve the session's recent writes against the directory it runs in.

@@ -204,6 +204,29 @@ pub struct Clash {
     pub files: Vec<String>,
 }
 
+/// Why the agent looks stuck in a loop, and what shows it — see
+/// [`cctop_core::stuck`]. Beside the conflict warning, and as loud: both are
+/// an agent costing you while looking busy.
+fn looping_lines(session: &Session) -> Vec<Line<'static>> {
+    let Some(looping) = session.looping() else {
+        return Vec::new();
+    };
+    let mut lines = vec![Line::from(vec![
+        label(&format!("{:<9}", "Looping")),
+        Span::raw(" "),
+        Span::styled(
+            format!("⟳ {}", looping.reason),
+            Style::default()
+                .fg(theme::colors().cost_high)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ])];
+    for item in looping.evidence {
+        lines.push(Line::from(vec![Span::raw(" ".repeat(11)), dim(item)]));
+    }
+    lines
+}
+
 /// The Info panel's account of who else is on this session's ground.
 ///
 /// The `!` column can only say that something is wrong; this is where it says
@@ -382,6 +405,7 @@ pub fn info(
     lines.push(field("Cmd", cmd));
     lines.push(field("Plan", plan.as_str()));
     lines.extend(clash_lines(clash));
+    lines.extend(looping_lines(session));
     if let Some(effort) = &data.reasoning_effort {
         lines.push(field("Effort", effort.clone()));
     }

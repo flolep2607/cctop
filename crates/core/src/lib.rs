@@ -95,6 +95,8 @@ pub mod shim;
 pub mod ssh_config;
 pub mod ssh_master;
 pub mod sshfs;
+/// Spotting an agent that is going round in circles.
+pub mod stuck;
 /// The anonymous daily usage report, and its off switches.
 pub mod telemetry;
 #[cfg(any(test, feature = "test-support"))]

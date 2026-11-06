@@ -241,6 +241,11 @@ pub struct Outcome {
     /// `Some(true)` met, `Some(false)` can no longer be met, `None` timed out.
     pub met: Option<bool>,
     pub waited: Duration,
+    /// Why the session looks stuck in a loop, if it does — see
+    /// `cctop_core::stuck`. Worth saying on a timeout above all: a supervisor
+    /// that waited the full five minutes for a turn to end wants to know the
+    /// turn is never going to.
+    pub looping: Option<String>,
 }
 
 impl Outcome {
@@ -265,6 +270,7 @@ impl Outcome {
             "met": self.met == Some(true),
             "timed_out": self.met.is_none(),
             "waited_secs": (self.waited.as_secs_f64() * 10.0).round() / 10.0,
+            "looping": self.looping.as_ref().map(|reason| serde_json::json!({ "reason": reason })),
         })
     }
 
@@ -387,6 +393,7 @@ pub fn wait(
                 until,
                 met,
                 waited: started.elapsed(),
+                looping: session.and_then(Session::looping).map(|l| l.reason),
             });
         }
 
@@ -678,6 +685,7 @@ mod tests {
             until: Until::AnyStop,
             met,
             waited: Duration::from_secs(3),
+            looping: None,
         };
         assert_eq!(outcome(Some(true)).exit_code(), 0);
         assert_eq!(outcome(Some(false)).exit_code(), 1);
@@ -687,5 +695,6 @@ mod tests {
         assert_eq!(json["met"], true);
         assert_eq!(json["timed_out"], false);
         assert!(outcome(None).sentence().contains("gave up"));
+        assert!(json["looping"].is_null());
     }
 }

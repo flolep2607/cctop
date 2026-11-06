@@ -765,6 +765,8 @@ fn group_row(
 
 fn cell_color(id: ColumnId, s: &cctop_core::session::Session, age_secs: Option<i64>) -> Color {
     match id {
+        // As loud as a question: it is costing you time the same way.
+        ColumnId::Status if s.looping().is_some() => theme::colors().cost_high,
         ColumnId::Status => match s.activity_state {
             // Three states, three colours, loudest first: an agent blocked on a
             // question is the one costing you time, a finished turn is merely
