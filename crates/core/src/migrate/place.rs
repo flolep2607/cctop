@@ -26,11 +26,18 @@ pub fn propose(ask: &Ask, home: &Path) -> Result<Placement, String> {
         if !dir.is_absolute() {
             return Err(format!("{typed} is not an absolute path"));
         }
-        return propose_at(ask, &dir);
+        let placed = propose_at(ask, &dir)?;
+        if placed.kind == Kind::Clone && !clone_place_ok(&dir, home) {
+            return Err(format!(
+                "{typed} is not somewhere a new clone goes here — under the home, \
+                 outside hidden directories"
+            ));
+        }
+        return Ok(placed);
     }
     let same = crate::repos::repos_under(home)
         .into_iter()
-        .find(|root| key_of(root).as_deref() == Some(ask.repo.key.as_str()));
+        .find(|root| same_repo(root, &ask.repo));
     if let Some(root) = same {
         return evaluate(ask, &root);
     }
@@ -60,9 +67,9 @@ fn propose_at(ask: &Ask, dir: &Path) -> Result<Placement, String> {
             note: None,
         });
     }
-    match key_of(dir) {
-        Some(key) if key == ask.repo.key && is_root(dir) => evaluate(ask, dir),
-        _ => Err(format!(
+    match same_repo(dir, &ask.repo) && is_root(dir) {
+        true => evaluate(ask, dir),
+        false => Err(format!(
             "{} is neither empty nor a checkout of {}",
             dir.display(),
             ask.repo.key
@@ -107,9 +114,82 @@ fn evaluate(ask: &Ask, root: &Path) -> Result<Placement, String> {
     })
 }
 
+/// Whether the placement the sender sent is the one this side would choose
+/// for it now — asked again here rather than taken on its word.
+///
+/// The sender only relays what [`propose`] answered, and the person's typed
+/// directory; a placement this machine would not have offered — a clone into
+/// a dot-directory, a worktree beside a checkout that is not this repository,
+/// a "clean" checkout that has since been written to — is refused, so every
+/// path a move writes is one this side chose. A clone lands under the home,
+/// outside any hidden directory: somewhere a person keeps projects, never
+/// `~/.config/autostart`.
+fn confirm(m: &Manifest, home: &Path) -> Result<(), String> {
+    let ask = Ask {
+        protocol: m.protocol,
+        harness: m.harness,
+        repo: m.repo.clone(),
+        dir: None,
+    };
+    let placed = &m.placement;
+    let dir = PathBuf::from(&placed.dir);
+    let ours = match placed.kind {
+        Kind::Clone => {
+            if !clone_place_ok(&dir, home) {
+                return Err(format!(
+                    "{} is not somewhere a new clone goes here — under the home, \
+                     outside hidden directories",
+                    dir.display()
+                ));
+            }
+            propose_at(&ask, &dir)?
+        }
+        Kind::Existing => propose_at(&ask, &dir)?,
+        Kind::Worktree => {
+            let root = PathBuf::from(placed.root.as_deref().ok_or("no checkout named")?);
+            match same_repo(&root, &m.repo) && is_root(&root) {
+                true => evaluate(&ask, &root)?,
+                false => {
+                    return Err(format!(
+                        "{} is not a checkout of {}",
+                        root.display(),
+                        m.repo.key
+                    ));
+                }
+            }
+        }
+    };
+    match (ours.kind, ours.dir == placed.dir, ours.root == placed.root) {
+        (kind, true, true) if kind == placed.kind => Ok(()),
+        _ => Err(format!(
+            "{} is not where this machine would put it now — move it again",
+            placed.dir
+        )),
+    }
+}
+
+/// Somewhere a new clone may be made: below `home`, and in no hidden
+/// directory on the way — where a person keeps projects, not where programs
+/// keep what they run at login.
+fn clone_place_ok(dir: &Path, home: &Path) -> bool {
+    dir.strip_prefix(home).is_ok_and(|rel| {
+        rel.components().next().is_some()
+            && rel.components().all(|c| match c {
+                std::path::Component::Normal(part) => !part.to_string_lossy().starts_with('.'),
+                _ => false,
+            })
+    })
+}
+
 /// Put the bundle's snapshot in place as `m.placement` says, and answer the
-/// directory the session resumes in.
-pub fn apply(m: &Manifest, bundle: &Path, journal: &mut Journal) -> Result<PathBuf, String> {
+/// directory the session resumes in. `home` is this machine's, which a new
+/// clone has to land under.
+pub fn apply(
+    m: &Manifest,
+    bundle: &Path,
+    home: &Path,
+    journal: &mut Journal,
+) -> Result<PathBuf, String> {
     if !plain_relative(&m.repo.rel_cwd) {
         return Err("the session's directory walks out of its checkout".into());
     }
@@ -117,6 +197,7 @@ pub fn apply(m: &Manifest, bundle: &Path, journal: &mut Journal) -> Result<PathB
     if !dir.is_absolute() {
         return Err("the directory to land in is not an absolute path".into());
     }
+    confirm(m, home)?;
     let move_ref = format!("{MOVE_REF}/{}", m.move_id);
     let fetch_into = |repo: &Path, journal: &mut Journal| -> Result<(), String> {
         run(git(repo).args(["bundle", "verify", "-q"]).arg(bundle))?;
@@ -162,7 +243,7 @@ pub fn apply(m: &Manifest, bundle: &Path, journal: &mut Journal) -> Result<PathB
         }
         Kind::Worktree => {
             let root = PathBuf::from(m.placement.root.as_deref().ok_or("no checkout named")?);
-            check_checkout(&root, &m.repo.key)?;
+            check_checkout(&root, &m.repo)?;
             if dir.exists() {
                 return Err(format!("{} is already there", dir.display()));
             }
@@ -178,7 +259,7 @@ pub fn apply(m: &Manifest, bundle: &Path, journal: &mut Journal) -> Result<PathB
             dir.clone()
         }
         Kind::Existing => {
-            check_checkout(&dir, &m.repo.key)?;
+            check_checkout(&dir, &m.repo)?;
             // Asked again now rather than trusted from the plan: the person
             // may have spent a minute on the confirmation.
             if !clean(&dir)? || in_use(&dir) {
@@ -193,6 +274,7 @@ pub fn apply(m: &Manifest, bundle: &Path, journal: &mut Journal) -> Result<PathB
                 .ok()
                 .filter(|b| !b.is_empty());
             let added = added_paths(&dir, &prev, snap)?;
+            back_up_ignored(&dir, snap, &m.move_id, journal)?;
             let mut branch_was = None;
             match m.repo.branch.as_deref().filter(|b| branch_name_ok(b)) {
                 Some(b) => match branch_tip(&dir, b) {
@@ -262,14 +344,91 @@ fn added_paths(root: &Path, prev: &str, snap: &str) -> Result<Vec<String>, Strin
 }
 
 /// The checkout is still the repository it was offered as.
-fn check_checkout(root: &Path, key: &str) -> Result<(), String> {
-    match key_of(root) {
-        Some(k) if k == key && is_root(root) => Ok(()),
-        _ => Err(format!(
-            "{} is no longer a checkout of {key}",
-            root.display()
+fn check_checkout(root: &Path, repo: &super::Repo) -> Result<(), String> {
+    match same_repo(root, repo) && is_root(root) {
+        true => Ok(()),
+        false => Err(format!(
+            "{} is no longer a checkout of {}",
+            root.display(),
+            repo.key
         )),
     }
+}
+
+/// Whether the checkout at `root` is the repository `repo` describes.
+///
+/// By its key, as [`crate::worktree::Repo::key`] spells it — and, when that
+/// key is only a path, also by history. A repository with no origin (or a
+/// local path for one) is keyed by where it sits, and two machines with the
+/// same home layout have unrelated `~/notes` at the same path: matched by key
+/// alone, the session's work would be written over a stranger's checkout. A
+/// path is never an identity across machines, so the checkout here must also
+/// already have the commit the session is on.
+fn same_repo(root: &Path, repo: &super::Repo) -> bool {
+    if key_of(root).as_deref() != Some(repo.key.as_str()) {
+        return false;
+    }
+    let by_url = repo.origin.as_deref().is_some_and(origin_ok);
+    by_url || has_commit(root, &repo.head)
+}
+
+/// Files git ignores here that the snapshot would write over: copied aside
+/// first, each journalled so an undo puts it back.
+///
+/// The checkout is clean by `git status`, which does not see ignored files —
+/// and a file this side ignores (a global excludes file, `info/exclude`) can
+/// be one the sending side carried as untracked work. `switch` and `restore`
+/// would replace it without a word. The copies are kept in the repository's
+/// own git directory, under the move's id, after the move is kept too: what
+/// was there is never lost, and a note says where it went.
+fn back_up_ignored(
+    root: &Path,
+    snap: &str,
+    move_id: &str,
+    journal: &mut Journal,
+) -> Result<(), String> {
+    let ignored: std::collections::HashSet<String> = run(git(root).args([
+        "ls-files",
+        "-z",
+        "--others",
+        "--ignored",
+        "--exclude-standard",
+    ]))?
+    .split('\0')
+    .filter(|p| !p.is_empty())
+    .map(str::to_string)
+    .collect();
+    if ignored.is_empty() {
+        return Ok(());
+    }
+    let carried = run(git(root).args(["ls-tree", "-r", "-z", "--name-only", snap]))?;
+    let hit: Vec<&str> = carried
+        .split('\0')
+        .filter(|p| !p.is_empty() && ignored.contains(*p) && plain_relative(p))
+        .collect();
+    if hit.is_empty() {
+        return Ok(());
+    }
+    let git_dir = PathBuf::from(run(git(root).args(["rev-parse", "--absolute-git-dir"]))?);
+    let aside = git_dir.join("cctop-moved").join(move_id);
+    for rel in &hit {
+        let from = root.join(rel);
+        if !from.is_file() {
+            continue;
+        }
+        let to = aside.join(rel);
+        if let Some(parent) = to.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
+        }
+        std::fs::copy(&from, &to).map_err(|e| format!("{}: {e}", from.display()))?;
+        journal.push(Undo::RestoreFile { from: to, to: from })?;
+    }
+    journal.note(format!(
+        "{} ignored here and replaced by the session's — the old copies are in {}",
+        crate::util::plural(hit.len(), "file"),
+        aside.display()
+    ));
+    Ok(())
 }
 
 fn key_of(dir: &Path) -> Option<String> {
@@ -466,7 +625,7 @@ mod tests {
         assert_eq!(placement.kind, Kind::Clone);
         assert_eq!(PathBuf::from(&placement.dir), home.path().join("app"));
         let mut j = journal(home.path());
-        let cwd = apply(&manifest(&src, placement), &src.bundle, &mut j).unwrap();
+        let cwd = apply(&manifest(&src, placement), &src.bundle, home.path(), &mut j).unwrap();
         assert_eq!(
             std::fs::read_to_string(cwd.join("a.txt")).unwrap(),
             "changed here\n"
@@ -504,7 +663,7 @@ mod tests {
         assert_eq!(placement.kind, Kind::Existing, "{placement:?}");
         assert!(placement.has_head);
         let mut j = journal(home.path());
-        let cwd = apply(&manifest(&src, placement), &src.bundle, &mut j).unwrap();
+        let cwd = apply(&manifest(&src, placement), &src.bundle, home.path(), &mut j).unwrap();
         assert_eq!(cwd, there);
         assert_eq!(
             git_out(&there, &["symbolic-ref", "--short", "HEAD"]),
@@ -541,7 +700,7 @@ mod tests {
         let placement = propose(&ask(&src, None), home.path()).unwrap();
         assert_eq!(placement.kind, Kind::Worktree, "{placement:?}");
         let mut j = journal(home.path());
-        let cwd = apply(&manifest(&src, placement), &src.bundle, &mut j).unwrap();
+        let cwd = apply(&manifest(&src, placement), &src.bundle, home.path(), &mut j).unwrap();
         assert_eq!(cwd, home.path().join("app-moved"));
         assert_eq!(
             std::fs::read_to_string(cwd.join("new.txt")).unwrap(),
@@ -594,7 +753,7 @@ mod tests {
                 .is_some_and(|n| n.contains("detached"))
         );
         let mut j = journal(home.path());
-        apply(&manifest(&src, placement), &src.bundle, &mut j).unwrap();
+        apply(&manifest(&src, placement), &src.bundle, home.path(), &mut j).unwrap();
         assert_eq!(git_out(&there, &["rev-parse", "main"]), tip);
         assert_eq!(git_out(&there, &["rev-parse", "HEAD"]), src.snap.repo.head);
         assert!(j.undo_all().is_empty());
@@ -639,7 +798,7 @@ mod tests {
         );
         let placement = propose(&ask(&src, None), home.path()).unwrap();
         let mut j = journal(home.path());
-        apply(&manifest(&src, placement), &src.bundle, &mut j).unwrap();
+        apply(&manifest(&src, placement), &src.bundle, home.path(), &mut j).unwrap();
         j.undo_all();
         assert!(!ran.exists(), "a hook or fsmonitor ran");
     }
@@ -657,6 +816,111 @@ mod tests {
         let p = propose(&ask(&src, Some(&empty)), home.path()).unwrap();
         assert_eq!(p.kind, Kind::Clone);
         assert!(propose(&ask(&src, Some(Path::new("relative/x"))), home.path()).is_err());
+    }
+
+    /// The receiver lands a clone only where it would have chosen to: a
+    /// placement the sender made up — a hidden directory, somewhere outside
+    /// the home — is refused before anything is written.
+    #[test]
+    fn a_placement_this_side_would_not_choose_is_refused() {
+        let src = source(true);
+        let home = tempfile::tempdir().unwrap();
+        for dir in [
+            home.path().join(".config/autostart"),
+            tempfile::tempdir().unwrap().path().join("elsewhere"),
+        ] {
+            let placement = Placement {
+                kind: Kind::Clone,
+                dir: dir.to_string_lossy().into_owned(),
+                root: None,
+                has_head: false,
+                note: None,
+            };
+            let mut j = journal(home.path());
+            let why =
+                apply(&manifest(&src, placement), &src.bundle, home.path(), &mut j).unwrap_err();
+            assert!(why.contains("not somewhere a new clone goes"), "{why}");
+            assert!(!dir.exists());
+        }
+        // Typed at the plan, the same directory is refused there already.
+        let hidden = home.path().join(".local/app");
+        assert!(propose(&ask(&src, Some(&hidden)), home.path()).is_err());
+    }
+
+    /// A repository known only by its path is the same one here only if it
+    /// shares history: an unrelated checkout at the same path is not.
+    #[test]
+    fn a_path_is_not_an_identity_across_machines() {
+        let home = tempfile::tempdir().unwrap();
+        let here = repo(&home.path().join("notes"));
+        let key = key_of(&here).unwrap();
+        let head = git_out(&here, &["rev-parse", "HEAD"]);
+        let theirs = |head: &str| crate::migrate::Repo {
+            origin: None,
+            key: key.clone(),
+            name: "notes".into(),
+            head: head.into(),
+            branch: Some("main".into()),
+            rel_cwd: String::new(),
+        };
+        assert!(!same_repo(&here, &theirs(&"1".repeat(40))));
+        assert!(same_repo(&here, &theirs(&head)));
+        // With a real origin, the key is the identity, history or not.
+        let mut by_url = theirs(&"1".repeat(40));
+        by_url.origin = Some(ORIGIN.into());
+        git_out(&here, &["remote", "add", "origin", ORIGIN]);
+        by_url.key = key_of(&here).unwrap();
+        assert!(same_repo(&here, &by_url));
+    }
+
+    /// A file this checkout ignores, which the session carried as work, is
+    /// kept aside before it is replaced — and put back by an undo.
+    #[test]
+    fn an_ignored_file_here_is_kept_aside_and_given_back() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = repo(&tmp.path().join("app"));
+        git_out(&root, &["remote", "add", "origin", ORIGIN]);
+        std::fs::write(root.join("local.env"), "mine\n").unwrap();
+        let snap = snapshot::take(&root, "mv-ignored").unwrap();
+        let bundle = tmp.path().join("b.bundle");
+        snapshot::bundle(&snap, true, &bundle).unwrap();
+        let src = Source {
+            _tmp: tmp,
+            root,
+            snap,
+            bundle,
+        };
+
+        let home = tempfile::tempdir().unwrap();
+        let there = home.path().join("app");
+        let out = crate::worktree::git_in(home.path())
+            .args(["clone", "-q"])
+            .arg(&src.root)
+            .arg(&there)
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        git_out(&there, &["remote", "set-url", "origin", ORIGIN]);
+        std::fs::write(there.join(".git/info/exclude"), "local.env\n").unwrap();
+        std::fs::write(there.join("local.env"), "theirs\n").unwrap();
+
+        let placement = propose(&ask(&src, None), home.path()).unwrap();
+        assert_eq!(placement.kind, Kind::Existing, "{placement:?}");
+        let mut m = manifest(&src, placement);
+        m.move_id = "mv-ignored".into();
+        let mut j = journal(home.path());
+        apply(&m, &src.bundle, home.path(), &mut j).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(there.join("local.env")).unwrap(),
+            "mine\n"
+        );
+        let aside = there.join(".git/cctop-moved/mv-ignored/local.env");
+        assert_eq!(std::fs::read_to_string(&aside).unwrap(), "theirs\n");
+        assert!(j.undo_all().is_empty());
+        assert_eq!(
+            std::fs::read_to_string(there.join("local.env")).unwrap(),
+            "theirs\n"
+        );
     }
 
     #[test]

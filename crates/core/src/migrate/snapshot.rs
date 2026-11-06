@@ -129,6 +129,47 @@ pub fn bundle(snap: &Snapshot, has_head: bool, out: &Path) -> Result<(), String>
     run(&mut cmd).map(|_| ())
 }
 
+/// Refuse a snapshot whose work in progress touches files Git LFS tracks.
+///
+/// `git add` turns such a file into a pointer, and the object it points at
+/// lives only in this machine's `.git/lfs` — the bundle does not carry it, and
+/// the far side does not fetch it. The file would arrive as three lines of
+/// pointer text, which the agent there could go on to commit.
+pub fn refuse_lfs(snap: &Snapshot) -> Result<(), String> {
+    let changed = run(git(&snap.root).args([
+        "diff",
+        "--name-only",
+        "-z",
+        "--no-renames",
+        &snap.repo.head,
+        &snap.commit,
+    ]))?;
+    let paths: Vec<&str> = changed.split('\0').filter(|p| !p.is_empty()).collect();
+    if paths.is_empty() {
+        return Ok(());
+    }
+    let mut cmd = git(&snap.root);
+    cmd.args(["check-attr", "-z", "filter", "--"]).args(&paths);
+    let attrs = run(&mut cmd)?;
+    // `-z` output is path, attribute, value, each NUL-terminated.
+    let fields: Vec<&str> = attrs.split('\0').collect();
+    let lfs: Vec<&str> = fields
+        .chunks(3)
+        .filter(|f| f.len() == 3 && f[2] == "lfs")
+        .map(|f| f[0])
+        .collect();
+    match lfs.is_empty() {
+        true => Ok(()),
+        false => Err(format!(
+            "{} changed here {} tracked by Git LFS ({}), whose new contents would arrive as \
+             pointers — commit and push them with LFS first, then move it",
+            crate::util::plural(lfs.len(), "file"),
+            if lfs.len() == 1 { "is" } else { "are" },
+            lfs.iter().take(3).copied().collect::<Vec<_>>().join(", ")
+        )),
+    }
+}
+
 /// Drop the snapshot's ref; the objects go with the next gc.
 pub fn forget(snap: &Snapshot) {
     let _ = run(git(&snap.root).args(["update-ref", "-d", &snap.refname]));
@@ -214,6 +255,23 @@ pub(crate) mod tests {
         assert!(heads(&thin).contains("refs/cctop/move/m2"));
         assert!(!heads(&thin).contains("refs/heads/main"));
         assert!(heads(&full).contains("refs/heads/main"));
+    }
+
+    /// Work in a file Git LFS tracks would arrive as a pointer: refused,
+    /// naming it; other work is not.
+    #[test]
+    fn work_in_an_lfs_file_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = repo(&tmp.path().join("app"));
+        std::fs::write(root.join(".gitattributes"), "*.bin filter=lfs\n").unwrap();
+        let plain = take(&root, "m4").unwrap();
+        refuse_lfs(&plain).unwrap();
+        forget(&plain);
+        std::fs::write(root.join("model.bin"), "weights").unwrap();
+        let lfs = take(&root, "m5").unwrap();
+        let why = refuse_lfs(&lfs).unwrap_err();
+        assert!(why.contains("model.bin"), "{why}");
+        forget(&lfs);
     }
 
     #[test]

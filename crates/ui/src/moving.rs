@@ -33,6 +33,9 @@ pub struct Flow {
     pub plan: Option<Box<Plan>>,
     /// The directory, editable in the confirmation.
     pub dir: super::line_edit::LineEdit,
+    /// `q` was pressed once with an agent stopped by a move: the second one
+    /// quits.
+    pub quit_warned: bool,
 }
 
 /// One place a session could move to: a `--host` over ssh, or a sibling on
@@ -251,6 +254,26 @@ impl App {
     }
 }
 
+impl App {
+    /// Whether quitting has to wait for a word first: an agent is stopped by
+    /// a move, and a cctop that quits now leaves it stopped — safely, since the
+    /// far side may be running it, but not silently.
+    pub(super) fn quit_held_by_move(&mut self) -> bool {
+        let Some((_, machine)) = cctop_core::migrate::send::in_flight() else {
+            return false;
+        };
+        if self.moving.quit_warned {
+            return false;
+        }
+        self.moving.quit_warned = true;
+        self.set_status(format!(
+            "An agent is stopped by a move to {machine} — q again quits and leaves it \
+             stopped, with how to settle it"
+        ));
+        true
+    }
+}
+
 /// One line saying how the files would land.
 pub(crate) fn landing(plan: &Plan) -> String {
     let p = &plan.placement;
@@ -314,6 +337,9 @@ pub(super) fn sample() -> Plan {
         },
         machine: "desktop".into(),
         size_hint: 3 * 1024 * 1024,
+        pid_start: None,
+        transcript_stamp: None,
+        typed: None,
     }
 }
 

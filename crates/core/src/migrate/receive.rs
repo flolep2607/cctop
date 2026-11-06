@@ -13,6 +13,13 @@
 //! `abort` (undo everything); a ticket the sender never comes back for is
 //! kept after [`STALE`], since by then the agent here is the only copy
 //! running.
+//!
+//! A ticket is the sender's own move id, which it knows before a byte leaves:
+//! a sender that lost the answer — a dropped ssh, a tunnel that timed out
+//! while this side was still resuming — can still name the move to `abort`,
+//! and must, because the agent here may be running. [`abort`] answers `Ok`
+//! only when nothing of the move is left running here, so the sender thaws its
+//! own agent only on that word.
 
 use serde::{Deserialize, Serialize};
 use std::io::{BufRead, Read, Write};
@@ -27,6 +34,23 @@ use super::{
 /// How long a received move waits for `finish` or `abort` before it is
 /// simply kept.
 pub const STALE: Duration = Duration::from_secs(30 * 60);
+
+/// Where a move that was kept leaves its id, so a late `abort` for it is
+/// told the truth — it is running here, and staying — instead of hearing
+/// that nothing is here to undo.
+fn kept_dir() -> PathBuf {
+    staging().join("kept")
+}
+
+fn mark_kept(move_id: &str) {
+    let dir = kept_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    let _ = std::fs::write(dir.join(move_id), b"");
+}
+
+fn was_kept(move_id: &str) -> bool {
+    kept_dir().join(move_id).exists()
+}
 
 /// How long the resumed agent has to be up, and to stay up, before the move
 /// counts as having arrived.
@@ -56,6 +80,9 @@ pub enum Undo {
     },
     /// A transcript installed into the harness's store.
     RemoveFile(PathBuf),
+    /// A file git ignores here, copied aside before the snapshot replaced it:
+    /// copied back.
+    RestoreFile { from: PathBuf, to: PathBuf },
     /// The tab the agent was resumed in.
     KillTab(String),
 }
@@ -127,6 +154,9 @@ impl Journal {
 fn undo(step: &Undo) -> Result<(), String> {
     match step {
         Undo::KillTab(name) => crate::rmux::kill(name),
+        Undo::RestoreFile { from, to } => std::fs::copy(from, to)
+            .map(|_| ())
+            .map_err(|e| format!("{}: {e}", to.display())),
         Undo::RemoveFile(path) => match std::fs::remove_file(path) {
             Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
                 Err(format!("{}: {e}", path.display()))
@@ -233,17 +263,43 @@ pub fn receive(input: &mut impl BufRead) -> Result<Receipt, String> {
     let m: Manifest =
         serde_json::from_str(line.trim()).map_err(|e| format!("the manifest: {e}"))?;
     check(&m, 1)?;
+    let store = match m.harness {
+        Harness::Claude => crate::config::CLAUDE_CONFIG_DIR.clone(),
+        Harness::Codex => crate::config::CODEX_HOME.clone(),
+    };
+    receive_checked(&m, input, &crate::config::HOME, &store, &resume)
+}
+
+/// [`receive`] once the manifest is read and has passed [`check`], with the
+/// home placement is checked against, the harness's store and the resume
+/// handed in, for the tests.
+fn receive_checked(
+    m: &Manifest,
+    input: &mut impl Read,
+    home: &Path,
+    store: &Path,
+    resume: &dyn Fn(&crate::session::Session) -> Result<String, String>,
+) -> Result<Receipt, String> {
+    let m = m.clone();
     let base = staging();
     // One at a time: two moves into one checkout would each undo into the
     // other's state.
-    let _lock = crate::util::lock_within(&base.join("lock"), Duration::ZERO).map_err(|_| {
+    let _lock = lock(&base).map_err(|_| {
         "another move is arriving here right now — try again in a moment".to_string()
     })?;
     keep_stale(&base);
 
-    let ticket = crate::util::new_uuid();
+    if was_kept(&m.move_id) {
+        return Err("that move already arrived here and was kept".into());
+    }
+    let ticket = m.move_id.clone();
     let dir = base.join(&ticket);
-    std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    // `create_dir`, not `_all`: a second receive of one move id is refused
+    // rather than written into the first one's journal.
+    std::fs::create_dir(&dir).map_err(|e| match e.kind() {
+        std::io::ErrorKind::AlreadyExists => "that move already arrived here".to_string(),
+        _ => format!("{}: {e}", dir.display()),
+    })?;
     {
         use std::os::unix::fs::PermissionsExt;
         let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
@@ -254,11 +310,7 @@ pub fn receive(input: &mut impl BufRead) -> Result<Receipt, String> {
         copy_exact(input, &bundle, &m.bundle)?;
         copy_exact(input, &transcript, &m.transcript)?;
         let mut journal = Journal::new(dir.join("journal.json"));
-        let store = match m.harness {
-            Harness::Claude => crate::config::CLAUDE_CONFIG_DIR.clone(),
-            Harness::Codex => crate::config::CODEX_HOME.clone(),
-        };
-        match land(&m, &bundle, &transcript, &store, &resume, &mut journal) {
+        match land(&m, &bundle, &transcript, store, home, resume, &mut journal) {
             Ok((session_id, rmux, cwd)) => {
                 let note = (!journal.notes.is_empty()).then(|| journal.notes.join("; "));
                 Ok(Receipt {
@@ -296,8 +348,14 @@ pub fn receive(input: &mut impl BufRead) -> Result<Receipt, String> {
 fn check(m: &Manifest, copies: u64) -> Result<u64, String> {
     protocol(m.protocol)?;
     installed(m.harness)?;
-    if !crate::remote_open::id_ok(&m.session_id) || !crate::remote_open::id_ok(&m.move_id) {
+    if !crate::remote_open::id_ok(&m.session_id) {
         return Err("the manifest names a session id that is not one".into());
+    }
+    // The move id names the ticket, the upload and the directories they are
+    // kept in: a uuid, as the sender makes them, and nothing that could be a
+    // path.
+    if !crate::config::is_full_uuid(&m.move_id) {
+        return Err("the manifest names a move id that is not one".into());
     }
     let total = m.bundle.len.saturating_add(m.transcript.len);
     if total > MAX_TOTAL {
@@ -329,10 +387,11 @@ fn land(
     bundle: &Path,
     transcript: &Path,
     store: &Path,
+    home: &Path,
     resume: &dyn Fn(&crate::session::Session) -> Result<String, String>,
     journal: &mut Journal,
 ) -> Result<(String, String, PathBuf), String> {
-    let cwd = super::place::apply(m, bundle, journal)?;
+    let cwd = super::place::apply(m, bundle, home, journal)?;
     let cwd_text = cwd.to_string_lossy().into_owned();
     let (id, file) = super::transcript::install(
         m.harness,
@@ -349,7 +408,13 @@ fn land(
     let mut session = crate::session::Session::new(m.harness.provider(), id.clone());
     session.label_source = cwd_text;
     let rmux = resume(&session)?;
-    journal.push(Undo::KillTab(rmux.clone()))?;
+    // The agent is running: if its undo step cannot be written, the undo
+    // that follows would leave it running with everything under it taken
+    // away — so it is stopped here, before the error goes up.
+    if let Err(why) = journal.push(Undo::KillTab(rmux.clone())) {
+        let _ = crate::rmux::kill(&rmux);
+        return Err(why);
+    }
     Ok((id, rmux, cwd))
 }
 
@@ -456,6 +521,10 @@ fn open_upload(m: &Manifest) -> Result<String, String> {
     let base = uploads();
     std::fs::create_dir_all(&base).map_err(|e| format!("{}: {e}", base.display()))?;
     for entry in std::fs::read_dir(&base).into_iter().flatten().flatten() {
+        // An upload that has its answer is not arriving any more: it waits
+        // only for the sender's `finish` or `abort`, and is dropped once that
+        // has had [`STALE`] to come.
+        let answered = entry.path().join(RESULT).exists();
         // By its newest file, not the directory: a chunk appends to `data`,
         // which leaves the directory's own time where it was, and a slow
         // uplink can take longer than [`STALE`] to send a large one.
@@ -465,20 +534,26 @@ fn open_upload(m: &Manifest) -> Result<String, String> {
             .flatten()
             .filter_map(|file| file.metadata().and_then(|m| m.modified()).ok())
             .any(|t| t.elapsed().is_ok_and(|e| e < STALE));
-        match fresh {
-            true => {
+        match (fresh, answered) {
+            (true, false) => {
                 return Err(
                     "another move is arriving here right now — try again in a moment".into(),
                 );
             }
-            false => {
+            (true, true) => {}
+            (false, _) => {
                 let _ = std::fs::remove_dir_all(entry.path());
             }
         }
     }
-    let id = crate::util::new_uuid();
+    // Named by the move, so the sender can abort it without having heard
+    // back from this `begin`.
+    let id = m.move_id.clone();
     let dir = base.join(&id);
-    std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    std::fs::create_dir(&dir).map_err(|e| match e.kind() {
+        std::io::ErrorKind::AlreadyExists => "that move is already arriving here".to_string(),
+        _ => format!("{}: {e}", dir.display()),
+    })?;
     {
         use std::os::unix::fs::PermissionsExt;
         let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
@@ -537,10 +612,20 @@ pub fn commit(id: &str) -> Result<(), String> {
             human(total)
         ));
     }
-    if dir.join("committing").exists() || dir.join(RESULT).exists() {
+    if dir.join(RESULT).exists() {
         return Err("that upload is already being received".into());
     }
-    std::fs::write(dir.join("committing"), b"").map_err(|e| e.to_string())?;
+    // Made with `create_new`, so of two commits at once only one runs: the
+    // second would fail on the lock and write its failure over the first
+    // one's success, and the sender would thaw an agent that also runs here.
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(dir.join("committing"))
+        .map_err(|e| match e.kind() {
+            std::io::ErrorKind::AlreadyExists => "that upload is already being received".into(),
+            _ => e.to_string(),
+        })?;
     std::thread::spawn(move || {
         let answer = Answer::from(pour(&dir, &m));
         let _ = std::fs::remove_file(dir.join("data"));
@@ -560,8 +645,11 @@ fn pour(dir: &Path, m: &Manifest) -> Result<Receipt, String> {
     receive(&mut stream)
 }
 
-/// `status`: `None` while the commit is still running, else how it ended —
-/// after which the upload is gone.
+/// `status`: `None` while the commit is still running, else how it ended.
+///
+/// The answer stays readable until the sender says `finish` or `abort`: a
+/// reply lost on the way back is asked for again, and the ticket it names is
+/// still there to undo.
 pub fn status(id: &str) -> Result<Option<Receipt>, String> {
     let dir = upload_dir(id)?;
     let Ok(text) = std::fs::read_to_string(dir.join(RESULT)) else {
@@ -570,7 +658,6 @@ pub fn status(id: &str) -> Result<Option<Receipt>, String> {
             false => Err("no such upload — it may have been given up on".into()),
         };
     };
-    let _ = std::fs::remove_dir_all(&dir);
     serde_json::from_str::<Answer<Receipt>>(&text)
         .map_err(|e| format!("its answer: {e}"))?
         .into_result()
@@ -579,32 +666,57 @@ pub fn status(id: &str) -> Result<Option<Receipt>, String> {
 
 /// `finish`: keep it.
 pub fn finish(t: &Ticket) -> Result<(), String> {
-    let mut journal = Journal::load(ticket_dir(t)?.join("journal.json"))?;
+    let dir = ticket_dir(t)?;
+    let _lock = lock(&staging()).map_err(|_| "a move is arriving here — ask again".to_string())?;
+    let mut journal = Journal::load(dir.join("journal.json"))?;
     journal.finish();
-    let _ = std::fs::remove_dir_all(ticket_dir(t)?);
+    mark_kept(&t.ticket);
+    let _ = std::fs::remove_dir_all(dir);
+    let _ = std::fs::remove_dir_all(uploads().join(&t.ticket));
     Ok(())
 }
 
-/// `abort`: take it all back. An upload not yet committed is simply
-/// dropped; a received move is undone from its journal.
+/// `abort`: take it all back, by the move's id.
+///
+/// `Ok` means nothing of that move is running here — undone now, or it never
+/// landed — and is the only answer on which the sender lets its own agent go
+/// on. Anything else is an `Err` the sender asks again about: a receive still
+/// in progress, a move already kept, an undo that could not stop the agent.
 pub fn abort(t: &Ticket) -> Result<(), String> {
-    if let Ok(dir) = upload_dir(&t.ticket)
-        && dir.is_dir()
-    {
-        protocol(t.protocol)?;
-        if dir.join("committing").exists() && !dir.join(RESULT).exists() {
-            return Err("it is being received right now — abort its ticket once it is".into());
-        }
-        let _ = std::fs::remove_dir_all(&dir);
-        return Ok(());
+    let dir = ticket_dir(t)?;
+    let upload = uploads().join(&t.ticket);
+    // An upload committed but not yet received: the receive may be about to
+    // start the agent, and holds no lock until its thread takes one.
+    if upload.join("committing").exists() && !upload.join(RESULT).exists() {
+        return Err("it is being received right now — ask again in a moment".into());
     }
-    let mut journal = Journal::load(ticket_dir(t)?.join("journal.json"))?;
-    let failed = journal.undo_all();
-    let _ = std::fs::remove_dir_all(ticket_dir(t)?);
-    match failed.is_empty() {
+    // A receive in progress holds this; once it is free, what is on disk is
+    // the whole story.
+    let _lock =
+        lock(&staging()).map_err(|_| "it is being received right now — ask again".to_string())?;
+    if upload.join("committing").exists() && !upload.join(RESULT).exists() {
+        return Err("it is being received right now — ask again in a moment".into());
+    }
+    if was_kept(&t.ticket) {
+        return Err("it was already kept here and is running".into());
+    }
+    let undone = match Journal::load(dir.join("journal.json")) {
+        Ok(mut journal) => journal.undo_all(),
+        // No journal: it never landed, or failed and was undone as it failed.
+        Err(_) => Vec::new(),
+    };
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&upload);
+    match undone.is_empty() {
         true => Ok(()),
-        false => Err(format!("undoing it failed: {}", failed.join("; "))),
+        false => Err(format!("undoing it failed: {}", undone.join("; "))),
     }
+}
+
+/// The staging lock every receive holds, taken without waiting.
+fn lock(base: &Path) -> Result<std::fs::File, ()> {
+    let _ = std::fs::create_dir_all(base);
+    crate::util::lock_within(&base.join("lock"), Duration::ZERO).map_err(|_| ())
 }
 
 fn ticket_dir(t: &Ticket) -> Result<PathBuf, String> {
@@ -625,7 +737,25 @@ fn keep_stale(base: &Path) {
             .is_ok_and(|t| t.elapsed().is_ok_and(|e| e > STALE));
         if old && let Ok(mut j) = Journal::load(journal) {
             j.finish();
+            if let Some(id) = entry.file_name().to_str() {
+                mark_kept(id);
+            }
             let _ = std::fs::remove_dir_all(entry.path());
+        }
+    }
+    // A record of a kept move only has to outlive the sender's last word
+    // about it, which comes within minutes.
+    for entry in std::fs::read_dir(kept_dir())
+        .into_iter()
+        .flatten()
+        .flatten()
+    {
+        let old = entry.metadata().and_then(|m| m.modified()).is_ok_and(|t| {
+            t.elapsed()
+                .is_ok_and(|e| e > Duration::from_secs(24 * 3600))
+        });
+        if old {
+            let _ = std::fs::remove_file(entry.path());
         }
     }
 }
@@ -668,7 +798,34 @@ pub fn run_cli(args: &[String], version: &str) -> i32 {
             });
             serde_json::to_string(&Answer::from(r.and_then(|a| plan(&a))))
         }
-        Some("receive") => serde_json::to_string(&Answer::from(receive(&mut input))),
+        Some("receive") => {
+            let received = receive(&mut input);
+            let ticket = received.as_ref().ok().map(|r| r.ticket.clone());
+            let line = serde_json::to_string(&Answer::from(received));
+            // The sender may be gone — a dropped ssh — with the agent already
+            // running here. An answer nobody can read is a move nobody will
+            // `finish` or `abort`, and the sender has thawed its own agent by
+            // now: so it is undone here, the moment the write fails.
+            let said = line.as_ref().map_err(|e| e.to_string()).and_then(|line| {
+                let mut out = std::io::stdout().lock();
+                writeln!(out, "{line}")
+                    .and_then(|()| out.flush())
+                    .map_err(|e| e.to_string())
+            });
+            return match (said, ticket) {
+                (Ok(()), _) => 0,
+                (Err(why), ticket) => {
+                    if let Some(ticket) = ticket {
+                        let _ = abort(&Ticket {
+                            protocol: PROTOCOL,
+                            ticket,
+                        });
+                    }
+                    eprintln!("cctop move: {why}");
+                    1
+                }
+            };
+        }
         Some(word @ ("finish" | "abort")) => {
             let r = read_json(&mut input).and_then(|l| {
                 serde_json::from_str::<Ticket>(l.trim()).map_err(|e| format!("the ticket: {e}"))
@@ -699,6 +856,16 @@ pub fn run_cli(args: &[String], version: &str) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The tests that take the staging lock, or need it free, one at a time:
+    /// it is a file lock, which threads of one process contend for too.
+    static STAGING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn staging_alone() -> std::sync::MutexGuard<'static, ()> {
+        STAGING
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
 
     #[test]
     fn a_short_or_altered_stream_is_refused() {
@@ -772,7 +939,16 @@ mod tests {
         let failing = |_: &crate::session::Session| -> Result<String, String> {
             Err("the agent did not start there".into())
         };
-        let err = land(&m, &bundle, &transcript, &store, &failing, &mut journal).unwrap_err();
+        let err = land(
+            &m,
+            &bundle,
+            &transcript,
+            &store,
+            tmp.path(),
+            &failing,
+            &mut journal,
+        )
+        .unwrap_err();
         assert!(err.contains("did not start"));
         // Placed and installed before the failure…
         assert!(dest.join("new.txt").exists());
@@ -789,7 +965,16 @@ mod tests {
         // And the success path keeps both.
         let mut journal = Journal::new(tmp.path().join("journal2.json"));
         let ok = |_: &crate::session::Session| -> Result<String, String> { Ok("tab".into()) };
-        let (got, tab, cwd) = land(&m, &bundle, &transcript, &store, &ok, &mut journal).unwrap();
+        let (got, tab, cwd) = land(
+            &m,
+            &bundle,
+            &transcript,
+            &store,
+            tmp.path(),
+            &ok,
+            &mut journal,
+        )
+        .unwrap();
         assert_eq!((got.as_str(), tab.as_str(), cwd), (id, "tab", dest.clone()));
     }
 
@@ -798,6 +983,7 @@ mod tests {
     /// ssh stream feeds — which checks what arrived exactly as it would have.
     #[test]
     fn a_tunnel_upload_arrives_in_order_and_is_received_like_a_stream() {
+        let _alone = staging_alone();
         let mut m = sample_manifest();
         m.bundle = crate::migrate::Blob {
             len: 5,
@@ -838,16 +1024,105 @@ mod tests {
             why.contains("checksum") || why.contains("not installed"),
             "{why}"
         );
+        // The answer stays until the sender has heard it — asked again, it
+        // says the same — and the sender's abort clears it.
+        assert_eq!(status(&id).unwrap_err(), why);
+        let ticket = Ticket {
+            protocol: PROTOCOL,
+            ticket: id.clone(),
+        };
+        abort(&ticket).unwrap();
         assert!(!uploads().join(&id).exists());
 
         // An upload the sender gives up on is dropped by its abort.
         let id = open_upload(&m).unwrap();
-        abort(&Ticket {
-            protocol: PROTOCOL,
-            ticket: id.clone(),
-        })
-        .unwrap();
+        abort(&ticket).unwrap();
         assert!(!uploads().join(&id).exists());
+    }
+
+    /// A move that landed and started its agent, whose answer never reached
+    /// the sender: the sender's abort, by the move id it already knew, stops
+    /// that agent and takes the rest back. A move already kept is never
+    /// reported as undone.
+    #[test]
+    fn a_move_whose_answer_was_lost_is_undone_by_its_id() {
+        let _alone = staging_alone();
+        use crate::migrate::snapshot::tests::repo;
+        let _daemon = crate::mux::TestDaemon::new("move-lost-answer");
+        let tmp = tempfile::tempdir().unwrap();
+        let src = repo(&tmp.path().join("src/app"));
+        std::fs::write(src.join("new.txt"), "n\n").unwrap();
+        let move_id = "4d2a7c1e-9b3f-4e8d-a6c5-1f0e2d3c4b5a";
+        let snap = crate::migrate::snapshot::take(&src, move_id).unwrap();
+        let bundle = tmp.path().join("b.bundle");
+        crate::migrate::snapshot::bundle(&snap, false, &bundle).unwrap();
+        let id = "0b4e8a54-8d39-4f4e-8a39-6b8a3c1c2d02";
+        let transcript = format!("{{\"sessionId\":\"{id}\",\"cwd\":\"/x\"}}\n");
+        let blob = |bytes: &[u8]| crate::migrate::Blob {
+            len: bytes.len() as u64,
+            sha256: {
+                use sha2::Digest;
+                crate::migrate::hex(&sha2::Sha256::digest(bytes))
+            },
+        };
+        let bundle_bytes = std::fs::read(&bundle).unwrap();
+        let home = tmp.path().join("home");
+        let dest = home.join("app");
+        let mut m = sample_manifest();
+        m.move_id = move_id.into();
+        m.session_id = id.into();
+        m.repo = snap.repo.clone();
+        m.snapshot = snap.commit.clone();
+        m.placement.dir = dest.to_string_lossy().into_owned();
+        m.bundle = blob(&bundle_bytes);
+        m.transcript = blob(transcript.as_bytes());
+
+        // The "agent": a session in this test's daemon, as a resume makes one.
+        let tab = "cctop-moved-lost";
+        let resume = |_: &crate::session::Session| -> Result<String, String> {
+            crate::mux::new_session(tab, None, Vec::new(), &["sleep".into(), "30".into()])?;
+            Ok(tab.to_string())
+        };
+        let mut stream = std::io::Cursor::new([bundle_bytes, transcript.into_bytes()].concat());
+        let store = tmp.path().join("claude");
+        let receipt = receive_checked(&m, &mut stream, &home, &store, &resume).unwrap();
+        assert_eq!(
+            receipt.ticket, move_id,
+            "the ticket is the sender's move id"
+        );
+        assert!(crate::mux::has_session(tab));
+        assert!(dest.join("new.txt").exists());
+
+        // The answer is lost; the sender aborts by the id it knew.
+        let ticket = Ticket {
+            protocol: PROTOCOL,
+            ticket: move_id.into(),
+        };
+        abort(&ticket).unwrap();
+        assert!(!crate::mux::has_session(tab), "the far agent still runs");
+        assert!(!dest.exists());
+        // Asked again, nothing is there and nothing runs: still a yes.
+        abort(&ticket).unwrap();
+
+        // Kept, it is never "undone": a late abort hears that it runs.
+        mark_kept(move_id);
+        assert!(abort(&ticket).unwrap_err().contains("kept"));
+        let _ = std::fs::remove_file(kept_dir().join(move_id));
+    }
+
+    /// While a receive holds the lock, an abort cannot know what it will
+    /// leave running, and says "ask again" rather than yes.
+    #[test]
+    fn an_abort_during_a_receive_is_asked_again() {
+        let _alone = staging_alone();
+        let base = staging();
+        let _held = lock(&base).unwrap();
+        let busy = abort(&Ticket {
+            protocol: PROTOCOL,
+            ticket: "1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d".into(),
+        })
+        .unwrap_err();
+        assert!(busy.contains("ask again"), "{busy}");
     }
 
     fn sample_manifest() -> Manifest {
@@ -871,7 +1146,7 @@ mod tests {
                 note: None,
             },
             snapshot: "0".repeat(40),
-            move_id: "mv1".into(),
+            move_id: "6f1c2b3a-0d4e-4f5a-8b6c-7d8e9f0a1b2c".into(),
             bundle: crate::migrate::Blob {
                 len: 0,
                 sha256: String::new(),

@@ -1341,6 +1341,9 @@ impl App {
     }
 
     fn request_quit(&mut self) {
+        if self.quit_held_by_move() {
+            return;
+        }
         match self.hosted.is_some() {
             true => self.mode = Mode::QuitConfirm,
             false => self.should_quit = true,

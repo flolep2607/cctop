@@ -32,8 +32,19 @@ The other machine looks for a checkout of the same repository — the same
   beside it (`<checkout>-moved`), so nothing of yours there is moved aside.
 - **No checkout**: a new clone at `~/<name>`, with the original's `origin`.
 
+A checkout there is "the same repository" by its `origin`. A repository with no
+`origin` is known only by its path, and two machines can have unrelated
+checkouts at the same path — so one of those counts only if it already has the
+commit the session is on.
+
+A file the checkout there ignores (`info/exclude`, a global excludes file) that
+the session carried as work is copied aside into `.git/cctop-moved/<id>/` before
+it is replaced; an undo puts it back, and the confirmation's note says where the
+old copy went.
+
 The confirmation shows where, and the directory can be edited: an empty
-directory to clone into, or another checkout of the same repository.
+directory under the home to clone into (not inside a hidden directory), or
+another checkout of the same repository.
 
 ## What can move
 
@@ -42,6 +53,10 @@ Refused, with the reason, before anything changes:
 
 - a session mid-turn or holding a question — wait for its turn to end;
 - a directory that is not in a git repository, or a repository with no commits;
+- changed files that Git LFS tracks, which would arrive as pointers — commit
+  and push them with LFS first;
+- a session that has done something since `X` was pressed, or whose agent has
+  restarted — press `X` again;
 - Claude's desktop app, OpenCode, Devin, Cursor, Gemini, Pi and Vibe sessions —
   their transcripts are not files a path can be rewritten in, yet;
 - another user's session, a sandboxed one, or one already on another machine.
@@ -56,6 +71,16 @@ Refused, with the reason, before anything changes:
 3. There, the files are placed, the transcript installed, and the agent
    resumed in a tab. Every step is journalled; if any fails, all of it is
    undone and the agent here carries on.
+
+   If the answer does not come back — a dropped ssh, a tunnel that timed out
+   while the other machine was still resuming — this side asks it to undo the
+   move by its id, and lets the agent here go on only once it says nothing of
+   the move runs there. If it cannot say so, the agent here is **left
+   stopped**, and the message says how to settle it: `kill <pid>` if the
+   session runs on the other machine, `kill -CONT <pid>` if it does not. A
+   stopped agent can be continued; two agents writing one conversation cannot
+   be unwritten. Quitting cctop mid-move leaves it stopped for the same reason
+   (`q` asks twice) and prints the same instructions.
 4. Here, the checkout and the transcript are checked once more against the
    snapshot. If either changed, the other machine undoes its copy and nothing
    has moved. Otherwise the agent here is stopped, its tab closed, and the row
@@ -85,8 +110,11 @@ is named in the refusal, with the update to run.
   submodules and LFS are not fetched.
 - An `origin` is only written into a new clone if it is `https://`, `ssh://`
   or `user@host:path`.
-- Every path is derived on the receiving side; a name from the sender that
-  would walk out of where it belongs is refused.
+- Where the files land is checked again on the receiving side against what it
+  would choose itself — the same checkout, still clean, or a new clone under
+  the home outside any hidden directory — and a placement it would not have
+  offered is refused. A name from the sender that would walk out of where it
+  belongs is refused too.
 - A move carries at most 2 GB, needs 1 GB to spare on the disk there, and one
   arrives at a time. Over the tunnel the bytes are held there until the last
   one is in, so the disk needs room for them twice; an upload its sender gave

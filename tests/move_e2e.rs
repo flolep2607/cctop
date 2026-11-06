@@ -183,10 +183,15 @@ fn a_claude_session_moves_to_another_machine_files_and_all() {
     // And here it is marked as gone, so a resume here is refused.
     let moved = migrate::moved_to(Provider::Claude, ID).expect("marked as moved");
     assert_eq!(moved.machine, "box");
-    // Nothing of the move is left over there.
+    // Nothing of the move is left over there but the record that it was
+    // kept, which answers a late abort truthfully.
     let staging = far.home.join(".cache/cctop/move");
     let left: Vec<_> = std::fs::read_dir(&staging)
-        .map(|d| d.flatten().filter(|e| e.file_name() != "lock").collect())
+        .map(|d| {
+            d.flatten()
+                .filter(|e| e.file_name() != "lock" && e.file_name() != "kept")
+                .collect()
+        })
         .unwrap_or_default();
     assert!(left.is_empty(), "{left:?}");
     drop(cleanup);
