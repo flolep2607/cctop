@@ -743,35 +743,6 @@ pub fn exists(name: &str) -> bool {
     crate::mux::has_session(name)
 }
 
-/// Whether the agent in a session asked for the mouse itself.
-///
-/// `#{mouse_any_flag}` is rmux's record of the request the pane's own program
-/// made — the DECSET it emitted — and it is the flag `MouseDown3Pane` consults
-/// before choosing `send-keys -M` over its pane menu. Forwarding a right-click
-/// is only safe while this is set: with it the click reaches the agent, and
-/// without it the menu opens over the pane with splits and kills on it.
-pub fn mouse_wanted(name: &str) -> bool {
-    // `mouse_any_flag` is a pane format, which `display-message` will not
-    // resolve against a session name. Asking every pane and matching the name
-    // here is the form that answers at all.
-    const FORMAT: &str = "#{session_name} #{mouse_any_flag}";
-    // Asked within a deadline: this is asked on a click, on the thread that
-    // draws, and the daemon's own timeouts are five seconds to connect and
-    // fifteen to read — a right-click on a wedged daemon would freeze the
-    // screen that long. A daemon that has not answered by then is treated as
-    // one that does not want the mouse.
-    let Ok(socket) = crate::mux::socket() else {
-        return false;
-    };
-    let name = name.to_string();
-    crate::mux::within(crate::mux::ANSWER_DEADLINE, move || {
-        let listing = crate::mux::list_all_panes_at(&socket, FORMAT).unwrap_or_default();
-        let want = format!("{name} 1");
-        listing.lines().any(|line| line == want)
-    })
-    .unwrap_or(false)
-}
-
 /// End a session, taking the agent inside it with it.
 ///
 /// By exact name: the protocol's session target is a name, not a prefix, so
@@ -2665,32 +2636,6 @@ mod tests {
             last_words(parser.screen()).as_deref(),
             Some("error: no such model")
         );
-    }
-
-    /// The flag is the pane program's own answer, so it can only be checked
-    /// against real panes: one whose program emitted `?1000h` reads as wanting
-    /// the mouse, and one running a plain `sleep` does not.
-    #[test]
-    fn mouse_wanted_is_the_pane_programs_own_answer() {
-        let _daemon = crate::mux::TestDaemon::new("mouse_wanted_is_the_pane_programs_own_answer");
-        let asked = format!("cctop-mw-yes-{}", std::process::id());
-        let asleep = format!("cctop-mw-no-{}", std::process::id());
-        start_session(
-            &asked,
-            None,
-            &["sh", "-c", "printf '\\033[?1000h'; sleep 30"],
-        );
-        start_session(&asleep, None, &["sleep", "30"]);
-
-        // The flag lands when the program's DECSET does, and "not yet" reads
-        // the same as "never" — so the wanting side is the one waited on.
-        let wanted = wait_asking(|| mouse_wanted(&asked).then_some(()));
-        let quiet = mouse_wanted(&asleep);
-        end_session(&asked);
-        end_session(&asleep);
-
-        assert!(wanted.is_some(), "the pane's DECSET never reached rmux");
-        assert!(!quiet, "a pane that never asked read as asking");
     }
 
     /// An agent nobody is attached to still has to read as busy while it is

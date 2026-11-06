@@ -726,6 +726,7 @@ fn event_loop(
                         app.needs_redraw = true;
                     }
                 }
+                Ok(Response::Clipboard { tab, pane, text }) => app.got_clipboard(tab, pane, text),
                 Ok(Response::Changes { key, result }) => app.got_changes(key, result),
                 Ok(Response::Sidebar { key, answer }) => app.got_sidebar(key, answer),
                 Ok(Response::PullRequest(event)) => app.got_pull_request(event),
