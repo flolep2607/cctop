@@ -185,16 +185,60 @@ impl App {
             self.groups = tree.groups;
             self.indent = tree.indent;
         } else {
-            self.visible = visible
-                .iter()
-                .flat_map(|&i| {
-                    std::iter::once(Row::Session(i)).chain(
-                        (0..children(i)).map(move |index| Row::Subagent { parent: i, index }),
-                    )
-                })
-                .collect();
-            self.groups.clear();
+            // Agents another agent started sit under it, in the sort's order
+            // among themselves; one whose parent is filtered out stands alone.
+            let spawned = self.spawned_parents(&visible);
+            let mut ordered: Vec<(usize, String)> = Vec::with_capacity(visible.len());
+            fn walk(
+                i: usize,
+                rail: &str,
+                visible: &[usize],
+                spawned: &std::collections::HashMap<usize, usize>,
+                out: &mut Vec<(usize, String)>,
+                lead: String,
+            ) {
+                out.push((i, lead));
+                let kids: Vec<usize> = visible
+                    .iter()
+                    .copied()
+                    .filter(|c| spawned.get(c) == Some(&i))
+                    .collect();
+                for (n, &c) in kids.iter().enumerate() {
+                    let last = n + 1 == kids.len();
+                    let glyph = format!("{rail}{}", if last { "└─ " } else { "├─ " });
+                    let next = format!("{rail}{}", if last { "   " } else { "│  " });
+                    walk(c, &next, visible, spawned, out, glyph);
+                }
+            }
+            for &i in &visible {
+                if !spawned.contains_key(&i) {
+                    walk(i, "", &visible, &spawned, &mut ordered, String::new());
+                }
+            }
+            // Parents that name each other in a loop have no root to be
+            // reached from; they are still rows, so they stand alone.
+            if ordered.len() < visible.len() {
+                for &i in &visible {
+                    if !ordered.iter().any(|(o, _)| *o == i) {
+                        ordered.push((i, String::new()));
+                    }
+                }
+            }
+            self.visible.clear();
             self.indent.clear();
+            for (i, lead) in ordered {
+                self.visible.push(Row::Session(i));
+                self.indent.push(lead);
+                for index in 0..children(i) {
+                    self.visible.push(Row::Subagent { parent: i, index });
+                    self.indent.push(String::new());
+                }
+            }
+            // No nesting, no glyphs: the flat table as it always was.
+            if spawned.is_empty() {
+                self.indent.clear();
+            }
+            self.groups.clear();
         }
         self.selected = anchor
             .and_then(|key| self.visible.iter().position(|&r| self.row_key(r) == key))
@@ -202,6 +246,40 @@ impl App {
             .min(self.visible.len().saturating_sub(1));
         self.ensure_available_tab();
         self.needs_redraw = true;
+    }
+
+    /// Which of `visible`'s sessions another visible session started, by
+    /// index: read off the tab bar, where every agent cctop's rmux holds is a
+    /// tab carrying its parent — see [`nest_spawned_tabs`](Self::nest_spawned_tabs).
+    ///
+    /// ponytail: the tree view (`t`) groups by repository and does not nest
+    /// these; a spawn usually works in its parent's checkout, so the two land
+    /// under one heading anyway.
+    pub(super) fn spawned_parents(
+        &self,
+        visible: &[usize],
+    ) -> std::collections::HashMap<usize, usize> {
+        let mut out = std::collections::HashMap::new();
+        let row_of = |pid: u32| {
+            visible
+                .iter()
+                .copied()
+                .find(|&i| self.sessions[i].root_pid() == Some(pid))
+        };
+        for (i, tab) in self.tabs.iter().enumerate() {
+            let Some(p) = self.parent_tab(i) else {
+                continue;
+            };
+            let (Some(child), Some(parent)) = (tab.agent_pid(), self.tabs[p].agent_pid()) else {
+                continue;
+            };
+            if let (Some(c), Some(p)) = (row_of(child), row_of(parent))
+                && c != p
+            {
+                out.insert(c, p);
+            }
+        }
+        out
     }
 
     /// Fold this refresh's figures into the overview history buffers.
@@ -764,6 +842,53 @@ mod tests {
         app.search = "   ".into();
         app.remember_query();
         assert_eq!(app.search_history, vec!["alpha", "beta"]);
+    }
+
+    /// An agent another agent started is drawn under it in the table; one
+    /// whose parent the filter hides stands on its own.
+    #[test]
+    fn a_spawned_session_is_nested_under_its_parent() {
+        let live = |id: &str, pid: u32| {
+            let mut s = session(id, true, "/x");
+            s.process.as_mut().unwrap().process_list = vec![cctop_core::proc::ProcEntry {
+                pid,
+                is_root: true,
+                ghost: false,
+                cpu: 0.0,
+                memory: 0,
+                args: String::new(),
+            }];
+            s
+        };
+        let tab = |name: &str, pid: u32, parent: Option<&str>| {
+            super::tabs::Tab::for_agent(&cctop_core::rmux::Running {
+                pid: Some(pid),
+                parent: parent.map(str::to_string),
+                ..cctop_core::rmux::Running::unrecorded(name)
+            })
+        };
+        let mut app = test_app();
+        app.sessions = vec![live("child", 30), live("other", 20), live("parent", 10)];
+        app.tabs = vec![
+            tab("cctop-p", 10, None),
+            tab("cctop-o", 20, None),
+            tab("cctop-c", 30, Some("cctop-p")),
+        ];
+        app.refilter();
+        let ids: Vec<&str> = app
+            .visible
+            .iter()
+            .map(|r| app.sessions[r.session().unwrap()].session_id.as_str())
+            .collect();
+        let parent = ids.iter().position(|&i| i == "parent").unwrap();
+        assert_eq!(ids[parent + 1], "child", "{ids:?}");
+        assert_eq!(app.indent[parent + 1], "└─ ");
+        assert_eq!(app.indent[parent], "");
+
+        app.search = "child".into();
+        app.refilter();
+        assert_eq!(app.visible.len(), 1);
+        assert!(app.indent.is_empty(), "alone, it is an ordinary row");
     }
 
     #[test]

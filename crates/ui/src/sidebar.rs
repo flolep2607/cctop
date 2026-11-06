@@ -708,14 +708,15 @@ pub(super) fn draw(frame: &mut Frame, area: Rect, app: &App) -> Hits {
         .as_deref()
         .and_then(|k| app.sidebar_folds.get(k))
         .unwrap_or(&none);
+    let children = app.spawned_children();
     let drawn = open(
         &app.sidebar,
         key.is_some(),
         notes,
         editing,
         turned,
-        inner.width as usize,
-        inner.height as usize,
+        &children,
+        (inner.width as usize, inner.height as usize),
     );
     frame.render_widget(Paragraph::new(drawn.lines), inner);
     let at = |i: usize| inner.y + i as u16;
@@ -779,6 +780,16 @@ pub(super) enum Target {
     File(String),
     /// Write a note: the one at this index, or a new one.
     Note(Option<usize>),
+    /// Show this bar position: a tab the agent here started.
+    Tab(usize),
+}
+
+/// A tab the focused agent started, as the sidebar lists it: its bar
+/// position, its name, and what it is doing.
+pub(super) struct Child {
+    pub at: usize,
+    pub title: String,
+    pub doing: Option<super::tabs::Attention>,
 }
 
 /// A line, and what a click on it does, if anything.
@@ -790,8 +801,8 @@ fn open(
     notes: &[String],
     editing: Option<(&LineEdit, usize)>,
     turned: &HashSet<String>,
-    width: usize,
-    height: usize,
+    children: &[Child],
+    (width, height): (usize, usize),
 ) -> Drawn {
     if !found {
         let lines = wrap(
@@ -811,7 +822,8 @@ fn open(
         lines.into_iter().map(|l| (l, None)).collect()
     };
     let notes = notes_lines(notes, editing, width);
-    let room = height.saturating_sub(notes.len() + 2);
+    let spawned = spawned_lines(children, width);
+    let room = height.saturating_sub(notes.len() + spawned.len() + 2);
     let plan = untagged(plan_lines(&state.plan, width));
     let files = files_lines(state.files.as_ref(), turned, state.files_scroll, width);
     // The files are usually the longer list and the plan the one being read
@@ -826,6 +838,10 @@ fn open(
     out.extend(fit(files, room.saturating_sub(plan_room)));
     let files = (files_at, out.len());
     out.push((Line::default(), None));
+    if !spawned.is_empty() {
+        out.extend(spawned);
+        out.push((Line::default(), None));
+    }
     out.extend(notes);
     let targets = out
         .iter()
@@ -1026,6 +1042,41 @@ fn row_line(row: Row, width: usize) -> Tagged {
     (Line::from(spans), folder)
 }
 
+/// The agents this one started, each a click away: empty, and no section at
+/// all, for an agent that started none.
+fn spawned_lines(children: &[Child], width: usize) -> Vec<Tagged> {
+    if children.is_empty() {
+        return Vec::new();
+    }
+    let mut out = vec![(
+        header(
+            "Spawned",
+            vec![Span::styled(format!("  {}", children.len()), theme::dim())],
+        ),
+        None,
+    )];
+    for child in children {
+        let (doing, style) = match child.doing {
+            None => ("working", theme::dim()),
+            Some(super::tabs::Attention::Idle) => ("idle", theme::dim()),
+            Some(super::tabs::Attention::Done) => ("done", theme::value()),
+            Some(super::tabs::Attention::NeedsInput) => {
+                ("asks you", Style::default().fg(theme::colors().accent))
+            }
+        };
+        let room = width.saturating_sub(util::cells(doing) + 4);
+        out.push((
+            Line::from(vec![
+                Span::styled("↳ ", theme::dim()),
+                Span::styled(util::clip(&child.title, room.max(4)), theme::value()),
+                Span::styled(format!(" {doing}"), style),
+            ]),
+            Some(Target::Tab(child.at)),
+        ));
+    }
+    out
+}
+
 /// The notes, each line tagged with the note a click on it writes: the
 /// header and the empty line start a new one, a note's own lines change it.
 fn notes_lines(notes: &[String], editing: Option<(&LineEdit, usize)>, width: usize) -> Vec<Tagged> {
@@ -1182,6 +1233,36 @@ mod tests {
         assert_eq!(rows(&root, files.len(), &turned).len(), 23);
     }
 
+    /// The agents this one started are listed with what each is doing, and a
+    /// click on one is a click on its tab; none started, no section.
+    #[test]
+    fn the_agents_it_started_are_a_click_away() {
+        assert!(spawned_lines(&[], 30).is_empty());
+        let children = [
+            Child {
+                at: 3,
+                title: "codex · tests".into(),
+                doing: None,
+            },
+            Child {
+                at: 4,
+                title: "claude · docs".into(),
+                doing: Some(super::super::tabs::Attention::NeedsInput),
+            },
+        ];
+        let lines = spawned_lines(&children, 30);
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[1].1, Some(Target::Tab(3)));
+        assert_eq!(lines[2].1, Some(Target::Tab(4)));
+        let text: String = lines[2]
+            .0
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(text.ends_with("asks you"), "{text}");
+    }
+
     /// Every line of the notes is a click: the header and the empty line start
     /// a new note, and each of a note's lines — wrapped ones too — opens that
     /// note.
@@ -1274,8 +1355,8 @@ mod tests {
                 &["remember".into()],
                 None,
                 &HashSet::new(),
-                30,
-                16,
+                &[],
+                (30, 16),
             )
             .lines,
         );

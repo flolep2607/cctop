@@ -364,13 +364,28 @@ pub fn alive() -> usize {
 /// the environment is set when the pane is made, so two spawns racing each
 /// other still count each other.
 fn carries(pid: u32, var: &str) -> bool {
-    let Ok(environ) = std::fs::read(format!("/proc/{pid}/environ")) else {
-        return false;
-    };
+    value_of(pid, var).is_some()
+}
+
+/// The value of `var` in the environment `pid` was started with.
+fn value_of(pid: u32, var: &str) -> Option<String> {
+    let environ = std::fs::read(format!("/proc/{pid}/environ")).ok()?;
     let wanted = format!("{var}=");
-    environ
-        .split(|b| *b == 0)
-        .any(|entry| entry.starts_with(wanted.as_bytes()))
+    environ.split(|b| *b == 0).find_map(|entry| {
+        entry
+            .strip_prefix(wanted.as_bytes())
+            .map(|value| String::from_utf8_lossy(value).into_owned())
+    })
+}
+
+/// The tab of the agent that spawned the agent `pid`, as its own environment
+/// says: [`SPAWNED_BY`], when that names a cctop tab rather than a bare pid.
+///
+/// The fallback for an agent whose session carries no
+/// [`set_parent`](crate::rmux::set_parent) — one a cctop from before that
+/// option spawned.
+pub fn spawned_by(pid: u32) -> Option<String> {
+    value_of(pid, SPAWNED_BY).filter(|name| crate::rmux::is_cctop_name(name))
 }
 
 /// Start the agent `request` asks for, in a tab of cctop's rmux.
@@ -404,6 +419,12 @@ fn launch(plan: Plan, caller: &Caller) -> Result<Spawned, String> {
     let tab = crate::rmux::free_name(&plan.harness);
     crate::rmux::start_detached_with(&plan.argv, &tab, Some(&plan.dir), &plan.env)
         .map_err(|why| format!("could not start {}: {why}", plan.harness))?;
+    // Which agent asked, on the new session itself, so every cctop nests it
+    // under that agent's tab. Only a tab: a caller known only by its pid is
+    // not one any cctop draws.
+    if crate::rmux::is_cctop_name(&caller.name) {
+        crate::rmux::set_parent(&tab, &caller.name);
+    }
     // Its pid is what `wait_for_session` finds it by before it has written a
     // transcript; the pane is up within moments of the session.
     let mut pid = None;

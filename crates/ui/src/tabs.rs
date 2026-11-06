@@ -1121,6 +1121,11 @@ pub struct Tab {
     /// through a split lands on the pane that asked with it on screen. See
     /// [`Tab::zoomed`] for why it is read through a method.
     zoom: bool,
+    /// The session of the agent that started this tab's agent through
+    /// `spawn_agent`, as rmux records it — see
+    /// [`set_parent`](cctop_core::rmux::set_parent). The bar draws such a tab
+    /// right after its parent's, marked as its child.
+    pub parent: Option<String>,
 }
 
 impl Tab {
@@ -1134,6 +1139,7 @@ impl Tab {
             color: None,
             restarted: None,
             zoom: false,
+            parent: None,
         }
     }
 
@@ -1181,6 +1187,15 @@ impl Tab {
             color: leader.color.as_deref().and_then(Hue::from_name),
             restarted: None,
             zoom: false,
+            parent: leader.parent.clone(),
+        }
+    }
+
+    /// The leading agent's pid, held or not, when it is known.
+    pub fn agent_pid(&self) -> Option<u32> {
+        match self.panes.first() {
+            Some(pane) => Some(pane.agent()),
+            None => self.shared.as_ref().and_then(|s| s.pid),
         }
     }
 
@@ -2262,6 +2277,7 @@ Enter to select · ↑/↓ to navigate · Esc to cancel";
             pane: None,
             axis: None,
             transport: None,
+            parent: None,
             window: None,
         }
     }

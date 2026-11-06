@@ -985,6 +985,7 @@ mod tests {
             pane: None,
             axis: None,
             transport: None,
+            parent: None,
             window: None,
         };
         let now = 1_700_000_000;
