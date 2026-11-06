@@ -141,9 +141,236 @@ fn tasks(creates: &[&ToolDetail], updates: &[&ToolDetail]) -> Vec<Step> {
         .collect()
 }
 
+// ---------------------------------------------------------------------------
+// Plans an agent published itself
+// ---------------------------------------------------------------------------
+
+/// The most steps a published plan keeps; past it the rest are dropped.
+pub const MAX_STEPS: usize = 50;
+/// The longest step a published plan keeps, in characters; longer is cut.
+pub const MAX_TEXT: usize = 200;
+
+/// A plan an agent sent through cctop's `set_plan` MCP tool, checked.
+///
+/// For the harnesses with no to-do tool of their own — OpenCode, Devin and
+/// the rest — which is the only way their plan reaches the sidebar. The
+/// status words are the ones the harnesses' own tools use, so an agent that
+/// knows one knows these; anything else is refused rather than guessed at,
+/// because a step shown done that is not is worse than no plan.
+pub fn checked(steps: &[(String, String)]) -> Result<Vec<Step>, String> {
+    if steps.is_empty() {
+        return Err("a plan needs at least one step".into());
+    }
+    steps
+        .iter()
+        .take(MAX_STEPS)
+        .map(|(text, status)| {
+            let status = match status.as_str() {
+                "pending" => Status::Pending,
+                "in_progress" => Status::Active,
+                "completed" => Status::Done,
+                other => {
+                    return Err(format!(
+                        "{other:?} is not a status: use pending, in_progress or completed"
+                    ));
+                }
+            };
+            let text: String = text
+                .chars()
+                .filter(|c| !c.is_control())
+                .take(MAX_TEXT)
+                .collect();
+            match text.trim().is_empty() {
+                true => Err("a step needs some text".into()),
+                false => Ok(Step {
+                    text: text.trim().to_string(),
+                    status,
+                }),
+            }
+        })
+        .collect()
+}
+
+/// Where published plans are kept: one small file per session, beside the
+/// notes, so a plan outlives the agent's MCP server and the cctop showing it.
+fn published_dir() -> std::path::PathBuf {
+    crate::config::data_base().join("cctop").join("plans")
+}
+
+/// The file for one session's plan, or `None` for an id that could name a
+/// path rather than a session.
+fn published_file(dir: &std::path::Path, provider: &str, id: &str) -> Option<std::path::PathBuf> {
+    let safe = |word: &str| crate::remote_open::id_ok(word);
+    (safe(provider) && safe(id)).then(|| dir.join(format!("{provider}-{id}.json")))
+}
+
+/// Keep `steps` as the session's published plan, replacing the last one.
+pub fn publish(provider: &str, id: &str, steps: &[Step]) -> std::io::Result<()> {
+    publish_in(&published_dir(), provider, id, steps)
+}
+
+fn publish_in(
+    dir: &std::path::Path,
+    provider: &str,
+    id: &str,
+    steps: &[Step],
+) -> std::io::Result<()> {
+    let path = published_file(dir, provider, id)
+        .ok_or_else(|| std::io::Error::other("not a session id"))?;
+    let list: Vec<serde_json::Value> = steps
+        .iter()
+        .map(|step| {
+            let status = match step.status {
+                Status::Done => "completed",
+                Status::Active => "in_progress",
+                Status::Pending => "pending",
+            };
+            serde_json::json!({ "text": step.text, "status": status })
+        })
+        .collect();
+    let bytes = serde_json::to_vec(&list).map_err(std::io::Error::other)?;
+    crate::util::write_atomic(&path, &bytes, true)
+}
+
+/// The plan the session published, or nothing.
+///
+/// The sidebar asks for it only when the transcript holds no plan of its own:
+/// a harness's own to-do tool is the better witness, since the agent uses it
+/// as it works rather than when told to report.
+pub fn published(provider: &str, id: &str) -> Vec<Step> {
+    if crate::under_test() {
+        return Vec::new();
+    }
+    published_in(&published_dir(), provider, id)
+}
+
+fn published_in(dir: &std::path::Path, provider: &str, id: &str) -> Vec<Step> {
+    let Some(path) = published_file(dir, provider, id) else {
+        return Vec::new();
+    };
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let Ok(serde_json::Value::Array(list)) = serde_json::from_str(&text) else {
+        return Vec::new();
+    };
+    list.iter()
+        .take(MAX_STEPS)
+        .filter_map(|step| {
+            Some(Step {
+                text: step.get("text")?.as_str()?.chars().take(MAX_TEXT).collect(),
+                status: Status::parse(step.get("status")?.as_str()?),
+            })
+        })
+        .collect()
+}
+
+/// The session whose agent started the process with ancestry `ancestors`.
+///
+/// cctop's MCP server is spawned by the agent it serves, so the agent is
+/// among its parents; nothing else says which session called a tool. Nearest
+/// first, and an agent root before any process merely in a session's list —
+/// a child an agent spawned is in that agent's list too, and naming it would
+/// pick the same session the long way round. Local sessions only: a pid from
+/// another machine names nothing here.
+pub fn caller<'a>(
+    ancestors: &[u32],
+    sessions: &'a [crate::session::Session],
+) -> Option<&'a crate::session::Session> {
+    let local = || sessions.iter().filter(|s| s.remote.is_none());
+    ancestors
+        .iter()
+        .find_map(|pid| local().find(|s| s.root_pid() == Some(*pid)))
+        .or_else(|| {
+            ancestors.iter().find_map(|pid| {
+                local().find(|s| {
+                    s.process.as_ref().is_some_and(|info| {
+                        info.process_list.iter().any(|p| p.pid == *pid && !p.ghost)
+                    })
+                })
+            })
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn step(text: &str, status: &str) -> (String, String) {
+        (text.to_string(), status.to_string())
+    }
+
+    /// A published plan is kept to its caps, its controls stripped, and an
+    /// unknown status or an empty step refused rather than guessed at.
+    #[test]
+    fn a_published_plan_is_checked_and_capped() {
+        let plan = checked(&[
+            step("read it", "completed"),
+            step("fix\x1bit", "in_progress"),
+        ])
+        .unwrap();
+        assert_eq!(plan[0].status, Status::Done);
+        assert_eq!(plan[1].text, "fixit");
+        assert_eq!(plan[1].status, Status::Active);
+        assert!(checked(&[step("x", "doing")]).is_err());
+        assert!(checked(&[step("  ", "pending")]).is_err());
+        assert!(checked(&[]).is_err());
+        let long: Vec<_> = (0..80)
+            .map(|i| step(&"y".repeat(300 + i), "pending"))
+            .collect();
+        let capped = checked(&long).unwrap();
+        assert_eq!(capped.len(), MAX_STEPS);
+        assert!(capped.iter().all(|s| s.text.chars().count() == MAX_TEXT));
+    }
+
+    /// What is published is what is read back, per session, and an id that
+    /// could name a path is neither written nor read.
+    #[test]
+    fn a_published_plan_is_read_back_for_its_session_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let plan = checked(&[step("one", "completed"), step("two", "pending")]).unwrap();
+        publish_in(dir.path(), "opencode", "ses_abc", &plan).unwrap();
+        assert_eq!(published_in(dir.path(), "opencode", "ses_abc"), plan);
+        assert!(published_in(dir.path(), "opencode", "ses_other").is_empty());
+        assert!(publish_in(dir.path(), "opencode", "../escape", &plan).is_err());
+        assert!(published_in(dir.path(), "opencode", "../escape").is_empty());
+    }
+
+    /// The caller is the nearest ancestor that is a session's agent root, and
+    /// a process merely in a session's list counts only when no root matches.
+    #[test]
+    fn the_caller_is_the_agent_that_started_the_server() {
+        use crate::proc::{ProcEntry, ProcInfo};
+        use crate::session::Session;
+        let session = |id: &str, root: u32, child: u32| {
+            let mut s = Session::new(crate::pricing::Provider::OpenCode, id.into());
+            let entry = |pid, is_root| ProcEntry {
+                pid,
+                cpu: 0.0,
+                memory: 0,
+                args: String::new(),
+                is_root,
+                ghost: false,
+            };
+            s.process = Some(ProcInfo {
+                process_list: vec![entry(root, true), entry(child, false)],
+                ..Default::default()
+            });
+            s
+        };
+        let sessions = vec![session("a", 100, 101), session("b", 200, 201)];
+        // The MCP server's parents: its agent (200), then a shell, then init.
+        assert_eq!(
+            caller(&[200, 50, 1], &sessions).map(|s| s.session_id.as_str()),
+            Some("b")
+        );
+        // Spawned by the agent's child rather than the agent itself.
+        assert_eq!(
+            caller(&[101, 100, 1], &sessions).map(|s| s.session_id.as_str()),
+            Some("a")
+        );
+        assert!(caller(&[999, 1], &sessions).is_none());
+    }
 
     fn detail(d: &str, ts: &str, full: Option<&str>) -> ToolDetail {
         ToolDetail {

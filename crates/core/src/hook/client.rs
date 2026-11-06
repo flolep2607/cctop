@@ -810,7 +810,7 @@ pub(crate) fn ancestry() -> Vec<u32> {
 }
 
 /// `pid`'s parents, nearest first, as [`ancestry`] walks this process's.
-pub(crate) fn ancestors_of(pid: u32) -> Vec<u32> {
+pub fn ancestors_of(pid: u32) -> Vec<u32> {
     walk(pid, parent)
 }
 
