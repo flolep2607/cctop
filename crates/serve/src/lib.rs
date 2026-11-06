@@ -134,7 +134,8 @@ mod ts_types;
 // the handoff brief, and the actions.
 use api::{
     api_access, api_act, api_chat, api_chat_markdown, api_data, api_insight, api_report,
-    api_search, api_tab, api_wrapped, find, may_act, provider_status_route,
+    api_search, api_sidebar, api_sidebar_diff, api_tab, api_wrapped, find, may_act,
+    provider_status_route,
 };
 use cctop_core::actions;
 use cctop_core::fleet;
@@ -1801,6 +1802,17 @@ fn serve_connection(shared: &Shared, stream: &mut TcpStream) {
         _ if path.starts_with("/window/") => app_page(shared, stream, &request, handed),
         _ if path.starts_with("/api/data/") => {
             api_data(shared, stream, &request, &path["/api/data/".len()..]);
+        }
+        _ if path.starts_with("/api/sidebar/") => {
+            api_sidebar(shared, stream, &request, &path["/api/sidebar/".len()..]);
+        }
+        _ if path.starts_with("/api/sidebar-diff/") => {
+            api_sidebar_diff(
+                shared,
+                stream,
+                &request,
+                &path["/api/sidebar-diff/".len()..],
+            );
         }
         _ if path.starts_with("/api/report/") => {
             api_report(shared, stream, &request, &path["/api/report/".len()..]);

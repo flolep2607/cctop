@@ -1314,3 +1314,36 @@ mod tests {
         assert_ne!(random_hex(16), random_hex(16));
     }
 }
+
+/// `text`'s bytes as lowercase hex: a form that survives any shell, for an
+/// argument ssh hands to the far side's as part of one line.
+pub fn to_hex(text: &str) -> String {
+    text.bytes().map(|b| format!("{b:02x}")).collect()
+}
+
+/// [`to_hex`] undone; `None` for anything that is not hex of UTF-8.
+pub fn from_hex(hex: &str) -> Option<String> {
+    if !hex.len().is_multiple_of(2) {
+        return None;
+    }
+    let bytes = (0..hex.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(hex.get(i..i + 2)?, 16).ok())
+        .collect::<Option<Vec<u8>>>()?;
+    String::from_utf8(bytes).ok()
+}
+
+#[cfg(test)]
+mod hex_tests {
+    /// A name a shell would act on comes back exactly, and is plain hex on
+    /// the way.
+    #[test]
+    fn a_path_survives_hex_both_ways() {
+        let path = "docs/$(touch x) a;b.md";
+        let hex = super::to_hex(path);
+        assert!(hex.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_eq!(super::from_hex(&hex).as_deref(), Some(path));
+        assert_eq!(super::from_hex("zz"), None);
+        assert_eq!(super::from_hex("abc"), None);
+    }
+}

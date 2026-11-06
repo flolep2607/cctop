@@ -22,6 +22,8 @@ pub(crate) fn peer_of(shared: &Shared, path: &str) -> Option<Arc<cctop_core::pee
         "/api/report/",
         "/api/data/",
         "/api/changes/",
+        "/api/sidebar/",
+        "/api/sidebar-diff/",
         "/api/diff/",
         "/api/access/",
         "/api/handoff/",

@@ -16,8 +16,7 @@ pub(super) enum Request {
     Refresh,
     /// One changed file read whole for the diff view, against `base`.
     FileDiff {
-        root: std::path::PathBuf,
-        base: String,
+        from: super::diffview::From,
         path: String,
         untracked: bool,
     },
@@ -43,11 +42,13 @@ pub(super) enum Request {
     },
     /// An agent tab's sidebar: the session's plan, and what it changed in
     /// `dir` — or, where there is no checkout to read, in its transcript.
+    ///
+    /// `reach` is the machine to ask, for a session on another one: the cctop
+    /// there reads its own checkout.
     Sidebar {
         key: String,
         session: Box<Session>,
-        dir: Result<std::path::PathBuf, String>,
-        started: Option<i64>,
+        reach: Option<cctop_core::reach::Reach>,
     },
     /// Install the timers for `[[schedule]]` if they changed, and read each
     /// schedule's next run from `path`'s entries — all of it systemd's to
@@ -620,8 +621,7 @@ pub(super) fn spawn_worker(
                     });
                 }
                 Request::FileDiff {
-                    root,
-                    base,
+                    from,
                     path,
                     untracked,
                 } => {
@@ -630,7 +630,20 @@ pub(super) fn spawn_worker(
                     // should not.
                     let tx = tx.clone();
                     loader.gently_spawn(move || {
-                        let result = cctop_core::diff_file::read(&root, &base, &path, untracked);
+                        let result = match from {
+                            super::diffview::From::Checkout { root, base } => {
+                                cctop_core::diff_file::read(&root, &base, &path, untracked)
+                            }
+                            super::diffview::From::Remote { reach, id } => {
+                                reach.diff(&id, &path).map_err(|why| {
+                                    format!(
+                                        "could not read it on {}: {why} — the cctop there may \
+                                         be too old, update it",
+                                        reach.machine()
+                                    )
+                                })
+                            }
+                        };
                         let colours = result
                             .as_ref()
                             .map(|view| super::diffview::colour(&path, view))
@@ -688,24 +701,33 @@ pub(super) fn spawn_worker(
                 Request::Sidebar {
                     key,
                     session,
-                    dir,
-                    started,
+                    reach,
                 } => {
                     let store = loader.store_shared();
                     let tx = tx.clone();
                     loader.gently_spawn(move || {
-                        let data = store.session_data_fresh(&session);
-                        let mut answer =
-                            super::sidebar::read(&data, dir, started, &session.label_source);
-                        // The harness's own to-do tool first, as the agent's
-                        // working record; what it published through
-                        // `set_plan` when it has none.
-                        if answer.plan.is_empty() {
-                            answer.plan = cctop_core::plan::published(
-                                session.provider.as_str(),
-                                &session.session_id,
-                            );
-                        }
+                        let answer = match reach {
+                            None => {
+                                let data = store.session_data_fresh(&session);
+                                cctop_core::sidebar::of(&session, &data)
+                            }
+                            // Read by the cctop that has the checkout. A cctop
+                            // there from before the sidebar refuses, and the
+                            // Files line says what fixes it.
+                            Some(reach) => match reach.sidebar(&session.session_id) {
+                                Ok(answer) => answer,
+                                Err(why) => cctop_core::sidebar::Sidebar {
+                                    plan: Vec::new(),
+                                    files: Err(format!(
+                                        "could not read it on {}: {why} — the cctop there may \
+                                         be too old, update it",
+                                        reach.machine()
+                                    )),
+                                    more: 0,
+                                    checkout: None,
+                                },
+                            },
+                        };
                         let _ = tx.send(Response::Sidebar { key, answer });
                     });
                 }

@@ -201,6 +201,33 @@ impl Reach {
             .map_err(|e| format!("{} returned an unreadable session: {e}", self.machine()))
     }
 
+    /// What an agent tab's sidebar shows about session `id` — its plan and the
+    /// files it changed — read by the cctop that has the session.
+    ///
+    /// Over ssh `cctop --sidebar`; from a sibling, `/api/sidebar/<id>`, and
+    /// a file's diff `/api/sidebar-diff/<id>`.
+    pub fn sidebar(&self, id: &str) -> Result<crate::sidebar::Sidebar, String> {
+        let json = self.ask(&["--sidebar", id], &format!("/api/sidebar/{id}"), "")?;
+        serde_json::from_str(&json)
+            .map_err(|e| format!("{} returned an unreadable sidebar: {e}", self.machine()))
+    }
+
+    /// One changed file of session `id`, for the diff view, read by the cctop
+    /// that has the checkout — which answers only for a file its sidebar lists.
+    ///
+    /// The path goes as hex over ssh, whose far shell reads the line it is
+    /// given — see `--path-hex` — and escaped in a sibling's query.
+    pub fn diff(&self, id: &str, path: &str) -> Result<crate::diff_file::FileDiff, String> {
+        let hex = crate::util::to_hex(path);
+        let json = self.ask(
+            &["--diff", id, "--path-hex", &hex],
+            &format!("/api/sidebar-diff/{id}"),
+            &format!("path={}", encode(path)),
+        )?;
+        serde_json::from_str(&json)
+            .map_err(|e| format!("{} returned an unreadable diff: {e}", self.machine()))
+    }
+
     /// One answer from the far cctop: `args` run over ssh, or `path?query`
     /// asked of a sibling's serve — the same document either way.
     fn ask(&self, args: &[&str], path: &str, query: &str) -> Result<String, String> {
@@ -268,6 +295,41 @@ mod tests {
             .chat("sess-1", None, None)
             .unwrap_err();
         assert_eq!(why, "reach-test-gone answered no such session");
+    }
+
+    /// The sidebar and a file's diff are asked of a sibling on its own routes,
+    /// the path escaped in the query; a sibling from before them answers 404,
+    /// which is said with its name.
+    #[test]
+    fn a_siblings_sidebar_and_diff_are_asked_of_it() {
+        let (url, seen) = sibling(200, r#"{"plan":[],"files":{"Ok":[]},"more":0}"#);
+        know(Peer::fixed("reach-test-side", &url, SECRET));
+        let side = reach("reach-test-side", None).unwrap();
+        let sidebar = side.sidebar("sess-1").expect("it answered");
+        assert_eq!(sidebar.files, Ok(Vec::new()));
+        let (url, seen_diff) = sibling(
+            200,
+            r#"{"diff":["+x"],"old":null,"new":["x"],"binary":false,"too_big":false}"#,
+        );
+        know(Peer::fixed("reach-test-diff", &url, SECRET));
+        let diff = reach("reach-test-diff", None)
+            .unwrap()
+            .diff("sess-1", "docs/a b.md")
+            .expect("it answered");
+        assert_eq!(diff.diff, ["+x"]);
+        assert_eq!(seen.lock().unwrap().as_slice(), ["/api/sidebar/sess-1"]);
+        assert_eq!(
+            seen_diff.lock().unwrap().as_slice(),
+            ["/api/sidebar-diff/sess-1?path=docs%2Fa%20b%2Emd"]
+        );
+
+        let (url, _) = sibling(404, "no such page");
+        know(Peer::fixed("reach-test-old", &url, SECRET));
+        let why = reach("reach-test-old", None)
+            .unwrap()
+            .sidebar("sess-1")
+            .unwrap_err();
+        assert!(why.starts_with("reach-test-old "), "{why}");
     }
 
     #[test]

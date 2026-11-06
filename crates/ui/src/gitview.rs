@@ -79,6 +79,15 @@ impl App {
         if !self.sidebar.shown() {
             return self.set_status("Alt+g opens an agent's changes — open an agent's tab first");
         }
+        // A tool here runs against a checkout here; the one beside an agent on
+        // another machine is there.
+        if let Some((reach, _)) = &self.sidebar.remote {
+            return self.set_status(format!(
+                "Alt+g runs a git tool on this machine, and this agent's checkout is on {} — \
+                 click a file in the sidebar for its diff",
+                reach.machine()
+            ));
+        }
         let Some((root, base)) = self.sidebar.checkout.clone() else {
             return self.set_status(match self.sidebar.files.is_none() {
                 true => "Still reading this session's changes — try again in a moment",

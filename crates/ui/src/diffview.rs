@@ -419,11 +419,26 @@ fn tokens(line: &str) -> Vec<(usize, &str)> {
 
 /// The diff view's state, while it is open.
 #[derive(Debug)]
+/// Where the diff view reads its files: the checkout here against the
+/// sidebar's base, or the cctop on the machine the agent runs on, which
+/// diffs its own checkout the same way.
+#[derive(Clone)]
+pub(super) enum From {
+    Checkout {
+        root: PathBuf,
+        base: String,
+    },
+    Remote {
+        reach: cctop_core::reach::Reach,
+        id: String,
+    },
+}
+
 pub(super) struct State {
     /// The tab it was opened over; leaving that tab closes it.
     pub tab: usize,
-    pub root: PathBuf,
-    pub base: String,
+    /// Where each file is read from.
+    pub from: From,
     /// Every changed file, in the sidebar tree's order: path, lines added and
     /// removed, and whether it is untracked.
     pub files: Vec<super::sidebar::File>,
@@ -998,9 +1013,17 @@ pub(super) fn draw(frame: &mut Frame, area: Rect, app: &App) -> Hits {
 impl App {
     /// A click on a file in the sidebar's tree: its diff, over the tab.
     pub(super) fn open_diff(&mut self, path: &str) {
-        let Some((root, base)) = self.sidebar.checkout.clone() else {
-            return self
-                .set_status("These files came from the transcript — there is no checkout to diff");
+        let from = match (&self.sidebar.remote, self.sidebar.checkout.clone()) {
+            (Some((reach, id)), _) => From::Remote {
+                reach: reach.clone(),
+                id: id.clone(),
+            },
+            (None, Some((root, base))) => From::Checkout { root, base },
+            (None, None) => {
+                return self.set_status(
+                    "These files came from the transcript — there is no checkout to diff",
+                );
+            }
         };
         let Some(Ok(listed)) = self.sidebar.files.as_ref() else {
             return;
@@ -1011,8 +1034,7 @@ impl App {
         };
         self.diff = Some(State {
             tab: self.tab,
-            root,
-            base,
+            from,
             files,
             at,
             read: None,
@@ -1040,8 +1062,7 @@ impl App {
             return;
         };
         let request = super::worker::Request::FileDiff {
-            root: state.root.clone(),
-            base: state.base.clone(),
+            from: state.from.clone(),
             path: file.path.clone(),
             untracked: file.untracked,
         };

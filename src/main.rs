@@ -495,6 +495,8 @@ fn main() -> anyhow::Result<()> {
         || args.report.is_some()
         || args.chat.is_some()
         || args.data.is_some()
+        || args.sidebar.is_some()
+        || args.diff.is_some()
         || args.wrapped.is_some()
         || args.export.is_some()
         || args.access.is_some()
@@ -515,6 +517,11 @@ fn main() -> anyhow::Result<()> {
             cli::run_chat(&sessions, which, args.before, args.agent.as_deref())?;
         } else if let Some(which) = &args.data {
             cli::run_data(&sessions, which, &loader)?;
+        } else if let Some(which) = &args.sidebar {
+            cli::run_sidebar(&sessions, which, &loader)?;
+        } else if let Some(which) = &args.diff {
+            let hex = args.path_hex.as_deref().unwrap_or_default();
+            cli::run_diff(&sessions, which, hex, &loader)?;
         } else if let Some(year) = args.wrapped {
             cli::run_wrapped(&sessions, year, &loader)?;
         } else if let Some(which) = &args.export {

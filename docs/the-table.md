@@ -629,8 +629,16 @@ you let go, with a line showing where the border will land until then. A
 double-click on the border goes back to the default width, and the width you
 chose is remembered like the fold. It is about the focused agent — or, while
 the focus is on a shell beside it, the tab's agent, so moving between them does
-not resize anything — is not drawn in a tab with no agent on this machine, and
-folds itself on a terminal too narrow to spare the columns. A note being
+not resize anything — is not drawn in a tab with no agent, and folds itself on
+a terminal too narrow to spare the columns.
+
+Beside an agent on **another machine** — a tab opened from a remote row, over
+ssh or your Cloudflare tunnel — the plan, the files and each file's diff are
+read by the cctop there (`cctop --sidebar`, `--diff`, or `/api/sidebar/<id>`
+and `/api/sidebar-diff/<id>` on its serve), at most every fifteen seconds, and a file's
+diff only for a file that session changed. A cctop there from before this says
+so in the Files section: update it. Notes on such a tab stay on this machine,
+and `Alt+g` — a git tool run here — points you at the sidebar's diff instead. A note being
 written (`Alt+e`, or a click on the Notes header) belongs to the session it
 was started on. A click on a note opens it to change; while one is being
 written, a click on another note picks that one instead, and the rest of the

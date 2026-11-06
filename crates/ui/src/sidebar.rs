@@ -23,7 +23,7 @@ use super::line_edit::{Edit, LineEdit};
 use super::{App, Mode, changes, theme};
 use cctop_core::notes::NOTE_MAX;
 use cctop_core::plan::{Status, Step};
-use cctop_core::session::{Session, SessionData};
+use cctop_core::session::Session;
 use cctop_core::util;
 use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
@@ -96,34 +96,26 @@ pub struct State {
     pub note_input: LineEdit,
     /// How many rows of the Files tree the wheel has scrolled past.
     pub files_scroll: usize,
+    /// Where the session is when it is not on this machine: the way back to
+    /// its cctop, which reads the plan, the files and each file's diff there.
+    /// `None` for an agent here.
+    pub remote: Option<(cctop_core::reach::Reach, String)>,
+    /// When the far side was last asked, so a row whose activity moves on
+    /// every poll is not re-read every second over a tunnel.
+    remote_asked: Option<std::time::Instant>,
     /// The session the note being written is about, fixed when `Alt+e` was
     /// pressed. The sidebar follows the focus, and a note saved against
     /// whatever it shows at Enter could replace another session's.
     note_key: Option<String>,
 }
 
-/// One changed file, as the sidebar lists it.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct File {
-    /// Relative to the checkout, or to the session's directory.
-    pub path: String,
-    /// `None` for a binary file, which has no lines to count.
-    pub added: Option<u64>,
-    pub removed: Option<u64>,
-    /// Never added to git: its diff is the whole file, read from disk.
-    pub untracked: bool,
-}
+/// One changed file, as the sidebar lists it — core's, because another
+/// machine reads the same list for a tab here.
+pub use cctop_core::sidebar::File;
 
-/// What the worker reads for the sidebar.
-#[derive(Debug)]
-pub struct Answer {
-    pub plan: Vec<Step>,
-    pub files: Result<Vec<File>, String>,
-    /// The checkout the files were read from and the commit they are against,
-    /// which is what a click on one diffs; `None` when they came from the
-    /// transcript, which has no checkout to diff.
-    pub checkout: Option<(PathBuf, String)>,
-}
+/// What the worker reads for the sidebar: core's document, read here or on
+/// the machine the agent runs on.
+pub type Answer = cctop_core::sidebar::Sidebar;
 
 impl State {
     /// Whether the sidebar is drawn: the tab holds an agent here.
@@ -286,60 +278,6 @@ pub(super) fn rows(root: &Dir, total: usize, turned: &HashSet<String>) -> Vec<Ro
     out
 }
 
-/// Read a session's plan and changed files, on the worker.
-///
-/// The checkout's own diff when there is one, as the Changes panel shows it:
-/// that is what is actually on disk. Outside a repository — or where the
-/// checkout cannot be read — the transcript's edits stand in, which at least
-/// name the files.
-pub(super) fn read(
-    data: &SessionData,
-    dir: Result<PathBuf, String>,
-    started: Option<i64>,
-    cwd: &str,
-) -> Answer {
-    let details = &data.metrics.tool_details;
-    let plan = cctop_core::plan::latest(details);
-    let edited = || -> Vec<File> {
-        let root = format!("{}/", cwd.trim_end_matches('/'));
-        cctop_core::handoff::touched_files(details)
-            .into_iter()
-            .map(|t| File {
-                path: t.path.strip_prefix(&root).unwrap_or(&t.path).to_string(),
-                added: Some(t.added),
-                removed: Some(t.removed),
-                untracked: false,
-            })
-            .collect()
-    };
-    let mut checkout = None;
-    let files = match dir.map(|dir| cctop_core::changes::read(&dir, started)) {
-        Ok(Ok(Some(changes))) => {
-            checkout = Some((changes.root.clone(), changes.base.commit.clone()));
-            Ok(changes
-                .files
-                .into_iter()
-                .map(|f| File {
-                    path: f.path,
-                    added: f.added,
-                    removed: f.removed,
-                    untracked: f.untracked,
-                })
-                .collect())
-        }
-        Ok(Ok(None)) => Ok(edited()),
-        Ok(Err(why)) | Err(why) => match edited() {
-            files if files.is_empty() => Err(why),
-            files => Ok(files),
-        },
-    };
-    Answer {
-        plan,
-        files,
-        checkout,
-    }
-}
-
 impl App {
     /// Resolve the focused pane's session, and ask for its plan and files once
     /// it has done something since they were last read. Called every turn of
@@ -350,9 +288,7 @@ impl App {
         // one: whether the sidebar is drawn is the tab's answer, not the
         // focus's, so moving between an agent and a shell beside it does not
         // resize every pane in the tab on each click.
-        let ours = |pane: &super::tabs::Pane| {
-            pane.is_agent() && pane.transport.is_none() && pane.dead.is_none()
-        };
+        let ours = |pane: &super::tabs::Pane| pane.is_agent() && pane.dead.is_none();
         let focused = self
             .tab
             .checked_sub(1)
@@ -382,7 +318,7 @@ impl App {
             let found = self
                 .sessions
                 .iter()
-                .find(|s| holds(pane, s))
+                .find(|s| holds(pane, s) || shows_remote(pane, s))
                 .map(|s| (s.provider.as_str().to_string(), s.session_id.clone()));
             let (provider, id) = found.unwrap_or_default();
             if id != self.sidebar.id || provider != self.sidebar.provider {
@@ -405,25 +341,50 @@ impl App {
             return;
         }
         let (provider, id) = (&self.sidebar.provider, &self.sidebar.id);
-        let Some(session) = self
-            .sessions
-            .iter()
-            .find(|s| s.remote.is_none() && s.session_id == *id && s.provider.as_str() == provider)
-        else {
+        let remote_pane = pane.transport.is_some();
+        let Some(session) = self.sessions.iter().find(|s| {
+            s.remote.is_some() == remote_pane
+                && s.session_id == *id
+                && s.provider.as_str() == provider
+        }) else {
             return;
         };
         let stamp = session.touched();
         if self.sidebar.asked == stamp {
             return;
         }
+        // Across a tunnel the stamp moves with every poll of that machine, so
+        // the read is also held to one per [`REMOTE_EVERY`].
+        let reach = match &session.remote {
+            None => None,
+            Some(remote) => {
+                if self
+                    .sidebar
+                    .remote_asked
+                    .is_some_and(|at| at.elapsed() < REMOTE_EVERY)
+                {
+                    return;
+                }
+                match self.reach_of(&remote.host) {
+                    Ok(reach) => Some(reach),
+                    Err(why) => {
+                        self.sidebar.files = Some(Err(why.to_string()));
+                        self.sidebar.asked = stamp.to_string();
+                        return;
+                    }
+                }
+            }
+        };
         self.sidebar.asked = stamp.to_string();
         self.sidebar.in_flight = true;
-        let started = cctop_core::changes::since(session);
+        if let Some(reach) = &reach {
+            self.sidebar.remote = Some((reach.clone(), session.session_id.clone()));
+            self.sidebar.remote_asked = Some(std::time::Instant::now());
+        }
         let _ = self.tx.send(super::worker::Request::Sidebar {
             key: session.key(),
-            dir: changes::checkout_of(session),
-            started,
             session: Box::new(session.clone()),
+            reach,
         });
     }
 
@@ -604,6 +565,32 @@ impl App {
         }
         self.needs_redraw = true;
     }
+}
+
+/// How often a sidebar about an agent on another machine is read again, at
+/// most: the panels' own pace for a remote row.
+const REMOTE_EVERY: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// Whether `pane` is a tab onto `session` on another machine: the name an
+/// open from another machine gives its tab, which is how the table's tab
+/// mark finds it too.
+///
+/// ponytail: notes on such a tab are kept on this machine, under the remote
+/// session's key; they do not travel to the machine the agent runs on.
+fn shows_remote(pane: &super::tabs::Pane, session: &Session) -> bool {
+    let Some(remote) = &session.remote else {
+        return false;
+    };
+    pane.transport.is_some()
+        && pane.resumed.as_deref()
+            == Some(
+                cctop_core::remote_open::tab_name(
+                    &remote.host,
+                    session.provider.as_str(),
+                    &session.session_id,
+                )
+                .as_str(),
+            )
 }
 
 /// Whether `pane` is where `session`'s agent runs: by the agent's pid, or by
@@ -825,7 +812,14 @@ fn open(
     let spawned = spawned_lines(children, width);
     let room = height.saturating_sub(notes.len() + spawned.len() + 2);
     let plan = untagged(plan_lines(&state.plan, width));
-    let files = files_lines(state.files.as_ref(), turned, state.files_scroll, width);
+    let from = state.remote.as_ref().map(|(reach, _)| reach.machine());
+    let files = files_lines(
+        state.files.as_ref(),
+        from,
+        turned,
+        state.files_scroll,
+        width,
+    );
     // The files are usually the longer list and the plan the one being read
     // top to bottom, so the plan takes what it needs of half, and the files
     // the rest.
@@ -927,6 +921,7 @@ fn plan_lines(plan: &[Step], width: usize) -> Vec<Line<'static>> {
 
 fn files_lines(
     files: Option<&Result<Vec<File>, String>>,
+    from: Option<&str>,
     turned: &HashSet<String>,
     scroll: usize,
     width: usize,
@@ -936,7 +931,13 @@ fn files_lines(
         None => {
             return vec![
                 plain(header("Files", vec![])),
-                plain(Line::from(Span::styled("  reading…", theme::dim()))),
+                plain(Line::from(Span::styled(
+                    match from {
+                        Some(machine) => format!("  reading from {machine}…"),
+                        None => "  reading…".to_string(),
+                    },
+                    theme::dim(),
+                ))),
             ];
         }
         Some(Err(why)) => {
@@ -1156,6 +1157,72 @@ fn wrap(text: &str, width: usize) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A tab onto an agent on another machine finds that machine's row and
+    /// asks it — not this machine's checkout — and does not ask again on
+    /// every poll of that machine, only once [`REMOTE_EVERY`] has passed.
+    #[test]
+    fn a_remote_tab_asks_its_machine_and_not_on_every_poll() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut app = App::with_prefs(
+            cctop_core::pricing::Plan::Retail,
+            tx,
+            super::super::UiPrefs::default(),
+        );
+        let mut remote = Session::new(cctop_core::pricing::Provider::Claude, "r1".into());
+        remote.remote = Some(cctop_core::session::Remote {
+            host: "side-host".into(),
+            ..Default::default()
+        });
+        remote.last_active = "2026-11-06T10:00:00Z".into();
+        app.sessions = vec![remote];
+        app.remote_hosts
+            .push(cctop_core::fleet::Host::parse("side-host").expect("a host"));
+        let mut pane = super::super::tabs::Pane::for_test("claude");
+        pane.transport = Some(cctop_core::reach::Transport::Ssh);
+        pane.resumed = Some(cctop_core::remote_open::tab_name(
+            "side-host",
+            "claude",
+            "r1",
+        ));
+        app.tabs.push(super::super::tabs::Tab::new(pane));
+        app.tab = 1;
+        let asked = || -> Vec<String> {
+            rx.try_iter()
+                .filter_map(|r| match r {
+                    super::super::worker::Request::Sidebar { reach, .. } => {
+                        Some(reach.map(|r| r.machine().to_string()).unwrap_or_default())
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+
+        app.sync_sidebar();
+        assert!(app.sidebar.shown(), "a remote agent's tab has a sidebar");
+        assert_eq!(asked(), ["side-host"], "asked of its machine");
+        assert!(app.sidebar.remote.is_some());
+
+        let key = app.sidebar_key_for_test().expect("the remote row");
+        app.got_sidebar(
+            key,
+            Answer {
+                plan: Vec::new(),
+                files: Ok(Vec::new()),
+                more: 0,
+                checkout: None,
+            },
+        );
+        // The row moves on with the machine's next poll: too soon to ask again.
+        app.sessions[0].last_active = "2026-11-06T10:00:05Z".into();
+        app.sync_sidebar();
+        assert!(asked().is_empty(), "asked again before REMOTE_EVERY");
+
+        app.sidebar.remote_asked =
+            Some(std::time::Instant::now() - REMOTE_EVERY - std::time::Duration::from_secs(1));
+        app.sync_sidebar();
+        assert_eq!(asked(), ["side-host"], "asked again once it was due");
+    }
 
     fn text(lines: &[Line]) -> Vec<String> {
         lines
