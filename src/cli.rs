@@ -296,6 +296,30 @@ pub struct Args {
     #[arg(long, value_name = "SESSION")]
     pub data: Option<String>,
 
+    /// Print what an agent tab's sidebar shows about one session — its plan
+    /// and the files it changed — as JSON, and exit
+    ///
+    /// /api/sidebar/<id> on a serve: the sidebar beside a tab on another
+    /// machine whose agent runs on this one
+    #[arg(long, value_name = "SESSION")]
+    pub sidebar: Option<String>,
+
+    /// Print one changed file's diff in a session's checkout, as JSON, and
+    /// exit. The file is --path-hex
+    ///
+    /// /api/sidebar-diff/<id>?path= on a serve. Only a file the session's sidebar
+    /// lists is answered
+    #[arg(long, value_name = "SESSION", requires = "path_hex")]
+    pub diff: Option<String>,
+
+    /// With --diff, the file's path relative to the checkout, hex-encoded
+    ///
+    /// Hex because ssh hands its arguments to the far shell as one line: a
+    /// file name with `$(…)` in it would run there, and hex has nothing a
+    /// shell reads
+    #[arg(long, value_name = "HEX", requires = "diff")]
+    pub path_hex: Option<String>,
+
     /// Print this machine's tally of a year, as JSON, and exit
     ///
     /// What `Y` in the table asks each remote for, so the year in review
@@ -960,6 +984,31 @@ pub fn run_data(sessions: &[Session], which: &str, loader: &Loader) -> anyhow::R
     let session = find_session(sessions, which)?;
     let data = loader.store().session_data_fresh(session);
     println!("{}", serde_json::to_string(&*data)?);
+    Ok(())
+}
+
+/// Print an agent tab's sidebar for one session as JSON, and exit.
+pub fn run_sidebar(sessions: &[Session], which: &str, loader: &Loader) -> anyhow::Result<()> {
+    let session = find_session(sessions, which)?;
+    let data = loader.store().session_data_fresh(session);
+    let sidebar = cctop_core::sidebar::of(session, &data);
+    println!("{}", serde_json::to_string(&sidebar)?);
+    Ok(())
+}
+
+/// Print one changed file's diff in a session's checkout as JSON, and exit.
+pub fn run_diff(
+    sessions: &[Session],
+    which: &str,
+    path_hex: &str,
+    loader: &Loader,
+) -> anyhow::Result<()> {
+    let session = find_session(sessions, which)?;
+    let path = cctop_core::util::from_hex(path_hex)
+        .ok_or_else(|| anyhow::anyhow!("--path-hex is not a hex-encoded UTF-8 path"))?;
+    let data = loader.store().session_data_fresh(session);
+    let diff = cctop_core::sidebar::diff(session, &data, &path).map_err(anyhow::Error::msg)?;
+    println!("{}", serde_json::to_string(&diff)?);
     Ok(())
 }
 

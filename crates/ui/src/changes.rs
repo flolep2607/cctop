@@ -87,26 +87,7 @@ pub enum View {
 /// The checkout a session's changes are read from, or the sentence saying why
 /// there is none here.
 pub(super) fn checkout_of(session: &Session) -> Result<PathBuf, String> {
-    // As `branch_of` reasons: a stopped sandbox's directory was the host's,
-    // mounted for as long as the agent ran, and the same path here now is
-    // something else.
-    if session.sandbox.is_some() && !session.is_running() {
-        return Err(
-            "this session ran in a sandbox that has stopped, so its checkout is no \
-                    longer mounted here"
-                .into(),
-        );
-    }
-    match session.work_dir() {
-        Some(dir) => Ok(dir),
-        None if session.label_source.is_empty() => {
-            Err("this session did not record a directory".into())
-        }
-        None => Err(format!(
-            "{} no longer exists on this machine",
-            util::tildify(&session.label_source)
-        )),
-    }
+    cctop_core::changes::checkout_of(session)
 }
 
 impl App {

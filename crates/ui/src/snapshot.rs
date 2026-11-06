@@ -1298,6 +1298,33 @@ fn agent_sidebar() {
     snap("agent_sidebar", &mut app);
 }
 
+/// The sidebar beside an agent on another machine, while that machine's
+/// cctop is being asked: it says where the files are coming from.
+#[test]
+fn agent_sidebar_remote() {
+    let mut app = fixture();
+    app.sessions[0].remote = Some(cctop_core::session::Remote {
+        host: "desktop".into(),
+        ..Default::default()
+    });
+    app.remote_hosts
+        .push(cctop_core::fleet::Host::parse("desktop").expect("a host"));
+    let session = &app.sessions[0];
+    let mut pane = tabs::Pane::for_test("claude");
+    pane.transport = Some(cctop_core::reach::Transport::Ssh);
+    pane.resumed = Some(cctop_core::remote_open::tab_name(
+        "desktop",
+        session.provider.as_str(),
+        &session.session_id,
+    ));
+    pane.label = "desktop · fix the login".into();
+    app.tabs.push(tabs::Tab::new(pane));
+    app.tab = 1;
+    app.sync_sidebar();
+    assert!(app.sidebar.remote.is_some(), "the remote row was not found");
+    snap("agent_sidebar_remote", &mut app);
+}
+
 /// The sidebar at a width dragged wider than the default.
 #[test]
 fn agent_sidebar_dragged_wide() {

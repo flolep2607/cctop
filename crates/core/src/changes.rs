@@ -221,6 +221,30 @@ fn written_since(path: &Path, started: Option<i64>) -> bool {
 /// The transcript's start is the session's first-ever moment, which a resume
 /// keeps; the process is the run going on now. Measured from the first, a
 /// session resumed after a week is charged with the week.
+/// Where a session's changes are read from: its directory, while it is still
+/// one on this machine.
+pub fn checkout_of(session: &crate::session::Session) -> Result<PathBuf, String> {
+    // A stopped sandbox's directory was the host's, mounted for as long as the
+    // agent ran, and the same path here now is something else.
+    if session.sandbox.is_some() && !session.is_running() {
+        return Err(
+            "this session ran in a sandbox that has stopped, so its checkout is no \
+             longer mounted here"
+                .into(),
+        );
+    }
+    match session.work_dir() {
+        Some(dir) => Ok(dir),
+        None if session.label_source.is_empty() => {
+            Err("this session did not record a directory".into())
+        }
+        None => Err(format!(
+            "{} no longer exists on this machine",
+            crate::util::tildify(&session.label_source)
+        )),
+    }
+}
+
 pub fn since(session: &crate::session::Session) -> Option<i64> {
     let first = chrono::DateTime::parse_from_rfc3339(&session.started_at)
         .ok()

@@ -92,6 +92,7 @@ pub mod secrets;
 pub mod session;
 pub mod settings;
 pub mod shim;
+pub mod sidebar;
 pub mod ssh_config;
 pub mod ssh_master;
 pub mod sshfs;

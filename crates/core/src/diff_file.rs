@@ -24,7 +24,7 @@ const MAX_DIFF_BYTES: usize = 4 << 20;
 const MAX_VERSION_BYTES: usize = 4 << 20;
 
 /// What the diff view shows for one file.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub struct FileDiff {
     /// The diff from the first hunk on, without git's header; for an
     /// untracked file, every line added, with no hunk header.
@@ -115,10 +115,18 @@ fn version(bytes: &[u8]) -> Version {
 }
 
 /// The file as it is in the working tree.
+///
+/// Only a file that is inside the checkout once its links are followed: a
+/// symlink in the tree that points out of it — at `~/.ssh`, say — names a file
+/// this view was never asked for, and another machine can ask for this one.
 fn read_new(root: &Path, path: &str) -> Option<Version> {
     use std::io::Read;
+    let resolved = root.join(path).canonicalize().ok()?;
+    if !resolved.starts_with(root.canonicalize().ok()?) {
+        return None;
+    }
     let mut bytes = Vec::new();
-    std::fs::File::open(root.join(path))
+    std::fs::File::open(resolved)
         .ok()?
         .take(MAX_VERSION_BYTES as u64 + 1)
         .read_to_end(&mut bytes)

@@ -23,7 +23,8 @@ use std::collections::HashMap;
 use crate::session::ToolDetail;
 
 /// Where one step stands.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Status {
     Done,
     Active,
@@ -41,7 +42,7 @@ impl Status {
 }
 
 /// One step of the plan.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Step {
     pub text: String,
     pub status: Status,

@@ -472,6 +472,70 @@ pub(crate) fn api_data(shared: &Shared, stream: &mut TcpStream, request: &Reques
     json(stream, request, &*shared.store.session_data_fresh(session));
 }
 
+/// Serve what an agent tab's sidebar shows about one session: its plan and
+/// the files it changed.
+///
+/// For another machine's TUI, whose tab holds an agent running here. A remote
+/// row is asked of the machine it came from, like the data above.
+pub(crate) fn api_sidebar(shared: &Shared, stream: &mut TcpStream, request: &Request, id: &str) {
+    let snapshot = current(shared);
+    let Some(session) = find(&snapshot.sessions, id) else {
+        return http::respond_error(stream, Some(request), 404, NO_SUCH_SESSION);
+    };
+    if session.remote.is_some() {
+        return remote_json(
+            shared,
+            stream,
+            request,
+            session,
+            &["--sidebar".to_string(), session.session_id.clone()],
+        );
+    }
+    let data = shared.store.session_data_fresh(session);
+    json(stream, request, &cctop_core::sidebar::of(session, &data));
+}
+
+/// Serve one changed file's diff, `?path=`, in a session's checkout, for
+/// another machine's terminal diff view. Not the page's `/api/diff`, which takes
+/// its base from the page: this one reads the session's own list and base.
+///
+/// Only a file the session's own sidebar lists — [`cctop_core::sidebar::diff`]
+/// reads the list again rather than trusting the path — so this reads nothing
+/// the session did not change.
+pub(crate) fn api_sidebar_diff(
+    shared: &Shared,
+    stream: &mut TcpStream,
+    request: &Request,
+    id: &str,
+) {
+    let Some(path) = request.query.get("path").filter(|p| !p.is_empty()) else {
+        return http::respond_error(stream, Some(request), 400, "which file? ?path= is missing");
+    };
+    let snapshot = current(shared);
+    let Some(session) = find(&snapshot.sessions, id) else {
+        return http::respond_error(stream, Some(request), 404, NO_SUCH_SESSION);
+    };
+    if session.remote.is_some() {
+        return remote_json(
+            shared,
+            stream,
+            request,
+            session,
+            &[
+                "--diff".to_string(),
+                session.session_id.clone(),
+                "--path-hex".to_string(),
+                cctop_core::util::to_hex(path),
+            ],
+        );
+    }
+    let data = shared.store.session_data_fresh(session);
+    match cctop_core::sidebar::diff(session, &data, path) {
+        Ok(diff) => json(stream, request, &diff),
+        Err(why) => http::respond_error(stream, Some(request), 404, &why),
+    }
+}
+
 /// Find a session by id, or by a prefix that matches exactly one.
 ///
 /// Prefixes because session ids are uuids and the report link is a thing people
@@ -652,6 +716,79 @@ mod tests {
         assert_eq!(doc["pages"][1]["state"], "pending");
         assert_eq!(doc["alerts"], serde_json::json!([]));
         assert_eq!(doc["line"], serde_json::Value::Null);
+    }
+
+    /// The sidebar and a file's diff, for another machine's tab: behind the
+    /// token like every other route, and a diff only for a file the session
+    /// changed — not another file in its checkout, and not one outside it.
+    #[test]
+    fn the_sidebar_and_its_diffs_answer_only_for_what_the_session_changed() {
+        let dir = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let ok = std::process::Command::new("git")
+                .arg("-C")
+                .arg(dir.path())
+                .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+                .args(args)
+                .output()
+                .unwrap()
+                .status
+                .success();
+            assert!(ok, "git {args:?}");
+        };
+        git(&["init", "-q"]);
+        std::fs::write(dir.path().join("a.txt"), "one\ntwo\n").unwrap();
+        std::fs::write(dir.path().join("kept.txt"), "kept\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "x"]);
+        std::fs::write(dir.path().join("a.txt"), "one\nTWO\n").unwrap();
+        let mut s = session("side-1");
+        s.label_source = dir.path().to_string_lossy().into_owned();
+
+        let guarded = shared("full", "view");
+        *guarded.latest.lock().unwrap() = Arc::new(Snapshot {
+            version: 1,
+            doc: crate::Doc::ready("[]".to_string(), Vec::new()),
+            sessions: vec![s],
+            host_errors: Vec::new(),
+        });
+        let full = "Authorization: Bearer full\r\n";
+        let body = |target: &str| {
+            let raw = response_of(&guarded, "GET", target, full);
+            let (head, body) = raw.split_once("\r\n\r\n").unwrap_or_default();
+            (
+                head.lines().next().unwrap_or_default().to_string(),
+                body.to_string(),
+            )
+        };
+
+        assert!(status_of(&guarded, "GET", "/api/sidebar/side-1", "").contains(" 403 "));
+        assert!(
+            status_of(&guarded, "GET", "/api/sidebar-diff/side-1?path=a.txt", "").contains(" 403 ")
+        );
+
+        let (status, sidebar) = body("/api/sidebar/side-1");
+        assert!(status.contains(" 200 "), "{status}: {sidebar}");
+        assert!(sidebar.contains("\"path\":\"a.txt\""), "{sidebar}");
+        assert!(
+            !sidebar.contains(&dir.path().to_string_lossy().into_owned()),
+            "{sidebar}"
+        );
+
+        let (status, diff) = body("/api/sidebar-diff/side-1?path=a.txt");
+        assert!(status.contains(" 200 "), "{status}: {diff}");
+        assert!(diff.contains("+TWO"), "{diff}");
+
+        for path in ["kept.txt", "..%2F..%2Fetc%2Fpasswd", "%2Fetc%2Fpasswd"] {
+            let (status, why) = body(&format!("/api/sidebar-diff/side-1?path={path}"));
+            assert!(status.contains(" 404 "), "{path}: {status}");
+            assert!(
+                why.contains("not a file this session changed"),
+                "{path}: {why}"
+            );
+        }
+        assert!(body("/api/sidebar-diff/side-1").0.contains(" 400 "));
+        assert!(body("/api/sidebar/nobody").0.contains(" 404 "));
     }
 
     #[test]
