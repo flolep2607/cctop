@@ -784,10 +784,13 @@ fn record(name: &str, option: &str, value: &str) {
 
 /// What the agent is started with beyond its argv, as `VAR=value` pairs.
 pub fn launch_env(argv: &[String]) -> Vec<String> {
+    // OpenCode reads its instructions from files, so the nudge is one, kept
+    // beside the notes; asked for only when it is handed the tool it names.
+    let nudge = plan_nudge().then(opencode_nudge_file).flatten();
     let mcp = mcp_launch()
         .then(crate::mux::installed_exe)
         .flatten()
-        .and_then(|exe| crate::opencode::mcp_env(argv, &exe.to_string_lossy()));
+        .and_then(|exe| crate::opencode::mcp_env(argv, &exe.to_string_lossy(), nudge.as_deref()));
     crate::opencode::launch_env(argv)
         .into_iter()
         .chain(mcp)
@@ -806,13 +809,47 @@ pub fn launch_argv(argv: &[String]) -> Vec<String> {
         .then(crate::mux::installed_exe)
         .flatten()
         .map(|exe| exe.to_string_lossy().into_owned());
-    launch_argv_with(argv, mcp.as_deref())
+    launch_argv_with(argv, mcp.as_deref(), plan_nudge())
 }
 
 /// Whether agents are handed cctop's MCP server — see
 /// [`Settings::mcp_launch`](crate::settings::Settings::mcp_launch).
 fn mcp_launch() -> bool {
     !crate::under_test() && crate::settings::Settings::load().mcp_launch != Some(false)
+}
+
+/// Whether agents are asked to keep a plan — see
+/// [`Settings::plan_nudge`](crate::settings::Settings::plan_nudge).
+fn plan_nudge() -> bool {
+    !crate::under_test() && crate::settings::Settings::load().plan_nudge != Some(false)
+}
+
+/// The line Claude Code is given, to keep its task list for the sidebar.
+pub const NUDGE_CLAUDE: &str = "This session runs in cctop, which shows your task list \
+    beside you. For work with more than one step, keep it in your task tool and update each \
+    task's status as you go.";
+
+/// The line Codex is given, to keep its plan for the sidebar.
+pub const NUDGE_CODEX: &str = "This session runs in cctop, which shows your plan beside \
+    you. For work with more than one step, keep it with update_plan and update each step's \
+    status as you go.";
+
+/// The line a harness without a to-do tool is given: cctop's `set_plan`.
+pub const NUDGE_MCP: &str = "This session runs in cctop, which shows your plan beside you. \
+    For work with more than one step, publish it with cctop's set_plan tool and send it again \
+    whenever a step's status changes.";
+
+/// The file holding [`NUDGE_MCP`] for OpenCode, written when it is missing or
+/// stale; `None` when it cannot be.
+fn opencode_nudge_file() -> Option<String> {
+    let path = crate::config::data_base()
+        .join("cctop")
+        .join("plan-nudge.md");
+    let current = std::fs::read_to_string(&path).ok();
+    if current.as_deref() != Some(NUDGE_MCP) {
+        crate::util::write_atomic(&path, NUDGE_MCP.as_bytes(), false).ok()?;
+    }
+    Some(path.to_string_lossy().into_owned())
 }
 
 /// [`launch_argv`], with the binary that serves MCP handed in, or `None`
@@ -835,7 +872,14 @@ fn mcp_launch() -> bool {
 /// after it to swallow; a prompt written after it would have been read as a
 /// second config. Codex's `-c` is a global option and goes before any
 /// subcommand.
-pub fn launch_argv_with(argv: &[String], mcp: Option<&str>) -> Vec<String> {
+///
+/// With `nudge`, the agent is also asked to keep a plan the sidebar can show:
+/// Claude in its own system prompt, appended to rather than replaced, and
+/// Codex in its developer instructions — each to use its own to-do tool. An
+/// argv that already sets either is the person's own and left alone.
+/// ponytail: Devin, Pi and Vibe are not asked; none takes instructions for one
+/// session on its command line or in its environment.
+pub fn launch_argv_with(argv: &[String], mcp: Option<&str>, nudge: bool) -> Vec<String> {
     let harness = argv.len() - crate::config::without_launch_prefix(argv).len();
     let Some(argv0) = argv.get(harness) else {
         return argv.to_vec();
@@ -854,26 +898,46 @@ pub fn launch_argv_with(argv: &[String], mcp: Option<&str>) -> Vec<String> {
                 ],
             );
         }
+        let prompted = argv
+            .iter()
+            .any(|a| a.starts_with("--system-prompt") || a.starts_with("--append-system-prompt"));
+        if nudge && !prompted {
+            out.splice(
+                harness + 1..harness + 1,
+                [
+                    "--append-system-prompt".to_string(),
+                    NUDGE_CLAUDE.to_string(),
+                ],
+            );
+        }
         if let Some(exe) = mcp {
             let config = serde_json::json!({
                 "mcpServers": { "cctop": { "command": exe, "args": ["--mcp"] } }
             });
             out.extend(["--mcp-config".to_string(), config.to_string()]);
         }
-    } else if crate::proc::command_stem(argv0) == "codex"
-        && let Some(exe) = mcp
-    {
-        // A TOML value: a JSON string is a valid TOML basic string.
-        let command = serde_json::Value::from(exe).to_string();
-        out.splice(
-            harness + 1..harness + 1,
-            [
-                "-c".to_string(),
-                format!("mcp_servers.cctop.command={command}"),
-                "-c".to_string(),
-                r#"mcp_servers.cctop.args=["--mcp"]"#.to_string(),
-            ],
-        );
+    } else if crate::proc::command_stem(argv0) == "codex" {
+        // TOML values: a JSON string is a valid TOML basic string.
+        if let Some(exe) = mcp {
+            let command = serde_json::Value::from(exe).to_string();
+            out.splice(
+                harness + 1..harness + 1,
+                [
+                    "-c".to_string(),
+                    format!("mcp_servers.cctop.command={command}"),
+                    "-c".to_string(),
+                    r#"mcp_servers.cctop.args=["--mcp"]"#.to_string(),
+                ],
+            );
+        }
+        let instructed = argv.iter().any(|a| a.starts_with("developer_instructions"));
+        if nudge && !instructed {
+            let text = serde_json::Value::from(NUDGE_CODEX).to_string();
+            out.splice(
+                harness + 1..harness + 1,
+                ["-c".to_string(), format!("developer_instructions={text}")],
+            );
+        }
     }
     out
 }
@@ -1793,11 +1857,15 @@ mod tests {
         let argv = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         let full = r#"{"tui":"fullscreen"}"#;
         assert_eq!(
-            launch_argv_with(&argv(&["claude", "--resume", "abc"]), None),
+            launch_argv_with(&argv(&["claude", "--resume", "abc"]), None, false),
             argv(&["claude", "--settings", full, "--resume", "abc"])
         );
         assert_eq!(
-            launch_argv_with(&argv(&["env", "CLAUDE_CONFIG_DIR=/x", "claude"]), None),
+            launch_argv_with(
+                &argv(&["env", "CLAUDE_CONFIG_DIR=/x", "claude"]),
+                None,
+                false
+            ),
             argv(&["env", "CLAUDE_CONFIG_DIR=/x", "claude", "--settings", full])
         );
         for unchanged in [
@@ -1805,8 +1873,41 @@ mod tests {
             argv(&["claude", "--settings", "/my.json"]),
             argv(&["claude", "--settings={}"]),
         ] {
-            assert_eq!(launch_argv_with(&unchanged, None), unchanged);
+            assert_eq!(launch_argv_with(&unchanged, None, false), unchanged);
         }
+    }
+
+    /// Claude and Codex are asked to keep their plan with their own tools,
+    /// unless the argv already sets their instructions; nudging never lands
+    /// after Claude's many-valued `--mcp-config`.
+    #[test]
+    fn agents_are_asked_to_keep_a_plan() {
+        let argv = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let claude = launch_argv_with(&argv(&["claude", "fix it"]), Some("/bin/cctop"), true);
+        assert_eq!(
+            claude[1..3],
+            argv(&["--append-system-prompt", NUDGE_CLAUDE])
+        );
+        assert_eq!(claude[claude.len() - 2], "--mcp-config");
+        assert!(claude.contains(&"fix it".to_string()));
+        let theirs = argv(&["claude", "--append-system-prompt", "mine"]);
+        let kept = launch_argv_with(&theirs, None, true);
+        assert_eq!(
+            kept.iter()
+                .filter(|a| *a == "--append-system-prompt")
+                .count(),
+            1
+        );
+        assert!(kept.contains(&"mine".to_string()));
+
+        let codex = launch_argv_with(&argv(&["codex", "resume", "abc"]), None, true);
+        let expected = format!(
+            "developer_instructions={}",
+            serde_json::Value::from(NUDGE_CODEX)
+        );
+        assert_eq!(codex, argv(&["codex", "-c", &expected, "resume", "abc"]));
+        let off = launch_argv_with(&argv(&["codex", "resume", "abc"]), None, false);
+        assert_eq!(off, argv(&["codex", "resume", "abc"]));
     }
 
     /// cctop's MCP server is offered to Claude last, where its many-valued
@@ -1814,7 +1915,7 @@ mod tests {
     #[test]
     fn agents_are_handed_cctops_mcp_server() {
         let argv = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-        let claude = launch_argv_with(&argv(&["claude", "fix the bug"]), Some("/bin/cctop"));
+        let claude = launch_argv_with(&argv(&["claude", "fix the bug"]), Some("/bin/cctop"), false);
         assert_eq!(
             claude[..4],
             argv(&[
@@ -1829,7 +1930,11 @@ mod tests {
         assert_eq!(config["mcpServers"]["cctop"]["command"], "/bin/cctop");
         assert_eq!(claude.len(), 6);
         assert_eq!(
-            launch_argv_with(&argv(&["codex", "resume", "abc"]), Some("/bin/cctop")),
+            launch_argv_with(
+                &argv(&["codex", "resume", "abc"]),
+                Some("/bin/cctop"),
+                false
+            ),
             argv(&[
                 "codex",
                 "-c",
@@ -1841,7 +1946,7 @@ mod tests {
             ])
         );
         let shell = argv(&["zsh"]);
-        assert_eq!(launch_argv_with(&shell, Some("/bin/cctop")), shell);
+        assert_eq!(launch_argv_with(&shell, Some("/bin/cctop"), true), shell);
     }
 
     /// An agent typed into a shell tab is held by that tab's session, through

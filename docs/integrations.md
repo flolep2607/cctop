@@ -405,8 +405,16 @@ Seven tools, all read-only — and two more that act, off until you turn them on
   calls again. Unlike the command it does not listen for hooks itself, so it
   hears a finished turn a second or two later, once a transcript or a running
   cctop has it.
+- **`set_plan`** `{steps: [{text, status}]}` — publishes the calling agent's
+  plan to the sidebar of its tab, for harnesses with no to-do tool of their
+  own (OpenCode, Devin, …); Claude's task list and Codex's `update_plan` are
+  read from the transcript and win when present. Each call replaces the last
+  plan; at most 50 steps of 200 characters, status `pending`, `in_progress` or
+  `completed`. The session is not an argument: it is the agent that started
+  the server, found among the server's parent processes, so an agent can only
+  ever set its own. It writes cctop's record of that plan and nothing else.
 
-None of those seven starts, stops, or types at anything. An agent that can
+None of those eight starts, stops, or types at anything. An agent that can
 *drive* other agents is a much larger proposition than one that can *see* them,
 and the visibility is the half with no downside.
 
@@ -426,6 +434,17 @@ mcp_launch = false   # on by default; also a switch in Settings (,)
 
 ponytail: Devin, Pi and Vibe are started without it; none of them takes a
 server for one session on its command line or in its environment.
+
+They are also asked, in one line, to keep their plan where the sidebar
+shows it: Claude through `--append-system-prompt` to use its task list,
+Codex through `-c developer_instructions=…` to use `update_plan`, and OpenCode
+through an `instructions` file to use `set_plan`. An argv that already sets
+Claude's system prompt or Codex's developer instructions is left alone.
+
+```toml
+[settings]
+plan_nudge = false   # on by default; also a switch in Settings (,)
+```
 
 ### Letting agents drive agents
 

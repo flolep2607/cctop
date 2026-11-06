@@ -588,6 +588,38 @@ fn read_schemas() -> Vec<Value> {
                 "required": ["query"],
             },
         }),
+        json!({
+            "name": "set_plan",
+            "description": "Publish your current plan to cctop's sidebar, beside your \
+                            terminal, so the person can see where you are. Send every step, \
+                            in order, each time it changes; the new plan replaces the last. \
+                            Agents with a to-do tool of their own are already shown — this is \
+                            for those without one.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "steps": {
+                        "type": "array",
+                        "description": "The whole plan, in order, at most 50 steps.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "text": {
+                                    "type": "string",
+                                    "description": "The step, at most 200 characters.",
+                                },
+                                "status": {
+                                    "type": "string",
+                                    "enum": ["pending", "in_progress", "completed"],
+                                },
+                            },
+                            "required": ["text", "status"],
+                        },
+                    },
+                },
+                "required": ["steps"],
+            },
+        }),
     ]
 }
 
@@ -595,7 +627,7 @@ fn read_schemas() -> Vec<Value> {
 const DRIVE_TOOLS: [&str; 2] = ["spawn_agent", "send_prompt"];
 
 /// The tools [`call_tool`] answers to, which [`tool_schemas`] must list.
-const TOOLS: [&str; 7] = [
+const TOOLS: [&str; 8] = [
     "list_sessions",
     "get_session_context",
     "check_conflicts",
@@ -603,6 +635,7 @@ const TOOLS: [&str; 7] = [
     "recall",
     "read_passage",
     "search_sessions",
+    "set_plan",
 ];
 
 /// Run one tool and wrap its output the way MCP expects.
@@ -666,6 +699,7 @@ fn run_tool(name: &str, args: Value) -> Result<String, String> {
         "recall" => recall(&sessions, parse(name, args)?)?,
         "read_passage" => read_passage(&sessions, parse(name, args)?)?,
         "send_prompt" => send_prompt(&sessions, parse(name, args)?)?,
+        "set_plan" => set_plan(&sessions, parse(name, args)?)?,
         other => unreachable!("{other} is not in TOOLS"),
     };
     // Persisting is worth the write even on a read-only call: an MCP server is
@@ -751,6 +785,40 @@ struct SendArgs {
 
 /// Start an agent in a cctop tab — see [`cctop_core::drive`] for every check
 /// it passes first.
+#[derive(Deserialize)]
+struct PlanArgs {
+    steps: Vec<PlanStep>,
+}
+
+#[derive(Deserialize)]
+struct PlanStep {
+    text: String,
+    status: String,
+}
+
+/// `set_plan`: keep the calling agent's plan for the sidebar.
+///
+/// The caller is found by ancestry, not named in the arguments: the server is
+/// the agent's own child, so whoever spawned it is the session asking, and an
+/// argument could name any session at all. It writes nothing but cctop's own
+/// record of that session's plan, so it needs no `mcp_drive`.
+fn set_plan(sessions: &[Session], args: PlanArgs) -> Result<String, String> {
+    let steps: Vec<(String, String)> = args.steps.into_iter().map(|s| (s.text, s.status)).collect();
+    let plan = cctop_core::plan::checked(&steps)?;
+    let ancestors = cctop_core::hook::ancestors_of(std::process::id());
+    let session = cctop_core::plan::caller(&ancestors, sessions).ok_or(
+        "cctop could not tell which session this is: set_plan works for an agent running on \
+         this machine, which is the process that started this MCP server",
+    )?;
+    cctop_core::plan::publish(session.provider.as_str(), &session.session_id, &plan)
+        .map_err(|e| format!("could not keep the plan: {e}"))?;
+    let done = cctop_core::plan::done(&plan);
+    Ok(format!(
+        "Plan published to cctop's sidebar: {done} of {} steps done.",
+        plan.len()
+    ))
+}
+
 fn spawn_agent(args: SpawnArgs) -> Result<String, String> {
     let request = cctop_core::drive::Request {
         harness: args.harness,

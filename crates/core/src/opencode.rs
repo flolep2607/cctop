@@ -168,8 +168,11 @@ const CONFIG_ENV: &str = "OPENCODE_CONFIG_CONTENT";
 /// OpenCode takes no server on its command line, but reads
 /// `OPENCODE_CONFIG_CONTENT` above every config file, and merges it with them,
 /// so the person's own servers are still there beside this one.
-pub fn mcp_env(argv: &[String], exe: &str) -> Option<(String, String)> {
-    mcp_env_from(argv, exe, &|key| std::env::var(key).ok())
+///
+/// With `nudge`, the path of a file asking it to publish its plan with
+/// `set_plan` is added to its `instructions`, after any of the person's own.
+pub fn mcp_env(argv: &[String], exe: &str, nudge: Option<&str>) -> Option<(String, String)> {
+    mcp_env_from(argv, exe, nudge, &|key| std::env::var(key).ok())
 }
 
 /// [`mcp_env`] with the environment handed in, for the reason
@@ -177,6 +180,7 @@ pub fn mcp_env(argv: &[String], exe: &str) -> Option<(String, String)> {
 fn mcp_env_from(
     argv: &[String],
     exe: &str,
+    nudge: Option<&str>,
     env: &dyn Fn(&str) -> Option<String>,
 ) -> Option<(String, String)> {
     let harness = crate::config::without_launch_prefix(argv).first()?;
@@ -197,6 +201,18 @@ fn mcp_env_from(
         "cctop".into(),
         serde_json::json!({ "type": "local", "command": [exe, "--mcp"], "enabled": true }),
     );
+    if let Some(path) = nudge {
+        let list = object
+            .entry("instructions")
+            .or_insert_with(|| serde_json::json!([]));
+        if !list.is_array() {
+            *list = serde_json::json!([]);
+        }
+        let list = list.as_array_mut()?;
+        if !list.iter().any(|p| p == path) {
+            list.push(path.into());
+        }
+    }
     Some((CONFIG_ENV.to_string(), root.to_string()))
 }
 
@@ -213,14 +229,30 @@ mod tests {
     fn opencode_is_handed_cctops_server_beside_its_own() {
         let argv = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         let theirs = r#"{"mcp":{"mine":{"type":"local","command":["x"]}},"theme":"dark"}"#;
-        let (var, value) =
-            mcp_env_from(&argv(&["opencode"]), "/bin/cctop", &|_| Some(theirs.into())).unwrap();
+        let (var, value) = mcp_env_from(&argv(&["opencode"]), "/bin/cctop", None, &|_| {
+            Some(theirs.into())
+        })
+        .unwrap();
         assert_eq!(var, "OPENCODE_CONFIG_CONTENT");
         let value: serde_json::Value = serde_json::from_str(&value).unwrap();
         assert_eq!(value["theme"], "dark");
         assert_eq!(value["mcp"]["mine"]["command"][0], "x");
         assert_eq!(value["mcp"]["cctop"]["command"][1], "--mcp");
-        assert!(mcp_env_from(&argv(&["claude"]), "/bin/cctop", &|_| None).is_none());
+        assert!(mcp_env_from(&argv(&["claude"]), "/bin/cctop", None, &|_| None).is_none());
+        // The nudge goes after the person's own instructions, once.
+        let mine = r#"{"instructions":["MINE.md"]}"#;
+        let (_, value) = mcp_env_from(
+            &argv(&["opencode"]),
+            "/bin/cctop",
+            Some("/data/plan-nudge.md"),
+            &|_| Some(mine.into()),
+        )
+        .unwrap();
+        let value: serde_json::Value = serde_json::from_str(&value).unwrap();
+        assert_eq!(
+            value["instructions"],
+            serde_json::json!(["MINE.md", "/data/plan-nudge.md"])
+        );
     }
 
     #[test]

@@ -684,8 +684,17 @@ pub(super) fn spawn_worker(
                     let tx = tx.clone();
                     loader.gently_spawn(move || {
                         let data = store.session_data_fresh(&session);
-                        let answer =
+                        let mut answer =
                             super::sidebar::read(&data, dir, started, &session.label_source);
+                        // The harness's own to-do tool first, as the agent's
+                        // working record; what it published through
+                        // `set_plan` when it has none.
+                        if answer.plan.is_empty() {
+                            answer.plan = cctop_core::plan::published(
+                                session.provider.as_str(),
+                                &session.session_id,
+                            );
+                        }
                         let _ = tx.send(Response::Sidebar { key, answer });
                     });
                 }

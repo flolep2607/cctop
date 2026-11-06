@@ -18,7 +18,7 @@ use std::path::Path;
 
 /// Every `[settings]` key: its name, its default as the file would spell it,
 /// and what it does.
-pub const SETTINGS: [(&str, &str, &str); 29] = [
+pub const SETTINGS: [(&str, &str, &str); 30] = [
     (
         "theme",
         "\"auto\"",
@@ -116,6 +116,11 @@ pub const SETTINGS: [(&str, &str, &str); 29] = [
         "tabs_kept",
         "3",
         "Recent tabs kept open behind the one on screen; 0 = none",
+    ),
+    (
+        "plan_nudge",
+        "true",
+        "Ask agents cctop starts to keep a plan for the sidebar",
     ),
     (
         "idle_after",
@@ -379,6 +384,13 @@ pub struct Settings {
     /// otherwise: without [`Self::mcp_drive`] every tool there only reads, and
     /// an agent started from cctop is the one most likely to want them.
     pub mcp_launch: Option<bool>,
+    /// Whether an agent cctop starts is asked, in one line of its
+    /// instructions, to keep its plan where the sidebar can show it — see
+    /// [`crate::rmux::launch_argv`]. On unless the file says otherwise: the
+    /// plan is half of what the sidebar is for, and an agent keeps one only
+    /// when it judges the work big enough, which is not when a person
+    /// watching would want one.
+    pub plan_nudge: Option<bool>,
     /// Hours without activity before a live session is idle — see
     /// [`Settings::idle_after_ms`].
     pub idle_after: Option<f64>,
@@ -466,6 +478,7 @@ impl Settings {
                     "checkpoints" => item.as_bool().map(|v| out.checkpoints = Some(v)).is_none(),
                     "mcp_drive" => item.as_bool().map(|v| out.mcp_drive = Some(v)).is_none(),
                     "mcp_launch" => item.as_bool().map(|v| out.mcp_launch = Some(v)).is_none(),
+                    "plan_nudge" => item.as_bool().map(|v| out.plan_nudge = Some(v)).is_none(),
                     "read_screen" => item.as_bool().map(|v| out.read_screen = Some(v)).is_none(),
                     "compact_threshold" => item
                         .as_float()
@@ -579,6 +592,7 @@ impl Settings {
             "checkpoints" => self.checkpoints.map(|v| v.to_string()),
             "mcp_drive" => self.mcp_drive.map(|v| v.to_string()),
             "mcp_launch" => self.mcp_launch.map(|v| v.to_string()),
+            "plan_nudge" => self.plan_nudge.map(|v| v.to_string()),
             "read_screen" => self.read_screen.map(|v| v.to_string()),
             "compact_threshold" => self.compact_threshold.map(|v| format!("{}", v * 100.0)),
             "hide_columns" => self.hide_columns.as_ref().map(|v| format!("{v:?}")),

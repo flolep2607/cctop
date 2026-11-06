@@ -163,7 +163,7 @@ mod tests {
         for tool in ["lazygit", "tig", "git", "env"] {
             let argv = vec![tool.to_string(), "x".to_string()];
             assert_eq!(
-                cctop_core::rmux::launch_argv_with(&argv, Some("/bin/cctop")),
+                cctop_core::rmux::launch_argv_with(&argv, Some("/bin/cctop"), true),
                 argv
             );
         }
