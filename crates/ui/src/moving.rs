@@ -9,9 +9,9 @@
 //! fills it in only asks questions, so it can sit open while the person reads.
 
 use super::{App, Mode, worker::Request};
-use cctop_core::fleet::Host;
 use cctop_core::migrate::send::{Outcome, Plan};
 use cctop_core::migrate::{self, Kind};
+use cctop_core::reach::Reach;
 use cctop_core::session::Session;
 
 /// A path is a line; this is room for a long one.
@@ -25,14 +25,59 @@ pub struct Flow {
     /// The session being moved, held while a machine is picked.
     pub session: Option<Box<Session>>,
     /// The machines to pick from, and which one is highlighted.
-    pub machines: Vec<Host>,
+    pub machines: Vec<Machine>,
     pub cursor: usize,
     /// The machine chosen.
-    pub host: Option<Host>,
+    pub host: Option<Reach>,
     /// What the check found, held through the confirmation.
     pub plan: Option<Box<Plan>>,
     /// The directory, editable in the confirmation.
     pub dir: super::line_edit::LineEdit,
+}
+
+/// One place a session could move to: a `--host` over ssh, or a sibling on
+/// the Cloudflare account — or one of those that cannot be reached now, and
+/// why, listed so it is not a mystery that it is missing.
+#[derive(Clone)]
+pub struct Machine {
+    pub name: String,
+    pub reach: Result<Reach, String>,
+}
+
+/// Every machine `X` could move a session to: the `--host`s, then the
+/// siblings the account's last listing found, with why each one that cannot
+/// be reached is not reachable.
+fn machines(app: &App) -> Vec<Machine> {
+    machines_from(
+        &app.remote_hosts,
+        cctop_core::peer::known(),
+        cctop_core::peer::find,
+    )
+}
+
+/// [`machines`] from what it is handed, so a test need not stand siblings in
+/// on the process-wide listing every other test reads too.
+fn machines_from(
+    hosts: &[cctop_core::fleet::Host],
+    siblings: Vec<(String, Option<String>)>,
+    find: impl Fn(&str) -> Option<std::sync::Arc<cctop_core::peer::Peer>>,
+) -> Vec<Machine> {
+    let mut out: Vec<Machine> = hosts
+        .iter()
+        .map(|host| Machine {
+            name: host.target.clone(),
+            reach: Ok(Reach::Ssh(host.clone())),
+        })
+        .collect();
+    for (name, why) in siblings {
+        let reach = match (why, find(&name)) {
+            (Some(why), _) => Err(why),
+            (None, Some(peer)) => Ok(Reach::Peer(peer)),
+            (None, None) => Err("no longer on the account".into()),
+        };
+        out.push(Machine { name, reach });
+    }
+    out
 }
 
 /// What the worker reports, in the order it happens.
@@ -57,9 +102,11 @@ impl App {
         if let Some(moved) = migrate::moved_to(session.provider, &session.session_id) {
             return Some(migrate::moved_refusal(&moved));
         }
-        if self.remote_hosts.is_empty() {
+        if self.remote_hosts.is_empty() && cctop_core::peer::known().is_empty() {
             return Some(
-                "no other machine to move it to — a session moves over ssh to a --host".into(),
+                "no other machine to move it to — a session moves to a --host over ssh, \
+                 or to another cctop on your Cloudflare account"
+                    .into(),
             );
         }
         if self.moving.busy {
@@ -78,10 +125,15 @@ impl App {
             return;
         }
         let session = Box::new(session.clone());
-        let machines = self.remote_hosts.clone();
-        if machines.len() == 1 {
-            let host = machines[0].clone();
-            return self.move_check(session, host);
+        let machines = machines(self);
+        if let [
+            Machine {
+                reach: Ok(reach), ..
+            },
+        ] = machines.as_slice()
+        {
+            let reach = reach.clone();
+            return self.move_check(session, reach);
         }
         self.moving = Flow {
             session: Some(session),
@@ -93,18 +145,31 @@ impl App {
 
     /// Enter in the machine list.
     pub(super) fn move_pick(&mut self) {
-        let host = self.moving.machines.get(self.moving.cursor).cloned();
-        match (self.moving.session.take(), host) {
-            (Some(session), Some(host)) => {
+        let machine = self.moving.machines.get(self.moving.cursor).cloned();
+        // One that cannot be reached stays in the list, saying why.
+        if let Some(Machine {
+            name,
+            reach: Err(why),
+        }) = &machine
+        {
+            return self.set_status(format!("{name} cannot take it now: {why}"));
+        }
+        match (self.moving.session.take(), machine) {
+            (
+                Some(session),
+                Some(Machine {
+                    reach: Ok(reach), ..
+                }),
+            ) => {
                 self.mode = Mode::List;
-                self.move_check(session, host);
+                self.move_check(session, reach);
             }
             _ => self.move_cancel(),
         }
     }
 
-    fn move_check(&mut self, session: Box<Session>, host: Host) {
-        self.set_status(format!("Asking {} where it would land…", host.target));
+    fn move_check(&mut self, session: Box<Session>, host: Reach) {
+        self.set_status(format!("Asking {} where it would land…", host.machine()));
         self.moving = Flow {
             busy: true,
             host: Some(host.clone()),
@@ -164,7 +229,7 @@ impl App {
         self.moving.busy = true;
         match typed != plan.placement.dir && !typed.is_empty() {
             true => {
-                self.set_status(format!("Asking {} about {typed}…", host.target));
+                self.set_status(format!("Asking {} about {typed}…", host.machine()));
                 let _ = self.tx.send(Request::MoveReplan {
                     plan,
                     dir: typed,
@@ -172,7 +237,7 @@ impl App {
                 });
             }
             false => {
-                self.set_status(format!("Moving it to {}…", host.target));
+                self.set_status(format!("Moving it to {}…", host.machine()));
                 let _ = self.tx.send(Request::MoveRun { plan, host });
             }
         }
@@ -197,26 +262,26 @@ pub(crate) fn landing(plan: &Plan) -> String {
 }
 
 /// The worker's halves.
-pub(super) fn check(session: &Session, host: Host) -> Event {
-    let wire = migrate::wire::Ssh(host);
-    match migrate::send::prepare(session, &wire) {
+pub(super) fn check(session: &Session, host: Reach) -> Event {
+    let wire = migrate::wire::to(&host);
+    match migrate::send::prepare(session, wire.as_ref()) {
         Ok(plan) => Event::Ready(Box::new(plan)),
         Err(why) => Event::Failed(why),
     }
 }
 
-pub(super) fn replan(mut plan: Plan, dir: &str, host: Host) -> Event {
-    let wire = migrate::wire::Ssh(host);
-    match migrate::send::replan(&mut plan, dir, &wire) {
+pub(super) fn replan(mut plan: Plan, dir: &str, host: Reach) -> Event {
+    let wire = migrate::wire::to(&host);
+    match migrate::send::replan(&mut plan, dir, wire.as_ref()) {
         Ok(()) => Event::Ready(Box::new(plan)),
         Err(why) => Event::Failed(why),
     }
 }
 
-pub(super) fn run(plan: &Plan, host: Host, send: &(dyn Fn(Event) + Sync)) -> Event {
-    let wire = migrate::wire::Ssh(host);
+pub(super) fn run(plan: &Plan, host: Reach, send: &(dyn Fn(Event) + Sync)) -> Event {
+    let wire = migrate::wire::to(&host);
     let say = |s: String| send(Event::Step(s));
-    match migrate::send::run(plan, &wire, &say) {
+    match migrate::send::run(plan, wire.as_ref(), &say) {
         Ok(outcome) => Event::Moved(Box::new(outcome)),
         Err(why) => Event::Failed(why),
     }
@@ -269,10 +334,58 @@ mod tests {
         assert!(app.status().is_some());
     }
 
+    /// The siblings are offered beside the `--host`s, and one that cannot be
+    /// reached stays in the list saying why, rather than being asked.
+    #[test]
+    fn siblings_are_offered_and_an_unreachable_one_says_why() {
+        let peer = std::sync::Arc::new(cctop_core::peer::Peer::fixed(
+            "desk",
+            "http://127.0.0.1:9",
+            "s",
+        ));
+        let hosts = vec![cctop_core::fleet::Host::parse("procdb").unwrap()];
+        let list = machines_from(
+            &hosts,
+            vec![
+                ("desk".into(), None),
+                ("laptop".into(), Some("offline".into())),
+            ],
+            |name| (name == "desk").then(|| peer.clone()),
+        );
+        let names: Vec<_> = list.iter().map(|m| m.name.as_str()).collect();
+        assert_eq!(names, ["procdb", "desk", "laptop"]);
+        assert!(matches!(list[1].reach, Ok(Reach::Peer(_))));
+        assert_eq!(
+            list[2].reach.as_ref().err().map(String::as_str),
+            Some("offline")
+        );
+
+        let mut app = test_app();
+        app.moving = Flow {
+            session: Some(Box::new(session("a", false, "/tmp"))),
+            machines: list,
+            cursor: 2,
+            ..Flow::default()
+        };
+        app.mode = Mode::MovePick;
+        app.on_key(key(KeyCode::Enter));
+        assert_eq!(app.mode, Mode::MovePick, "still choosing");
+        assert!(!app.moving.busy);
+        assert!(
+            app.status()
+                .unwrap()
+                .contains("laptop cannot take it now: offline"),
+            "{:?}",
+            app.status()
+        );
+    }
+
     #[test]
     fn enter_moves_it_and_an_edited_directory_is_asked_about_first() {
         let mut app = test_app();
-        app.moving.host = Some(Host::parse("desktop").unwrap());
+        app.moving.host = Some(Reach::Ssh(
+            cctop_core::fleet::Host::parse("desktop").unwrap(),
+        ));
         app.got_move(Event::Ready(Box::new(sample())));
         assert_eq!(app.mode, Mode::MoveConfirm);
         assert_eq!(app.moving.dir, "/home/me/code/cctop");
@@ -282,7 +395,9 @@ mod tests {
         assert!(app.moving.plan.is_none(), "handed to the worker");
 
         app.moving = Flow {
-            host: Some(Host::parse("desktop").unwrap()),
+            host: Some(Reach::Ssh(
+                cctop_core::fleet::Host::parse("desktop").unwrap(),
+            )),
             ..Flow::default()
         };
         app.got_move(Event::Ready(Box::new(sample())));

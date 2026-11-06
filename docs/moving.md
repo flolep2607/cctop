@@ -64,10 +64,19 @@ Refused, with the reason, before anything changes:
 
 ## How it reaches the other machine
 
-Over ssh, to a machine named with `--host` (or `$CCTOP_HOSTS`). Both machines
-need a cctop that knows how to move a session; an older one there is named in
-the refusal, with the update to run. Moving to a sibling on your Cloudflare
-account — no `--host` — is not here yet.
+Two ways, and `X` offers both — the `--host`s first, then the siblings, with
+one that cannot be reached right now listed with why:
+
+- **Over ssh**, to a machine named with `--host` (or `$CCTOP_HOSTS`): that
+  machine's `cctop move …` is run with everything on its stdin.
+- **Over your Cloudflare tunnel**, to another cctop on the same account — the
+  machines in the HOST column without a `--host`. The bytes go to its
+  `cctop serve` in requests of 2 MB each, signed as this machine, and are
+  received there by the same code ssh feeds. Nothing needs setting up beyond
+  what already lets you see that machine's sessions here.
+
+Both machines need a cctop that knows how to move a session; an older one there
+is named in the refusal, with the update to run.
 
 ## Safety on the receiving side
 
@@ -79,4 +88,10 @@ account — no `--host` — is not here yet.
 - Every path is derived on the receiving side; a name from the sender that
   would walk out of where it belongs is refused.
 - A move carries at most 2 GB, needs 1 GB to spare on the disk there, and one
-  arrives at a time.
+  arrives at a time. Over the tunnel the bytes are held there until the last
+  one is in, so the disk needs room for them twice; an upload its sender gave
+  up on stops counting after 30 minutes.
+- Over the tunnel, only another cctop on the account can send one: the routes
+  refuse every token link, cookie and Access login, a hub never relays them,
+  and each request names its body by sha256 in the signed path, so what was
+  signed is what is received.

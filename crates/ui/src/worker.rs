@@ -50,18 +50,18 @@ pub(super) enum Request {
     /// Ask `host` where the session would land, for `X`'s confirmation.
     MoveCheck {
         session: Box<Session>,
-        host: cctop_core::fleet::Host,
+        host: cctop_core::reach::Reach,
     },
     /// The person typed another directory: ask about that one.
     MoveReplan {
         plan: Box<cctop_core::migrate::send::Plan>,
         dir: String,
-        host: cctop_core::fleet::Host,
+        host: cctop_core::reach::Reach,
     },
     /// Move it.
     MoveRun {
         plan: Box<cctop_core::migrate::send::Plan>,
-        host: cctop_core::fleet::Host,
+        host: cctop_core::reach::Reach,
     },
     /// The session `id`'s checkpoints in its checkout, against how it is now.
     Checkpoints {

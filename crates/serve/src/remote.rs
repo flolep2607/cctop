@@ -84,6 +84,17 @@ pub(crate) fn forward(
             Err(why) => http::respond_error(stream, Some(request), 502, &why),
         };
     }
+    // A move is signed by the machine it comes from, for the machine it goes
+    // to. Relayed, it would arrive signed by this hub on the strength of a
+    // link someone holds here — exactly the credential a move refuses.
+    if path.starts_with(cctop_core::migrate::wire::ROUTE) {
+        return http::respond_error(
+            stream,
+            Some(request),
+            404,
+            "a moved session is never relayed",
+        );
+    }
     if !path.starts_with("/api/") || path == "/api/events" {
         return http::respond_error(
             stream,
