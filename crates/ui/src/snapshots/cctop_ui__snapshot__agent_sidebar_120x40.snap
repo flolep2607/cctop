@@ -23,7 +23,7 @@ expression: screen
 │                                                                                      ││▾ tests/ 1 +45 −0             │
 │                                                                                      ││    auth.rs +45 −0            │
 │                                                                                      ││                              │
-│                                                                                      ││Notes  Alt+e                  │
+│                                                                                      ││Notes  click or Alt+e         │
 │                                                                                      ││• ask Sam about token expiry  │
 │                                                                                      ││                              │
 │                                                                                      ││                              │

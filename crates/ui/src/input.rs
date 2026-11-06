@@ -2219,7 +2219,22 @@ impl App {
         // A note being written holds the mouse, as a modal does: a click that
         // moved the focus would move the sidebar to another session under the
         // half-written note. Esc or Enter puts it down first.
+        //
+        // Except a click on another note, or on the header, in that same
+        // sidebar: that picks the note to write, as ↑ and ↓ do.
         if self.mode == Mode::Note {
+            if let MouseEventKind::Down(MouseButton::Left) = ev.kind
+                && let Some((_, super::sidebar::Target::Note(at))) = layout
+                    .sidebar_tree
+                    .targets
+                    .iter()
+                    .find(|(row, _)| *row == ev.row)
+                && layout
+                    .sidebar
+                    .is_some_and(|r| r.contains(ratatui::layout::Position::new(ev.column, ev.row)))
+            {
+                self.edit_note_at(*at);
+            }
             return;
         }
 
@@ -2410,6 +2425,11 @@ impl App {
                     if let Some(super::sidebar::Target::File(path)) = &target =>
                 {
                     self.open_diff(path);
+                }
+                MouseEventKind::Down(MouseButton::Left)
+                    if let Some(super::sidebar::Target::Note(at)) = &target =>
+                {
+                    self.edit_note_at(*at);
                 }
                 MouseEventKind::Down(MouseButton::Left)
                     if self.sidebar_folded || ev.row == side.y =>

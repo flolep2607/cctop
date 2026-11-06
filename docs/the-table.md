@@ -561,7 +561,7 @@ Tabs and splits, from anywhere including inside a running agent:
 | `Alt+o` | Move focus to the next pane |
 | `Alt+z` | Zoom the focused pane to fill the tab, or put the split back (see below) |
 | `Alt+i` | Fold the agent's sidebar to a strip of counts, or open it (see below) |
-| `Alt+e` | Write a note on the agent's session, in the sidebar; `↑`/`↓` pick one to change, emptied removes it |
+| `Alt+e` | Write a note on the agent's session, in the sidebar (or click Notes, or a note to change it); `↑`/`↓` pick one to change, emptied removes it |
 | `Alt+g` | Open the agent's changes in your git tool, in a split beside it (see below) |
 | `Alt+w` | Close the focused pane and stop its agent |
 | `Alt+Shift+W` | The same thing, by a name that says so |
@@ -591,8 +591,10 @@ chose is remembered like the fold. It is about the focused agent — or, while
 the focus is on a shell beside it, the tab's agent, so moving between them does
 not resize anything — is not drawn in a tab with no agent on this machine, and
 folds itself on a terminal too narrow to spare the columns. A note being
-written (`Alt+e`) belongs to the session it was started on; the mouse waits
-until Enter or Esc.
+written (`Alt+e`, or a click on the Notes header) belongs to the session it
+was started on. A click on a note opens it to change; while one is being
+written, a click on another note picks that one instead, and the rest of the
+mouse waits until Enter or Esc.
 
 A click on a file in the tree opens its **diff** over the tab, the way GitHub
 draws a split diff: the old file on the left and the new on the right, line
