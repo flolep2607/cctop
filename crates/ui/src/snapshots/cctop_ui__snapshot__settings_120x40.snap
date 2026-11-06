@@ -40,5 +40,5 @@ expression: screen
 │  predictive_echo   auto         ↻   auto/always/off; auto above 60ms RTT                                             │
 │  footer_hide       ""               Footer items to hide, e.g. "sort,follow" or "share"                              │
 │  footer_note       ""               A note always shown on the footer, e.g. "on-call shift"                          │
-╰ 99   ↑↓ scroll   / filter   Esc back ────────────────────────────────────────────────────────────────────────────────╯
+╰ 100   ↑↓ scroll   / filter   Esc back ───────────────────────────────────────────────────────────────────────────────╯
 / Filter ↵ Change ⌫ Reset e Edit file , Back Alt+←→ Tabs F1 Help F10 Quit                                       ⧉ share
