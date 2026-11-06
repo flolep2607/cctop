@@ -357,10 +357,8 @@ impl App {
         self.refresh_connected();
         // So is `[[schedule]]`: a schedule written here is a timer installed,
         // without a second command. Nothing is asked of systemd unless the
-        // schedules changed since the last sync, which is most reloads.
-        if let Some(said) = cctop_core::schedule::sync_if_changed() {
-            self.set_status(said);
-        }
+        // schedules changed since the last sync, which is most reloads — and
+        // what is asked, on the worker (see `refresh_schedules`).
         self.refresh_schedules();
     }
 

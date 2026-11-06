@@ -72,6 +72,11 @@ pub struct Schedules {
     /// One sentence per entry that could not be used. Reported, not fatal: a
     /// typo in one schedule must not stop the others from running.
     pub problems: Vec<String>,
+    /// Why the file could not be read at all, when it could not: missing
+    /// permissions, or text that is not TOML — a typo anywhere in it, or an
+    /// editor's half-written save caught by the reload. Not the same answer as
+    /// "no schedules": read as that, a sync would uninstall every timer.
+    pub unreadable: Option<String>,
 }
 
 impl Schedules {
@@ -80,15 +85,24 @@ impl Schedules {
     }
 
     pub fn load_from(path: &Path) -> Schedules {
-        std::fs::read_to_string(path)
-            .map(|text| Schedules::parse(&text))
-            .unwrap_or_default()
+        match std::fs::read_to_string(path) {
+            Ok(text) => Schedules::parse(&text),
+            // No file is no schedules; that one is true.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Schedules::default(),
+            Err(e) => Schedules {
+                unreadable: Some(format!("{} could not be read: {e}", path.display())),
+                ..Schedules::default()
+            },
+        }
     }
 
     pub fn parse(text: &str) -> Schedules {
         let mut out = Schedules::default();
         let Ok(doc) = text.parse::<toml_edit::DocumentMut>() else {
-            // `Settings` already says the file is not TOML; once is enough.
+            // `Settings` already says how the file is not TOML; this only
+            // keeps the answer from being taken for "no schedules".
+            out.unreadable =
+                Some("config.toml is not valid TOML; schedules left as they were".into());
             return out;
         };
         let Some(item) = doc.get("schedule") else {
@@ -218,13 +232,37 @@ fn check_when(when: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Where a schedule's previous run is, as far as the next run cares.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Previous {
+    /// No tab, or its agent has exited.
+    Gone,
+    /// The agent is at its prompt, its turn done: finished, for a schedule.
+    /// An interactive agent never exits by itself, so without this a daily
+    /// schedule ran once and was skipped every day after.
+    Idle,
+    /// Working, or waiting on a person, or nobody can tell which.
+    Busy,
+}
+
+/// The previous run of the schedule whose tab is `tab`.
+pub fn previous(tab: &str) -> Previous {
+    if !crate::rmux::live(tab) {
+        return Previous::Gone;
+    }
+    match crate::peek::named(tab).map(|s| s.signal) {
+        Some(crate::hook::Signal::Idle) => Previous::Idle,
+        _ => Previous::Busy,
+    }
+}
+
 /// What a run does instead of starting the agent, if anything.
 ///
 /// By hand (`--now`) a disabled schedule still runs — the person asked for
 /// this one — but a schedule whose last agent is still at work never doubles
-/// up, whoever asks.
-pub fn skip_reason(schedule: &Schedule, still_running: bool, by_hand: bool) -> Option<String> {
-    if still_running {
+/// up, whoever asks. One that finished and sits at its prompt is replaced.
+pub fn skip_reason(schedule: &Schedule, previous: Previous, by_hand: bool) -> Option<String> {
+    if previous == Previous::Busy {
         return Some(format!(
             "{}'s previous run is still going (tab {}); not starting a second agent on the \
              same directory",
@@ -272,9 +310,25 @@ pub fn run(name: &str, by_hand: bool) -> Result<String, String> {
         return Err(why);
     };
     let tab = schedule.unit();
-    let result = match skip_reason(schedule, crate::rmux::live(&tab), by_hand) {
-        Some(why) => Ok(format!("skipped: {why}")),
-        None => start(schedule, &tab),
+    let before = previous(&tab);
+    let result = match skip_reason(schedule, before, by_hand) {
+        Some(why) => {
+            // Told, not only logged: a run that did not happen is otherwise
+            // noticed days later, by the work that was not done.
+            notify(
+                &format!("Skipped: {}", schedule.name),
+                &format!("Its previous run is still at work in tab {tab}"),
+            );
+            Ok(format!("skipped: {why}"))
+        }
+        None => {
+            if before == Previous::Idle {
+                // Its turn is over and its conversation is on disk; the tab
+                // is the next run's to use.
+                let _ = crate::rmux::kill(&tab);
+            }
+            start(schedule, &tab)
+        }
     };
     crate::elog::event(
         "schedule",
@@ -310,24 +364,35 @@ fn start(schedule: &Schedule, tab: &str) -> Result<String, String> {
 }
 
 /// Tell the person's phone a scheduled agent started.
+fn announce(schedule: &Schedule, dir: &Path) {
+    notify(
+        &format!("Scheduled: {}", schedule.name),
+        &format!(
+            "{} started in {}",
+            schedule.harness,
+            crate::util::tildify(&dir.to_string_lossy())
+        ),
+    );
+}
+
+/// A push to the person's phone, about a schedule.
 ///
 /// Through the browsers subscribed on `cctop serve`'s page, read from the same
 /// sealed store. Sent inline, not on [`push_all`](crate::webpush::push_all)'s
 /// thread: this process exits as soon as the agent is up, and would take the
 /// thread with it. Nobody subscribed is the usual case, and costs nothing.
-fn announce(schedule: &Schedule, dir: &Path) {
+fn notify(title: &str, body: &str) {
+    if crate::under_test() {
+        return;
+    }
     let store = crate::secrets::Store::current();
     let subscriptions = crate::webpush::load_subscriptions(&store);
     let Some(vapid) = crate::webpush::Vapid::load(&store) else {
         return;
     };
     let payload = crate::webpush::Payload {
-        title: format!("Scheduled: {}", schedule.name),
-        body: format!(
-            "{} started in {}",
-            schedule.harness,
-            crate::util::tildify(&dir.to_string_lossy())
-        ),
+        title: title.to_string(),
+        body: body.to_string(),
         // No session id yet — the transcript is written after the first
         // turn — so the tap opens the table, where the new tab's row is.
         session: String::new(),
@@ -348,12 +413,21 @@ fn announce(schedule: &Schedule, dir: &Path) {
 
 /// The `.service` that runs `schedule`: `exe schedule run <name>`.
 ///
-/// `PATH` is the one piece of the person's environment carried over, because
-/// the user manager's is a bare system one and the harnesses live in
-/// `~/.local/bin` and the like; without it `claude` is "not installed" at
-/// 08:00 and installed at 08:01. `XDG_RUNTIME_DIR` is `%t`, the manager's
-/// own, which is where cctop's rmux keeps its socket.
-pub fn service_text(schedule: &Schedule, exe: &Path, path: &str) -> String {
+/// The user manager's environment is a bare system one, so the person's is
+/// carried over: `PATH`, because the harnesses live in `~/.local/bin` and the
+/// like, and without it `claude` is "not installed" at 08:00 and installed at
+/// 08:01; and [`ENV_FILE`], written at sync time, for what picks the account
+/// and the credentials. `XDG_RUNTIME_DIR` is `%t`, the manager's own, which is
+/// where cctop's rmux keeps its socket.
+///
+/// `KillMode=process`: a oneshot's processes are killed when its command
+/// exits, the whole cgroup at systemd's default. A run that had to start
+/// cctop's rmux daemon itself — no cctop open at 08:00, which is what
+/// schedules are for — would have its agent killed a second after the push
+/// saying it started. [`crate::mux::start`] also moves a daemon it starts from
+/// a service into a scope of its own; this is the second guard for a machine
+/// where that cannot be done.
+pub fn service_text(schedule: &Schedule, exe: &Path, path: &str, env: &Path) -> String {
     format!(
         "{MARKER}\n\
          [Unit]\n\
@@ -361,13 +435,61 @@ pub fn service_text(schedule: &Schedule, exe: &Path, path: &str) -> String {
          \n\
          [Service]\n\
          Type=oneshot\n\
+         KillMode=process\n\
          Environment={path_env}\n\
          Environment=XDG_RUNTIME_DIR=%t\n\
+         EnvironmentFile=-{env_file}\n\
          ExecStart={exe} schedule run {name}\n",
         name = schedule.name,
         path_env = quote(&format!("PATH={path}")),
+        // A path, not a list of words: systemd does not unquote it, so only
+        // its specifier character is escaped.
+        env_file = env.to_string_lossy().replace('%', "%%"),
         exe = quote(&exe.to_string_lossy()),
     )
+}
+
+/// Where the environment a scheduled run needs is written at sync time.
+///
+/// Its own file, private, rather than `Environment=` lines in the unit: an API
+/// key has no business in a world-readable unit file.
+pub fn env_file() -> PathBuf {
+    crate::config::config_base()
+        .join("cctop")
+        .join("schedule.env")
+}
+
+/// The variables of this environment a scheduled agent needs and the user
+/// manager does not have: which account each harness uses, the keys some
+/// accounts are, and the locale.
+fn carried(name: &str) -> bool {
+    matches!(name, "LANG" | "LC_ALL" | "LC_CTYPE" | "TZ")
+        || [
+            "CLAUDE_",
+            "CODEX_",
+            "ANTHROPIC_",
+            "OPENAI_",
+            "OPENCODE_",
+            "DEVIN_",
+        ]
+        .iter()
+        .any(|prefix| name.starts_with(prefix))
+}
+
+/// [`env_file`]'s text, from `vars`: one `NAME="value"` line each, quoted as
+/// systemd reads an environment file, and sorted so a sync that changed
+/// nothing writes the same bytes.
+pub fn env_text(vars: impl IntoIterator<Item = (String, String)>) -> String {
+    let mut lines: Vec<String> = vars
+        .into_iter()
+        .filter(|(name, value)| carried(name) && !value.contains('\n'))
+        .map(|(name, value)| {
+            let value = value.replace('\\', "\\\\").replace('"', "\\\"");
+            format!("{name}=\"{value}\"")
+        })
+        .collect();
+    lines.sort();
+    lines.iter().map(|l| format!("{l}\n")).collect()
 }
 
 /// The `.timer` that fires `schedule`'s service on its calendar.
@@ -405,10 +527,12 @@ fn quote(value: &str) -> String {
 }
 
 /// The user's systemd unit directory.
+///
+/// Through [`config_base`](crate::config::config_base), whose guard keeps a
+/// root cctop under a `sudo` that kept `HOME` out of the user's directories: a
+/// root with no schedules would otherwise remove every timer the user has.
 pub fn unit_dir() -> PathBuf {
-    dirs::config_dir()
-        .unwrap_or_else(|| crate::config::HOME.join(".config"))
-        .join("systemd/user")
+    crate::config::config_base().join("systemd/user")
 }
 
 /// Asks systemd something: `systemctl --user <args>` in the real one, a
@@ -519,7 +643,10 @@ pub fn sync(
             continue;
         }
         let unit = schedule.unit();
-        wanted.insert(format!("{unit}.service"), service_text(schedule, exe, path));
+        wanted.insert(
+            format!("{unit}.service"),
+            service_text(schedule, exe, path, &env_file()),
+        );
         wanted.insert(format!("{unit}.timer"), timer_text(schedule));
         timers.push((schedule.name.clone(), format!("{unit}.timer")));
     }
@@ -594,10 +721,32 @@ fn push_once(list: &mut Vec<String>, name: &str) {
     }
 }
 
-/// [`sync`] against the real systemd and this cctop's own binary.
+/// The cctop a timer runs: the one on `PATH`, else this one.
+///
+/// Not simply this process's binary. A dashboard left open across
+/// `cctop --update` is running a deleted file, whose path reads
+/// `/usr/local/bin/cctop (deleted)` — a timer pointed there fails every run,
+/// silently — and a build run from a worktree is a file the worktree's
+/// cleanup removes. `None` when there is no cctop to point at.
+pub fn timer_exe() -> Option<PathBuf> {
+    std::env::var_os("PATH")
+        .into_iter()
+        .flat_map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
+        .map(|dir| dir.join("cctop"))
+        .find(|exe| {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::metadata(exe).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+        })
+        .or_else(crate::mux::installed_exe)
+}
+
+/// [`sync`] against the real systemd and the installed cctop, with this
+/// environment's account variables written to [`env_file`] first.
 pub fn sync_now(schedules: &[Schedule]) -> Result<Synced, String> {
-    let exe = std::env::current_exe().map_err(|e| format!("where is cctop? {e}"))?;
+    let exe =
+        timer_exe().ok_or("there is no cctop on PATH, nor at the path this one was run from")?;
     let path = std::env::var("PATH").unwrap_or_default();
+    write_env_file()?;
     sync(
         schedules,
         &unit_dir(),
@@ -608,26 +757,46 @@ pub fn sync_now(schedules: &[Schedule]) -> Result<Synced, String> {
     )
 }
 
-/// Sync if the schedules or this binary changed since the last sync this
-/// machine did, and say what changed — `None` when nothing needed doing.
+/// Write [`env_file`] from this process's environment, private to the user.
+fn write_env_file() -> Result<(), String> {
+    let file = env_file();
+    if let Some(dir) = file.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    }
+    crate::util::write_atomic(&file, env_text(std::env::vars()).as_bytes(), true)
+        .map_err(|e| format!("{}: {e}", file.display()))
+}
+
+/// Sync if the schedules or the environment they run in changed since the
+/// last sync this machine did, and say what changed — `None` when nothing
+/// needed doing.
 ///
 /// What the dashboard and `cctop serve` call when they read `config.toml`, so a
 /// schedule written into the file is installed without a second command. A
 /// machine with no schedules, and none installed, never asks systemd anything.
+/// A file that cannot be read changes nothing: see [`Schedules::unreadable`].
+/// A sync that failed is not tried again until something changes, so a
+/// machine with no user systemd says so once, not on every reload.
 pub fn sync_if_changed() -> Option<String> {
     if crate::under_test() {
         return None;
     }
     let schedules = Schedules::load();
-    let exe = std::env::current_exe().ok()?;
+    if schedules.unreadable.is_some() {
+        return None;
+    }
+    let exe = timer_exe()?;
     let fingerprint = format!(
-        "{:?}|{}|{}",
+        "{:?}|{}|{}|{}",
         schedules.entries,
         exe.display(),
-        std::env::var("PATH").unwrap_or_default()
+        std::env::var("PATH").unwrap_or_default(),
+        env_text(std::env::vars()),
     );
     let stamp = crate::config::CACHE_DIR.join("schedule-synced");
-    if std::fs::read_to_string(&stamp).is_ok_and(|old| old == fingerprint) {
+    let failed = crate::config::CACHE_DIR.join("schedule-sync-failed");
+    let same = |file: &Path| std::fs::read_to_string(file).is_ok_and(|old| old == fingerprint);
+    if same(&stamp) || same(&failed) {
         return None;
     }
     let installed = std::fs::read_dir(unit_dir()).is_ok_and(|mut entries| {
@@ -640,11 +809,15 @@ pub fn sync_if_changed() -> Option<String> {
     let said = match sync_now(&schedules.entries) {
         Ok(synced) => {
             let _ = std::fs::write(&stamp, &fingerprint);
+            let _ = std::fs::remove_file(&failed);
             synced
                 .changed()
                 .then(|| format!("Schedules: {}", synced.summary()))?
         }
-        Err(why) => format!("Schedules not installed: {why}"),
+        Err(why) => {
+            let _ = std::fs::write(&failed, &fingerprint);
+            format!("Schedules not installed: {why}")
+        }
     };
     Some(said)
 }
@@ -710,6 +883,10 @@ pub fn run_cli(argv: &[String]) -> i32 {
     match args.as_slice() {
         [] | ["list"] => {
             let schedules = Schedules::load();
+            if let Some(why) = &schedules.unreadable {
+                eprintln!("{why}");
+                return 1;
+            }
             if schedules.entries.is_empty() && schedules.problems.is_empty() {
                 println!(
                     "No schedules. Add a [[schedule]] to {} — see `cctop schedule help`.",
@@ -736,6 +913,12 @@ pub fn run_cli(argv: &[String]) -> i32 {
                     "",
                     last.as_deref().unwrap_or("never")
                 );
+                // Checked now rather than when the file is read: a directory
+                // can be made after the schedule is written, and a run checks
+                // again anyway. Said here so it is not found out at 08:00.
+                if let Err(why) = crate::drive::check_dir(&s.dir) {
+                    println!("{:<20} won't run: {why}", "");
+                }
             }
             for problem in &schedules.problems {
                 eprintln!("{problem}");
@@ -744,6 +927,10 @@ pub fn run_cli(argv: &[String]) -> i32 {
         }
         ["sync"] => {
             let schedules = Schedules::load();
+            if let Some(why) = &schedules.unreadable {
+                eprintln!("{why}");
+                return 1;
+            }
             for problem in &schedules.problems {
                 eprintln!("{problem}");
             }
@@ -874,19 +1061,69 @@ enabled = false
         assert!(bad(&format!("name = \"x\"\n{base}\nenabled = \"yes\"")).contains("`enabled`"));
     }
 
+    /// A previous run still at work is never doubled; one that finished and
+    /// sits at its prompt is replaced, or a daily schedule would run once.
     #[test]
     fn a_running_previous_run_is_never_doubled() {
         let mut s = deps();
-        assert_eq!(skip_reason(&s, false, false), None);
+        assert_eq!(skip_reason(&s, Previous::Gone, false), None);
+        assert_eq!(skip_reason(&s, Previous::Idle, false), None);
         assert!(
-            skip_reason(&s, true, false)
+            skip_reason(&s, Previous::Busy, false)
                 .unwrap()
                 .contains("still going")
         );
-        assert!(skip_reason(&s, true, true).unwrap().contains("still going"));
+        assert!(
+            skip_reason(&s, Previous::Busy, true)
+                .unwrap()
+                .contains("still going")
+        );
         s.enabled = false;
-        assert!(skip_reason(&s, false, false).unwrap().contains("disabled"));
-        assert_eq!(skip_reason(&s, false, true), None);
+        assert!(
+            skip_reason(&s, Previous::Gone, false)
+                .unwrap()
+                .contains("disabled")
+        );
+        assert_eq!(skip_reason(&s, Previous::Gone, true), None);
+    }
+
+    /// A file that is not TOML, or cannot be read, is not "no schedules":
+    /// read as that, the next sync would remove every timer.
+    #[test]
+    fn a_broken_file_is_not_an_empty_one() {
+        let broken = Schedules::parse("[[schedule]]\nname = \"deps\"\nwhen = ");
+        assert!(broken.unreadable.is_some());
+        assert!(broken.entries.is_empty());
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            Schedules::load_from(&dir.path().join("absent.toml")),
+            Schedules::default(),
+            "no file really is no schedules"
+        );
+        // A directory where the file should be: there, but unreadable.
+        assert!(Schedules::load_from(dir.path()).unreadable.is_some());
+        assert!(Schedules::parse(FILE).unreadable.is_none());
+    }
+
+    /// The account variables a scheduled agent needs are carried, quoted for
+    /// systemd; nothing else of the environment is.
+    #[test]
+    fn the_environment_file_carries_accounts_and_nothing_else() {
+        let vars = [
+            ("CLAUDE_CONFIG_DIR", "/home/a/.claude-work"),
+            ("ANTHROPIC_API_KEY", "sk-\"x\\y"),
+            ("HOME", "/home/a"),
+            ("SSH_AUTH_SOCK", "/tmp/s"),
+            ("LANG", "en_NZ.UTF-8"),
+            ("CODEX_HOME", "two\nlines"),
+        ]
+        .map(|(k, v)| (k.to_string(), v.to_string()));
+        assert_eq!(
+            env_text(vars),
+            "ANTHROPIC_API_KEY=\"sk-\\\"x\\\\y\"\n\
+             CLAUDE_CONFIG_DIR=\"/home/a/.claude-work\"\n\
+             LANG=\"en_NZ.UTF-8\"\n"
+        );
     }
 
     /// A schedule's agent is started exactly as `spawn_agent` starts one,
@@ -932,12 +1169,20 @@ enabled = false
     fn the_units_are_what_systemd_is_given() {
         let s = deps();
         let exe = Path::new("/usr/local/bin/cctop");
+        // `KillMode=process` is what keeps the agent alive once the run that
+        // started cctop's rmux exits; without it systemd kills the cgroup.
         assert_eq!(
-            service_text(&s, exe, "/home/a%b/bin:/usr/bin"),
+            service_text(
+                &s,
+                exe,
+                "/home/a%b/bin:/usr/bin",
+                Path::new("/home/a%b/.config/cctop/schedule.env")
+            ),
             format!(
                 "{MARKER}\n[Unit]\nDescription=cctop scheduled agent: deps\n\n[Service]\n\
-                 Type=oneshot\nEnvironment=\"PATH=/home/a%%b/bin:/usr/bin\"\n\
+                 Type=oneshot\nKillMode=process\nEnvironment=\"PATH=/home/a%%b/bin:/usr/bin\"\n\
                  Environment=XDG_RUNTIME_DIR=%t\n\
+                 EnvironmentFile=-/home/a%%b/.config/cctop/schedule.env\n\
                  ExecStart=\"/usr/local/bin/cctop\" schedule run deps\n"
             )
         );

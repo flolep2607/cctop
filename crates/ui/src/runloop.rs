@@ -736,9 +736,16 @@ fn event_loop(
                         app.needs_redraw = true;
                     }
                 }
-                Ok(Response::Clipboard { tab, pane, text }) => app.got_clipboard(tab, pane, text),
+                Ok(Response::Clipboard { pane, text }) => app.got_clipboard(pane, text),
                 Ok(Response::Changes { key, result }) => app.got_changes(key, result),
                 Ok(Response::Sidebar { key, answer }) => app.got_sidebar(key, answer),
+                Ok(Response::Schedules { said, rows }) => {
+                    app.schedules = rows;
+                    if let Some(said) = said {
+                        app.set_status(said);
+                    }
+                    app.needs_redraw = true;
+                }
                 Ok(Response::PullRequest(event)) => app.got_pull_request(event),
                 Ok(Response::Move(event)) => app.got_move(event),
                 Ok(Response::Checkpoints { key, result }) => app.got_checkpoints(key, result),

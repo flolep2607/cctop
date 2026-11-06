@@ -554,10 +554,21 @@ and that schedule is not installed; the others are.
 starts the agent as a tab in cctop's rmux named after the schedule, so it is in
 every cctop's tab bar on the machine, and the first cctop you open finds it
 already at work. A machine that was off at the time runs it once when it next
-comes up. If the previous run is still going, the new one is skipped rather
-than started beside it: two agents of one schedule in one directory would be
-editing the same files. A browser subscribed to `cctop serve`'s notifications
-gets a push when one starts.
+comes up. If the previous run is still at work, or waiting on you, the new one
+is skipped rather than started beside it — two agents of one schedule in one
+directory would be editing the same files — and you get a push saying so. A
+previous run that finished and sits at its prompt counts as done: its tab is
+closed (its conversation stays on disk, resumable) and the new run takes it. A
+browser subscribed to `cctop serve`'s notifications gets a push when one
+starts.
+
+It runs whether or not a cctop is open. A run that has to start cctop's rmux
+itself starts it in a systemd scope of its own, and the unit says
+`KillMode=process`, so the agent outlives the short-lived timer job that
+started it. It runs in your environment as the dashboard saw it at the last
+sync: `PATH`, the locale, and the variables that pick an account or carry a key
+(`CLAUDE_*`, `CODEX_*`, `ANTHROPIC_*`, `OPENAI_*`, `OPENCODE_*`, `DEVIN_*`),
+written to `~/.config/cctop/schedule.env`, readable only by you.
 
 **What it may do.** Exactly what an agent you started from a shell may do,
 and no more. There is deliberately no permission setting: no
@@ -568,10 +579,14 @@ rules as [`spawn_agent`](integrations.md#letting-agents-drive-agents).
 
 **Installing them.** The dashboard installs, changes and removes the timers
 itself when it reads a `config.toml` whose schedules changed; `cctop serve`
-does the same when it starts. By hand:
+does the same when it starts. A `config.toml` that is not valid TOML — a typo
+anywhere, or an editor's save caught halfway — changes nothing: the timers stay
+as they were until the file reads again. The timers run the `cctop` on your
+`PATH`, so one left open across `cctop --update` keeps them pointed at the new
+one. By hand:
 
 ```bash
-cctop schedule list              # each schedule, its next and last run
+cctop schedule list              # each schedule, its next and last run, and a missing directory
 cctop schedule sync              # install the timers for what config.toml says now
 cctop schedule run deps --now    # run one now, even if it is switched off
 ```

@@ -1278,6 +1278,92 @@ fn agent_sidebar() {
     snap("agent_sidebar", &mut app);
 }
 
+/// Moving the focus between an agent and a shell beside it keeps the sidebar
+/// where it is, about the agent: drawn or not is the tab's answer, so a click
+/// never resizes every pane in it.
+#[test]
+fn the_sidebar_stays_while_the_focus_moves_to_a_shell() {
+    let mut app = fixture();
+    let session = &app.sessions[0];
+    let mut agent = tabs::Pane::for_test("claude");
+    agent.resumed = Some(cctop_core::rmux::name_for_session(
+        session.provider.as_str(),
+        &session.session_id,
+    ));
+    let mut tab = tabs::Tab::new(agent);
+    tab.panes.push(tabs::Pane::shell_for_test("zsh"));
+    app.tabs.push(tab);
+    app.tab = 1;
+    app.sync_sidebar();
+    assert!(app.sidebar_shown_for_test());
+    let about = app.sidebar_key_for_test();
+    app.tabs[0].focus = 1;
+    app.sync_sidebar();
+    assert!(
+        app.sidebar_shown_for_test(),
+        "the shell's focus hid the sidebar"
+    );
+    assert_eq!(app.sidebar_key_for_test(), about);
+}
+
+/// A note being written belongs to the session it was started on: when the
+/// sidebar moves to another session, the note is put down, never saved there.
+#[test]
+fn a_note_is_never_saved_onto_another_session() {
+    let mut app = fixture();
+    let (first, second) = (app.sessions[0].clone(), app.sessions[1].clone());
+    let resumed = |s: &cctop_core::session::Session| {
+        let mut pane = tabs::Pane::for_test("claude");
+        pane.resumed = Some(cctop_core::rmux::name_for_session(
+            s.provider.as_str(),
+            &s.session_id,
+        ));
+        pane
+    };
+    app.notes.set(&second.key(), 0, "keep me").unwrap();
+    app.tabs.push(tabs::Tab::new(resumed(&first)));
+    app.tabs.push(tabs::Tab::new(resumed(&second)));
+    app.tab = 1;
+    app.sync_sidebar();
+    app.edit_note();
+    assert_eq!(app.mode, Mode::Note);
+    // The focus moves on — a key that switches tabs, as a click can no longer.
+    app.tab = 2;
+    app.sync_sidebar();
+    assert_eq!(app.mode, Mode::List, "the note followed the focus");
+    assert_eq!(app.notes.of(&second.key()), ["keep me"]);
+}
+
+/// A right-click's paste lands in the pane it was asked from, by its process,
+/// and only one read is out at a time.
+#[test]
+fn a_paste_lands_only_in_the_pane_that_asked() {
+    #[derive(Clone, Default)]
+    struct Written(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+    impl std::io::Write for Written {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let written = Written::default();
+    let mut app = fixture();
+    let mut pane = tabs::Pane::for_test("claude");
+    pane.view = cctop_core::attach::Attach::for_test_into(Box::new(written.clone()));
+    app.tabs.push(tabs::Tab::new(pane));
+    app.tab = 1;
+    app.clipboard_pending = true;
+    // Another pane's answer, after the one clicked was closed: dropped.
+    app.got_clipboard(9999, Ok("rm -rf /".into()));
+    assert!(!app.clipboard_pending, "the read is over either way");
+    assert!(written.0.lock().unwrap().is_empty());
+    app.got_clipboard(4321, Ok("hello".into()));
+    assert!(String::from_utf8_lossy(&written.0.lock().unwrap()).contains("hello"));
+}
+
 /// Tabs on other machines: a session opened on a sibling through its
 /// Cloudflare tunnel, and an agent launched on an ssh host, each marked before
 /// its label beside a local one.

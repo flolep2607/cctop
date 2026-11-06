@@ -808,24 +808,50 @@ pub fn copy_to_clipboard(text: &str) {
     osc52(text);
 }
 
+/// The most a right-click pastes. A clipboard holds whatever was copied — a
+/// log, a file — and a paste that size is typed into an agent's prompt
+/// character by character; past this it is refused, with the way to do it on
+/// purpose.
+pub const PASTE_MAX: usize = 1 << 20;
+
+/// How long a clipboard helper may take before it is given up on. WSL's
+/// interop hangs after Windows sleeps; without a deadline every right-click
+/// then left a stuck helper behind, and each pasted when interop came back.
+const READ_DEADLINE: std::time::Duration = std::time::Duration::from_secs(3);
+
 /// The clipboard's text, for a right-click that pastes.
 ///
 /// A terminal pastes on right-click by itself, but not into a program that
 /// asked for the mouse, and cctop always has: the click arrives as a click.
-/// So cctop reads what the terminal would have pasted. Windows' clipboard,
-/// under WSL, is PowerShell's to read, which takes a moment — so this is
-/// called off the thread that draws.
+/// So cctop reads what the terminal would have pasted. Called off the thread
+/// that draws, one at a time (the caller keeps one in flight).
+///
+/// The Linux desktop's helpers first, asked for text by type: `wl-paste`
+/// without `--type` prints whatever was copied first, which for a screenshot
+/// is a PNG typed into the agent. Then Windows', under WSL, through one
+/// PowerShell kept running for the purpose ([`windows_text`]): starting one
+/// per click took a second each.
 ///
 /// Over ssh there is no clipboard here that is the user's, and the escape that
 /// asks the terminal for its own is one most terminals refuse, Windows
 /// Terminal among them; the answer then says to paste with the terminal's key.
 pub fn text() -> Result<String, String> {
-    use std::process::{Command, Stdio};
-
     if over_ssh() {
         return Err("over ssh there is no clipboard of yours to read here; \
              paste with your terminal's key (Ctrl+Shift+V)"
             .into());
+    }
+    let helpers: [(&str, &[&str]); 3] = [
+        ("wl-paste", &["--no-newline", "--type", "text"]),
+        ("xclip", &["-selection", "clipboard", "-o"]),
+        ("xsel", &["--clipboard", "--output"]),
+    ];
+    for (program, args) in helpers {
+        match one_shot(program, args) {
+            Some(Ok(bytes)) => return decoded(&bytes),
+            Some(Err(why)) => return Err(why),
+            None => {}
+        }
     }
     let powershell: Vec<&str> = std::iter::once("powershell.exe")
         .chain(
@@ -835,32 +861,192 @@ pub fn text() -> Result<String, String> {
                 .filter(|p| Path::new(p).exists()),
         )
         .collect();
-    let mut helpers: Vec<(&str, &[&str])> = vec![
-        ("wl-paste", &["--no-newline"]),
-        ("xclip", &["-selection", "clipboard", "-o"]),
-        ("xsel", &["--clipboard", "--output"]),
-    ];
-    for program in &powershell {
-        helpers.push((
-            program,
-            &["-NoProfile", "-STA", "-Command", "Get-Clipboard -Raw"],
-        ));
+    if let Some(bytes) = windows_text(&powershell) {
+        return bytes.and_then(|bytes| decoded(&bytes));
     }
-    for (program, args) in helpers {
-        let Ok(out) = Command::new(program)
-            .args(args)
-            .stdin(Stdio::null())
-            .stderr(Stdio::null())
-            .output()
-        else {
-            continue;
-        };
-        if !out.status.success() {
-            continue;
+    for program in powershell {
+        let args = ["-NoProfile", "-STA", "-Command", "Get-Clipboard -Raw"];
+        match one_shot(program, &args) {
+            Some(Ok(bytes)) => return decoded(&bytes),
+            Some(Err(why)) => return Err(why),
+            None => {}
         }
-        return Ok(clean_pasted(&String::from_utf8_lossy(&out.stdout)));
     }
     Err(format!("nothing here can read the clipboard — {HOW}"))
+}
+
+/// The bytes a helper printed, as the text to paste, or why not.
+fn decoded(bytes: &[u8]) -> Result<String, String> {
+    if bytes.len() > PASTE_MAX {
+        return Err(format!(
+            "the clipboard holds {} KB, more than a right-click pastes; \
+             use your terminal's paste key for that",
+            bytes.len() / 1024
+        ));
+    }
+    Ok(clean_pasted(&String::from_utf8_lossy(bytes)))
+}
+
+/// Run a clipboard helper once, within [`READ_DEADLINE`]. `None` when it is
+/// not here or answered with a failure — try the next — and `Some(Err)` when
+/// it hung, which the next helper would only repeat.
+fn one_shot(program: &str, args: &[&str]) -> Option<Result<Vec<u8>, String>> {
+    use std::io::Read;
+    use std::process::{Command, Stdio};
+    let mut child = Command::new(program)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    // Read on a thread of its own: a helper that prints more than a pipe
+    // holds would otherwise never exit, waiting on a reader that is waiting
+    // on it. One byte past the cap is enough to know it is past.
+    let mut out = child.stdout.take()?;
+    let reader = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let _ = (&mut out)
+            .take(PASTE_MAX as u64 + 1)
+            .read_to_end(&mut bytes);
+        bytes
+    });
+    let started = std::time::Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let bytes = reader.join().unwrap_or_default();
+                return status.success().then_some(Ok(bytes));
+            }
+            Ok(None) if started.elapsed() < READ_DEADLINE => {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Some(Err(format!(
+                    "{program} did not answer within {} s",
+                    READ_DEADLINE.as_secs()
+                )));
+            }
+        }
+    }
+}
+
+/// One PowerShell, kept running to read the Windows clipboard: a request is a
+/// line on its stdin, and the answer is the text's length in bytes on a line,
+/// then the text, as UTF-8.
+struct Reader {
+    child: std::process::Child,
+    stdin: std::process::ChildStdin,
+    answers: std::sync::mpsc::Receiver<Vec<u8>>,
+}
+
+impl Drop for Reader {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// What the kept PowerShell runs. `-STA` on its command line, because the
+/// clipboard API refuses a multi-threaded apartment; output is written as
+/// bytes, not through PowerShell's own formatting, which re-encodes text and
+/// adds line endings of its own.
+const READER_SCRIPT: &str = "$e=New-Object System.Text.UTF8Encoding $false; \
+    Add-Type -AssemblyName System.Windows.Forms; \
+    $o=[Console]::OpenStandardOutput(); \
+    while ($null -ne [Console]::In.ReadLine()) { \
+      $t=[System.Windows.Forms.Clipboard]::GetText(); \
+      $b=$e.GetBytes([string]$t); \
+      $h=$e.GetBytes([string]$b.Length + [char]10); \
+      $o.Write($h,0,$h.Length); $o.Write($b,0,$b.Length); $o.Flush() }";
+
+static READER: std::sync::Mutex<Option<Reader>> = std::sync::Mutex::new(None);
+
+/// The Windows clipboard's text through the kept PowerShell, started on first
+/// use and again whenever it has died or hung. `None` when no PowerShell can
+/// be started here, so the caller falls back to running one per read.
+fn windows_text(programs: &[&str]) -> Option<Result<Vec<u8>, String>> {
+    let mut held = READER
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    for attempt in 0..2 {
+        if held.is_none() {
+            *held = Some(start_reader(programs)?);
+        }
+        let reader = held.as_mut()?;
+        use std::io::Write;
+        let asked = reader
+            .stdin
+            .write_all(b"\n")
+            .and_then(|()| reader.stdin.flush());
+        // A first read starts PowerShell and loads the forms assembly, which
+        // takes as long as the one-shot did; every read after it is quick.
+        let patience = match attempt {
+            0 => READ_DEADLINE * 2,
+            _ => READ_DEADLINE * 3,
+        };
+        match asked
+            .ok()
+            .and_then(|()| reader.answers.recv_timeout(patience).ok())
+        {
+            Some(bytes) => return Some(Ok(bytes)),
+            // Dead or hung: dropped (and killed), and started afresh once.
+            None => *held = None,
+        }
+    }
+    Some(Err("Windows' clipboard did not answer; try again".into()))
+}
+
+fn start_reader(programs: &[&str]) -> Option<Reader> {
+    use std::io::{BufRead, Read};
+    use std::process::{Command, Stdio};
+    let mut child = programs.iter().find_map(|program| {
+        Command::new(program)
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-STA",
+                "-Command",
+                READER_SCRIPT,
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .ok()
+    })?;
+    let stdin = child.stdin.take()?;
+    let stdout = child.stdout.take()?;
+    let (tx, answers) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut out = std::io::BufReader::new(stdout);
+        loop {
+            let mut header = String::new();
+            if out.read_line(&mut header).unwrap_or(0) == 0 {
+                return;
+            }
+            let Ok(len) = header.trim().parse::<usize>() else {
+                return;
+            };
+            // Read whatever was sent, but keep no more than the cap and one
+            // byte, which is enough for `decoded` to refuse it.
+            let mut bytes = Vec::new();
+            if (&mut out).take(len as u64).read_to_end(&mut bytes).is_err() {
+                return;
+            }
+            bytes.truncate(PASTE_MAX + 1);
+            if tx.send(bytes).is_err() {
+                return;
+            }
+        }
+    });
+    Some(Reader {
+        child,
+        stdin,
+        answers,
+    })
 }
 
 /// Text as a helper printed it, as it was copied: Windows' line endings made

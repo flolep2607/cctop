@@ -71,6 +71,10 @@ pub struct State {
     /// The note being written: its index, or one past the last for a new one.
     pub note_at: usize,
     pub note_input: LineEdit,
+    /// The session the note being written is about, fixed when `Alt+e` was
+    /// pressed. The sidebar follows the focus, and a note saved against
+    /// whatever it shows at Enter could replace another session's.
+    note_key: Option<String>,
 }
 
 /// One changed file, as the sidebar lists it.
@@ -146,21 +150,31 @@ impl App {
     /// it has done something since they were last read. Called every turn of
     /// the loop; cheap unless something moved.
     pub(super) fn sync_sidebar(&mut self) {
+        // About the focused pane when it is an agent here, else the tab's first
+        // one: whether the sidebar is drawn is the tab's answer, not the
+        // focus's, so moving between an agent and a shell beside it does not
+        // resize every pane in the tab on each click.
+        let ours = |pane: &super::tabs::Pane| {
+            pane.is_agent() && pane.transport.is_none() && pane.dead.is_none()
+        };
         let focused = self
             .tab
             .checked_sub(1)
             .filter(|_| !self.on_settings())
             .and_then(|at| {
                 let tab = self.tabs.get(at)?;
-                let pane = tab.panes.get(tab.focus)?;
-                Some((at, tab.focus, pane))
+                let focus = Some(tab.focus)
+                    .filter(|&i| tab.panes.get(i).is_some_and(ours))
+                    .or_else(|| tab.panes.iter().position(ours))?;
+                Some((at, focus, tab.panes.get(focus)?))
             });
         let Some((at, focus, pane)) = focused else {
             self.sidebar.shown = false;
             self.sidebar.pane = None;
             return;
         };
-        self.sidebar.shown = pane.is_agent() && pane.transport.is_none() && pane.dead.is_none();
+        self.sidebar.shown = true;
+        self.notes.refresh();
         let identity = (
             at,
             focus,
@@ -176,6 +190,11 @@ impl App {
                 .map(|s| (s.provider.as_str().to_string(), s.session_id.clone()));
             let (provider, id) = found.unwrap_or_default();
             if id != self.sidebar.id || provider != self.sidebar.provider {
+                // A note half written about the session the sidebar is
+                // leaving goes with it, rather than being saved onto this one.
+                if self.mode == Mode::Note {
+                    self.mode = Mode::List;
+                }
                 self.sidebar = State {
                     provider,
                     id,
@@ -226,6 +245,18 @@ impl App {
         self.needs_redraw = true;
     }
 
+    /// The session the sidebar is about, for a test to compare.
+    #[cfg(test)]
+    pub(super) fn sidebar_key_for_test(&self) -> Option<String> {
+        self.sidebar.key()
+    }
+
+    /// Whether the sidebar is drawn, for a test to ask.
+    #[cfg(test)]
+    pub(super) fn sidebar_shown_for_test(&self) -> bool {
+        self.sidebar.shown
+    }
+
     /// `Alt+i`: fold the sidebar to its strip, or open it out.
     pub(super) fn toggle_sidebar(&mut self) {
         if !self.sidebar.shown {
@@ -247,6 +278,7 @@ impl App {
         self.sidebar_folded = false;
         self.sidebar.note_at = self.notes.of(&key).len();
         self.sidebar.note_input.clear();
+        self.sidebar.note_key = Some(key);
         self.mode = Mode::Note;
         self.needs_redraw = true;
     }
@@ -254,7 +286,7 @@ impl App {
     /// Typing a note. Enter keeps it, and an emptied note is removed; ↑ and ↓
     /// step to the note above or below to change it instead.
     pub(super) fn on_key_note(&mut self, key: KeyEvent) {
-        let Some(session) = self.sidebar.key() else {
+        let Some(session) = self.sidebar.note_key.clone() else {
             self.mode = Mode::List;
             return;
         };

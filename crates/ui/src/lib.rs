@@ -740,6 +740,10 @@ pub struct App {
     pub sidebar_folded: bool,
     /// Your notes on sessions, shown in the sidebar.
     pub notes: cctop_core::notes::Notes,
+    /// Whether a right-click's clipboard read is still out. One at a time:
+    /// clicked again while Windows' clipboard was slow, the same text was
+    /// pasted once per click.
+    pub clipboard_pending: bool,
     /// A pull request on its way from `p`: the check's answer and the title
     /// being edited.
     pub pull_request: pull_request::Flow,
@@ -1262,6 +1266,7 @@ impl App {
             sidebar: sidebar::State::default(),
             sidebar_folded: prefs.sidebar_folded,
             notes: cctop_core::notes::Notes::load(),
+            clipboard_pending: false,
             pull_request: pull_request::Flow::default(),
             moving: moving::Flow::default(),
             subagent_sort: (

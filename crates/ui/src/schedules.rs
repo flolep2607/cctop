@@ -31,31 +31,42 @@ fn short_time(systemd: &str) -> String {
     }
 }
 
+/// The schedules in `path`, each with its next run as systemd says it — after
+/// the sync, so a timer just installed answers. Never asks systemd under test,
+/// which must not reach the developer's own.
+pub(super) fn rows(path: &std::path::Path) -> Vec<ScheduleRow> {
+    cctop_core::schedule::Schedules::load_from(path)
+        .entries
+        .into_iter()
+        .map(|schedule| {
+            let next = match cctop_core::under_test() || !schedule.enabled {
+                true => None,
+                false => {
+                    let mut ctl = |a: &[&str]| cctop_core::schedule::systemctl(a);
+                    cctop_core::schedule::timer_times(&schedule, &mut ctl).0
+                }
+            };
+            ScheduleRow { schedule, next }
+        })
+        .collect()
+}
+
 impl App {
-    /// Read the schedules again, with their next run.
-    ///
-    /// On the settings reload, so after the sync that same reload did: the
-    /// next run asked of systemd is the one the timer just installed has. Not
-    /// in tests, which must not ask the developer's own systemd anything.
+    /// Sync the timers if the schedules changed, and read the schedules
+    /// again with their next run — on the worker, since every row is a
+    /// `systemctl` call and a sync several. The rows arrive with
+    /// `Response::Schedules`. Under test, read here, and systemd never asked.
     pub(super) fn refresh_schedules(&mut self) {
-        let Some(path) = &self.settings_file else {
+        let Some(path) = self.settings_file.clone() else {
             self.schedules.clear();
             return;
         };
-        let entries = cctop_core::schedule::Schedules::load_from(path).entries;
-        self.schedules = entries
-            .into_iter()
-            .map(|schedule| {
-                let next = match cctop_core::under_test() || !schedule.enabled {
-                    true => None,
-                    false => {
-                        let mut ctl = |a: &[&str]| cctop_core::schedule::systemctl(a);
-                        cctop_core::schedule::timer_times(&schedule, &mut ctl).0
-                    }
-                };
-                ScheduleRow { schedule, next }
-            })
-            .collect();
+        match cctop_core::under_test() {
+            true => self.schedules = rows(&path),
+            false => {
+                let _ = self.tx.send(super::worker::Request::Schedules { path });
+            }
+        }
     }
 
     /// The row's description: when, what, where, and when next.
@@ -111,7 +122,10 @@ impl App {
             return;
         };
         let name = row.schedule.name.clone();
-        if cctop_core::rmux::live(&row.schedule.unit()) {
+        // As the timer would decide: a run still at work is left alone, and one
+        // that finished at its prompt is replaced by this one.
+        let previous = cctop_core::schedule::previous(&row.schedule.unit());
+        if previous == cctop_core::schedule::Previous::Busy {
             return self.set_status(format!("{name} is already running — see its tab"));
         }
         if !cctop_core::under_test() {

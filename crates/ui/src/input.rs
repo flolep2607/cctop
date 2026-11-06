@@ -628,8 +628,9 @@ impl App {
     /// asked from — if that is still where the keyboard is. A click and then a
     /// move to another tab before PowerShell answered must not paste into
     /// whatever is in front now.
-    pub(super) fn got_clipboard(&mut self, tab: usize, pane: usize, text: Result<String, String>) {
-        let here = self.tab == tab && self.active_tab().is_some_and(|t| t.focus == pane);
+    pub(super) fn got_clipboard(&mut self, pane: u32, text: Result<String, String>) {
+        self.clipboard_pending = false;
+        let here = self.focused_pane().is_some_and(|p| p.pid == pane);
         match text {
             Ok(text) if here && !text.is_empty() => self.send_to_focused_pane(&text),
             Ok(_) => {}
@@ -2213,6 +2214,13 @@ impl App {
             self.needs_redraw = true;
         }
 
+        // A note being written holds the mouse, as a modal does: a click that
+        // moved the focus would move the sidebar to another session under the
+        // half-written note. Esc or Enter puts it down first.
+        if self.mode == Mode::Note {
+            return;
+        }
+
         // The help sheet covers most of the screen and records no rectangle,
         // so it answers the mouse itself: the wheel reads it and a click puts
         // it away. Over a pane this is what keeps a click from reaching the
@@ -2464,12 +2472,32 @@ impl App {
                     // A right-click pastes, as it does in Windows Terminal
                     // and the terminals that copy it — which cannot do it
                     // themselves here, because cctop asked for the mouse and
-                    // the click arrives as a click. Forwarded, it opened
-                    // rmux's pane menu over the agent instead, or did nothing.
+                    // the click arrives as a click. Except where the pane's
+                    // own program asked for the mouse: it gets the click, as
+                    // vim or htop expect, and Claude Code's fullscreen
+                    // interface pastes on right-click by itself.
                     if b == cctop_core::attach::MouseButton::Right {
-                        if kind == cctop_core::attach::MouseKind::Press {
-                            let tab = self.tab;
-                            let _ = self.tx.send(Request::ReadClipboard { tab, pane: i });
+                        let pending = self.clipboard_pending;
+                        let Some(pane) = self.active_tab().and_then(|t| t.panes.get_mut(i)) else {
+                            return;
+                        };
+                        let wanted = match (&pane.rmux, &pane.transport) {
+                            // Its program's own request, as rmux recorded it:
+                            // this pane's screen is rmux's, which always has
+                            // the mouse on.
+                            (Some(name), _) => cctop_core::rmux::mouse_wanted(name),
+                            // On another machine: what is asked for there
+                            // cannot be seen from here, and text is safe.
+                            (None, Some(_)) => false,
+                            (None, None) => pane.view.wants_mouse(),
+                        };
+                        if wanted {
+                            pane.note_input(false);
+                            let _ = pane.view.mouse(kind, b, col, row);
+                        } else if kind == cctop_core::attach::MouseKind::Press && !pending {
+                            let pane = pane.pid;
+                            self.clipboard_pending = true;
+                            let _ = self.tx.send(Request::ReadClipboard { pane });
                         }
                         return;
                     }

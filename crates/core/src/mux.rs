@@ -302,15 +302,38 @@ pub fn start() -> Result<(), String> {
     if in_test_harness() {
         return Err("a test that starts an agent needs a mux::TestDaemon".into());
     }
-    let mut daemon = std::process::Command::new("/proc/self/exe");
-    // Named for `ps` as what it is, rather than as the path it was run by.
-    std::os::unix::process::CommandExt::arg0(&mut daemon, "cctop");
+    let mut daemon = match in_a_service() && scope_works() {
+        // A daemon started from inside a systemd service is in that service's
+        // cgroup, and goes when the service does: a scheduled run is a
+        // oneshot, so its agent was killed the moment the run that started it
+        // exited. A scope of its own keeps the daemon out of the service's
+        // cgroup; `systemd-run --scope` execs the daemon in place, so it is
+        // still this process's child, with this environment.
+        true => {
+            let mut scope = std::process::Command::new("systemd-run");
+            scope
+                .args(["--user", "--scope", "--quiet", "--collect", "--"])
+                .arg("/proc/self/exe");
+            scope
+        }
+        false => {
+            let mut daemon = std::process::Command::new("/proc/self/exe");
+            // Named for `ps` as what it is, rather than as the path it was run by.
+            std::os::unix::process::CommandExt::arg0(&mut daemon, "cctop");
+            daemon
+        }
+    };
     daemon.args(["mux", "daemon", "--socket"]).arg(&socket);
     for (var, _) in std::env::vars_os() {
         if foreign(&var) {
             daemon.env_remove(var);
         }
     }
+    // The service's identity is not the daemon's, nor any agent's in it: a
+    // cctop opened later in one of its tabs would take itself for a service.
+    daemon
+        .env_remove("INVOCATION_ID")
+        .env_remove("JOURNAL_STREAM");
     daemon
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
@@ -328,6 +351,25 @@ pub fn start() -> Result<(), String> {
             .map(drop)
             .map_err(|e| format!("could not start cctop's rmux daemon: {e}"))
     })
+}
+
+/// Whether this process runs as part of a systemd unit — a scheduled run, or
+/// a `cctop serve` installed as a service — which sets `INVOCATION_ID`.
+fn in_a_service() -> bool {
+    std::env::var_os("INVOCATION_ID").is_some()
+}
+
+/// Whether `systemd-run --user --scope` can be used here: asked once by
+/// running `true` in one, since a machine with a user manager but no bus to
+/// it answers only by failing.
+fn scope_works() -> bool {
+    std::process::Command::new("systemd-run")
+        .args(["--user", "--scope", "--quiet", "--collect", "--", "true"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
 }
 
 /// A connection to cctop's daemon, or `None` when it is not running.
@@ -803,6 +845,27 @@ pub fn own_exe() -> PathBuf {
     }
 }
 
+/// The cctop installed where this one was run from: this binary's path, or —
+/// once `--update` has replaced it, and the path reads `… (deleted)` — that
+/// same path, which now holds the newer cctop. `None` when nothing is there.
+///
+/// For what another process will run later: a timer, an agent's MCP server.
+/// [`own_exe`]'s `/proc/self/exe` is no good there — in another process it
+/// names that process's own binary, so an agent handed it as its MCP server
+/// ran `claude --mcp`.
+pub fn installed_exe() -> Option<PathBuf> {
+    installed_from(std::env::current_exe().ok()?)
+}
+
+/// [`installed_exe`] from a path as `current_exe` reports it.
+fn installed_from(exe: PathBuf) -> Option<PathBuf> {
+    if exe.exists() {
+        return Some(exe);
+    }
+    let replaced = PathBuf::from(exe.to_str()?.strip_suffix(" (deleted)")?);
+    replaced.exists().then_some(replaced)
+}
+
 /// The command a tab's pane runs to sit on session `name`: this binary's
 /// `mux attach`, by [`own_exe`].
 pub fn attach_argv(name: &str, create: Option<(&[String], Option<&Path>)>) -> Vec<String> {
@@ -935,11 +998,11 @@ fn attach(args: &[String]) -> Result<(), String> {
         }
     };
     if create && !has_session(name) {
-        let env = crate::opencode::launch_env(argv)
-            .into_iter()
-            .map(|(var, value)| format!("{var}={value}"))
-            .collect();
-        new_session(name, cwd.as_deref(), env, argv)?;
+        // The fallback for a tab whose `prepare` failed, so the same additions
+        // as `rmux::start_detached` makes: without them this agent alone came
+        // up without cctop's MCP server and Claude's fullscreen interface.
+        let env = crate::rmux::launch_env(argv);
+        new_session(name, cwd.as_deref(), env, &crate::rmux::launch_argv(argv))?;
     }
     let mut connection = connect().ok_or("cctop's rmux daemon is not running")?;
     take_menus_off(&mut connection);
@@ -1336,6 +1399,22 @@ mod tests {
         assert_eq!(size.split_whitespace().count(), 2, "{size}");
         kill_session("cctop-t").expect("killed");
         assert!(!has_session("cctop-t"));
+    }
+
+    /// After `--update` a running cctop's path reads `… (deleted)`; what
+    /// another process should run is the cctop now at that path, and nothing
+    /// when there is none.
+    #[test]
+    fn the_installed_cctop_is_found_past_an_update() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join("cctop");
+        std::fs::write(&exe, "").unwrap();
+        assert_eq!(installed_from(exe.clone()), Some(exe.clone()));
+        let replaced = PathBuf::from(format!("{} (deleted)", exe.display()));
+        assert_eq!(installed_from(replaced.clone()), Some(exe.clone()));
+        std::fs::remove_file(&exe).unwrap();
+        assert_eq!(installed_from(replaced), None);
+        assert_eq!(installed_from(exe), None);
     }
 
     /// A terminal rmux never asked for extended keys sends Shift+Enter as the
