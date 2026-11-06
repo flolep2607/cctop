@@ -27,9 +27,11 @@ pub struct Notes {
     by_session: BTreeMap<String, Vec<String>>,
     /// Where they are saved; `None` keeps them in memory only, as under test.
     path: Option<PathBuf>,
-    /// The file's modification time when last read, to know when another
-    /// cctop has written it.
-    stamp: u64,
+    /// The file's modification time and length when last read or written,
+    /// to know when another cctop has written it since. To the nanosecond:
+    /// two saves inside one millisecond are ordinary, and one missed is a
+    /// note that stays off the screen until the next.
+    stamp: Option<(std::time::SystemTime, u64)>,
 }
 
 /// The longest note kept. A note is a line to glance at beside a terminal,
@@ -60,14 +62,14 @@ impl Notes {
     /// Read the file again if another cctop has written it since.
     pub fn refresh(&mut self) {
         let Some(path) = &self.path else { return };
-        if crate::config::file_mtime_ms(path) != self.stamp {
+        if stamp_of(path) != self.stamp {
             self.reread();
         }
     }
 
     fn reread(&mut self) {
         let Some(path) = &self.path else { return };
-        self.stamp = crate::config::file_mtime_ms(path);
+        self.stamp = stamp_of(path);
         self.by_session = std::fs::read(path)
             .ok()
             .and_then(|bytes| serde_json::from_slice(&bytes).ok())
@@ -123,9 +125,15 @@ impl Notes {
         let bytes = serde_json::to_vec_pretty(&self.by_session).map_err(std::io::Error::other)?;
         crate::util::write_atomic(path, &bytes, true)?;
         // Our own write is not news to read back.
-        self.stamp = crate::config::file_mtime_ms(path);
+        self.stamp = stamp_of(path);
         Ok(())
     }
+}
+
+/// What [`Notes::stamp`] compares.
+fn stamp_of(path: &std::path::Path) -> Option<(std::time::SystemTime, u64)> {
+    let meta = std::fs::metadata(path).ok()?;
+    Some((meta.modified().ok()?, meta.len()))
 }
 
 #[cfg(test)]
@@ -161,8 +169,8 @@ mod tests {
         let back = Notes::at(path);
         assert_eq!(back.of("claude:a"), ["from a"]);
         assert_eq!(back.of("codex:b"), ["from b"]);
-        // And the first sees the second's once it looks again.
-        std::thread::sleep(std::time::Duration::from_millis(5));
+        // And the first sees the second's once it looks again, however soon
+        // after its own write the second's came.
         a.refresh();
         assert_eq!(a.of("codex:b"), ["from b"]);
     }

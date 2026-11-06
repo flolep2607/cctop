@@ -695,6 +695,9 @@ pub struct UiPrefs {
     /// Whether an agent tab's sidebar is folded to its strip (`Alt+i`): how
     /// someone likes their screen, so it holds across runs.
     pub sidebar_folded: bool,
+    /// The sidebar's width as last dragged, in columns; `None` for the
+    /// default, which a double-click on its border goes back to.
+    pub sidebar_width: Option<u16>,
     /// Session keys whose subagents are shown as child rows.
     ///
     /// Unlike the table's sort, this is worth persisting: expanding a session is
@@ -792,6 +795,7 @@ impl Default for UiPrefs {
             tool_show_diff: false,
             tab_overview_hidden: false,
             sidebar_folded: false,
+            sidebar_width: None,
             expanded: Vec::new(),
             subagent_sort_col: "last".into(),
             // Ascending for `last` is newest-first, so this default keeps the

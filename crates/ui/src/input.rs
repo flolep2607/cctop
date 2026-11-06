@@ -2356,6 +2356,27 @@ impl App {
             return;
         }
 
+        // A drag of the sidebar's border is followed wherever the pointer goes —
+        // over the pane it is widening into, too — until it is let go.
+        if self.sidebar_drag.is_some() {
+            match ev.kind {
+                MouseEventKind::Drag(MouseButton::Left) => self.drag_sidebar_border(ev.column),
+                MouseEventKind::Up(MouseButton::Left) => match layout.sidebar_border {
+                    Some((_, tab)) => self.release_sidebar_border(ev.column, tab),
+                    None => self.sidebar_drag = None,
+                },
+                _ => {}
+            }
+            return;
+        }
+        if ev.kind == MouseEventKind::Down(MouseButton::Left)
+            && let Some((border, _)) = layout.sidebar_border
+            && border.contains(ratatui::layout::Position::new(ev.column, ev.row))
+        {
+            self.press_sidebar_border(ev.column);
+            return;
+        }
+
         // The sidebar beside an agent's pane is cctop's, not the agent's: a
         // click on its fold or its top line folds or opens it, and nothing in
         // it reaches the pane.
@@ -2363,10 +2384,28 @@ impl App {
             .sidebar
             .filter(|r| r.contains(ratatui::layout::Position::new(ev.column, ev.row)))
         {
-            if ev.kind == MouseEventKind::Down(MouseButton::Left)
-                && (self.sidebar_folded || ev.row == side.y)
-            {
-                self.toggle_sidebar();
+            let in_files = layout
+                .sidebar_tree
+                .files
+                .is_some_and(|(from, to)| (from..to).contains(&ev.row));
+            let folder = layout
+                .sidebar_tree
+                .folders
+                .iter()
+                .find(|(row, _)| *row == ev.row)
+                .map(|(_, path)| path.clone());
+            match ev.kind {
+                MouseEventKind::Down(MouseButton::Left) if let Some(path) = folder => {
+                    self.turn_sidebar_folder(&path);
+                }
+                MouseEventKind::Down(MouseButton::Left)
+                    if self.sidebar_folded || ev.row == side.y =>
+                {
+                    self.toggle_sidebar();
+                }
+                MouseEventKind::ScrollDown if in_files => self.scroll_sidebar_files(true),
+                MouseEventKind::ScrollUp if in_files => self.scroll_sidebar_files(false),
+                _ => {}
             }
             return;
         }

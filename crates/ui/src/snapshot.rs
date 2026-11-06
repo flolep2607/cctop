@@ -1278,6 +1278,97 @@ fn agent_sidebar() {
     snap("agent_sidebar", &mut app);
 }
 
+/// The sidebar at a width dragged wider than the default.
+#[test]
+fn agent_sidebar_dragged_wide() {
+    let mut app = fixture();
+    let session = &app.sessions[0];
+    let mut pane = tabs::Pane::for_test("claude");
+    pane.resumed = Some(cctop_core::rmux::name_for_session(
+        session.provider.as_str(),
+        &session.session_id,
+    ));
+    app.tabs.push(tabs::Tab::new(pane));
+    app.tab = 1;
+    app.sidebar_width = Some(48);
+    app.sync_sidebar();
+    app.sidebar.files = Some(Ok(vec![super::sidebar::File {
+        path: "src/a/rather/long/path/to/the/client.rs".into(),
+        added: Some(41),
+        removed: Some(9),
+    }]));
+    snap("agent_sidebar_dragged_wide", &mut app);
+}
+
+/// A long list of changed files as a tree: the big folder folded to its
+/// count, another opened by a click, files indented under their folder.
+#[test]
+fn agent_sidebar_file_tree() {
+    let mut app = fixture();
+    let session = &app.sessions[0];
+    let key = session.key();
+    let mut pane = tabs::Pane::for_test("claude");
+    pane.resumed = Some(cctop_core::rmux::name_for_session(
+        session.provider.as_str(),
+        &session.session_id,
+    ));
+    app.tabs.push(tabs::Tab::new(pane));
+    app.tab = 1;
+    app.sync_sidebar();
+    let file = |path: String, added, removed| super::sidebar::File {
+        path,
+        added: Some(added),
+        removed: Some(removed),
+    };
+    let mut files: Vec<_> = (0..12)
+        .map(|i| file(format!("docs/explanation/topic-{i:02}.md"), 20, 4))
+        .collect();
+    files.extend((0..6).map(|i| file(format!("crates/core/src/mod{i}.rs"), 7, 1)));
+    files.push(file("README.md".into(), 2, 1));
+    app.sidebar.files = Some(Ok(files));
+    // Both start folded (more than five files each); a click opened one.
+    app.sidebar_folds
+        .entry(key)
+        .or_default()
+        .insert("crates/core/src".into());
+    snap("agent_sidebar_file_tree", &mut app);
+}
+
+/// Dragging the border sets the width, kept in the preferences; dragged
+/// almost shut it folds; a folded strip dragged out opens at that width; and a
+/// double-click goes back to the default.
+#[test]
+fn dragging_the_sidebar_border_sets_its_width() {
+    let mut app = fixture();
+    let tab = ratatui::layout::Rect::new(0, 3, 120, 30);
+    app.press_sidebar_border(88);
+    app.drag_sidebar_border(70);
+    assert_eq!(app.sidebar_width, None, "nothing moves until it is let go");
+    app.release_sidebar_border(70, tab);
+    assert_eq!(app.sidebar_width, Some(50));
+    assert_eq!(app.prefs.sidebar_width, Some(50), "kept across runs");
+    assert!(!app.sidebar_folded);
+
+    app.sidebar_pressed = None;
+    app.press_sidebar_border(70);
+    app.release_sidebar_border(110, tab);
+    assert!(app.sidebar_folded, "dragged nearly shut, it folds");
+    assert_eq!(app.sidebar_width, Some(50));
+
+    app.sidebar_pressed = None;
+    app.press_sidebar_border(115);
+    app.release_sidebar_border(80, tab);
+    assert!(!app.sidebar_folded, "a strip dragged out opens");
+    assert_eq!(app.sidebar_width, Some(40));
+
+    app.sidebar_pressed = None;
+    app.press_sidebar_border(80);
+    app.release_sidebar_border(80, tab);
+    app.press_sidebar_border(80);
+    assert_eq!(app.sidebar_width, None, "a double-click goes back");
+    assert_eq!(app.prefs.sidebar_width, None);
+}
+
 /// Moving the focus between an agent and a shell beside it keeps the sidebar
 /// where it is, about the agent: drawn or not is the tab's answer, so a click
 /// never resizes every pane in it.

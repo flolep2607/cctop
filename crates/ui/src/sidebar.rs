@@ -31,6 +31,7 @@ use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Paragraph};
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 /// The sidebar open, borders included: room for a step or a path to be read.
@@ -42,6 +43,26 @@ const STRIP: u16 = 5;
 /// What an agent keeps at the least. Below it the sidebar folds, and below
 /// this plus the strip it is not drawn at all.
 const MIN_PANE: u16 = 60;
+/// The narrowest a dragged sidebar stays open; dragged narrower, it folds.
+const OPEN_MIN: u16 = 24;
+/// The most of the tab a dragged sidebar may take, in percent — more room
+/// than the default gives, for a long plan or a note, at the person's choice.
+const DRAG_SHARE: u16 = 60;
+/// What a dragged sidebar always leaves the agent.
+const AGENT_MIN: u16 = 40;
+/// Two presses on the border this close together are a double-click.
+const DOUBLE_CLICK: std::time::Duration = std::time::Duration::from_millis(400);
+
+/// A dragged width as the sidebar can have it in a tab `tab` columns wide:
+/// between the narrowest open one and [`DRAG_SHARE`] of the tab, leaving the
+/// agent [`AGENT_MIN`]. The strip when even the narrowest does not fit.
+pub(super) fn clamp_width(chosen: u16, tab: u16) -> u16 {
+    let most = (tab * DRAG_SHARE / 100).min(tab.saturating_sub(AGENT_MIN));
+    match most >= OPEN_MIN {
+        true => chosen.clamp(OPEN_MIN, most),
+        false => STRIP,
+    }
+}
 
 /// A pane as the sidebar tells one from another: its tab, its place in it,
 /// its agent's pid, and the rmux names it was resumed and is running under.
@@ -71,6 +92,8 @@ pub struct State {
     /// The note being written: its index, or one past the last for a new one.
     pub note_at: usize,
     pub note_input: LineEdit,
+    /// How many rows of the Files tree the wheel has scrolled past.
+    pub files_scroll: usize,
     /// The session the note being written is about, fixed when `Alt+e` was
     /// pressed. The sidebar follows the focus, and a note saved against
     /// whatever it shows at Enter could replace another session's.
@@ -99,6 +122,148 @@ impl State {
     fn key(&self) -> Option<String> {
         (!self.id.is_empty()).then(|| format!("{}:{}", self.provider, self.id))
     }
+}
+
+/// A total at or under which every folder starts open: a short list reads
+/// best whole.
+const ALL_OPEN: usize = 15;
+/// Past [`ALL_OPEN`], a top-level folder with more than this many files starts
+/// folded, so the tree opens as an outline of where the work is.
+const FEW: usize = 5;
+
+/// A directory of changed files, as the sidebar's tree shows it.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(super) struct Dir {
+    /// As shown: one name, or a chain of directories each holding only the
+    /// next — `docs/explanation` — joined, so a deep path is one row.
+    pub name: String,
+    /// The path from the checkout, which is what its fold is kept by.
+    pub path: String,
+    pub dirs: Vec<Dir>,
+    /// Its own files: name, lines added and removed (`None` when binary).
+    pub files: Vec<(String, Option<u64>, Option<u64>)>,
+    /// Every file under it, and their lines added and removed.
+    pub count: usize,
+    pub added: u64,
+    pub removed: u64,
+}
+
+/// The changed files as a tree of directories, each sorted by name, with
+/// chains of single-child directories joined into one.
+pub(super) fn tree(files: &[File]) -> Dir {
+    #[derive(Default)]
+    struct Raw {
+        dirs: std::collections::BTreeMap<String, Raw>,
+        files: std::collections::BTreeMap<String, (Option<u64>, Option<u64>)>,
+    }
+    fn finish(mut raw: Raw, mut name: String, mut path: String) -> Dir {
+        // The root is never joined to its only child: it has no row to join.
+        while !path.is_empty() && raw.files.is_empty() && raw.dirs.len() == 1 {
+            let Some((next, child)) = std::mem::take(&mut raw.dirs).into_iter().next() else {
+                break;
+            };
+            name = format!("{name}/{next}");
+            path = format!("{path}/{next}");
+            raw = child;
+        }
+        let dirs: Vec<Dir> = std::mem::take(&mut raw.dirs)
+            .into_iter()
+            .map(|(child, sub)| {
+                let at = match path.is_empty() {
+                    true => child.clone(),
+                    false => format!("{path}/{child}"),
+                };
+                finish(sub, child, at)
+            })
+            .collect();
+        let files: Vec<_> = raw.files.into_iter().map(|(n, (a, r))| (n, a, r)).collect();
+        let count = files.len() + dirs.iter().map(|d| d.count).sum::<usize>();
+        let added = files.iter().filter_map(|f| f.1).sum::<u64>()
+            + dirs.iter().map(|d| d.added).sum::<u64>();
+        let removed = files.iter().filter_map(|f| f.2).sum::<u64>()
+            + dirs.iter().map(|d| d.removed).sum::<u64>();
+        Dir {
+            name,
+            path,
+            dirs,
+            files,
+            count,
+            added,
+            removed,
+        }
+    }
+    let mut root = Raw::default();
+    for file in files {
+        let mut parts: Vec<&str> = file.path.split('/').filter(|p| !p.is_empty()).collect();
+        let Some(name) = parts.pop() else { continue };
+        let mut at = &mut root;
+        for part in parts {
+            at = at.dirs.entry(part.to_string()).or_default();
+        }
+        at.files
+            .insert(name.to_string(), (file.added, file.removed));
+    }
+    finish(root, String::new(), String::new())
+}
+
+/// Whether a folder is open before anyone clicks it — see [`ALL_OPEN`] and
+/// [`FEW`] — and whether it is open now, a click having turned it over.
+pub(super) fn is_open(dir: &Dir, depth: usize, total: usize, turned: &HashSet<String>) -> bool {
+    let default = total <= ALL_OPEN || depth > 0 || dir.count <= FEW;
+    default != turned.contains(&dir.path)
+}
+
+/// One row of the Files tree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum Row {
+    Folder {
+        depth: usize,
+        name: String,
+        path: String,
+        open: bool,
+        count: usize,
+        added: u64,
+        removed: u64,
+    },
+    File {
+        depth: usize,
+        name: String,
+        added: Option<u64>,
+        removed: Option<u64>,
+    },
+}
+
+/// The tree as rows, top to bottom: folders before files at each level, and
+/// nothing under a folded one.
+pub(super) fn rows(root: &Dir, total: usize, turned: &HashSet<String>) -> Vec<Row> {
+    fn walk(dir: &Dir, depth: usize, total: usize, turned: &HashSet<String>, out: &mut Vec<Row>) {
+        for sub in &dir.dirs {
+            let open = is_open(sub, depth, total, turned);
+            out.push(Row::Folder {
+                depth,
+                name: sub.name.clone(),
+                path: sub.path.clone(),
+                open,
+                count: sub.count,
+                added: sub.added,
+                removed: sub.removed,
+            });
+            if open {
+                walk(sub, depth + 1, total, turned, out);
+            }
+        }
+        for (name, added, removed) in &dir.files {
+            out.push(Row::File {
+                depth,
+                name: name.clone(),
+                added: *added,
+                removed: *removed,
+            });
+        }
+    }
+    let mut out = Vec::new();
+    walk(root, 0, total, turned, &mut out);
+    out
 }
 
 /// Read a session's plan and changed files, on the worker.
@@ -257,6 +422,85 @@ impl App {
         self.sidebar.shown
     }
 
+    /// A press on the sidebar's left border: the start of a drag, or — the
+    /// second press of a double-click — back to the default width.
+    pub(super) fn press_sidebar_border(&mut self, column: u16) {
+        let now = std::time::Instant::now();
+        let double = self
+            .sidebar_pressed
+            .is_some_and(|at| now.duration_since(at) < DOUBLE_CLICK);
+        self.sidebar_pressed = Some(now);
+        if double {
+            self.sidebar_pressed = None;
+            self.sidebar_drag = None;
+            self.sidebar_width = None;
+            self.sidebar_folded = false;
+            self.save_prefs();
+        } else {
+            self.sidebar_drag = Some((column, column));
+        }
+        self.needs_redraw = true;
+    }
+
+    /// The pointer moved while the border is held: only the guide moves. The
+    /// panes keep their size until the drag ends, so the agent is resized
+    /// once, not at every column the pointer crossed.
+    pub(super) fn drag_sidebar_border(&mut self, column: u16) {
+        if let Some((from, _)) = self.sidebar_drag {
+            self.sidebar_drag = Some((from, column));
+            self.needs_redraw = true;
+        }
+    }
+
+    /// The border let go at `column`, in a tab whose pane area is `tab`. Not
+    /// moved, it was a click, which folds or opens as a click on the sidebar
+    /// does. Moved, it sets the width — and unfolds a folded strip dragged
+    /// out; dragged narrower than the narrowest open sidebar, it folds.
+    pub(super) fn release_sidebar_border(&mut self, column: u16, tab: Rect) {
+        let Some((from, _)) = self.sidebar_drag.take() else {
+            return;
+        };
+        self.needs_redraw = true;
+        if column == from {
+            if self.sidebar_folded {
+                self.toggle_sidebar();
+            }
+            return;
+        }
+        let right = tab.x + tab.width;
+        let wanted = right.saturating_sub(column);
+        if wanted < OPEN_MIN {
+            self.sidebar_folded = true;
+        } else {
+            self.sidebar_folded = false;
+            self.sidebar_width = Some(clamp_width(wanted, tab.width));
+        }
+        self.save_prefs();
+    }
+
+    /// A click on a folder in the Files tree: fold it, or open it. Kept per
+    /// session for as long as cctop runs, so coming back to a tab finds the
+    /// tree as it was left.
+    pub(super) fn turn_sidebar_folder(&mut self, path: &str) {
+        let Some(key) = self.sidebar.key() else {
+            return;
+        };
+        let turned = self.sidebar_folds.entry(key).or_default();
+        if !turned.remove(path) {
+            turned.insert(path.to_string());
+        }
+        self.needs_redraw = true;
+    }
+
+    /// The wheel over the Files tree.
+    pub(super) fn scroll_sidebar_files(&mut self, down: bool) {
+        self.sidebar.files_scroll = match down {
+            true => self.sidebar.files_scroll + 3,
+            false => self.sidebar.files_scroll.saturating_sub(3),
+        };
+        self.needs_redraw = true;
+    }
+
     /// `Alt+i`: fold the sidebar to its strip, or open it out.
     pub(super) fn toggle_sidebar(&mut self) {
         if !self.sidebar.shown {
@@ -340,13 +584,16 @@ pub(super) fn split(app: &App, area: Rect) -> (Rect, Option<Rect>) {
         (false, _) => 0,
         _ if area.width < MIN_PANE + STRIP => 0,
         (true, true) => STRIP,
-        (true, false) => {
-            let wide = WIDE.min(area.width * SHARE / 100);
-            match wide >= 24 && area.width >= MIN_PANE + wide {
-                true => wide,
-                false => STRIP,
+        (true, false) => match app.sidebar_width {
+            Some(chosen) => clamp_width(chosen, area.width),
+            None => {
+                let wide = WIDE.min(area.width * SHARE / 100);
+                match wide >= OPEN_MIN && area.width >= MIN_PANE + wide {
+                    true => wide,
+                    false => STRIP,
+                }
             }
-        }
+        },
     };
     super::render::set_sidebar_width(width);
     if width == 0 {
@@ -364,8 +611,34 @@ pub(super) fn split(app: &App, area: Rect) -> (Rect, Option<Rect>) {
     (panes, Some(side))
 }
 
+/// While the border is dragged, a line where it will land: the sidebar and
+/// the panes are redrawn at the new width only when the drag ends.
+pub(super) fn draw_drag_guide(frame: &mut Frame, tab: Rect, app: &App) {
+    let Some((_, at)) = app.sidebar_drag else {
+        return;
+    };
+    let x = at.clamp(tab.x, (tab.x + tab.width).saturating_sub(1));
+    let style = Style::default()
+        .fg(theme::colors().accent)
+        .add_modifier(Modifier::BOLD);
+    let buffer = frame.buffer_mut();
+    for y in tab.y..tab.y + tab.height {
+        if let Some(cell) = buffer.cell_mut((x, y)) {
+            cell.set_symbol("┃").set_style(style);
+        }
+    }
+}
+
 /// Draw the sidebar into `area`, folded or open as it was split.
-pub(super) fn draw(frame: &mut Frame, area: Rect, app: &App) {
+/// Where the open sidebar's Files tree landed on screen: its folder rows,
+/// for a click to fold or open, and its lines, for the wheel.
+#[derive(Debug, Default, Clone)]
+pub(super) struct Hits {
+    pub folders: Vec<(u16, String)>,
+    pub files: Option<(u16, u16)>,
+}
+
+pub(super) fn draw(frame: &mut Frame, area: Rect, app: &App) -> Hits {
     let folded = area.width <= STRIP;
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
@@ -379,22 +652,36 @@ pub(super) fn draw(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(block, area);
     let key = app.sidebar.key();
     let notes = key.as_deref().map_or(&[][..], |k| app.notes.of(k));
-    let lines = match folded {
-        true => strip(&app.sidebar, notes.len()),
-        false => {
-            let editing =
-                (app.mode == Mode::Note).then_some((&app.sidebar.note_input, app.sidebar.note_at));
-            open(
-                &app.sidebar,
-                key.is_some(),
-                notes,
-                editing,
-                inner.width as usize,
-                inner.height as usize,
-            )
-        }
-    };
-    frame.render_widget(Paragraph::new(lines), inner);
+    if folded {
+        frame.render_widget(Paragraph::new(strip(&app.sidebar, notes.len())), inner);
+        return Hits::default();
+    }
+    let editing =
+        (app.mode == Mode::Note).then_some((&app.sidebar.note_input, app.sidebar.note_at));
+    let none = HashSet::new();
+    let turned = key
+        .as_deref()
+        .and_then(|k| app.sidebar_folds.get(k))
+        .unwrap_or(&none);
+    let drawn = open(
+        &app.sidebar,
+        key.is_some(),
+        notes,
+        editing,
+        turned,
+        inner.width as usize,
+        inner.height as usize,
+    );
+    frame.render_widget(Paragraph::new(drawn.lines), inner);
+    let at = |i: usize| inner.y + i as u16;
+    Hits {
+        folders: drawn
+            .folders
+            .into_iter()
+            .map(|(i, path)| (at(i), path))
+            .collect(),
+        files: drawn.files.map(|(from, to)| (at(from), at(to))),
+    }
 }
 
 /// The folded strip: a count under each section's sign.
@@ -430,27 +717,47 @@ fn strip(state: &State, notes: usize) -> Vec<Line<'static>> {
 
 /// The open sidebar's lines, fitted to `height`: the notes whole, since they
 /// are short and yours, and the plan and the files sharing what is left.
+/// The open sidebar's lines, and where in them the Files tree is: its folder
+/// rows by line, for a click to fold, and its lines, for the wheel.
+pub(super) struct Drawn {
+    pub lines: Vec<Line<'static>>,
+    pub folders: Vec<(usize, String)>,
+    pub files: Option<(usize, usize)>,
+}
+
+/// A line, and the folder it is the row of, if it is one.
+type Tagged = (Line<'static>, Option<String>);
+
 fn open(
     state: &State,
     found: bool,
     notes: &[String],
     editing: Option<(&LineEdit, usize)>,
+    turned: &HashSet<String>,
     width: usize,
     height: usize,
-) -> Vec<Line<'static>> {
+) -> Drawn {
     if !found {
-        return wrap(
+        let lines = wrap(
             "Waiting for this agent's session to appear — its plan, files and notes show here then.",
             width,
         )
         .into_iter()
         .map(|l| Line::from(Span::styled(l, theme::dim())))
         .collect();
+        return Drawn {
+            lines,
+            folders: Vec::new(),
+            files: None,
+        };
     }
+    let untagged = |lines: Vec<Line<'static>>| -> Vec<Tagged> {
+        lines.into_iter().map(|l| (l, None)).collect()
+    };
     let notes = notes_lines(notes, editing, width);
     let room = height.saturating_sub(notes.len() + 2);
-    let plan = plan_lines(&state.plan, width);
-    let files = files_lines(state.files.as_ref(), width);
+    let plan = untagged(plan_lines(&state.plan, width));
+    let files = files_lines(state.files.as_ref(), turned, state.files_scroll, width);
     // The files are usually the longer list and the plan the one being read
     // top to bottom, so the plan takes what it needs of half, and the files
     // the rest.
@@ -458,16 +765,27 @@ fn open(
         .len()
         .min(room.saturating_sub(files.len().min(room / 2)));
     let mut out = fit(plan, plan_room);
-    out.push(Line::default());
+    out.push((Line::default(), None));
+    let files_at = out.len();
     out.extend(fit(files, room.saturating_sub(plan_room)));
-    out.push(Line::default());
-    out.extend(notes);
-    out
+    let files = (files_at, out.len());
+    out.push((Line::default(), None));
+    out.extend(untagged(notes));
+    let folders = out
+        .iter()
+        .enumerate()
+        .filter_map(|(i, (_, folder))| folder.clone().map(|f| (i, f)))
+        .collect();
+    Drawn {
+        lines: out.into_iter().map(|(l, _)| l).collect(),
+        folders,
+        files: Some(files),
+    }
 }
 
 /// A section cut to `room` lines, its header kept and a count of what was cut
 /// on the last line kept.
-fn fit(mut lines: Vec<Line<'static>>, room: usize) -> Vec<Line<'static>> {
+fn fit(mut lines: Vec<Tagged>, room: usize) -> Vec<Tagged> {
     if lines.len() <= room {
         return lines;
     }
@@ -477,10 +795,10 @@ fn fit(mut lines: Vec<Line<'static>>, room: usize) -> Vec<Line<'static>> {
     }
     let cut = lines.len() - room + 1;
     lines.truncate(room - 1);
-    lines.push(Line::from(Span::styled(
-        format!("  … {cut} more"),
-        theme::dim(),
-    )));
+    lines.push((
+        Line::from(Span::styled(format!("  … {cut} more"), theme::dim())),
+        None,
+    ));
     lines
 }
 
@@ -535,60 +853,116 @@ fn plan_lines(plan: &[Step], width: usize) -> Vec<Line<'static>> {
     out
 }
 
-fn files_lines(files: Option<&Result<Vec<File>, String>>, width: usize) -> Vec<Line<'static>> {
+fn files_lines(
+    files: Option<&Result<Vec<File>, String>>,
+    turned: &HashSet<String>,
+    scroll: usize,
+    width: usize,
+) -> Vec<Tagged> {
+    let plain = |line: Line<'static>| (line, None);
     let list = match files {
         None => {
             return vec![
-                header("Files", vec![]),
-                Line::from(Span::styled("  reading…", theme::dim())),
+                plain(header("Files", vec![])),
+                plain(Line::from(Span::styled("  reading…", theme::dim()))),
             ];
         }
         Some(Err(why)) => {
-            let mut out = vec![header("Files", vec![])];
+            let mut out = vec![plain(header("Files", vec![]))];
             out.extend(
                 wrap(why, width.saturating_sub(2))
                     .into_iter()
-                    .map(|l| Line::from(Span::styled(format!("  {l}"), theme::dim()))),
+                    .map(|l| plain(Line::from(Span::styled(format!("  {l}"), theme::dim())))),
             );
             return out;
         }
         Some(Ok(list)) => list,
     };
-    let added: u64 = list.iter().filter_map(|f| f.added).sum();
-    let removed: u64 = list.iter().filter_map(|f| f.removed).sum();
-    let mut out = vec![header(
+    let root = tree(list);
+    let mut out = vec![plain(header(
         "Files",
         match list.len() {
             0 => vec![],
             n => vec![
                 Span::styled(format!("  {n}  "), theme::dim()),
-                Span::styled(format!("+{added}"), changes::plus()),
-                Span::styled(format!(" −{removed}"), changes::minus()),
+                Span::styled(format!("+{}", root.added), changes::plus()),
+                Span::styled(format!(" −{}", root.removed), changes::minus()),
             ],
         },
-    )];
+    ))];
     if list.is_empty() {
-        out.push(Line::from(Span::styled("  nothing changed", theme::dim())));
+        out.push(plain(Line::from(Span::styled(
+            "  nothing changed",
+            theme::dim(),
+        ))));
         return out;
     }
-    for file in list {
-        let counts = match (file.added, file.removed) {
-            (Some(a), Some(r)) => vec![
-                Span::styled(format!(" +{a}"), changes::plus()),
-                Span::styled(format!(" −{r}"), changes::minus()),
-            ],
-            _ => vec![Span::styled(" bin", theme::dim())],
-        };
-        let used: usize = counts.iter().map(|s| util::cells(&s.content)).sum();
-        let path_width = width.saturating_sub(used).max(4);
-        let mut spans = vec![Span::styled(
-            changes::truncate_left(&file.path, path_width),
-            theme::value(),
-        )];
-        spans.extend(counts);
-        out.push(Line::from(spans));
+    let rows = rows(&root, list.len(), turned);
+    let scroll = scroll.min(rows.len().saturating_sub(1));
+    if scroll > 0 {
+        out.push(plain(Line::from(Span::styled(
+            format!("  ↑ {scroll} above"),
+            theme::dim(),
+        ))));
+    }
+    for row in rows.into_iter().skip(scroll) {
+        out.push(row_line(row, width));
     }
     out
+}
+
+/// One row of the tree as a line: indented by depth, the name cut at its end
+/// so the start of it — which says where it is — always shows, and its lines
+/// added and removed on the right.
+fn row_line(row: Row, width: usize) -> Tagged {
+    let indent = |depth: usize| "  ".repeat(depth.min(3));
+    let counts = |added: Option<u64>, removed: Option<u64>| match (added, removed) {
+        (Some(a), Some(r)) => vec![
+            Span::styled(format!(" +{a}"), changes::plus()),
+            Span::styled(format!(" −{r}"), changes::minus()),
+        ],
+        _ => vec![Span::styled(" bin", theme::dim())],
+    };
+    let (lead, name, style, tail, folder) = match row {
+        Row::Folder {
+            depth,
+            name,
+            path,
+            open,
+            count,
+            added,
+            removed,
+        } => {
+            let mut tail = vec![Span::styled(format!(" {count}"), theme::dim())];
+            tail.extend(counts(Some(added), Some(removed)));
+            (
+                format!("{}{} ", indent(depth), if open { "▾" } else { "▸" }),
+                format!("{name}/"),
+                theme::title(),
+                tail,
+                Some(path),
+            )
+        }
+        Row::File {
+            depth,
+            name,
+            added,
+            removed,
+        } => (
+            format!("{}  ", indent(depth)),
+            name,
+            theme::value(),
+            counts(added, removed),
+            None,
+        ),
+    };
+    let used = util::cells(&lead) + tail.iter().map(|s| util::cells(&s.content)).sum::<usize>();
+    let mut spans = vec![
+        Span::styled(lead, theme::dim()),
+        Span::styled(util::clip(&name, width.saturating_sub(used).max(4)), style),
+    ];
+    spans.extend(tail);
+    (Line::from(spans), folder)
 }
 
 fn notes_lines(
@@ -679,6 +1053,99 @@ mod tests {
         }
     }
 
+    fn changed(path: &str, added: u64, removed: u64) -> File {
+        File {
+            path: path.into(),
+            added: Some(added),
+            removed: Some(removed),
+        }
+    }
+
+    /// Directories each holding only the next are one row; every folder
+    /// counts the files under it and adds up their lines; folders come before
+    /// files, each in name order.
+    #[test]
+    fn the_tree_joins_chains_and_adds_up() {
+        let root = tree(&[
+            changed("docs/explanation/architecture.md", 10, 2),
+            changed("docs/explanation/entity-resolution.md", 5, 1),
+            changed("src/main.rs", 3, 0),
+            changed("src/ui/table.rs", 7, 4),
+            changed("README.md", 1, 1),
+        ]);
+        let names: Vec<&str> = root.dirs.iter().map(|d| d.name.as_str()).collect();
+        assert_eq!(names, ["docs/explanation", "src"]);
+        assert_eq!(root.dirs[0].path, "docs/explanation");
+        assert_eq!(root.dirs[0].count, 2);
+        assert_eq!((root.dirs[0].added, root.dirs[0].removed), (15, 3));
+        assert_eq!(
+            root.dirs[1].dirs[0].name, "ui",
+            "a folder beside a file is kept"
+        );
+        assert_eq!(root.files, [("README.md".to_string(), Some(1), Some(1))]);
+        assert_eq!((root.count, root.added, root.removed), (5, 26, 8));
+        let all = rows(&root, 5, &HashSet::new());
+        assert!(
+            matches!(&all[0], Row::Folder { name, open: true, .. } if name == "docs/explanation")
+        );
+        assert!(matches!(all.last(), Some(Row::File { name, .. }) if name == "README.md"));
+    }
+
+    /// A long list starts as an outline, its big top-level folders folded,
+    /// and a click turns one over.
+    #[test]
+    fn a_long_list_starts_folded_and_a_click_opens_a_folder() {
+        let mut files: Vec<File> = (0..20)
+            .map(|i| changed(&format!("docs/f{i:02}.md"), 1, 0))
+            .collect();
+        files.push(changed("src/a.rs", 1, 0));
+        let root = tree(&files);
+        let none = HashSet::new();
+        let folded = rows(&root, files.len(), &none);
+        assert_eq!(
+            folded.len(),
+            3,
+            "docs folded, src (one file) open with its file: {folded:?}"
+        );
+        assert!(
+            matches!(&folded[0], Row::Folder { name, open: false, count: 20, .. } if name == "docs")
+        );
+        let turned: HashSet<String> = ["docs".to_string()].into();
+        assert_eq!(rows(&root, files.len(), &turned).len(), 23);
+    }
+
+    /// A name too long for the sidebar is cut at its end, so where it is —
+    /// the start — still shows.
+    #[test]
+    fn a_long_name_is_cut_at_its_end() {
+        let (line, folder) = row_line(
+            Row::File {
+                depth: 1,
+                name: "entity-resolution-and-merging.md".into(),
+                added: Some(12),
+                removed: Some(3),
+            },
+            26,
+        );
+        assert_eq!(folder, None);
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.starts_with("    entity-res"), "{text}");
+        assert!(text.contains('…'), "{text}");
+        assert!(text.ends_with(" +12 −3"), "{text}");
+    }
+
+    /// A dragged width stays between the narrowest open sidebar and 60% of
+    /// the tab, always leaves the agent 40 columns, and is the strip in a tab
+    /// too narrow for even the narrowest.
+    #[test]
+    fn a_dragged_width_is_kept_within_bounds() {
+        assert_eq!(clamp_width(50, 200), 50);
+        assert_eq!(clamp_width(5, 200), OPEN_MIN);
+        assert_eq!(clamp_width(190, 200), 120, "60% of the tab");
+        assert_eq!(clamp_width(80, 90), 50, "40 columns left for the agent");
+        assert_eq!(clamp_width(40, 60), STRIP, "no room to open at all");
+    }
+
     #[test]
     fn a_long_plan_folds_its_finished_steps() {
         let mut plan: Vec<Step> = (0..6)
@@ -705,7 +1172,18 @@ mod tests {
                 .collect())),
             ..State::default()
         };
-        let lines = text(&open(&state, true, &["remember".into()], None, 30, 16));
+        let lines = text(
+            &open(
+                &state,
+                true,
+                &["remember".into()],
+                None,
+                &HashSet::new(),
+                30,
+                16,
+            )
+            .lines,
+        );
         assert!(lines.len() <= 16, "{lines:#?}");
         assert!(lines.iter().any(|l| l.contains("more")), "{lines:#?}");
         assert!(lines.iter().any(|l| l == "• remember"), "{lines:#?}");
