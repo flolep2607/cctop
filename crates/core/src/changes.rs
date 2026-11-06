@@ -25,6 +25,30 @@
 //! no reflog at all, the newest commit on `HEAD`'s history from before the
 //! start stands in.
 //!
+//! # Moving the base past what was not the session's
+//!
+//! `HEAD` at the start is only the right base until something else moves
+//! `HEAD` under the session: a `git pull` in the middle of it, by the person or
+//! by the agent, brought in every commit anyone else pushed, and against the
+//! start's base they all read as the session's — one pull and a session that
+//! touched three files reported a hundred and sixty. So the reflog is read on
+//! past the start, and every move that is not this checkout's own work moves
+//! the base with it:
+//!
+//! - a fast-forward (`pull: Fast-forward`, `merge X: Fast-forward`), a
+//!   `reset`, a `checkout` of another branch, the start of a rebase: the base
+//!   becomes where `HEAD` landed, so what the session does next is measured
+//!   from there, and a rebase's replayed commits — the session's own — are in.
+//! - a merge that made a commit (`pull: Merge made by…`, `commit (merge)`):
+//!   the base becomes the merged-in side, the commit's second parent. Against
+//!   it, the merge's result differs by exactly the local side's work.
+//! - anything else — `commit`, `commit (amend)`, `cherry-pick`, `revert`, a
+//!   rebase's `pick`s and its `finish` — is the session's own and stays in.
+//!
+//! The start is the latest run of the session in this checkout, not its first:
+//! a session resumed today after a week away is charged with today, and is
+//! given that start by its caller ([`since`]).
+//!
 //! ponytail: the diff is the checkout as it is now against how it was, so a
 //! person's edits — or another agent's in the same checkout — during the
 //! session are in it too. Telling them apart would need the transcript's
@@ -32,7 +56,8 @@
 //!
 //! Untracked files the ignore rules let through are listed as wholly new: an
 //! agent's new file is usually its most important change, and `git diff`
-//! never shows one that was not added.
+//! never shows one that was not added. Only those written since the start,
+//! though: an untracked scratch file from last month is not the session's.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -68,6 +93,9 @@ pub enum BaseKind {
     Empty,
     /// The session's start is unknown, so only uncommitted changes are shown.
     Head,
+    /// Where a pull, merge, rebase, reset or checkout during the session left
+    /// `HEAD` — see the module docs.
+    Synced,
 }
 
 impl BaseKind {
@@ -79,6 +107,7 @@ impl BaseKind {
             BaseKind::CommitBefore => "the last commit before the session started (no reflog)",
             BaseKind::Empty => "nothing: no commit predates the session",
             BaseKind::Head => "HEAD: the session's start is unknown, so uncommitted only",
+            BaseKind::Synced => "where the last pull, merge or rebase in the session left HEAD",
         }
     }
 }
@@ -153,7 +182,11 @@ pub fn read(dir: &Path, started: Option<i64>) -> Result<Option<Changes>, String>
         git(&root).args(["ls-files", "--others", "--exclude-standard", "-z"]),
         MAX_LIST_BYTES,
     )?;
-    let others: Vec<&str> = others.split('\0').filter(|p| !p.is_empty()).collect();
+    let others: Vec<&str> = others
+        .split('\0')
+        .filter(|p| !p.is_empty())
+        .filter(|p| written_since(&root.join(p), started))
+        .collect();
     let room = MAX_FILES.saturating_sub(files.len());
     let more_untracked = others.len().saturating_sub(room);
     files.extend(others.iter().take(room).map(|p| untracked(&root, p)));
@@ -167,6 +200,36 @@ pub fn read(dir: &Path, started: Option<i64>) -> Result<Option<Changes>, String>
         more_files: more_tracked + more_untracked,
         patch_cut,
     }))
+}
+
+/// Whether the file at `path` was written at or after `started`; anything is,
+/// when the start is unknown.
+fn written_since(path: &Path, started: Option<i64>) -> bool {
+    let Some(started) = started else {
+        return true;
+    };
+    std::fs::symlink_metadata(path)
+        .and_then(|meta| meta.modified())
+        .ok()
+        .and_then(|at| at.duration_since(std::time::UNIX_EPOCH).ok())
+        .is_none_or(|at| at.as_secs() as i64 >= started)
+}
+
+/// When a session's latest run started, for [`read`]: the later of its first
+/// message and its running agent's process start.
+///
+/// The transcript's start is the session's first-ever moment, which a resume
+/// keeps; the process is the run going on now. Measured from the first, a
+/// session resumed after a week is charged with the week.
+pub fn since(session: &crate::session::Session) -> Option<i64> {
+    let first = chrono::DateTime::parse_from_rfc3339(&session.started_at)
+        .ok()
+        .map(|t| t.timestamp());
+    let run = session.root_pid().and_then(crate::proc::started_epoch);
+    match (first, run) {
+        (Some(first), Some(run)) => Some(first.max(run)),
+        (first, run) => first.or(run),
+    }
 }
 
 /// `git -C root`, scrubbed of the environment that would aim it elsewhere, and
@@ -275,24 +338,86 @@ fn choose_base(root: &Path, started: Option<i64>) -> Result<Base, String> {
         .map(|p| root.join(p))
         .and_then(|p| std::fs::read_to_string(p).ok())
         .unwrap_or_default();
-    if let Some((commit, kind)) = head_at(&log, started) {
-        // A reflog can name a commit that has since been pruned; it is only a
-        // base if git can still read it.
+    // A reflog can name a commit that has since been pruned; it is only a base
+    // if git can still read it.
+    let readable = |commit: &str| {
         let spec = format!("{commit}^{{commit}}");
-        if ask(root, &["rev-parse", "--verify", "-q", &spec]).is_some() {
-            return Ok(Base { commit, kind });
+        ask(root, &["rev-parse", "--verify", "-q", &spec]).is_some()
+    };
+    let at_start = head_at(&log, started)
+        .filter(|(commit, _)| readable(commit))
+        .map(|(commit, kind)| Base { commit, kind })
+        .or_else(|| {
+            ask(
+                root,
+                &["rev-list", "-1", &format!("--before={started}"), "HEAD"],
+            )
+            .map(|commit| Base {
+                commit,
+                kind: BaseKind::CommitBefore,
+            })
+        });
+    let mut base = match at_start {
+        Some(base) => base,
+        None => empty()?,
+    };
+    for step in moves_after(&log, started) {
+        let commit = match step {
+            Move::To(new) => Some(new),
+            Move::MergedIn(new) => ask(root, &["rev-parse", "--verify", "-q", &format!("{new}^2")]),
+        };
+        if let Some(commit) = commit.filter(|c| readable(c)) {
+            base = Base {
+                commit,
+                kind: BaseKind::Synced,
+            };
         }
     }
-    match ask(
-        root,
-        &["rev-list", "-1", &format!("--before={started}"), "HEAD"],
-    ) {
-        Some(commit) => Ok(Base {
-            commit,
-            kind: BaseKind::CommitBefore,
-        }),
-        None => empty(),
+    Ok(base)
+}
+
+/// A move of `HEAD` during the session that was not the session's own work.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Move {
+    /// `HEAD` landed here, and the session is measured from it on.
+    To(String),
+    /// This merge commit brought somebody else's work in; its second parent is
+    /// what the local side's work is measured against.
+    MergedIn(String),
+}
+
+/// The moves in a `logs/HEAD` reflog after `started` that move the base — see
+/// the module docs for which those are.
+fn moves_after(log: &str, started: i64) -> Vec<Move> {
+    log.lines()
+        .filter_map(|line| {
+            let (head, message) = line.split_once('\t').unwrap_or((line, ""));
+            let new = head.split(' ').nth(1)?;
+            let mut tail = head.rsplit(' ');
+            let _zone = tail.next()?;
+            let at: i64 = tail.next()?.parse().ok()?;
+            if at <= started {
+                return None;
+            }
+            classify(message, new)
+        })
+        .collect()
+}
+
+/// Whose move one reflog entry was: `None` for the session's own.
+fn classify(message: &str, new: &str) -> Option<Move> {
+    // The command is what comes before the first `:` — `pull --rebase
+    // (start)`, `merge origin/main`, `reset`.
+    let command = message.split(':').next().unwrap_or("");
+    if command.starts_with("commit (merge)") || message.contains(": Merge made by") {
+        return Some(Move::MergedIn(new.to_string()));
     }
+    let moved = message.contains(": Fast-forward")
+        || (command.ends_with("(start)")
+            && (command.starts_with("rebase") || command.starts_with("pull")))
+        || command.starts_with("reset")
+        || command.starts_with("checkout");
+    moved.then(|| Move::To(new.to_string()))
 }
 
 /// Where `HEAD` stood at `started`, from the text of a `logs/HEAD` reflog.
@@ -609,6 +734,178 @@ mod tests {
         let all = read(repo, Some(T + 10)).unwrap().unwrap();
         assert_eq!(all.base.kind, BaseKind::Empty);
         assert_eq!(all.files[0].added, Some(2));
+    }
+
+    /// The moves that are not the session's own, read off their messages.
+    #[test]
+    fn a_pull_merge_rebase_reset_or_checkout_moves_the_base() {
+        let to = |m: &str| classify(m, A);
+        assert_eq!(to("pull: Fast-forward"), Some(Move::To(A.into())));
+        assert_eq!(
+            to("merge origin/main: Fast-forward"),
+            Some(Move::To(A.into()))
+        );
+        assert_eq!(
+            to("pull: Merge made by the 'ort' strategy."),
+            Some(Move::MergedIn(A.into()))
+        );
+        assert_eq!(
+            to("commit (merge): Merge branch 'x'"),
+            Some(Move::MergedIn(A.into()))
+        );
+        assert_eq!(
+            to("pull --rebase (start): checkout origin/main"),
+            Some(Move::To(A.into()))
+        );
+        assert_eq!(
+            to("rebase -i (start): checkout HEAD~3"),
+            Some(Move::To(A.into()))
+        );
+        assert_eq!(to("reset: moving to origin/main"), Some(Move::To(A.into())));
+        assert_eq!(
+            to("checkout: moving from main to fix"),
+            Some(Move::To(A.into()))
+        );
+        // The session's own work stays in.
+        for own in [
+            "commit: add the thing",
+            "commit (amend): add the thing",
+            "cherry-pick: x",
+            "revert: Revert x",
+            "rebase (pick): replay",
+            "rebase (finish): returning to refs/heads/fix",
+            "pull --rebase (finish): returning to refs/heads/main",
+        ] {
+            assert_eq!(to(own), None, "{own}");
+        }
+        // Only moves after the start count.
+        let log = [
+            format!("{A} {B} t <t@t> 100 +0000\treset: moving to B\n"),
+            format!("{B} {C} t <t@t> 300 +0000\tpull: Fast-forward\n"),
+        ]
+        .concat();
+        assert_eq!(moves_after(&log, 200), [Move::To(C.into())]);
+    }
+
+    /// A clone whose upstream moves during the session.
+    fn clone_with_upstream(tmp: &Path) -> (PathBuf, PathBuf) {
+        let up = tmp.join("up");
+        let repo = tmp.join("repo");
+        std::fs::create_dir_all(&up).unwrap();
+        git_at(&up, T + 1000, &["init", "-q", "-b", "main"]);
+        std::fs::write(up.join("base.txt"), "1\n").unwrap();
+        git_at(&up, T + 1000, &["add", "."]);
+        git_at(&up, T + 1000, &["commit", "-q", "-m", "base"]);
+        git_at(
+            tmp,
+            T + 1100,
+            &["clone", "-q", up.to_str().unwrap(), repo.to_str().unwrap()],
+        );
+        // Somebody else's work, pushed while the session runs.
+        for (at, name) in [(T + 2100, "theirs1.txt"), (T + 2200, "theirs2.txt")] {
+            std::fs::write(up.join(name), "theirs\n").unwrap();
+            git_at(&up, at, &["add", name]);
+            git_at(&up, at, &["commit", "-q", "-m", name]);
+        }
+        (up, repo)
+    }
+
+    fn paths(changes: &Changes) -> Vec<&str> {
+        changes.files.iter().map(|f| f.path.as_str()).collect()
+    }
+
+    /// A pull in the middle of a session — fast-forward or merge — brings
+    /// other people's commits, and they are not the session's changes; the
+    /// agent's own commit, before or after the pull, is.
+    #[test]
+    fn a_pull_during_the_session_is_not_counted_as_its_changes() {
+        // Pulled first, then worked: a fast-forward.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (_, repo) = clone_with_upstream(tmp.path());
+        git_at(&repo, T + 2500, &["-c", "pull.rebase=false", "pull", "-q"]);
+        std::fs::write(repo.join("mine.txt"), "mine\n").unwrap();
+        git_at(&repo, T + 2600, &["add", "mine.txt"]);
+        git_at(&repo, T + 2600, &["commit", "-q", "-m", "mine"]);
+        let changes = read(&repo, Some(T + 2000)).unwrap().unwrap();
+        assert_eq!(changes.base.kind, BaseKind::Synced);
+        assert_eq!(paths(&changes), ["mine.txt"]);
+
+        // Worked first, then pulled: a merge.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (_, repo) = clone_with_upstream(tmp.path());
+        std::fs::write(repo.join("mine.txt"), "mine\n").unwrap();
+        git_at(&repo, T + 2300, &["add", "mine.txt"]);
+        git_at(&repo, T + 2300, &["commit", "-q", "-m", "mine"]);
+        git_at(
+            &repo,
+            T + 2500,
+            &["-c", "pull.rebase=false", "pull", "-q", "--no-edit"],
+        );
+        let changes = read(&repo, Some(T + 2000)).unwrap().unwrap();
+        assert_eq!(changes.base.kind, BaseKind::Synced);
+        assert_eq!(paths(&changes), ["mine.txt"]);
+
+        // Worked first, then pulled with a rebase: the replayed commit is in.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (_, repo) = clone_with_upstream(tmp.path());
+        std::fs::write(repo.join("mine.txt"), "mine\n").unwrap();
+        git_at(&repo, T + 2300, &["add", "mine.txt"]);
+        git_at(&repo, T + 2300, &["commit", "-q", "-m", "mine"]);
+        git_at(&repo, T + 2500, &["pull", "-q", "--rebase"]);
+        let changes = read(&repo, Some(T + 2000)).unwrap().unwrap();
+        assert_eq!(paths(&changes), ["mine.txt"]);
+    }
+
+    /// An untracked file last written before the session is not its new file.
+    #[test]
+    fn an_untracked_file_older_than_the_session_is_not_its_change() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo = tmp.path();
+        git_at(repo, T + 1000, &["init", "-q", "-b", "main"]);
+        std::fs::write(repo.join("a"), "1\n").unwrap();
+        git_at(repo, T + 1000, &["add", "."]);
+        git_at(repo, T + 1000, &["commit", "-q", "-m", "a"]);
+        let old = repo.join("scratch-from-last-month.txt");
+        std::fs::write(&old, "old\n").unwrap();
+        let then = std::time::UNIX_EPOCH + std::time::Duration::from_secs((T + 500) as u64);
+        std::fs::File::options()
+            .write(true)
+            .open(&old)
+            .unwrap()
+            .set_modified(then)
+            .unwrap();
+        std::fs::write(repo.join("fresh.txt"), "new\n").unwrap();
+        let changes = read(repo, Some(T + 2000)).unwrap().unwrap();
+        assert_eq!(paths(&changes), ["fresh.txt"]);
+        // With no start known, every untracked file is listed, as before.
+        assert_eq!(read(repo, None).unwrap().unwrap().files.len(), 2);
+    }
+
+    /// A resumed session is measured from the run going on now, not from its
+    /// first message.
+    #[test]
+    fn a_resumed_session_starts_at_its_running_agent() {
+        let mut session =
+            crate::session::Session::new(crate::pricing::Provider::Claude, "s".into());
+        session.started_at = "2020-01-01T00:00:00Z".into();
+        let first = chrono::DateTime::parse_from_rfc3339(&session.started_at)
+            .unwrap()
+            .timestamp();
+        assert_eq!(since(&session), Some(first));
+        session.process = Some(crate::proc::ProcInfo {
+            process_list: vec![crate::proc::ProcEntry {
+                pid: std::process::id(),
+                is_root: true,
+                ghost: false,
+                cpu: 0.0,
+                memory: 0,
+                args: String::new(),
+            }],
+            ..Default::default()
+        });
+        let run = since(&session).expect("a start");
+        let now = chrono::Utc::now().timestamp();
+        assert!(run > first && run <= now && run > now - 86_400, "{run}");
     }
 
     #[test]

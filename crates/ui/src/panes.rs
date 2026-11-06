@@ -457,6 +457,8 @@ impl App {
         if want == self.tab {
             return;
         }
+        let began = std::time::Instant::now();
+        let mut attached = false;
         if let Some(tab) = want.checked_sub(1).and_then(|i| self.tabs.get_mut(i))
             && tab.detached()
         {
@@ -465,11 +467,22 @@ impl App {
                 self.set_status(format!("Could not open {title}: {error}"));
                 return;
             }
+            attached = true;
         }
-        if let Some(tab) = self.tab.checked_sub(1).and_then(|i| self.tabs.get_mut(i)) {
-            tab.detach();
-        }
+        let left = self.tab;
         self.tab = want;
+        self.remember_tab(left);
+        self.remember_tab(want);
+        self.detach_stale_tabs();
+        cctop_core::elog::event(
+            "tabs",
+            "switch",
+            serde_json::json!({
+                "to": want,
+                "attached": attached,
+                "ms": began.elapsed().as_secs_f64() * 1000.0,
+            }),
+        );
         // A tab that kept its client while away — a recording, a pane cctop
         // owns — did not attach just now, which is the one event rmux refits
         // the window on. Arriving is coming back to it, so it checks.
@@ -478,6 +491,70 @@ impl App {
         {
             pane.note_input(true);
         }
+    }
+
+    /// Put bar position `at` at the front of the tabs visited most recently.
+    pub(super) fn remember_tab(&mut self, at: usize) {
+        let Some(key) = at
+            .checked_sub(1)
+            .and_then(|i| self.tabs.get(i))
+            .and_then(|tab| tab.sessions().next().map(str::to_string))
+        else {
+            return;
+        };
+        self.recent_tabs.retain(|k| *k != key);
+        self.recent_tabs.insert(0, key);
+    }
+
+    /// Give up the client of every tab neither on screen nor among the
+    /// [`tabs_kept`](cctop_core::settings::Settings::tabs_kept)
+    /// visited last.
+    ///
+    /// Every switch used to put the tab it left down and pick the one it went
+    /// to back up: a new `mux attach` client, a whole screen sent again, and —
+    /// when anything else had held the window meanwhile — a resize the agent
+    /// redrew everything for, all before the frame that showed it. Going back
+    /// and forth between two agents paid that on every key. A few recent tabs
+    /// keep their client instead, so returning to one is drawing what is
+    /// already there.
+    ///
+    /// What putting tabs down was for still holds. The window is sized
+    /// `latest`, to whichever client was used last, so a client of ours that
+    /// is only being kept does not take the size from another cctop that is
+    /// being typed into; it takes it back only when it is looked at again,
+    /// which is what attaching did anyway. The cost is a client process each,
+    /// idle, for a handful of tabs.
+    pub(super) fn detach_stale_tabs(&mut self) {
+        let keep = self.settings.tabs_kept.unwrap_or(3) as usize;
+        let here = self.tab.checked_sub(1);
+        // The tab on screen is at the front of the list and is not one of the
+        // kept; on the dashboard there is none, and the front is a kept one.
+        let shown = usize::from(here.is_some());
+        let recent: Vec<String> = self
+            .recent_tabs
+            .iter()
+            .take(keep + shown)
+            .cloned()
+            .collect();
+        for (i, tab) in self.tabs.iter_mut().enumerate() {
+            if Some(i) == here || tab.detached() {
+                continue;
+            }
+            let kept = tab
+                .sessions()
+                .next()
+                .is_some_and(|key| recent.iter().any(|k| k == key));
+            if !kept {
+                tab.detach();
+            }
+        }
+        // Tabs that have gone are forgotten, so the list stays as long as the bar.
+        let live: Vec<String> = self
+            .tabs
+            .iter()
+            .filter_map(|tab| tab.sessions().next().map(str::to_string))
+            .collect();
+        self.recent_tabs.retain(|k| live.contains(k));
     }
 
     /// Reconcile the tab bar against every cctop-owned rmux session on this
@@ -1021,6 +1098,51 @@ mod tests {
         // Landing on it again is staying, not toggling away.
         app.go_to_tab(settings);
         assert!(app.on_settings());
+    }
+
+    /// Going back to a recent tab finds its client still there: only tabs past
+    /// the ones kept give theirs up, and `0` is the old one-tab behaviour.
+    #[test]
+    fn recent_tabs_keep_their_client() {
+        let (mut child, pid) = cctop_core::shim::test_session(&["sh", "-c", "sleep 30"], (80, 24));
+        let tab = |name: &str| {
+            let mut pane = tabs::Pane::view_of(pid, name.into()).expect("attach");
+            pane.rmux = Some(format!("cctop-{name}"));
+            tabs::Tab::new(pane)
+        };
+        let mut app = test_app();
+        app.tabs = ["a", "b", "c", "d"].map(tab).into();
+        app.settings.tabs_kept = Some(2);
+        // Visited a, b, c, then d, which is on screen. Arriving at a tab
+        // attaches it, so each was attached when it was visited; the put-down
+        // after the last visit is what is being asked about.
+        for at in 1..=4 {
+            app.remember_tab(at);
+        }
+        app.tab = 4;
+        app.detach_stale_tabs();
+        let detached: Vec<bool> = app.tabs.iter().map(tabs::Tab::detached).collect();
+        assert_eq!(
+            detached,
+            [true, false, false, false],
+            "d on screen, c and b kept"
+        );
+
+        // None kept: everything but the tab on screen is put down, as before.
+        app.settings.tabs_kept = Some(0);
+        app.detach_stale_tabs();
+        let detached: Vec<bool> = app.tabs.iter().map(tabs::Tab::detached).collect();
+        assert_eq!(detached, [true, true, true, false]);
+
+        // On the dashboard nothing is on screen, so the last tab is put down too.
+        app.tab = 0;
+        app.detach_stale_tabs();
+        assert!(app.tabs.iter().all(tabs::Tab::detached));
+
+        drop(app);
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = cctop_core::shim::socket_path(pid).map(std::fs::remove_file);
     }
 
     #[test]

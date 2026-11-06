@@ -693,6 +693,7 @@ month_window = "rolling" # calendar / rolling: This month, or the last 30 days
 notify = true
 compact_threshold = 90   # context % the agent compacts at
 idle_after = 12          # hours quiet before `I` counts a live session idle
+tabs_kept = 3            # recent tabs that keep their client, so going back is instant
 
 [keys]
 quit = "x"

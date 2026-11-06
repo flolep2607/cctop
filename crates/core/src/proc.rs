@@ -170,6 +170,24 @@ fn basename(s: &str) -> &str {
     s.rsplit(['/', '\\']).next().unwrap_or(s)
 }
 
+/// When `pid` started, in seconds since the epoch.
+///
+/// `/proc/<pid>/stat` counts a process's start in clock ticks since boot, and
+/// `/proc/stat`'s `btime` says when boot was.
+pub fn started_epoch(pid: u32) -> Option<i64> {
+    let ticks = crate::yolo::start_time(pid)?;
+    let boot: i64 = std::fs::read_to_string("/proc/stat")
+        .ok()?
+        .lines()
+        .find_map(|line| line.strip_prefix("btime "))?
+        .trim()
+        .parse()
+        .ok()?;
+    // SAFETY: sysconf has no preconditions.
+    let per_second = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
+    (per_second > 0).then(|| boot + (ticks / per_second as u64) as i64)
+}
+
 /// Strip a path and any `.js`/`.exe` suffix to get a comparable command name.
 pub(crate) fn command_stem(s: &str) -> String {
     let base = basename(s);
