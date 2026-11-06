@@ -91,6 +91,18 @@ do not open a second window on one agent:
 The far machine says whether its agent is in a tab along with the rest of the
 row; one running a cctop too old to say shows no `□`.
 
+### Agents started by an agent
+
+An agent that another agent started over MCP (`spawn_agent`, see
+[letting agents drive agents](integrations.md#letting-agents-drive-agents))
+sits under it: its row right below the parent's, behind `└─` (`├─` when there
+are several), and its tab right after the parent's on the bar, marked `↳`.
+Sorting moves the family as one; a filter that hides the parent leaves the
+child as an ordinary row. The tree view (`t`) groups by repository and does
+not nest them, though a spawn working in its parent's checkout lands under
+the same heading anyway. The parent tab's sidebar lists its children under
+**Spawned**, with what each is doing; a click goes to that tab.
+
 A session past one of the `alert_*` thresholds you have set wears that alert
 in place of its dot for as long as it stays past it: `$` for its cost or burn
 rate, a red `!` for an error loop, `◌` for a working agent that has written

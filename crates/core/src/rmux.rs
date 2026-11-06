@@ -1092,6 +1092,24 @@ pub fn set_tab(name: &str, tab: &str) {
     record(name, "@cctop_tab", tab);
 }
 
+/// Record that the agent in `name` was started by the agent in `parent`, by
+/// that agent's session name — through `spawn_agent`, see [`crate::drive`].
+///
+/// On the session for the reason the label is: every cctop reads the same
+/// link, and it outlives the cctop that made the spawn. The parent's own
+/// session is not touched, so a parent that ends leaves its children as tabs
+/// of their own, with a link that simply points nowhere.
+pub fn set_parent(name: &str, parent: &str) {
+    record(name, "@cctop_parent", parent);
+}
+
+/// Whether `name` is a session name cctop gives: what a parent link may
+/// point at, and nothing else.
+pub fn is_cctop_name(name: &str) -> bool {
+    name.strip_prefix(PREFIX)
+        .is_some_and(|rest| rest.starts_with('-') && rest.len() > 1)
+}
+
 /// Record this session's place among its tab's panes.
 ///
 /// Written per pane rather than once per tab, because the tab is not a thing
@@ -1299,6 +1317,11 @@ pub struct Running {
     /// How the tab reaches another machine, when it is a transport to one —
     /// written by [`set_transport`], and drawn as a mark before its label.
     pub transport: Option<crate::reach::Transport>,
+    /// The session of the agent that started this one through `spawn_agent`,
+    /// as [`set_parent`] wrote it — or, for an agent a cctop from before the
+    /// option started, as its own `CCTOP_SPAWNED_BY` says; see
+    /// [`spawned_by`].
+    pub parent: Option<String>,
     /// The size rmux has fitted the session's window to, columns by rows.
     ///
     /// The window is fitted to one attached client at a time, so a client that
@@ -1335,6 +1358,7 @@ impl Running {
             pane: None,
             axis: None,
             transport: None,
+            parent: None,
             window: None,
         }
     }
@@ -1439,7 +1463,7 @@ pub fn running() -> Vec<Running> {
     // One call for all of it. Every field below resolves in a pane's context —
     // rmux looks up the session a pane belongs to — so asking per session would
     // be a request each for the same answer.
-    const FORMAT: &str = "#{session_name}\t#{pane_pid}\t#{pane_current_path}\t#{session_attached}\t#{session_created}\t#{window_activity}\t#{@cctop_label}\t#{@cctop_profile}\t#{@cctop_order}\t#{@cctop_state}\t#{@cctop_color}\t#{@cctop_tab}\t#{@cctop_pane}\t#{@cctop_axis}\t#{@cctop_transport}\t#{window_width}\t#{window_height}\t#{pane_dead}";
+    const FORMAT: &str = "#{session_name}\t#{pane_pid}\t#{pane_current_path}\t#{session_attached}\t#{session_created}\t#{window_activity}\t#{@cctop_label}\t#{@cctop_profile}\t#{@cctop_order}\t#{@cctop_state}\t#{@cctop_color}\t#{@cctop_tab}\t#{@cctop_pane}\t#{@cctop_axis}\t#{@cctop_transport}\t#{@cctop_parent}\t#{window_width}\t#{window_height}\t#{pane_dead}";
     // No daemon running: no sessions, not an error.
     let listing = crate::mux::list_all_panes(FORMAT).unwrap_or_default();
 
@@ -1496,6 +1520,10 @@ pub fn running() -> Vec<Running> {
         let pane = option().and_then(|v| v.parse::<u64>().ok());
         let axis = option();
         let transport = option().as_deref().and_then(crate::reach::Transport::parse);
+        // Written by the cctop that made the spawn; failing that, what the
+        // agent's own environment says, which an older cctop's spawn still
+        // carries.
+        let parent = option().or_else(|| pid.and_then(crate::drive::spawned_by));
         let width = option().and_then(|v| v.parse::<u16>().ok());
         let height = option().and_then(|v| v.parse::<u16>().ok());
         let window = width.zip(height);
@@ -1522,6 +1550,7 @@ pub fn running() -> Vec<Running> {
                 pane,
                 axis,
                 transport,
+                parent,
                 window,
             },
         ));
@@ -1849,6 +1878,33 @@ fn capture_bytes(raw: &[u8]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A parent link is a cctop session name and nothing else.
+    #[test]
+    fn only_a_cctop_session_can_be_a_parent() {
+        assert!(is_cctop_name("cctop-claude-2"));
+        assert!(!is_cctop_name("cctop"));
+        assert!(!is_cctop_name("cctop-"));
+        assert!(!is_cctop_name("pid 1234"));
+        assert!(!is_cctop_name("mycctop-x"));
+    }
+
+    /// The link a spawn writes is what every cctop reads back.
+    #[test]
+    fn a_spawns_parent_is_read_back_off_the_session() {
+        let _daemon = crate::mux::TestDaemon::new("rmux-parent");
+        let child = "cctop-parent-child";
+        start_session(child, None, &["sleep", "30"]);
+        set_parent(child, "cctop-parent-p");
+        let read = wait_asking(|| {
+            running()
+                .into_iter()
+                .find(|r| r.name == child)
+                .and_then(|r| r.parent)
+        });
+        end_session(child);
+        assert_eq!(read.as_deref(), Some("cctop-parent-p"));
+    }
 
     /// Claude starts fullscreen, under an account's prefix too; another
     /// harness, or a Claude already given settings, is left as it was.

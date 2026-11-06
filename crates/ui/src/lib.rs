@@ -869,6 +869,9 @@ pub struct App {
     /// is asked on a thread of its own and folded in here when it lands — the
     /// shape [`preview::Capture`] uses for its own capture.
     shared_listing: Option<std::sync::mpsc::Receiver<panes::Sweep>>,
+    /// The leading sessions of the tabs drawn as another tab's child at the
+    /// last nesting, so a child whose parent has gone can be said to stay.
+    nested: std::collections::HashSet<String>,
     /// The tab being dragged along the bar, indexed as the bar is: `1..=len`,
     /// and never `0` because the dashboard does not move.
     ///
@@ -1335,6 +1338,7 @@ impl App {
             tab: 0,
             shared_at: None,
             shared_listing: None,
+            nested: std::collections::HashSet::new(),
             drag_tab: None,
             // Empty rather than seeded from the claims file, which is the
             // other `$HOME` read here; [`App::new`] seeds it, because the row

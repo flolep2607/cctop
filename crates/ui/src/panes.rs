@@ -194,6 +194,8 @@ impl App {
     /// thing nobody notices until they have used the wrong one.
     pub fn tab_title(&self, i: usize) -> String {
         match i.checked_sub(1).and_then(|t| self.tabs.get(t)) {
+            // A tab another agent started reads as that agent's child.
+            Some(tab) if self.parent_tab(i - 1).is_some() => format!("↳ {}", tab.title()),
             Some(tab) => tab.title(),
             None if i == 0 => "Dashboard".to_string(),
             None if i == self.settings_tab() => SETTINGS_TITLE.to_string(),
@@ -667,6 +669,13 @@ impl App {
             // is the one property of a tab another cctop can change while this
             // one is still holding the pane. Everything else the sweep updates
             // lives on `shared`, which only detached tabs have.
+            let leader = tab
+                .sessions()
+                .next()
+                .and_then(|name| running.iter().find(|a| a.name == name));
+            if let Some(agent) = leader {
+                tab.parent = agent.parent.clone();
+            }
             let painted = tab
                 .sessions()
                 .find_map(|name| running.iter().find(|a| a.name == name))
@@ -741,7 +750,126 @@ impl App {
             self.tabs.push(tabs::Tab::split_of(leader, &rest, axis));
             arrived = true;
         }
+        self.nest_spawned_tabs();
         self.needs_redraw |= !retired.is_empty() || arrived;
+    }
+
+    /// The parent tab of tab `i` (an index into `tabs`), when its agent was
+    /// started by an agent whose tab is on this bar.
+    pub(super) fn parent_tab(&self, i: usize) -> Option<usize> {
+        let parent = self.tabs.get(i)?.parent.as_deref()?;
+        self.tabs
+            .iter()
+            .position(|tab| tab.sessions().any(|name| name == parent))
+            .filter(|&p| p != i)
+    }
+
+    /// The tabs the tab on screen started, for the sidebar's Spawned list.
+    pub(super) fn spawned_children(&self) -> Vec<super::sidebar::Child> {
+        let Some(here) = self.tab.checked_sub(1) else {
+            return Vec::new();
+        };
+        (0..self.tabs.len())
+            .filter(|&i| self.parent_tab(i) == Some(here))
+            .map(|i| super::sidebar::Child {
+                at: i + 1,
+                title: self.tabs[i].title(),
+                doing: self.switch_attention(i + 1),
+            })
+            .collect()
+    }
+
+    /// Put every tab whose agent another agent started right after its
+    /// parent's tab, and its own children after it — the bar as a tree of
+    /// who started whom, walked left to right.
+    ///
+    /// Only the order moves: the view stays on the tab it was on, as with a
+    /// drag. A child takes its parent's colour when it has none of its own, so
+    /// the family reads as one. A child whose parent has gone stays, as a tab
+    /// of its own, and the status line says so once.
+    pub(super) fn nest_spawned_tabs(&mut self) {
+        let parents: Vec<Option<usize>> =
+            (0..self.tabs.len()).map(|i| self.parent_tab(i)).collect();
+        // A loop of parents (each naming the other) is no tree: those tabs
+        // stay where they are, as roots.
+        let rooted = |mut i: usize| {
+            for _ in 0..=parents.len() {
+                match parents[i] {
+                    None => return true,
+                    Some(p) => i = p,
+                }
+            }
+            false
+        };
+        let child = |i: usize| parents[i].is_some() && rooted(i);
+        let mut order = Vec::with_capacity(self.tabs.len());
+        fn walk(
+            i: usize,
+            parents: &[Option<usize>],
+            kids: &dyn Fn(usize) -> bool,
+            order: &mut Vec<usize>,
+        ) {
+            order.push(i);
+            for c in 0..parents.len() {
+                if parents[c] == Some(i) && kids(c) {
+                    walk(c, parents, kids, order);
+                }
+            }
+        }
+        for i in 0..self.tabs.len() {
+            if !child(i) {
+                walk(i, &parents, &child, &mut order);
+            }
+        }
+        let now: std::collections::HashSet<String> = (0..self.tabs.len())
+            .filter(|&i| child(i))
+            .filter_map(|i| self.tabs[i].sessions().next().map(str::to_string))
+            .collect();
+        let orphaned = self
+            .nested
+            .iter()
+            .filter(|name| {
+                !now.contains(*name)
+                    && self
+                        .tabs
+                        .iter()
+                        .any(|t| t.sessions().any(|n| n == name.as_str()))
+            })
+            .count();
+        if orphaned > 0 {
+            self.set_status(match orphaned {
+                1 => "The agent that started a tab is gone; its tab stays, on its own".to_string(),
+                n => format!("The agent that started {n} tabs is gone; they stay, on their own"),
+            });
+        }
+        self.nested = now;
+        for (i, parent) in parents.iter().enumerate() {
+            if let Some(p) = parent.filter(|_| child(i))
+                && self.tabs[i].color.is_none()
+            {
+                self.tabs[i].color = self.tabs[p].color;
+            }
+        }
+        if order.iter().copied().eq(0..self.tabs.len()) {
+            return;
+        }
+        let here = self.tab.checked_sub(1);
+        let mut taken: Vec<Option<tabs::Tab>> = std::mem::take(&mut self.tabs)
+            .into_iter()
+            .map(Some)
+            .collect();
+        self.tabs = order
+            .iter()
+            .map(|&i| taken[i].take().expect("each once"))
+            .collect();
+        if let Some(here) = here {
+            self.tab = order
+                .iter()
+                .position(|&i| i == here)
+                .map_or(self.tab, |at| at + 1);
+        }
+        self.save_tab_order();
+        self.needs_redraw = true;
     }
 
     /// Start recording the focused pane to a `.cast` file, or stop and say
@@ -1040,6 +1168,7 @@ impl App {
             let rest: Vec<&cctop_core::rmux::Running> = rest.iter().collect();
             self.tabs.push(tabs::Tab::split_of(leader, &rest, axis));
         }
+        self.nest_spawned_tabs();
         if !self.tabs.is_empty() {
             self.go_to_tab(1);
         }
@@ -1145,6 +1274,59 @@ mod tests {
         let _ = cctop_core::shim::socket_path(pid).map(std::fs::remove_file);
     }
 
+    /// A tab `name`, its agent `pid`, started by the agent of tab `parent`.
+    fn spawned_tab(name: &str, pid: u32, parent: Option<&str>) -> tabs::Tab {
+        tabs::Tab::for_agent(&cctop_core::rmux::Running {
+            label: Some(name.to_string()),
+            pid: Some(pid),
+            parent: parent.map(|p| format!("cctop-{p}")),
+            ..cctop_core::rmux::Running::unrecorded(&format!("cctop-{name}"))
+        })
+    }
+
+    /// A tab another agent started sits right after its parent's, its own
+    /// children after it, each marked as a child; the view stays on its tab.
+    #[test]
+    fn a_spawned_tab_sits_after_the_agent_that_started_it() {
+        let mut app = test_app();
+        app.tabs = vec![
+            spawned_tab("a", 1, None),
+            spawned_tab("b", 2, None),
+            spawned_tab("c", 3, Some("a")),
+            spawned_tab("d", 4, Some("c")),
+        ];
+        app.tab = 2; // b
+        app.nest_spawned_tabs();
+        let titles: Vec<String> = (1..=4).map(|i| app.tab_title(i)).collect();
+        assert_eq!(titles, ["a", "↳ c", "↳ d", "b"]);
+        assert_eq!(app.tab_title(app.tab), "b", "the view followed its tab");
+
+        // The tab that started them goes: they stay, as tabs of their own.
+        app.tabs.remove(0);
+        app.nest_spawned_tabs();
+        let titles: Vec<String> = (1..=3).map(|i| app.tab_title(i)).collect();
+        assert_eq!(titles, ["c", "↳ d", "b"]);
+        assert!(
+            app.status().is_some_and(|s| s.contains("stays")),
+            "{:?}",
+            app.status()
+        );
+    }
+
+    /// Two tabs naming each other as parent are no tree: both stay where
+    /// they are rather than vanishing from the bar.
+    #[test]
+    fn a_loop_of_parents_leaves_the_tabs_alone() {
+        let mut app = test_app();
+        app.tabs = vec![
+            spawned_tab("a", 1, Some("b")),
+            spawned_tab("b", 2, Some("a")),
+        ];
+        app.nest_spawned_tabs();
+        assert_eq!(app.tabs.len(), 2);
+        assert_eq!(app.tab_title(1), "↳ a");
+    }
+
     #[test]
     fn the_settings_tab_is_the_last_stop_and_no_tab_takes_it() {
         let named = |name: &str| {
@@ -1163,6 +1345,7 @@ mod tests {
                 pane: None,
                 axis: None,
                 transport: None,
+                parent: None,
                 window: None,
             })
         };
@@ -1421,6 +1604,7 @@ mod tests {
                 pane: None,
                 axis: None,
                 transport: None,
+                parent: None,
                 window: None,
             })
         };
@@ -1478,6 +1662,7 @@ mod tests {
                 pane: None,
                 axis: None,
                 transport: None,
+                parent: None,
                 window: None,
             })
         };
@@ -1649,6 +1834,7 @@ mod tests {
                 pane: None,
                 axis: None,
                 transport: None,
+                parent: None,
                 window: None,
             })
         };
@@ -1711,6 +1897,7 @@ mod tests {
                 pane: None,
                 axis: None,
                 transport: None,
+                parent: None,
                 window: None,
             })
         };
@@ -1792,6 +1979,7 @@ mod tests {
                 pane: None,
                 axis: None,
                 transport: None,
+                parent: None,
                 window: None,
             })
         };
@@ -1883,6 +2071,7 @@ mod tests {
                 pane: None,
                 axis: None,
                 transport: None,
+                parent: None,
                 window: None,
             })
         };
@@ -1994,6 +2183,7 @@ mod tests {
                 pane: None,
                 axis: None,
                 transport: None,
+                parent: None,
                 window: None,
             }));
         app.tab = 1;
@@ -2038,6 +2228,7 @@ mod tests {
                 pane: None,
                 axis: None,
                 transport: None,
+                parent: None,
                 window: None,
             })
         };
@@ -2105,6 +2296,7 @@ mod tests {
             pane: None,
             axis: None,
             transport: None,
+            parent: None,
             window: None,
         })
     }
@@ -2210,6 +2402,7 @@ mod tests {
                 pane: None,
                 axis: None,
                 transport: None,
+                parent: None,
                 window: None,
             })
         };
@@ -2249,6 +2442,7 @@ mod tests {
                 pane: None,
                 axis: None,
                 transport: None,
+                parent: None,
                 window: None,
             })
         };
@@ -2321,6 +2515,7 @@ mod tests {
                 pane: None,
                 axis: None,
                 transport: None,
+                parent: None,
                 window: None,
             })
         };

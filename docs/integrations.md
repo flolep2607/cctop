@@ -503,6 +503,14 @@ What holds once it is on:
 - **Visible.** The spawned agent is a tab; a sent line appears in the agent's
   terminal. With `CCTOP_LOG` set, every spawn and send — refused or not — is
   an event with `src: "drive"` in cctop's event log.
+- **Under the agent that asked.** The spawn is recorded on the new rmux
+  session (`@cctop_parent`, falling back to its `CCTOP_SPAWNED_BY`), so every
+  cctop on the machine draws it as the child it is: its tab right after its
+  parent's, marked `↳` and in the parent's colour; its row under the parent's
+  in the session table, `└─`; and a **Spawned** list in the parent tab's
+  sidebar, each child with what it is doing and a click away. Closing the
+  parent leaves the children running, as tabs of their own, and the status
+  line says so.
 
 ## More than one machine
 

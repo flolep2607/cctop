@@ -1747,3 +1747,26 @@ fn diff_view() {
         }
     }
 }
+
+/// An agent started by another, through `spawn_agent`: its tab sits right
+/// after its parent's on the bar, marked `↳`, and its row under the parent's
+/// in the table.
+#[test]
+fn spawned_agent_under_its_parent() {
+    let mut app = fixture();
+    let tab = |name: &str, label: &str, pid: u32, parent: Option<&str>| {
+        tabs::Tab::for_agent(&cctop_core::rmux::Running {
+            label: Some(label.to_string()),
+            pid: Some(pid),
+            parent: parent.map(str::to_string),
+            ..cctop_core::rmux::Running::unrecorded(name)
+        })
+    };
+    app.tabs = vec![
+        tab("cctop-child", "codex · tests", 5120, Some("cctop-lead")),
+        tab("cctop-lead", "claude · refactor", 4101, None),
+    ];
+    app.nest_spawned_tabs();
+    app.refilter();
+    snap("spawned_agent", &mut app);
+}

@@ -2432,6 +2432,11 @@ impl App {
                     self.edit_note_at(*at);
                 }
                 MouseEventKind::Down(MouseButton::Left)
+                    if let Some(super::sidebar::Target::Tab(at)) = &target =>
+                {
+                    self.go_to_tab(*at);
+                }
+                MouseEventKind::Down(MouseButton::Left)
                     if self.sidebar_folded || ev.row == side.y =>
                 {
                     self.toggle_sidebar();
