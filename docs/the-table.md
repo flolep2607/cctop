@@ -562,6 +562,7 @@ Tabs and splits, from anywhere including inside a running agent:
 | `Alt+z` | Zoom the focused pane to fill the tab, or put the split back (see below) |
 | `Alt+i` | Fold the agent's sidebar to a strip of counts, or open it (see below) |
 | `Alt+e` | Write a note on the agent's session, in the sidebar; `↑`/`↓` pick one to change, emptied removes it |
+| `Alt+g` | Open the agent's changes in your git tool, in a split beside it (see below) |
 | `Alt+w` | Close the focused pane and stop its agent |
 | `Alt+Shift+W` | The same thing, by a name that says so |
 | `Alt+Shift+R` | Restart the pane's agent on the same session, after an update; on the dashboard, the selected row's tab |
@@ -592,6 +593,30 @@ not resize anything — is not drawn in a tab with no agent on this machine, and
 folds itself on a terminal too narrow to spare the columns. A note being
 written (`Alt+e`) belongs to the session it was started on; the mouse waits
 until Enter or Esc.
+
+A click on a file in the tree opens its **diff** over the tab, the way GitHub
+draws a split diff: the old file on the left and the new on the right, line
+numbers on both, removed and added lines washed red and green, and inside a
+changed line the words that actually changed washed stronger. A hunk's header
+carries the function git found it in, and the unchanged stretches between
+hunks fold to a `⋯ 42 unchanged lines` row — Enter opens the folds on screen,
+a click opens one, `e` opens or closes them all. Narrower than 120 columns it
+is drawn unified, removed lines above added, with the same washes; `s` turns
+either way by hand. `n`/`p` (or `]`/`[`) step through the changed files in
+the tree's order, and from 160 columns a list of them runs down the left,
+where a click goes to one. `↑`/`↓`, `PgUp`/`PgDn` and the wheel scroll, `←`/`→`
+scroll long lines, and `Esc` or `q` puts it down; the keys are the view's
+while it is up, not the agent's. A binary file, or a diff too large to draw,
+says so in a line. There is no syntax colouring: cctop carries no highlighter.
+
+`Alt+g` opens the agent's changes in your own git tool, in a split beside it:
+the first installed of `lazygit`, `tig status`, `git diff` paged through
+`delta`, `git difftool -d` (when git has a `diff.tool` configured), or `git
+diff` paged through `less`, each against the commit the sidebar counts from.
+Set `git_viewer` in `[settings]` to run a command of your own instead; it runs
+in the checkout with the base in `$CCTOP_DIFF_BASE`. The pane is cctop's own,
+not an rmux session, so it closes when the tool exits and other cctops do not
+adopt it as a tab.
 
 `Alt+z` zooms the focused pane over the whole tab, and the bar marks the tab
 `⤢` while it is. The other panes keep running out of sight — their output is

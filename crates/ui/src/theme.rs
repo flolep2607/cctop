@@ -155,6 +155,13 @@ pub struct Palette {
     /// One step off the ground rather than a hue — it has to sit behind four
     /// different foreground inks without arguing with any of them.
     pub edited_bg: Color,
+    /// A diff's added and removed lines, washed across the whole row as a
+    /// split diff on GitHub is, and the stronger wash on the words a modified
+    /// line actually changed.
+    pub diff_add_bg: Color,
+    pub diff_del_bg: Color,
+    pub diff_add_word: Color,
+    pub diff_del_word: Color,
 
     /// A freshly active session's status dot, and the step just below it.
     pub dot_fresh: Color,
@@ -224,6 +231,12 @@ const DARK: Palette = Palette {
     // rest and still a step rather than a tie when the cursor's row is the
     // one that is set.
     edited_bg: Color::Indexed(237),
+    // The darkest green and red the 256 have, behind ordinary text; one step
+    // up for the words that changed.
+    diff_add_bg: Color::Indexed(22),
+    diff_del_bg: Color::Indexed(52),
+    diff_add_word: Color::Indexed(28),
+    diff_del_word: Color::Indexed(88),
     dot_fresh: Color::Indexed(82),
     dot_warm: Color::Indexed(71),
     name_hue: Color::Indexed(180),
@@ -309,6 +322,11 @@ const LIGHT: Palette = Palette {
     // 253, mirrored like the rest of light's greys: a shade off white that a
     // set value can still be found by, without becoming the page's own ground.
     edited_bg: Color::Indexed(253),
+    // Pale washes on white, mirrored from dark's: the line, then the words.
+    diff_add_bg: Color::Indexed(194),
+    diff_del_bg: Color::Indexed(224),
+    diff_add_word: Color::Indexed(157),
+    diff_del_word: Color::Indexed(217),
     dot_fresh: Color::Indexed(34),
     dot_warm: Color::Indexed(22),
     name_hue: Color::Indexed(94),
@@ -385,6 +403,10 @@ const MONO: Palette = {
         header_bg: r,
         marked_bg: r,
         edited_bg: r,
+        diff_add_bg: r,
+        diff_del_bg: r,
+        diff_add_word: r,
+        diff_del_word: r,
         dot_fresh: r,
         dot_warm: r,
         name_hue: r,
@@ -447,6 +469,10 @@ impl Palette {
             header_bg: f(self.header_bg),
             marked_bg: f(self.marked_bg),
             edited_bg: f(self.edited_bg),
+            diff_add_bg: f(self.diff_add_bg),
+            diff_del_bg: f(self.diff_del_bg),
+            diff_add_word: f(self.diff_add_word),
+            diff_del_word: f(self.diff_del_word),
             dot_fresh: f(self.dot_fresh),
             dot_warm: f(self.dot_warm),
             name_hue: f(self.name_hue),
@@ -516,6 +542,9 @@ fn adapt_for(color: Color, variant: Variant, depth: Depth, truecolor: bool) -> C
 /// * A ramp's empty slot is there to be seen, and dark's lands on black.
 /// * Light's accent and label were a deep blue that the table turns to cyan,
 ///   and white key caps on cyan are unreadable.
+/// * A diff's washes fold to black on dark and to the light pinks' yellow on
+///   light, so added and removed would be one colour: they are named by hand,
+///   the word wash the bright step of its line's.
 fn sixteen(palette: Palette) -> Palette {
     let mut p = palette.map(|c| fold(c, Depth::Ansi16));
     p.depth = Depth::Ansi16;
@@ -527,6 +556,10 @@ fn sixteen(palette: Palette) -> Palette {
             p.selected_bg = Color::Blue;
             p.header_bg = Color::Blue;
             p.edited_bg = Color::DarkGray;
+            p.diff_add_bg = Color::Green;
+            p.diff_del_bg = Color::Red;
+            p.diff_add_word = Color::LightGreen;
+            p.diff_del_word = Color::LightRed;
             let heat = [
                 Color::DarkGray,
                 Color::Green,
@@ -552,6 +585,10 @@ fn sixteen(palette: Palette) -> Palette {
             p.border_hi = Color::Blue;
             p.failed_bg = Color::LightRed;
             p.marked_bg = Color::LightMagenta;
+            p.diff_add_bg = Color::LightGreen;
+            p.diff_del_bg = Color::LightRed;
+            p.diff_add_word = Color::Green;
+            p.diff_del_word = Color::Red;
             p.edited_bg = Color::Gray;
             p.spark_accent = [
                 Color::Gray,

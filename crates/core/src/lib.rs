@@ -36,6 +36,7 @@ pub mod collide;
 pub mod config;
 pub mod convert;
 pub mod detect;
+pub mod diff_file;
 pub mod drive;
 pub mod elog;
 pub mod embed;

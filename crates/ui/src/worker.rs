@@ -14,6 +14,13 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 
 pub(super) enum Request {
     Refresh,
+    /// One changed file read whole for the diff view, against `base`.
+    FileDiff {
+        root: std::path::PathBuf,
+        base: String,
+        path: String,
+        untracked: bool,
+    },
     /// The clipboard's text, for a right-click on the pane whose process is
     /// `pane` — by pid, not by place: a tab closed while Windows answered moves
     /// the next one into its place. Off the thread that draws, because under
@@ -158,6 +165,11 @@ pub(super) enum Request {
 }
 
 pub(super) enum Response {
+    /// What [`Request::FileDiff`] read, by the file's path.
+    FileDiff {
+        path: String,
+        result: Result<cctop_core::diff_file::FileDiff, String>,
+    },
     /// What [`Request::ReadClipboard`] read, or why it could not.
     Clipboard {
         pane: u32,
@@ -602,6 +614,21 @@ pub(super) fn spawn_worker(
                     std::thread::spawn(move || {
                         let text = cctop_core::clipboard::text();
                         let _ = tx.send(Response::Clipboard { pane, text });
+                    });
+                }
+                Request::FileDiff {
+                    root,
+                    base,
+                    path,
+                    untracked,
+                } => {
+                    // Off the request loop, like a transcript: a big file's
+                    // diff takes a moment, and the refresh queued behind it
+                    // should not.
+                    let tx = tx.clone();
+                    loader.gently_spawn(move || {
+                        let result = cctop_core::diff_file::read(&root, &base, &path, untracked);
+                        let _ = tx.send(Response::FileDiff { path, result });
                     });
                 }
                 Request::Data(session, Some(reach)) => {

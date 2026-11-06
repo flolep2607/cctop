@@ -13,7 +13,7 @@ expression: screen
 │█                                                                                     ││Plan                          │
 │                                                                                      ││  none recorded               │
 │                                                                                      ││                              │
-│                                                                                      ││Files  19  +284 −55           │
+│                                                                                      ││Files  19  +284 −55  Alt+g    │
 │                                                                                      ││▾ crates/core/src/ 6 +42 −6   │
 │                                                                                      ││    mod0.rs +7 −1             │
 │                                                                                      ││    mod1.rs +7 −1             │

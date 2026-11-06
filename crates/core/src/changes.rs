@@ -254,7 +254,7 @@ pub(crate) fn git(root: &Path) -> Command {
 /// colour (the panel colours by theme), no external or text-converted diff,
 /// and no rename pairing, so each file is one entry with one path in both the
 /// counts and the patch — which is what lets the two be matched by position.
-fn diff_cmd(root: &Path) -> Command {
+pub(crate) fn diff_cmd(root: &Path) -> Command {
     let mut cmd = git(root);
     cmd.args([
         "diff",
@@ -270,7 +270,7 @@ fn diff_cmd(root: &Path) -> Command {
 /// Run `cmd` and read at most `cap` bytes of what it prints, killing it past
 /// that: a `git diff` of a vendored tree is not something to wait for in full.
 /// The second value is whether the output was cut.
-fn run_capped(cmd: &mut Command, cap: usize) -> Result<(String, bool), String> {
+pub(crate) fn run_capped(cmd: &mut Command, cap: usize) -> Result<(String, bool), String> {
     let mut child = cmd
         .stdin(Stdio::null())
         .stdout(Stdio::piped())

@@ -251,6 +251,7 @@ impl App {
             },
             Mode::RenameTab => self.on_key_rename(key),
             Mode::Note => self.on_key_note(key),
+            Mode::Diff => self.on_key_diff(key),
             Mode::SwitchTab => self.on_key_switch(key),
             Mode::AddAccount => self.on_key_add_account(key),
             Mode::Launch => self.on_key_launch(key),
@@ -750,6 +751,7 @@ impl App {
             // to write in it. Only in a tab, which is the only place it is.
             KeyCode::Char('i') if self.tab > 0 => self.toggle_sidebar(),
             KeyCode::Char('e') if self.tab > 0 => self.edit_note(),
+            KeyCode::Char('g') if self.tab > 0 => self.open_git_viewer(),
             _ => return false,
         }
         true
@@ -2355,6 +2357,10 @@ impl App {
         if self.on_mouse_workspace(ev, layout) {
             return;
         }
+        // The diff view over a tab owns the mouse while it is up.
+        if self.on_mouse_diff(ev, layout) {
+            return;
+        }
 
         // A drag of the sidebar's border is followed wherever the pointer goes —
         // over the pane it is widening into, too — until it is let go.
@@ -2388,15 +2394,22 @@ impl App {
                 .sidebar_tree
                 .files
                 .is_some_and(|(from, to)| (from..to).contains(&ev.row));
-            let folder = layout
+            let target = layout
                 .sidebar_tree
-                .folders
+                .targets
                 .iter()
                 .find(|(row, _)| *row == ev.row)
-                .map(|(_, path)| path.clone());
+                .map(|(_, target)| target.clone());
             match ev.kind {
-                MouseEventKind::Down(MouseButton::Left) if let Some(path) = folder => {
-                    self.turn_sidebar_folder(&path);
+                MouseEventKind::Down(MouseButton::Left)
+                    if let Some(super::sidebar::Target::Folder(path)) = &target =>
+                {
+                    self.turn_sidebar_folder(path);
+                }
+                MouseEventKind::Down(MouseButton::Left)
+                    if let Some(super::sidebar::Target::File(path)) = &target =>
+                {
+                    self.open_diff(path);
                 }
                 MouseEventKind::Down(MouseButton::Left)
                     if self.sidebar_folded || ev.row == side.y =>
