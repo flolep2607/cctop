@@ -1,0 +1,34 @@
+---
+source: crates/ui/src/snapshot.rs
+expression: text(&buffer)
+---
+ 1:Dashboard │ 2:claude │ + Tab (Alt+n) ────────────────────────────────────────────────── Settings
+╭ Overview ────────────────────────────────────────────────────────────────────────────────────────╮
+│Live rate         $0.04                               ⡀  Models    claude-opus-4-1 68%            │
+│Today             $8.97                               ⡀  Sessions  4 · 2 live · 3 in 24h          │
+│This month        $0.00                               ⡀  Agent CPU   3.2%                    ⡀    │
+│All time         $28.51 $0.00/day this month             Agent mem 592 MB · 2.5M in / 72.3K out   │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭ src/client.rs +3 −3 ■■■■■ ───────────────────────────────────────────────────────────────────────╮
+│  ⋯ 8 unchanged lines  · Enter or click to show                                                   │
+│@@ -9,7 +9,8 @@ fn send(request: Request) {                                                       │
+│  9   9   line 9                                                                                  │
+│ 10  10   line 10                                                                                 │
+│ 11  11   line 11                                                                                 │
+│ 12     -     let timeout = Duration::from_secs(30);                                              │
+│ 13     -     retry(request, 3)                                                                   │
+│     12 +     let timeout = Duration::from_secs(90);                                              │
+│     13 +     retry(request, attempts)                                                            │
+│     14 +     log::debug!("sent");                                                                │
+│ 14  15   line 14                                                                                 │
+│ 15  16   line 15                                                                                 │
+│  ⋯ 11 unchanged lines  · Enter or click to show                                                  │
+│@@ -27,7 +28,6 @@ impl Client {                                                                   │
+│ 27  28   line 27                                                                                 │
+│ 28  29   line 28                                                                                 │
+│ 29  30   line 29                                                                                 │
+│ 30     - fn legacy() {}                                                                          │
+│ 31  31   line 31                                                                                 │
+│ 32  32   line 32                                                                                 │
+╰───────────────────────────────────────── 2/3 · n/p file · s side by side · ←→ · e open all · Esc ╯
+F12 Dashboard Alt+←→ Tabs Alt+n New Alt+w Close Alt+o Focus F1 Help F9 Image Alt+v/s Split  ⧉ share

@@ -1266,6 +1266,7 @@ fn agent_sidebar() {
         path: path.into(),
         added: Some(added),
         removed: Some(removed),
+        untracked: false,
     };
     app.sidebar.files = Some(Ok(vec![
         file("src/auth.rs", 96, 20),
@@ -1296,6 +1297,7 @@ fn agent_sidebar_dragged_wide() {
         path: "src/a/rather/long/path/to/the/client.rs".into(),
         added: Some(41),
         removed: Some(9),
+        untracked: false,
     }]));
     snap("agent_sidebar_dragged_wide", &mut app);
 }
@@ -1319,6 +1321,7 @@ fn agent_sidebar_file_tree() {
         path,
         added: Some(added),
         removed: Some(removed),
+        untracked: false,
     };
     let mut files: Vec<_> = (0..12)
         .map(|i| file(format!("docs/explanation/topic-{i:02}.md"), 20, 4))
@@ -1683,5 +1686,45 @@ fn wrapped() {
     for (card, name) in [(0, "intro"), (3, "clock"), (5, "models"), (10, "summary")] {
         app.recap.card = card;
         snap(&format!("wrapped_{name}"), &mut app);
+    }
+}
+
+/// A file's diff over an agent's tab, as GitHub draws a split diff: old on the
+/// left and new on the right, a hunk under its function, a modified line with
+/// its changed words marked, an added and a removed line, and the unchanged
+/// stretches folded. At 160 columns the file list runs down the left; at 100
+/// it is drawn unified. The read is put in place, as git is not run here.
+#[test]
+fn diff_view() {
+    let mut app = fixture();
+    let session = &app.sessions[0];
+    let mut pane = tabs::Pane::for_test("claude");
+    pane.resumed = Some(cctop_core::rmux::name_for_session(
+        session.provider.as_str(),
+        &session.session_id,
+    ));
+    app.tabs.push(tabs::Tab::new(pane));
+    app.tab = 1;
+    app.sync_sidebar();
+    let file = |path: &str, added, removed| super::sidebar::File {
+        path: path.into(),
+        added: Some(added),
+        removed: Some(removed),
+        untracked: false,
+    };
+    app.sidebar.files = Some(Ok(vec![
+        file("src/client.rs", 3, 3),
+        file("src/auth.rs", 96, 20),
+        file("README.md", 2, 1),
+    ]));
+    app.sidebar.checkout = Some(("/nonexistent/web".into(), "0".repeat(40)));
+    app.open_diff("src/client.rs");
+    app.got_file_diff("src/client.rs".into(), Ok(super::diffview::sample()));
+    for (name, size) in [("diff_split", (160, 40)), ("diff_unified", (100, 30))] {
+        let buffer = draw(&mut app, size);
+        insta::assert_snapshot!(format!("{name}_{}x{}", size.0, size.1), text(&buffer));
+        if name == "diff_split" {
+            insta::assert_snapshot!("diff_split_styles", styles(&buffer));
+        }
     }
 }

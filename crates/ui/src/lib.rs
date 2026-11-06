@@ -19,11 +19,13 @@ mod changes;
 mod codes;
 pub mod columns;
 mod connect;
+mod diffview;
 mod dirs;
 mod drunk;
 mod effects;
 mod fanout;
 mod filter;
+mod gitview;
 mod harness_opts;
 mod high;
 mod hooks;
@@ -138,6 +140,8 @@ pub enum Mode {
     /// Where the moved session would land, the directory editable; Enter
     /// moves it.
     MoveConfirm,
+    /// A changed file's diff over the agent's tab; see [`diffview`].
+    Diff,
     /// Writing a note in an agent tab's sidebar (`Alt+e`).
     Note,
     /// Picking which agent a new tab or split should run.
@@ -736,6 +740,8 @@ pub struct App {
     pub changes: changes::State,
     /// The column down the right of an agent's tab; see [`sidebar`].
     pub sidebar: sidebar::State,
+    /// A file's diff drawn over the tab, while it is open.
+    pub(crate) diff: Option<diffview::State>,
     /// Whether that column is folded to its strip of counts (`Alt+i`).
     pub sidebar_folded: bool,
     /// Its width as dragged, kept across runs; `None` for the default.
@@ -1276,6 +1282,7 @@ impl App {
             tool_owners: Vec::new(),
             changes: changes::State::default(),
             sidebar: sidebar::State::default(),
+            diff: None,
             sidebar_folded: prefs.sidebar_folded,
             sidebar_width: prefs.sidebar_width,
             sidebar_folds: HashMap::new(),

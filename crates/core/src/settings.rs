@@ -18,7 +18,7 @@ use std::path::Path;
 
 /// Every `[settings]` key: its name, its default as the file would spell it,
 /// and what it does.
-pub const SETTINGS: [(&str, &str, &str); 28] = [
+pub const SETTINGS: [(&str, &str, &str); 29] = [
     (
         "theme",
         "\"auto\"",
@@ -152,6 +152,11 @@ pub const SETTINGS: [(&str, &str, &str); 28] = [
         "footer_command",
         "\"\"",
         "A command whose first line is shown on the footer, refreshed every 30s",
+    ),
+    (
+        "git_viewer",
+        "\"\"",
+        "Alt+g's git tool; empty picks lazygit, tig, delta or git diff",
     ),
 ];
 
@@ -398,6 +403,10 @@ pub struct Settings {
     pub footer_note: Option<String>,
     /// A command whose first line is the footer's live note.
     pub footer_command: Option<String>,
+    /// The command `Alt+g` opens a session's changes in; empty, or unset,
+    /// picks the first installed of the ones it knows. See
+    /// `ui::gitview` for the order.
+    pub git_viewer: Option<String>,
     /// `(action, key)` as written, in file order.
     pub keys: Vec<(String, String)>,
     /// Everything that was written and could not be used, said in a sentence.
@@ -496,6 +505,10 @@ impl Settings {
                         .as_str()
                         .map(|v| out.footer_command = Some(v.into()))
                         .is_none(),
+                    "git_viewer" => item
+                        .as_str()
+                        .map(|v| out.git_viewer = Some(v.into()))
+                        .is_none(),
                     "alert_errors" => amount(item)
                         .filter(|p| *p <= 100.0)
                         .map(|v| out.alert_errors = Some(v))
@@ -582,6 +595,7 @@ impl Settings {
             "footer_hide" => self.footer_hide.as_ref().map(|v| format!("{v:?}")),
             "footer_note" => self.footer_note.as_ref().map(|v| format!("{v:?}")),
             "footer_command" => self.footer_command.as_ref().map(|v| format!("{v:?}")),
+            "git_viewer" => self.git_viewer.as_ref().map(|v| format!("{v:?}")),
             _ => None,
         };
         match set {

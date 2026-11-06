@@ -105,6 +105,8 @@ pub struct Layout {
     pub(super) sidebar_border: Option<(Rect, Rect)>,
     /// The sidebar's Files tree: its folder rows, and its lines.
     pub(super) sidebar_tree: super::sidebar::Hits,
+    /// The diff view over a tab, while it is open.
+    pub(super) diff: super::diffview::Hits,
     /// The session table's scrollbar track, while the table overflows.
     pub(super) table_track: Option<Rect>,
     /// The active bottom panel's scrollbar track, while it overflows.
@@ -588,6 +590,11 @@ pub fn draw(frame: &mut Frame, app: &mut App) -> Layout {
             layout.sidebar_border = Some((border, chunks[1]));
             super::sidebar::draw_drag_guide(frame, chunks[1], app);
         }
+        // Over the panes and the sidebar both: the file it shows was picked
+        // in the sidebar, and the agent beside it is what wrote it.
+        if app.mode == Mode::Diff {
+            layout.diff = super::diffview::draw(frame, chunks[1], app);
+        }
         draw_footer(frame, footer, app, &mut layout);
         match app.mode {
             Mode::Launch | Mode::LaunchCwd | Mode::LaunchOptions => {
@@ -715,8 +722,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) -> Layout {
         Mode::Wrapped => super::wrapped::draw(frame, area, app),
         Mode::Conversation => super::reader::draw(frame, area, app),
         Mode::AddAccount => modals::draw_add_account(frame, area, app, &mut layout),
-        // Typed in the sidebar itself, which is only drawn in a tab.
-        Mode::Note | Mode::List => {}
+        // Typed in the sidebar itself, which is only drawn in a tab; and the
+        // diff view, drawn over a tab's panes in the tab's own branch.
+        Mode::Note | Mode::Diff | Mode::List => {}
     }
     // Over everything, modals included: a few seconds of confirmation for a
     // key that has already acted, in a corner nothing else owns.
@@ -2375,6 +2383,7 @@ mod tests {
             sidebar: None,
             sidebar_border: None,
             sidebar_tree: Default::default(),
+            diff: Default::default(),
             table_track: None,
             panel_track: None,
             modal_rect: Some(Rect::new(10, 8, 20, 6)),

@@ -13,7 +13,7 @@ expression: screen
 │█                                     ││Plan                                  │
 │                                      ││  none recorded                       │
 │                                      ││                                      │
-│                                      ││Files  1  +41 −9                      │
+│                                      ││Files  1  +41 −9  Alt+g               │
 │                                      ││▾ src/a/rather/long/path/to/t… 1 +41 −│
 │                                      ││    client.rs +41 −9                  │
 │                                      ││                                      │

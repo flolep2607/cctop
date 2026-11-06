@@ -16,7 +16,7 @@ expression: screen
 │█                                                                                     ││▶ Write tests                 │
 │                                                                                      ││· Update the docs             │
 │                                                                                      ││                              │
-│                                                                                      ││Files  3  +182 −29            │
+│                                                                                      ││Files  3  +182 −29  Alt+g     │
 │                                                                                      ││▾ src/ 2 +137 −29             │
 │                                                                                      ││    auth.rs +96 −20           │
 │                                                                                      ││    client.rs +41 −9          │

@@ -89,6 +89,8 @@ pub struct State {
     pub plan: Vec<Step>,
     /// `None` until the first answer; an `Err` is a sentence to show.
     pub files: Option<Result<Vec<File>, String>>,
+    /// See [`Answer::checkout`].
+    pub checkout: Option<(PathBuf, String)>,
     /// The note being written: its index, or one past the last for a new one.
     pub note_at: usize,
     pub note_input: LineEdit,
@@ -101,13 +103,15 @@ pub struct State {
 }
 
 /// One changed file, as the sidebar lists it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct File {
     /// Relative to the checkout, or to the session's directory.
     pub path: String,
     /// `None` for a binary file, which has no lines to count.
     pub added: Option<u64>,
     pub removed: Option<u64>,
+    /// Never added to git: its diff is the whole file, read from disk.
+    pub untracked: bool,
 }
 
 /// What the worker reads for the sidebar.
@@ -115,9 +119,18 @@ pub struct File {
 pub struct Answer {
     pub plan: Vec<Step>,
     pub files: Result<Vec<File>, String>,
+    /// The checkout the files were read from and the commit they are against,
+    /// which is what a click on one diffs; `None` when they came from the
+    /// transcript, which has no checkout to diff.
+    pub checkout: Option<(PathBuf, String)>,
 }
 
 impl State {
+    /// Whether the sidebar is drawn: the tab holds an agent here.
+    pub(super) fn shown(&self) -> bool {
+        self.shown
+    }
+
     /// The session key the sidebar is about, when it has one.
     fn key(&self) -> Option<String> {
         (!self.id.is_empty()).then(|| format!("{}:{}", self.provider, self.id))
@@ -228,6 +241,8 @@ pub(super) enum Row {
     File {
         depth: usize,
         name: String,
+        /// From the checkout, which is what a click on it opens.
+        path: String,
         added: Option<u64>,
         removed: Option<u64>,
     },
@@ -253,9 +268,14 @@ pub(super) fn rows(root: &Dir, total: usize, turned: &HashSet<String>) -> Vec<Ro
             }
         }
         for (name, added, removed) in &dir.files {
+            let path = match dir.path.is_empty() {
+                true => name.clone(),
+                false => format!("{}/{name}", dir.path),
+            };
             out.push(Row::File {
                 depth,
                 name: name.clone(),
+                path,
                 added: *added,
                 removed: *removed,
             });
@@ -288,26 +308,36 @@ pub(super) fn read(
                 path: t.path.strip_prefix(&root).unwrap_or(&t.path).to_string(),
                 added: Some(t.added),
                 removed: Some(t.removed),
+                untracked: false,
             })
             .collect()
     };
+    let mut checkout = None;
     let files = match dir.map(|dir| cctop_core::changes::read(&dir, started)) {
-        Ok(Ok(Some(changes))) => Ok(changes
-            .files
-            .into_iter()
-            .map(|f| File {
-                path: f.path,
-                added: f.added,
-                removed: f.removed,
-            })
-            .collect()),
+        Ok(Ok(Some(changes))) => {
+            checkout = Some((changes.root.clone(), changes.base.commit.clone()));
+            Ok(changes
+                .files
+                .into_iter()
+                .map(|f| File {
+                    path: f.path,
+                    added: f.added,
+                    removed: f.removed,
+                    untracked: f.untracked,
+                })
+                .collect())
+        }
         Ok(Ok(None)) => Ok(edited()),
         Ok(Err(why)) | Err(why) => match edited() {
             files if files.is_empty() => Err(why),
             files => Ok(files),
         },
     };
-    Answer { plan, files }
+    Answer {
+        plan,
+        files,
+        checkout,
+    }
 }
 
 impl App {
@@ -315,6 +345,7 @@ impl App {
     /// it has done something since they were last read. Called every turn of
     /// the loop; cheap unless something moved.
     pub(super) fn sync_sidebar(&mut self) {
+        self.diff_follows_tab();
         // About the focused pane when it is an agent here, else the tab's first
         // one: whether the sidebar is drawn is the tab's answer, not the
         // focus's, so moving between an agent and a shell beside it does not
@@ -405,6 +436,7 @@ impl App {
         self.sidebar.in_flight = false;
         self.sidebar.plan = answer.plan;
         self.sidebar.files = Some(answer.files);
+        self.sidebar.checkout = answer.checkout;
         self.needs_redraw = true;
     }
 
@@ -632,7 +664,7 @@ pub(super) fn draw_drag_guide(frame: &mut Frame, tab: Rect, app: &App) {
 /// for a click to fold or open, and its lines, for the wheel.
 #[derive(Debug, Default, Clone)]
 pub(super) struct Hits {
-    pub folders: Vec<(u16, String)>,
+    pub targets: Vec<(u16, Target)>,
     pub files: Option<(u16, u16)>,
 }
 
@@ -673,10 +705,10 @@ pub(super) fn draw(frame: &mut Frame, area: Rect, app: &App) -> Hits {
     frame.render_widget(Paragraph::new(drawn.lines), inner);
     let at = |i: usize| inner.y + i as u16;
     Hits {
-        folders: drawn
-            .folders
+        targets: drawn
+            .targets
             .into_iter()
-            .map(|(i, path)| (at(i), path))
+            .map(|(i, target)| (at(i), target))
             .collect(),
         files: drawn.files.map(|(from, to)| (at(from), at(to))),
     }
@@ -719,12 +751,21 @@ fn strip(state: &State, notes: usize) -> Vec<Line<'static>> {
 /// rows by line, for a click to fold, and its lines, for the wheel.
 pub(super) struct Drawn {
     pub lines: Vec<Line<'static>>,
-    pub folders: Vec<(usize, String)>,
+    pub targets: Vec<(usize, Target)>,
     pub files: Option<(usize, usize)>,
 }
 
-/// A line, and the folder it is the row of, if it is one.
-type Tagged = (Line<'static>, Option<String>);
+/// What a click on a line of the Files tree does.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum Target {
+    /// Fold or open the folder at this path.
+    Folder(String),
+    /// Open this file's diff.
+    File(String),
+}
+
+/// A line, and what a click on it does, if anything.
+type Tagged = (Line<'static>, Option<Target>);
 
 fn open(
     state: &State,
@@ -745,7 +786,7 @@ fn open(
         .collect();
         return Drawn {
             lines,
-            folders: Vec::new(),
+            targets: Vec::new(),
             files: None,
         };
     }
@@ -769,14 +810,14 @@ fn open(
     let files = (files_at, out.len());
     out.push((Line::default(), None));
     out.extend(untagged(notes));
-    let folders = out
+    let targets = out
         .iter()
         .enumerate()
-        .filter_map(|(i, (_, folder))| folder.clone().map(|f| (i, f)))
+        .filter_map(|(i, (_, target))| target.clone().map(|t| (i, t)))
         .collect();
     Drawn {
         lines: out.into_iter().map(|(l, _)| l).collect(),
-        folders,
+        targets,
         files: Some(files),
     }
 }
@@ -877,17 +918,21 @@ fn files_lines(
         Some(Ok(list)) => list,
     };
     let root = tree(list);
-    let mut out = vec![plain(header(
-        "Files",
-        match list.len() {
-            0 => vec![],
-            n => vec![
-                Span::styled(format!("  {n}  "), theme::dim()),
-                Span::styled(format!("+{}", root.added), changes::plus()),
-                Span::styled(format!(" −{}", root.removed), changes::minus()),
-            ],
-        },
-    ))];
+    let mut rest = match list.len() {
+        0 => vec![],
+        n => vec![
+            Span::styled(format!("  {n}  "), theme::dim()),
+            Span::styled(format!("+{}", root.added), changes::plus()),
+            Span::styled(format!(" −{}", root.removed), changes::minus()),
+        ],
+    };
+    // Where the git tool is, when there is room to say: a click on a file
+    // opens it here, and Alt+g opens all of them there.
+    let used = "Files".len() + rest.iter().map(|s| util::cells(&s.content)).sum::<usize>();
+    if !list.is_empty() && used + 7 <= width {
+        rest.push(Span::styled("  Alt+g", theme::dim()));
+    }
+    let mut out = vec![plain(header("Files", rest))];
     if list.is_empty() {
         out.push(plain(Line::from(Span::styled(
             "  nothing changed",
@@ -938,12 +983,13 @@ fn row_line(row: Row, width: usize) -> Tagged {
                 format!("{name}/"),
                 theme::title(),
                 tail,
-                Some(path),
+                Some(Target::Folder(path)),
             )
         }
         Row::File {
             depth,
             name,
+            path,
             added,
             removed,
         } => (
@@ -951,7 +997,7 @@ fn row_line(row: Row, width: usize) -> Tagged {
             name,
             theme::value(),
             counts(added, removed),
-            None,
+            Some(Target::File(path)),
         ),
     };
     let used = util::cells(&lead) + tail.iter().map(|s| util::cells(&s.content)).sum::<usize>();
@@ -1056,6 +1102,7 @@ mod tests {
             path: path.into(),
             added: Some(added),
             removed: Some(removed),
+            untracked: false,
         }
     }
 
@@ -1116,16 +1163,20 @@ mod tests {
     /// the start — still shows.
     #[test]
     fn a_long_name_is_cut_at_its_end() {
-        let (line, folder) = row_line(
+        let (line, target) = row_line(
             Row::File {
                 depth: 1,
                 name: "entity-resolution-and-merging.md".into(),
+                path: "docs/entity-resolution-and-merging.md".into(),
                 added: Some(12),
                 removed: Some(3),
             },
             26,
         );
-        assert_eq!(folder, None);
+        assert_eq!(
+            target,
+            Some(Target::File("docs/entity-resolution-and-merging.md".into()))
+        );
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(text.starts_with("    entity-res"), "{text}");
         assert!(text.contains('…'), "{text}");
@@ -1166,6 +1217,7 @@ mod tests {
                     path: format!("f{i}.rs"),
                     added: Some(1),
                     removed: Some(0),
+                    untracked: false,
                 })
                 .collect())),
             ..State::default()
