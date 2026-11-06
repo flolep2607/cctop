@@ -150,6 +150,14 @@ notify = { version = "8.2.0", default-features = false }
 # through syntect's multi-megabyte syntax dumps, and draws links as text with
 # no way to make them OSC 8 — which is why the renderer is cctop's own.
 pulldown-cmark = { version = "0.13.4", default-features = false }
+# Syntax colours under the diff view's washes (`ui::syntax`). Only syntect's
+# parser and its bundled grammars: no themes, since the colours are cctop's own
+# palette mapped from the grammar's scopes, and `regex-fancy` rather than the
+# default Oniguruma, which is C and would have to build for both musl targets.
+# Measured in a release build of nothing else: 2.6 MB stripped, the 75 bundled
+# grammars most of it — the multi-megabyte dump the note above turned down for
+# markdown, taken here because a diff is the one place code is read as code.
+syntect = { version = "5.3.0", default-features = false, features = ["default-syntaxes", "regex-fancy", "parsing"] }
 ratatui = "0.30.2"
 # The web UI's TypeScript types are generated from the serde structs the API
 # answers with (`web/src/lib/gen/`), so the page and the server cannot drift

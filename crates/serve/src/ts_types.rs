@@ -42,6 +42,8 @@ fn export(dir: &Path) {
     out(crate::tabs::Tab::export_all(&cfg));
     out(crate::address::Address::export_all(&cfg));
     out(crate::address::Done::export_all(&cfg));
+    out(crate::checkout::Changes::export_all(&cfg));
+    out(crate::checkout::Diff::export_all(&cfg));
 }
 
 /// The `.ts` files under `dir`, by name.

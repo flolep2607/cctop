@@ -169,6 +169,9 @@ pub(super) enum Response {
     FileDiff {
         path: String,
         result: Result<cctop_core::diff_file::FileDiff, String>,
+        /// Both versions, coloured: worked out here with the read rather
+        /// than on the thread that draws.
+        colours: super::syntax::Pair,
     },
     /// What [`Request::ReadClipboard`] read, or why it could not.
     Clipboard {
@@ -628,7 +631,15 @@ pub(super) fn spawn_worker(
                     let tx = tx.clone();
                     loader.gently_spawn(move || {
                         let result = cctop_core::diff_file::read(&root, &base, &path, untracked);
-                        let _ = tx.send(Response::FileDiff { path, result });
+                        let colours = result
+                            .as_ref()
+                            .map(|view| super::diffview::colour(&path, view))
+                            .unwrap_or_default();
+                        let _ = tx.send(Response::FileDiff {
+                            path,
+                            result,
+                            colours,
+                        });
                     });
                 }
                 Request::Data(session, Some(reach)) => {

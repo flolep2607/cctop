@@ -68,6 +68,7 @@ mod snapshot;
 pub mod spark;
 mod styled;
 mod switch;
+mod syntax;
 mod table;
 pub mod tabs;
 pub mod theme;

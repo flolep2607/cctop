@@ -14,9 +14,9 @@
 //! above added ones, as `git diff` prints them — with the same washes and word
 //! marks, since two halves of sixty columns are two halves of nothing.
 //!
-//! ponytail: no syntax colouring. cctop carries no highlighter (see the root
-//! `Cargo.toml` on syntect), and a diff's own two colours are what this view
-//! is for.
+//! Code is coloured by [`super::syntax`], from both versions of the file, so
+//! a string or a comment that opened above a hunk is still one inside it. The
+//! colours are the text's; the washes and word marks stay the ground.
 
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -27,6 +27,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, Paragraph};
 
+use super::syntax::{self, Kind};
 use super::{App, Mode, changes, theme};
 use cctop_core::diff_file::FileDiff;
 use cctop_core::util;
@@ -91,8 +92,22 @@ fn first((at, len): (u64, u64)) -> u64 {
 
 /// A tab as the columns it stands for: ratatui counts it as none and the
 /// terminal as up to eight, and four is what an editor shows.
-fn untab(text: &str) -> String {
+pub(super) fn untab(text: &str) -> String {
     text.replace('\t', "    ")
+}
+
+/// Both versions of `path` coloured, with their tabs expanded first as the
+/// view expands them, so a colour's char range lands on the char it meant.
+/// Runs on the worker, once per file opened.
+pub(super) fn colour(path: &str, view: &FileDiff) -> syntax::Pair {
+    let side = |lines: &Option<Vec<String>>| {
+        let lines: Vec<String> = lines.as_ref()?.iter().map(|l| untab(l)).collect();
+        syntax::highlight(path, &lines)
+    };
+    syntax::Pair {
+        old: side(&view.old),
+        new: side(&view.new),
+    }
 }
 
 /// git's diff, from the first hunk on, as hunks. A diff with no hunk header —
@@ -416,6 +431,8 @@ pub(super) struct State {
     pub at: usize,
     /// The file's read and its hunks, once the worker answers.
     pub read: Option<Result<(FileDiff, Vec<Hunk>), String>>,
+    /// Both versions coloured, from the same read.
+    pub syntax: syntax::Pair,
     pub scroll: usize,
     pub hscroll: usize,
     /// Side by side, unified, or — `None` — whichever the width suits.
@@ -533,6 +550,7 @@ fn blocks(added: u64, removed: u64) -> Vec<Span<'static>> {
 fn cut(
     text: &str,
     marks: &[(usize, usize)],
+    syn: &[(usize, usize, Kind)],
     skip: usize,
     width: usize,
     base: Style,
@@ -547,23 +565,32 @@ fn cut(
         true => width - 1,
         false => chars.len(),
     };
-    let marked = |i: usize| marks.iter().any(|&(a, b)| (a..b).contains(&(i + skip)));
+    // A char's style: its syntax colour as the text, over the line's wash or
+    // the word mark's stronger one.
+    let style_at = |i: usize| {
+        let at = i + skip;
+        let ground = match marks.iter().any(|&(a, b)| (a..b).contains(&at)) {
+            true => mark,
+            false => base,
+        };
+        match syntax::color_at(syn, at) {
+            Some(fg) => ground.fg(fg),
+            None => ground,
+        }
+    };
     let mut out: Vec<Span<'static>> = Vec::new();
     let mut run = String::new();
-    let mut run_marked = false;
+    let mut run_style = base;
     for (i, c) in chars.iter().take(shown).enumerate() {
-        let m = marked(i);
-        if m != run_marked && !run.is_empty() {
-            out.push(Span::styled(
-                std::mem::take(&mut run),
-                if run_marked { mark } else { base },
-            ));
+        let style = style_at(i);
+        if style != run_style && !run.is_empty() {
+            out.push(Span::styled(std::mem::take(&mut run), run_style));
         }
-        run_marked = m;
+        run_style = style;
         run.push(*c);
     }
     if !run.is_empty() {
-        out.push(Span::styled(run, if run_marked { mark } else { base }));
+        out.push(Span::styled(run, run_style));
     }
     if more {
         out.push(Span::styled("…", base.patch(theme::dim())));
@@ -588,6 +615,7 @@ fn gutter(no: Option<u64>, digits: usize, base: Style) -> Span<'static> {
 fn half(
     cell: Option<&Cell>,
     added: bool,
+    syn: &syntax::Pair,
     digits: usize,
     hscroll: usize,
     width: usize,
@@ -614,6 +642,7 @@ fn half(
     out.extend(cut(
         &cell.text,
         &cell.marks,
+        syn.line(added, cell.no),
         hscroll,
         room,
         base,
@@ -626,6 +655,7 @@ fn half(
 fn same_half(
     no: u64,
     text: &str,
+    colours: &[(usize, usize, Kind)],
     digits: usize,
     hscroll: usize,
     width: usize,
@@ -635,6 +665,7 @@ fn same_half(
     out.extend(cut(
         text,
         &[],
+        colours,
         hscroll,
         width.saturating_sub(digits + 3),
         base,
@@ -643,10 +674,20 @@ fn same_half(
     out
 }
 
+/// An unchanged line's colours: the new version's, or the old one's where
+/// only that was read.
+fn same_colours(syn: &syntax::Pair, old: u64, new: u64) -> &[(usize, usize, Kind)] {
+    match syn.line(true, new) {
+        [] => syn.line(false, old),
+        found => found,
+    }
+}
+
 /// The view's lines for `rows`, `width` wide: side by side when `split`, else
 /// unified. Each line comes with the fold it is, if it is one.
 pub(super) fn lines(
     rows: &[Row],
+    syn: &syntax::Pair,
     split: bool,
     hscroll: usize,
     width: usize,
@@ -707,6 +748,7 @@ pub(super) fn lines(
             spans.extend(cut(
                 &cell.text,
                 &cell.marks,
+                syn.line(is_added, cell.no),
                 hscroll,
                 room,
                 base,
@@ -742,12 +784,15 @@ pub(super) fn lines(
                 ));
             }
             Row::Same { old, new, text } => match split {
+                // An unchanged line is the same text on both sides, coloured
+                // from whichever version was read: the new one first.
                 true => {
                     let left_w = width.saturating_sub(1) / 2;
                     let right_w = width.saturating_sub(1) - left_w;
-                    let mut spans = same_half(*old, text, digits, hscroll, left_w);
+                    let colours = same_colours(syn, *old, *new);
+                    let mut spans = same_half(*old, text, colours, digits, hscroll, left_w);
                     spans.push(Span::styled("│", rule()));
-                    spans.extend(same_half(*new, text, digits, hscroll, right_w));
+                    spans.extend(same_half(*new, text, colours, digits, hscroll, right_w));
                     out.push((Line::from(spans), None));
                 }
                 false => {
@@ -760,6 +805,7 @@ pub(super) fn lines(
                     spans.extend(cut(
                         text,
                         &[],
+                        same_colours(syn, *old, *new),
                         hscroll,
                         room,
                         theme::value(),
@@ -772,9 +818,9 @@ pub(super) fn lines(
                 true => {
                     let left_w = width.saturating_sub(1) / 2;
                     let right_w = width.saturating_sub(1) - left_w;
-                    let mut spans = half(left.as_ref(), false, digits, hscroll, left_w);
+                    let mut spans = half(left.as_ref(), false, syn, digits, hscroll, left_w);
                     spans.push(Span::styled("│", rule()));
-                    spans.extend(half(right.as_ref(), true, digits, hscroll, right_w));
+                    spans.extend(half(right.as_ref(), true, syn, digits, hscroll, right_w));
                     out.push((Line::from(spans), None));
                 }
                 // Unified, a change's removed lines all go above its added
@@ -924,7 +970,13 @@ pub(super) fn draw(frame: &mut Frame, area: Rect, app: &App) -> Hits {
         return hits;
     }
     let rows = rows(view, hunks, &state.opened, state.all_open);
-    let drawn = lines(&rows, split, state.hscroll, body.width as usize);
+    let drawn = lines(
+        &rows,
+        &state.syntax,
+        split,
+        state.hscroll,
+        body.width as usize,
+    );
     let height = body.height as usize;
     let top = state.scroll.min(drawn.len().saturating_sub(height));
     state.page.set(height.max(1));
@@ -964,6 +1016,7 @@ impl App {
             files,
             at,
             read: None,
+            syntax: syntax::Pair::default(),
             scroll: 0,
             hscroll: 0,
             split: None,
@@ -993,6 +1046,7 @@ impl App {
             untracked: file.untracked,
         };
         state.read = None;
+        state.syntax = syntax::Pair::default();
         state.scroll = 0;
         state.hscroll = 0;
         state.opened.clear();
@@ -1006,6 +1060,7 @@ impl App {
         &mut self,
         path: String,
         result: Result<cctop_core::diff_file::FileDiff, String>,
+        colours: syntax::Pair,
     ) {
         let Some(state) = self.diff.as_mut() else {
             return;
@@ -1013,6 +1068,7 @@ impl App {
         if state.file().map(|f| f.path.as_str()) != Some(path.as_str()) {
             return;
         }
+        state.syntax = colours;
         state.read = Some(result.map(|view| {
             let hunks = parse(&view.diff);
             (view, hunks)
@@ -1350,8 +1406,8 @@ mod tests {
     fn unified_below_the_split_width() {
         let view = sample();
         let rows = rows_of(&view, false);
-        let split = lines(&rows, true, 0, 140);
-        let unified = lines(&rows, false, 0, 90);
+        let split = lines(&rows, &syntax::Pair::default(), true, 0, 140);
+        let unified = lines(&rows, &syntax::Pair::default(), false, 0, 90);
         let pairs = rows
             .iter()
             .filter(|r| matches!(r, Row::Pair { .. }))
@@ -1414,10 +1470,16 @@ mod tests {
                 .map(|s| s.content.to_string())
                 .collect::<String>()
         };
-        assert_eq!(text(cut("abcdefghij", &[], 0, 6, base, base)), "abcde…");
-        assert_eq!(text(cut("abcdefghij", &[], 4, 6, base, base)), "efghij");
-        assert_eq!(text(cut("abc", &[], 0, 6, base, base)), "abc   ");
-        let spans = cut("abcdef", &[(2, 4)], 1, 6, base, mark);
+        assert_eq!(
+            text(cut("abcdefghij", &[], &[], 0, 6, base, base)),
+            "abcde…"
+        );
+        assert_eq!(
+            text(cut("abcdefghij", &[], &[], 4, 6, base, base)),
+            "efghij"
+        );
+        assert_eq!(text(cut("abc", &[], &[], 0, 6, base, base)), "abc   ");
+        let spans = cut("abcdef", &[(2, 4)], &[], 1, 6, base, mark);
         let marked: String = spans
             .iter()
             .filter(|s| s.style == mark)

@@ -196,6 +196,16 @@ one that jumped is a single tool result that will do it again.
 **What it cost, split by model.** Plus spend per hour, the slowest individual
 calls by wall time, the full tool table, and the files the session wrote.
 
+**What it changed in its checkout**, under Changes: the same files and the same
+base commit as the terminal's sidebar, as a folder tree, and the file you pick
+drawn the way GitHub draws a diff — old and new side by side on a wide screen,
+unified on a phone, both line numbers, washed rows, the changed words inside a
+line marked, the function each hunk is in, and the unchanged stretches folded
+to a row that opens them. Code is coloured for Rust, TypeScript and JavaScript,
+Python, Go, shell, JSON, YAML, Markdown and TOML. A read-only link sees the
+changed lines but not the whole file, so the folds stay shut. Below it, what
+the agent's edit tools applied, from the transcript.
+
 ## Reaching it from your phone
 
 The default bind is `127.0.0.1`, so out of the box nothing but this machine can
@@ -698,6 +708,8 @@ readable by you alone.
 | `GET /api/sessions` | The same document `cctop --json` prints |
 | `GET /api/analytics` | The whole fleet's history as one document, untrimmed — the page fetches it on its own cadence rather than every refresh |
 | `GET /api/report/<id>` | The report, as JSON |
+| `GET /api/changes/<id>` | The session's checkout: changed files with `+`/`−`, and the base commit they are against; `null` outside a repository |
+| `GET /api/diff/<id>?path=<path>&base=<commit>` | One file of it: git's hunks, and both versions of the file for a full link (`null` for a read-only one). `untracked=1` for a file git does not know |
 | `GET /api/chat/<id>` | The conversation, as JSON — what `cctop --chat` prints |
 | `GET /api/chat/<id>?agent=<agent>` | One subagent's own conversation, by the id its `Agent` call names — what `cctop --chat <id> --agent <agent>` prints; 404 for an id the session does not list |
 | `GET /api/access/<id>` | What one session can reach: instructions, skills, MCP servers — what `cctop --access` prints |

@@ -77,6 +77,7 @@ mod analytics;
 /// The session API's handlers: search, the conversation, the report, the
 /// acting routes and the provider-status document.
 mod api;
+mod checkout;
 /// Routes that only exist in a build that asked for them. Not a default
 /// feature, so a released cctop contains none of this — see the module docs.
 #[cfg(feature = "debug")]
@@ -1804,6 +1805,13 @@ fn serve_connection(shared: &Shared, stream: &mut TcpStream) {
         _ if path.starts_with("/api/report/") => {
             api_report(shared, stream, &request, &path["/api/report/".len()..]);
         }
+        _ if path.starts_with("/api/changes/") => {
+            checkout::api_changes(shared, stream, &request, &path["/api/changes/".len()..]);
+        }
+        _ if path.starts_with("/api/diff/") => {
+            let id = &path["/api/diff/".len()..];
+            checkout::api_diff(shared, stream, &request, id, access);
+        }
         // The id is between the two ends, and there has to be one between
         // them: `/api/chat/markdown` is the prefix and the suffix with
         // nothing in between, and slicing it as if there were would ask for
@@ -3477,6 +3485,89 @@ mod tests {
         let (no_year, _) = exchange(&guarded, "/api/wrapped", bearer);
         assert!(no_year.contains(" 400 "), "{no_year}");
         let (anonymous, _) = exchange(&guarded, "/api/wrapped?year=2026", "");
+        assert!(!anonymous.contains(" 200 "), "{anonymous}");
+    }
+
+    /// The session page's diff: the checkout's changed files, and one file's
+    /// diff against the base they name — whole for a full link, hunks only for
+    /// a read-only one — and nothing for a path out of the checkout, a base
+    /// that is not a commit, or another machine's row.
+    #[test]
+    fn a_sessions_checkout_is_listed_and_its_files_diffed() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args([
+                    "-c",
+                    "user.name=t",
+                    "-c",
+                    "user.email=t@t",
+                    "-c",
+                    "commit.gpgsign=false",
+                ])
+                .args(args)
+                .current_dir(repo)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        git(&["init", "-q"]);
+        std::fs::write(repo.join("a.rs"), "fn a() {}\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-qm", "one"]);
+        std::fs::write(repo.join("a.rs"), "fn a() { b() }\n").unwrap();
+
+        let mut here = Session::new(cctop_core::pricing::Provider::Claude, "here".into());
+        here.label_source = repo.to_string_lossy().into_owned();
+        let mut there = Session::new(cctop_core::pricing::Provider::Claude, "there".into());
+        there.remote = Some(cctop_core::session::Remote {
+            // Not "box": other tests in this binary register a sibling by
+            // that name, and a sibling's row is relayed rather than refused.
+            host: "an-ssh-host-of-this-test".into(),
+            ..Default::default()
+        });
+        let guarded = shared("full", "view");
+        *guarded.latest.lock().unwrap() = Arc::new(Snapshot {
+            version: 1,
+            doc: Doc::ready("[]".to_string(), Vec::new()),
+            sessions: vec![here, there],
+            host_errors: Vec::new(),
+        });
+        let full = "Authorization: Bearer full\r\n";
+        let view = "Authorization: Bearer view\r\n";
+
+        let (head, body) = exchange(&guarded, "/api/changes/here", full);
+        assert!(head.starts_with("HTTP/1.1 200 "), "{head}");
+        let listed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(listed["files"][0]["path"], "a.rs");
+        let base = listed["base"].as_str().unwrap().to_string();
+
+        let target = format!("/api/diff/here?path=a.rs&base={base}");
+        let (head, body) = exchange(&guarded, &target, full);
+        assert!(head.starts_with("HTTP/1.1 200 "), "{head}");
+        let diff: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(diff["diff"][0].as_str().unwrap().starts_with("@@"));
+        assert_eq!(diff["new"][0], "fn a() { b() }");
+        let (_, body) = exchange(&guarded, &target, view);
+        let diff: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(diff["diff"].as_array().is_some_and(|d| !d.is_empty()));
+        assert!(diff["old"].is_null() && diff["new"].is_null(), "{diff}");
+
+        for (bad, status) in [
+            (format!("/api/diff/here?path=../x&base={base}"), " 400 "),
+            ("/api/diff/here?path=a.rs&base=HEAD".to_string(), " 400 "),
+            ("/api/changes/there".to_string(), " 409 "),
+            ("/api/changes/nobody".to_string(), " 404 "),
+        ] {
+            let (head, _) = exchange(&guarded, &bad, full);
+            assert!(head.contains(status), "{bad}: {head}");
+        }
+        let (anonymous, _) = exchange(&guarded, "/api/changes/here", "");
         assert!(!anonymous.contains(" 200 "), "{anonymous}");
     }
 
