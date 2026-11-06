@@ -738,8 +738,21 @@ pub struct App {
     pub sidebar: sidebar::State,
     /// Whether that column is folded to its strip of counts (`Alt+i`).
     pub sidebar_folded: bool,
+    /// Its width as dragged, kept across runs; `None` for the default.
+    pub sidebar_width: Option<u16>,
+    /// The Files tree's folders turned from how they start, by session key.
+    pub sidebar_folds: HashMap<String, std::collections::HashSet<String>>,
+    /// A drag of its border under way: the column it started at, and where
+    /// the pointer is now. The panes keep their size until it ends.
+    pub sidebar_drag: Option<(u16, u16)>,
+    /// When its border was last pressed, to tell a double-click.
+    pub sidebar_pressed: Option<std::time::Instant>,
     /// Your notes on sessions, shown in the sidebar.
     pub notes: cctop_core::notes::Notes,
+    /// Whether a right-click's clipboard read is still out. One at a time:
+    /// clicked again while Windows' clipboard was slow, the same text was
+    /// pasted once per click.
+    pub clipboard_pending: bool,
     /// A pull request on its way from `p`: the check's answer and the title
     /// being edited.
     pub pull_request: pull_request::Flow,
@@ -1261,7 +1274,12 @@ impl App {
             changes: changes::State::default(),
             sidebar: sidebar::State::default(),
             sidebar_folded: prefs.sidebar_folded,
+            sidebar_width: prefs.sidebar_width,
+            sidebar_folds: HashMap::new(),
+            sidebar_drag: None,
+            sidebar_pressed: None,
             notes: cctop_core::notes::Notes::load(),
+            clipboard_pending: false,
             pull_request: pull_request::Flow::default(),
             moving: moving::Flow::default(),
             subagent_sort: (
@@ -1388,6 +1406,7 @@ impl App {
         self.prefs.tool_show_diff = self.tool_show_diff;
         self.prefs.tab_overview_hidden = !render::tab_overview();
         self.prefs.sidebar_folded = self.sidebar_folded;
+        self.prefs.sidebar_width = self.sidebar_width;
         // Sorted so the file does not churn on every save purely because a
         // HashSet iterated in a different order.
         let mut expanded: Vec<String> = self.expanded.iter().cloned().collect();

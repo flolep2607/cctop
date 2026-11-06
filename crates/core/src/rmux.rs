@@ -783,10 +783,11 @@ fn record(name: &str, option: &str, value: &str) {
 }
 
 /// What the agent is started with beyond its argv, as `VAR=value` pairs.
-fn launch_env(argv: &[String]) -> Vec<String> {
+pub fn launch_env(argv: &[String]) -> Vec<String> {
     let mcp = mcp_launch()
-        .then(|| crate::opencode::mcp_env(argv, &crate::mux::own_exe().to_string_lossy()))
-        .flatten();
+        .then(crate::mux::installed_exe)
+        .flatten()
+        .and_then(|exe| crate::opencode::mcp_env(argv, &exe.to_string_lossy()));
     crate::opencode::launch_env(argv)
         .into_iter()
         .chain(mcp)
@@ -798,7 +799,13 @@ fn launch_env(argv: &[String]) -> Vec<String> {
 /// was asked to run: Claude's fullscreen interface, and cctop's own MCP
 /// server for the harnesses that take one there.
 pub fn launch_argv(argv: &[String]) -> Vec<String> {
-    let mcp = mcp_launch().then(|| crate::mux::own_exe().to_string_lossy().into_owned());
+    // The installed path, never `/proc/self/exe`: the agent runs the server,
+    // and in the agent that path is the agent. After `--update` it is the new
+    // cctop at the old path; with nothing there, the server is left out.
+    let mcp = mcp_launch()
+        .then(crate::mux::installed_exe)
+        .flatten()
+        .map(|exe| exe.to_string_lossy().into_owned());
     launch_argv_with(argv, mcp.as_deref())
 }
 
@@ -1527,6 +1534,37 @@ pub fn ended() -> Vec<Ended> {
 /// not merely kept to show how it ended.
 pub fn live(name: &str) -> bool {
     exists(name) && !ended_one(name)
+}
+
+/// Whether the agent in a session asked for the mouse itself.
+///
+/// `#{mouse_any_flag}` is rmux's record of the request the pane's own program
+/// made — the DECSET it emitted — and it is the flag `MouseDown3Pane` consults
+/// before passing a right-click through (see
+/// [`MOUSE_MENUS`](crate::mux::MOUSE_MENUS)). A right-click is forwarded only
+/// while it is set — Claude Code's fullscreen interface asks, and pastes on
+/// right-click itself — and pasted by cctop otherwise, where the click would
+/// reach nothing.
+pub fn mouse_wanted(name: &str) -> bool {
+    // `mouse_any_flag` is a pane format, which `display-message` will not
+    // resolve against a session name. Asking every pane and matching the name
+    // here is the form that answers at all.
+    const FORMAT: &str = "#{session_name} #{mouse_any_flag}";
+    // Asked within a deadline: this is asked on a click, on the thread that
+    // draws, and the daemon's own timeouts are five seconds to connect and
+    // fifteen to read — a right-click on a wedged daemon would freeze the
+    // screen that long. A daemon that has not answered by then is treated as
+    // one that does not want the mouse.
+    let Ok(socket) = crate::mux::socket() else {
+        return false;
+    };
+    let name = name.to_string();
+    crate::mux::within(crate::mux::ANSWER_DEADLINE, move || {
+        let listing = crate::mux::list_all_panes_at(&socket, FORMAT).unwrap_or_default();
+        let want = format!("{name} 1");
+        listing.lines().any(|line| line == want)
+    })
+    .unwrap_or(false)
 }
 
 /// Whether the session called `name` is one whose agent has exited.
@@ -2636,6 +2674,32 @@ mod tests {
             last_words(parser.screen()).as_deref(),
             Some("error: no such model")
         );
+    }
+
+    /// The flag is the pane program's own answer, so it can only be checked
+    /// against real panes: one whose program emitted `?1000h` reads as wanting
+    /// the mouse, and one running a plain `sleep` does not.
+    #[test]
+    fn mouse_wanted_is_the_pane_programs_own_answer() {
+        let _daemon = crate::mux::TestDaemon::new("mouse_wanted_is_the_pane_programs_own_answer");
+        let asked = format!("cctop-mw-yes-{}", std::process::id());
+        let asleep = format!("cctop-mw-no-{}", std::process::id());
+        start_session(
+            &asked,
+            None,
+            &["sh", "-c", "printf '\\033[?1000h'; sleep 30"],
+        );
+        start_session(&asleep, None, &["sleep", "30"]);
+
+        // The flag lands when the program's DECSET does, and "not yet" reads
+        // the same as "never" — so the wanting side is the one waited on.
+        let wanted = wait_asking(|| mouse_wanted(&asked).then_some(()));
+        let quiet = mouse_wanted(&asleep);
+        end_session(&asked);
+        end_session(&asleep);
+
+        assert!(wanted.is_some(), "the pane's DECSET never reached rmux");
+        assert!(!quiet, "a pane that never asked read as asking");
     }
 
     /// An agent nobody is attached to still has to read as busy while it is

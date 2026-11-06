@@ -573,12 +573,25 @@ An agent's tab has a sidebar down its right: the **plan** the agent is
 working to (Claude's tasks or checklist, Codex's plan) with each step ticked
 `✓`, current `▶` or ahead `·`; the **files** it has changed since the session
 started, with their `+`/`−` lines, read from the checkout as the Changes panel
-(`0`) reads it, or from the transcript's edits outside a repository; and your
+(`0`) reads it, or from the transcript's edits outside a repository — as a tree
+of folders, each with its file count and lines, a chain of single-folder
+directories as one row, names cut at their end so where a file is always
+shows; a long list opens with its big top-level folders folded, a click on a
+folder folds or opens it (remembered per session until cctop exits), and the
+wheel over the tree scrolls it; and your
 own **notes** on the session, kept in `~/.local/share/cctop/notes.json` across
 runs. `Alt+i` folds it to a strip of counts and back, and the choice is
-remembered. It is about the focused pane, is not drawn beside a shell or an
-agent on another machine, and folds itself on a terminal too narrow to spare
-the columns.
+remembered. Drag its left border to make it wider or narrower — up to 60% of
+the tab, always leaving the agent 40 columns; dragged nearly shut it folds, and
+a folded strip dragged out opens at that width. The agent is resized once, when
+you let go, with a line showing where the border will land until then. A
+double-click on the border goes back to the default width, and the width you
+chose is remembered like the fold. It is about the focused agent — or, while
+the focus is on a shell beside it, the tab's agent, so moving between them does
+not resize anything — is not drawn in a tab with no agent on this machine, and
+folds itself on a terminal too narrow to spare the columns. A note being
+written (`Alt+e`) belongs to the session it was started on; the mouse waits
+until Enter or Esc.
 
 `Alt+z` zooms the focused pane over the whole tab, and the bar marks the tab
 `⤢` while it is. The other panes keep running out of sight — their output is
@@ -716,6 +729,21 @@ an action whose key you gave to something else, without giving it another,
 reads `unbound` rather than naming a key that now does something different.
 A line the file has but cctop could not use — listed as a problem at the top of
 the `,` panel — moved nothing, and the help says so by not moving either.
+
+### Right-click pastes
+
+A terminal pastes on right-click by itself, but not into a program that holds
+the mouse, and cctop does. So in a tab, a right-click pastes the clipboard's
+text into the pane under the pointer — unless the program in that pane asked
+for the mouse itself (vim, htop, Claude Code's fullscreen interface, which
+pastes on right-click on its own), which then gets the click. The clipboard is
+read with `wl-paste`, `xclip` or `xsel`, or under WSL through one PowerShell
+kept running for it, so only the first right-click waits for it to start. One
+read at a time, given up after a few seconds; more than 1 MB is refused, with
+the terminal's own paste key for that. What is pasted is text: escapes and
+other control characters are dropped, and the newline at the very end, so a
+copied command waits for Enter. Over ssh there is no clipboard of yours on that
+machine to read, and cctop says to use the terminal's paste key instead.
 
 ### A paste that arrives twice
 

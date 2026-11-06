@@ -340,6 +340,16 @@ type ScreenPlace = (Instant, u16, usize);
 pub type ScreenReading = (Option<cctop_core::hook::Signal>, Option<String>, bool);
 
 impl Pane {
+    /// [`Pane::for_test`] holding a shell rather than an agent.
+    #[cfg(test)]
+    pub(crate) fn shell_for_test(label: &str) -> Pane {
+        Pane {
+            is_agent: false,
+            pid: 4322,
+            ..Pane::for_test(label)
+        }
+    }
+
     /// A pane labelled `label` with no process behind it, for tests elsewhere
     /// that draw one: the fields that own a process are private to this module.
     #[cfg(test)]

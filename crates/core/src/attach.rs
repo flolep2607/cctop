@@ -543,11 +543,16 @@ impl Attach {
     /// not, and that shell gets the plain text a terminal without the mode would
     /// have sent it.
     ///
-    /// Two things are rewritten on the way through, both of which a real terminal
-    /// also does. Newlines become carriage returns, because that is what Enter is
-    /// on a pty. And an end marker occurring inside the pasted text is dropped:
-    /// left in, it would close the bracket early and hand the remainder to the
-    /// agent as keystrokes, which is the one way a paste can still submit itself.
+    /// Three things are rewritten on the way through, as a careful terminal does.
+    /// Newlines become carriage returns, because that is what Enter is on a pty.
+    /// An end marker occurring inside the pasted text is dropped, until none is
+    /// left — once was not enough, since `\x1b[20\x1b[201~1~` is a marker again
+    /// with the inner one taken out — because left in it would close the bracket
+    /// early and hand the remainder to the agent as keystrokes, which is the one
+    /// way a paste can still submit itself. And every other control character
+    /// goes, but the tab and the line endings: a paste is text, and an escape in
+    /// one — text copied off a web page can carry anything — is a keystroke the
+    /// agent's interface would act on.
     ///
     /// It leaves in `PASTE_CHUNK`-sized writes rather than one, because a
     /// clipboard has no size limit and the wire format does: a single frame past
@@ -558,10 +563,16 @@ impl Attach {
         if self.parser.screen().scrollback() > 0 {
             self.parser.screen_mut().set_scrollback(0);
         }
-        let body = text
-            .replace("\x1b[201~", "")
+        let mut text = text.to_string();
+        while text.contains("\x1b[201~") {
+            text = text.replace("\x1b[201~", "");
+        }
+        let body: String = text
             .replace("\r\n", "\r")
-            .replace('\n', "\r");
+            .replace('\n', "\r")
+            .chars()
+            .filter(|c| matches!(c, '\t' | '\r') || !c.is_control())
+            .collect();
         if body.is_empty() {
             return true;
         }
@@ -622,6 +633,11 @@ impl Attach {
             return true;
         };
         self.send(&frame::encode(frame::KEYS, &bytes))
+    }
+
+    /// Whether the program on this terminal asked for mouse reports.
+    pub fn wants_mouse(&self) -> bool {
+        self.parser.screen().mouse_protocol_mode() != vt100::MouseProtocolMode::None
     }
 
     /// Let PageUp, PageDown, Home and End scroll what cctop kept, as
@@ -1944,6 +1960,20 @@ mod tests {
         assert_eq!(
             written.lock().unwrap().as_slice(),
             frame::encode(frame::KEYS, b"\x1b[200~hello\rrm -rf /\r\x1b[201~")
+        );
+    }
+
+    /// The marker hidden inside another is still a marker once the inner one
+    /// is dropped, and any other escape in a paste is a keystroke: neither
+    /// survives the paste.
+    #[test]
+    fn a_paste_cannot_smuggle_a_marker_or_an_escape() {
+        let (mut attach, written) = probe();
+        attach.parser.process(b"\x1b[?2004h");
+        assert!(attach.send_paste("a\x1b[20\x1b[201~1~\nrm -rf /\n\x1b[A\x07\u{9b}2Jb\tc"));
+        assert_eq!(
+            written.lock().unwrap().as_slice(),
+            frame::encode(frame::KEYS, b"\x1b[200~a\rrm -rf /\r[A2Jb\tc\x1b[201~")
         );
     }
 

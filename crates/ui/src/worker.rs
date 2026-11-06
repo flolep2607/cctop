@@ -14,11 +14,12 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 
 pub(super) enum Request {
     Refresh,
-    /// The clipboard's text, for a right-click on pane `pane` of tab `tab`.
-    /// Off the thread that draws, because under WSL it is PowerShell's to read.
+    /// The clipboard's text, for a right-click on the pane whose process is
+    /// `pane` — by pid, not by place: a tab closed while Windows answered moves
+    /// the next one into its place. Off the thread that draws, because under
+    /// WSL it is PowerShell's to read.
     ReadClipboard {
-        tab: usize,
-        pane: usize,
+        pane: u32,
     },
     /// Update the running sessions without re-walking every provider directory.
     RefreshLive,
@@ -40,6 +41,12 @@ pub(super) enum Request {
         session: Box<Session>,
         dir: Result<std::path::PathBuf, String>,
         started: Option<i64>,
+    },
+    /// Install the timers for `[[schedule]]` if they changed, and read each
+    /// schedule's next run from `path`'s entries — all of it systemd's to
+    /// answer, which can take its time, so never on the thread that draws.
+    Schedules {
+        path: std::path::PathBuf,
     },
     /// Check a checkout's branch for `p`. `title` is the session's own, for
     /// the title box to start from.
@@ -153,8 +160,7 @@ pub(super) enum Request {
 pub(super) enum Response {
     /// What [`Request::ReadClipboard`] read, or why it could not.
     Clipboard {
-        tab: usize,
-        pane: usize,
+        pane: u32,
         text: Result<String, String>,
     },
     /// Cheap discovery result, shown before transcript extraction completes.
@@ -182,6 +188,11 @@ pub(super) enum Response {
     Sidebar {
         key: String,
         answer: super::sidebar::Answer,
+    },
+    /// [`Request::Schedules`]: what a sync changed, if anything, and the rows.
+    Schedules {
+        said: Option<String>,
+        rows: Vec<super::schedules::ScheduleRow>,
     },
     /// A step of `p`, or how it ended.
     PullRequest(super::pull_request::Event),
@@ -586,11 +597,11 @@ pub(super) fn spawn_worker(
                         break;
                     }
                 }
-                Request::ReadClipboard { tab, pane } => {
+                Request::ReadClipboard { pane } => {
                     let tx = tx.clone();
                     std::thread::spawn(move || {
                         let text = cctop_core::clipboard::text();
-                        let _ = tx.send(Response::Clipboard { tab, pane, text });
+                        let _ = tx.send(Response::Clipboard { pane, text });
                     });
                 }
                 Request::Data(session, Some(reach)) => {
@@ -649,6 +660,14 @@ pub(super) fn spawn_worker(
                         let answer =
                             super::sidebar::read(&data, dir, started, &session.label_source);
                         let _ = tx.send(Response::Sidebar { key, answer });
+                    });
+                }
+                Request::Schedules { path } => {
+                    let tx = tx.clone();
+                    spawner.spawn(move || {
+                        let said = cctop_core::schedule::sync_if_changed();
+                        let rows = super::schedules::rows(&path);
+                        let _ = tx.send(Response::Schedules { said, rows });
                     });
                 }
                 // A thread each, not the gentle pool: a push can take its whole

@@ -628,8 +628,9 @@ impl App {
     /// asked from — if that is still where the keyboard is. A click and then a
     /// move to another tab before PowerShell answered must not paste into
     /// whatever is in front now.
-    pub(super) fn got_clipboard(&mut self, tab: usize, pane: usize, text: Result<String, String>) {
-        let here = self.tab == tab && self.active_tab().is_some_and(|t| t.focus == pane);
+    pub(super) fn got_clipboard(&mut self, pane: u32, text: Result<String, String>) {
+        self.clipboard_pending = false;
+        let here = self.focused_pane().is_some_and(|p| p.pid == pane);
         match text {
             Ok(text) if here && !text.is_empty() => self.send_to_focused_pane(&text),
             Ok(_) => {}
@@ -2213,6 +2214,13 @@ impl App {
             self.needs_redraw = true;
         }
 
+        // A note being written holds the mouse, as a modal does: a click that
+        // moved the focus would move the sidebar to another session under the
+        // half-written note. Esc or Enter puts it down first.
+        if self.mode == Mode::Note {
+            return;
+        }
+
         // The help sheet covers most of the screen and records no rectangle,
         // so it answers the mouse itself: the wheel reads it and a click puts
         // it away. Over a pane this is what keeps a click from reaching the
@@ -2348,6 +2356,27 @@ impl App {
             return;
         }
 
+        // A drag of the sidebar's border is followed wherever the pointer goes —
+        // over the pane it is widening into, too — until it is let go.
+        if self.sidebar_drag.is_some() {
+            match ev.kind {
+                MouseEventKind::Drag(MouseButton::Left) => self.drag_sidebar_border(ev.column),
+                MouseEventKind::Up(MouseButton::Left) => match layout.sidebar_border {
+                    Some((_, tab)) => self.release_sidebar_border(ev.column, tab),
+                    None => self.sidebar_drag = None,
+                },
+                _ => {}
+            }
+            return;
+        }
+        if ev.kind == MouseEventKind::Down(MouseButton::Left)
+            && let Some((border, _)) = layout.sidebar_border
+            && border.contains(ratatui::layout::Position::new(ev.column, ev.row))
+        {
+            self.press_sidebar_border(ev.column);
+            return;
+        }
+
         // The sidebar beside an agent's pane is cctop's, not the agent's: a
         // click on its fold or its top line folds or opens it, and nothing in
         // it reaches the pane.
@@ -2355,10 +2384,28 @@ impl App {
             .sidebar
             .filter(|r| r.contains(ratatui::layout::Position::new(ev.column, ev.row)))
         {
-            if ev.kind == MouseEventKind::Down(MouseButton::Left)
-                && (self.sidebar_folded || ev.row == side.y)
-            {
-                self.toggle_sidebar();
+            let in_files = layout
+                .sidebar_tree
+                .files
+                .is_some_and(|(from, to)| (from..to).contains(&ev.row));
+            let folder = layout
+                .sidebar_tree
+                .folders
+                .iter()
+                .find(|(row, _)| *row == ev.row)
+                .map(|(_, path)| path.clone());
+            match ev.kind {
+                MouseEventKind::Down(MouseButton::Left) if let Some(path) = folder => {
+                    self.turn_sidebar_folder(&path);
+                }
+                MouseEventKind::Down(MouseButton::Left)
+                    if self.sidebar_folded || ev.row == side.y =>
+                {
+                    self.toggle_sidebar();
+                }
+                MouseEventKind::ScrollDown if in_files => self.scroll_sidebar_files(true),
+                MouseEventKind::ScrollUp if in_files => self.scroll_sidebar_files(false),
+                _ => {}
             }
             return;
         }
@@ -2464,12 +2511,32 @@ impl App {
                     // A right-click pastes, as it does in Windows Terminal
                     // and the terminals that copy it — which cannot do it
                     // themselves here, because cctop asked for the mouse and
-                    // the click arrives as a click. Forwarded, it opened
-                    // rmux's pane menu over the agent instead, or did nothing.
+                    // the click arrives as a click. Except where the pane's
+                    // own program asked for the mouse: it gets the click, as
+                    // vim or htop expect, and Claude Code's fullscreen
+                    // interface pastes on right-click by itself.
                     if b == cctop_core::attach::MouseButton::Right {
-                        if kind == cctop_core::attach::MouseKind::Press {
-                            let tab = self.tab;
-                            let _ = self.tx.send(Request::ReadClipboard { tab, pane: i });
+                        let pending = self.clipboard_pending;
+                        let Some(pane) = self.active_tab().and_then(|t| t.panes.get_mut(i)) else {
+                            return;
+                        };
+                        let wanted = match (&pane.rmux, &pane.transport) {
+                            // Its program's own request, as rmux recorded it:
+                            // this pane's screen is rmux's, which always has
+                            // the mouse on.
+                            (Some(name), _) => cctop_core::rmux::mouse_wanted(name),
+                            // On another machine: what is asked for there
+                            // cannot be seen from here, and text is safe.
+                            (None, Some(_)) => false,
+                            (None, None) => pane.view.wants_mouse(),
+                        };
+                        if wanted {
+                            pane.note_input(false);
+                            let _ = pane.view.mouse(kind, b, col, row);
+                        } else if kind == cctop_core::attach::MouseKind::Press && !pending {
+                            let pane = pane.pid;
+                            self.clipboard_pending = true;
+                            let _ = self.tx.send(Request::ReadClipboard { pane });
                         }
                         return;
                     }

@@ -17,14 +17,14 @@ expression: screen
 │                                                                                      ││· Update the docs             │
 │                                                                                      ││                              │
 │                                                                                      ││Files  3  +182 −29            │
-│                                                                                      ││src/auth.rs +96 −20           │
-│                                                                                      ││src/client.rs +41 −9          │
-│                                                                                      ││tests/auth.rs +45 −0          │
+│                                                                                      ││▾ src/ 2 +137 −29             │
+│                                                                                      ││    auth.rs +96 −20           │
+│                                                                                      ││    client.rs +41 −9          │
+│                                                                                      ││▾ tests/ 1 +45 −0             │
+│                                                                                      ││    auth.rs +45 −0            │
 │                                                                                      ││                              │
 │                                                                                      ││Notes  Alt+e                  │
 │                                                                                      ││• ask Sam about token expiry  │
-│                                                                                      ││                              │
-│                                                                                      ││                              │
 │                                                                                      ││                              │
 │                                                                                      ││                              │
 │                                                                                      ││                              │

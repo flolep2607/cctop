@@ -100,6 +100,11 @@ pub struct Layout {
     /// An agent tab's sidebar, while it is drawn: a click there folds or
     /// opens it, and must not reach the pane beside it.
     pub(super) sidebar: Option<Rect>,
+    /// Its left border, where a drag sets its width, and the tab's whole
+    /// pane area it shares — what that width is measured against.
+    pub(super) sidebar_border: Option<(Rect, Rect)>,
+    /// The sidebar's Files tree: its folder rows, and its lines.
+    pub(super) sidebar_tree: super::sidebar::Hits,
     /// The session table's scrollbar track, while the table overflows.
     pub(super) table_track: Option<Rect>,
     /// The active bottom panel's scrollbar track, while it overflows.
@@ -577,8 +582,11 @@ pub fn draw(frame: &mut Frame, app: &mut App) -> Layout {
         let (panes, side) = super::sidebar::split(app, chunks[1]);
         draw_panes(frame, panes, app, &mut layout);
         if let Some(side) = side {
-            super::sidebar::draw(frame, side, app);
+            layout.sidebar_tree = super::sidebar::draw(frame, side, app);
             layout.sidebar = Some(side);
+            let border = Rect { width: 1, ..side };
+            layout.sidebar_border = Some((border, chunks[1]));
+            super::sidebar::draw_drag_guide(frame, chunks[1], app);
         }
         draw_footer(frame, footer, app, &mut layout);
         match app.mode {
@@ -2365,6 +2373,8 @@ mod tests {
             tool_sidebar: Some((18, 21, 0, 3)),
             tool_log: Some((19, 21, 4)),
             sidebar: None,
+            sidebar_border: None,
+            sidebar_tree: Default::default(),
             table_track: None,
             panel_track: None,
             modal_rect: Some(Rect::new(10, 8, 20, 6)),
