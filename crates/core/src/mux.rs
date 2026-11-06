@@ -112,6 +112,7 @@ pub const HISTORY_LINES: &str = "50000";
 ///   an agent wanted — Claude Code's Ctrl+B, "run in background", never
 ///   arrived in a tab whose keys went through an rmux client, which is every
 ///   remote tab.
+/// - [`MOUSE_MENUS`]: no right-click menus.
 fn defaults() -> String {
     format!(
         "\
@@ -125,8 +126,51 @@ set-option -wg remain-on-exit {REMAIN_ON_EXIT}
 set-option -s extended-keys {EXTENDED_KEYS}
 set-option -g prefix None
 set-option -g prefix2 None
-"
+{MOUSE_MENUS}"
     )
+}
+
+/// rmux's menus, taken off — the right-click ones, and the kill confirmation
+/// on a pane control — and a right-click on a pane handed to its program only
+/// when that program asked for the mouse.
+///
+/// tmux's defaults, which rmux keeps, answer a right-click on a pane whose
+/// program did not ask for the mouse with a menu of splits, swaps and a kill,
+/// drawn over the agent. In Windows Terminal a right-click is how you paste,
+/// and through an rmux client — every tab opened from another machine — that
+/// paste opened the menu instead, with `X` one keystroke from ending the
+/// agent. Nobody drives these sessions with rmux's menus (see `prefix` above),
+/// so they go; the pass-through half of the default binding stays, so an
+/// agent that does want its right-click still gets it.
+pub const MOUSE_MENUS: &str = "\
+unbind-key -q -n M-MouseDown3Pane
+unbind-key -q -n MouseDown3Status
+unbind-key -q -n M-MouseDown3Status
+unbind-key -q -n MouseDown3StatusLeft
+unbind-key -q -n M-MouseDown3StatusLeft
+unbind-key -q -n MouseDown1Control9
+bind-key -n MouseDown3Pane if-shell -F -t = \"#{mouse_any_flag}\" { select-pane -t = ; send-keys -M }
+";
+
+/// Apply [`MOUSE_MENUS`] to a daemon already running.
+///
+/// A daemon reads [`defaults`] once, when it starts, and lives as long as any
+/// session does — weeks, on a machine whose tabs are always open — so a daemon
+/// started by an older cctop would keep the menus until every tab closed.
+/// Sent on each attach, which is cheap, and best effort: a daemon that refuses
+/// it still attaches, with the menus it had.
+fn take_menus_off(connection: &mut rmux_client::Connection) {
+    let request = Request::SourceFile(Box::new(rmux_proto::SourceFileRequest {
+        paths: vec!["-".to_string()],
+        quiet: true,
+        parse_only: false,
+        verbose: false,
+        expand_paths: false,
+        target: None,
+        caller_cwd: None,
+        stdin: Some(MOUSE_MENUS.to_string()),
+    }));
+    let _ = exchange(connection, &request);
 }
 
 /// What a session's pane does when its agent exits: stay, frozen, when the
@@ -898,6 +942,7 @@ fn attach(args: &[String]) -> Result<(), String> {
         new_session(name, cwd.as_deref(), env, argv)?;
     }
     let mut connection = connect().ok_or("cctop's rmux daemon is not running")?;
+    take_menus_off(&mut connection);
     let target = session(name)?;
     let geometry = connection
         .supports_capability(rmux_proto::CAPABILITY_ATTACH_RESIZE_GEOMETRY)
@@ -1315,5 +1360,54 @@ mod tests {
         );
         kill_session("cctop-k").expect("killed");
         kill_session("cctop-l").expect("killed");
+    }
+
+    /// No right-click opens a menu: not on a new daemon, and not on one an
+    /// older cctop started with tmux's menus bound, once anything attaches.
+    #[test]
+    fn a_right_click_never_opens_rmuxs_menu() {
+        let _daemon = TestDaemon::new("mux-menus");
+        new_session("cctop-m", None, Vec::new(), &["sleep".into(), "30".into()])
+            .expect("session made");
+        let root = || {
+            let request = Request::ListKeys(Box::new(rmux_proto::ListKeysRequest {
+                table_name: Some("root".into()),
+                first_only: false,
+                notes: false,
+                include_unnoted: false,
+                reversed: false,
+                format: None,
+                sort_order: None,
+                prefix: None,
+                key: None,
+            }));
+            printed(&ask(request).expect("keys listed"))
+        };
+        let keys = root();
+        assert!(!keys.contains("display-menu"), "{keys}");
+        assert!(
+            keys.contains("send-keys -M"),
+            "the pass-through went too: {keys}"
+        );
+
+        // An older daemon, menus and all.
+        let older = Request::SourceFile(Box::new(rmux_proto::SourceFileRequest {
+            paths: vec!["-".into()],
+            quiet: false,
+            parse_only: false,
+            verbose: false,
+            expand_paths: false,
+            target: None,
+            caller_cwd: None,
+            stdin: Some(
+                "bind-key -n MouseDown3Status display-menu -T x Kill X { kill-window }\n".into(),
+            ),
+        }));
+        ask(older).expect("menu bound");
+        assert!(root().contains("display-menu"));
+        take_menus_off(&mut connect().expect("connected"));
+        let keys = root();
+        assert!(!keys.contains("display-menu"), "{keys}");
+        kill_session("cctop-m").expect("killed");
     }
 }

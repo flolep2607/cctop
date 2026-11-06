@@ -14,6 +14,12 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 
 pub(super) enum Request {
     Refresh,
+    /// The clipboard's text, for a right-click on pane `pane` of tab `tab`.
+    /// Off the thread that draws, because under WSL it is PowerShell's to read.
+    ReadClipboard {
+        tab: usize,
+        pane: usize,
+    },
     /// Update the running sessions without re-walking every provider directory.
     RefreshLive,
     /// Extract full data for one session, to populate the bottom panels.
@@ -145,6 +151,12 @@ pub(super) enum Request {
 }
 
 pub(super) enum Response {
+    /// What [`Request::ReadClipboard`] read, or why it could not.
+    Clipboard {
+        tab: usize,
+        pane: usize,
+        text: Result<String, String>,
+    },
     /// Cheap discovery result, shown before transcript extraction completes.
     Discovered(Vec<Session>),
     /// One row whose transcript has finished loading.
@@ -573,6 +585,13 @@ pub(super) fn spawn_worker(
                     {
                         break;
                     }
+                }
+                Request::ReadClipboard { tab, pane } => {
+                    let tx = tx.clone();
+                    std::thread::spawn(move || {
+                        let text = cctop_core::clipboard::text();
+                        let _ = tx.send(Response::Clipboard { tab, pane, text });
+                    });
                 }
                 Request::Data(session, Some(reach)) => {
                     // The transcript is a file on the other machine: the cctop

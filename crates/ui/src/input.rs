@@ -624,6 +624,19 @@ impl App {
         }
     }
 
+    /// The clipboard a right-click asked for, pasted into the pane it was
+    /// asked from — if that is still where the keyboard is. A click and then a
+    /// move to another tab before PowerShell answered must not paste into
+    /// whatever is in front now.
+    pub(super) fn got_clipboard(&mut self, tab: usize, pane: usize, text: Result<String, String>) {
+        let here = self.tab == tab && self.active_tab().is_some_and(|t| t.focus == pane);
+        match text {
+            Ok(text) if here && !text.is_empty() => self.send_to_focused_pane(&text),
+            Ok(_) => {}
+            Err(why) => self.set_status(format!("Nothing pasted: {why}")),
+        }
+    }
+
     /// F9 inside a pane: the image, then a space, typed at the agent.
     ///
     /// A space after it because the path is the start of a sentence, not the
@@ -2416,13 +2429,7 @@ impl App {
             // and cctop holds the terminal's capture, so without forwarding the
             // click simply went nowhere.
             //
-            // The right button is the one rmux can intercept: its
-            // `MouseDown3Pane` binding reads `#{mouse_any_flag}` — the pane's
-            // own request for mouse reporting — and forwards the click to the
-            // agent when it is set, but opens rmux's pane menu, splits and
-            // kills included, when it is not. So the flag is asked before the
-            // click is written: an agent that asked gets its right-click, and
-            // a pane that did not keeps the menu out of reach.
+            // Except the right button, which pastes — see below.
             let button = |b| match b {
                 MouseButton::Left => Some(cctop_core::attach::MouseButton::Left),
                 MouseButton::Middle => Some(cctop_core::attach::MouseButton::Middle),
@@ -2451,23 +2458,23 @@ impl App {
                     {
                         tab.focus = i;
                     }
+                    // A right-click pastes, as it does in Windows Terminal
+                    // and the terminals that copy it — which cannot do it
+                    // themselves here, because cctop asked for the mouse and
+                    // the click arrives as a click. Forwarded, it opened
+                    // rmux's pane menu over the agent instead, or did nothing.
+                    if b == cctop_core::attach::MouseButton::Right {
+                        if kind == cctop_core::attach::MouseKind::Press {
+                            let tab = self.tab;
+                            let _ = self.tx.send(Request::ReadClipboard { tab, pane: i });
+                        }
+                        return;
+                    }
                     if let Some(pane) = self.active_tab().and_then(|t| t.panes.get_mut(i)) {
-                        // Right-click is the agent's only where rmux will hand
-                        // it over: without the flag the same click raises the
-                        // pane menu this guard exists to keep away. A pane with
-                        // no multiplexer behind it has no menu to raise —
-                        // `encode_mouse` already gates on the agent's own mode.
-                        let wanted = b != cctop_core::attach::MouseButton::Right
-                            || match &pane.rmux {
-                                Some(name) => cctop_core::rmux::mouse_wanted(name),
-                                None => true,
-                            };
                         // A failed send means that agent has gone, which the
                         // reaper already watches for.
-                        if wanted {
-                            pane.note_input(false);
-                            let _ = pane.view.mouse(kind, b, col, row);
-                        }
+                        pane.note_input(false);
+                        let _ = pane.view.mouse(kind, b, col, row);
                     }
                 }
                 return;

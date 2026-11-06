@@ -808,6 +808,69 @@ pub fn copy_to_clipboard(text: &str) {
     osc52(text);
 }
 
+/// The clipboard's text, for a right-click that pastes.
+///
+/// A terminal pastes on right-click by itself, but not into a program that
+/// asked for the mouse, and cctop always has: the click arrives as a click.
+/// So cctop reads what the terminal would have pasted. Windows' clipboard,
+/// under WSL, is PowerShell's to read, which takes a moment — so this is
+/// called off the thread that draws.
+///
+/// Over ssh there is no clipboard here that is the user's, and the escape that
+/// asks the terminal for its own is one most terminals refuse, Windows
+/// Terminal among them; the answer then says to paste with the terminal's key.
+pub fn text() -> Result<String, String> {
+    use std::process::{Command, Stdio};
+
+    if over_ssh() {
+        return Err("over ssh there is no clipboard of yours to read here; \
+             paste with your terminal's key (Ctrl+Shift+V)"
+            .into());
+    }
+    let powershell: Vec<&str> = std::iter::once("powershell.exe")
+        .chain(
+            WSL_POWERSHELL
+                .iter()
+                .copied()
+                .filter(|p| Path::new(p).exists()),
+        )
+        .collect();
+    let mut helpers: Vec<(&str, &[&str])> = vec![
+        ("wl-paste", &["--no-newline"]),
+        ("xclip", &["-selection", "clipboard", "-o"]),
+        ("xsel", &["--clipboard", "--output"]),
+    ];
+    for program in &powershell {
+        helpers.push((
+            program,
+            &["-NoProfile", "-STA", "-Command", "Get-Clipboard -Raw"],
+        ));
+    }
+    for (program, args) in helpers {
+        let Ok(out) = Command::new(program)
+            .args(args)
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output()
+        else {
+            continue;
+        };
+        if !out.status.success() {
+            continue;
+        }
+        return Ok(clean_pasted(&String::from_utf8_lossy(&out.stdout)));
+    }
+    Err(format!("nothing here can read the clipboard — {HOW}"))
+}
+
+/// Text as a helper printed it, as it was copied: Windows' line endings made
+/// Unix ones, and the one newline `Get-Clipboard` adds after the text taken
+/// off, so a copied command is not run by the paste that was meant to place it.
+fn clean_pasted(raw: &str) -> String {
+    let text = raw.replace("\r\n", "\n");
+    text.strip_suffix('\n').unwrap_or(&text).to_string()
+}
+
 /// Whether cctop is running on the far end of an ssh session.
 ///
 /// Then the machine's own clipboard and browser are not the ones in front of
@@ -888,6 +951,16 @@ fn osc52(text: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Windows' line endings come out as Unix ones, and the newline the reader
+    /// adds after the text is dropped, so a pasted command waits for Enter.
+    #[test]
+    fn pasted_text_is_what_was_copied() {
+        assert_eq!(clean_pasted("git status\r\n"), "git status");
+        assert_eq!(clean_pasted("a\r\nb\r\n"), "a\nb");
+        assert_eq!(clean_pasted("no newline"), "no newline");
+        assert_eq!(clean_pasted(""), "");
+    }
 
     /// Anything that is not a PNG is nothing having been pasted.
     ///
