@@ -476,6 +476,10 @@ pub fn branch_mark(s: &Session) -> Option<String> {
 pub fn render_cell<'a>(id: ColumnId, s: &'a Session, now: &DateTime<Utc>) -> Cow<'a, str> {
     use Cow::{Borrowed, Owned};
     match id {
+        // Going round in circles is working, but not the calm kind: a glyph of
+        // its own, so the row is findable without relying on colour — see
+        // `cctop_core::stuck`.
+        ColumnId::Status if s.looping().is_some() => Borrowed("⟳"),
         ColumnId::Status => match s.activity_state {
             // A ring rather than a disc, so the one row that is actually
             // blocking an agent is findable without relying on colour alone.

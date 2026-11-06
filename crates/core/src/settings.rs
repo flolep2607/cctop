@@ -18,7 +18,7 @@ use std::path::Path;
 
 /// Every `[settings]` key: its name, its default as the file would spell it,
 /// and what it does.
-pub const SETTINGS: [(&str, &str, &str); 30] = [
+pub const SETTINGS: [(&str, &str, &str); 33] = [
     (
         "theme",
         "\"auto\"",
@@ -121,6 +121,21 @@ pub const SETTINGS: [(&str, &str, &str); 30] = [
         "plan_nudge",
         "true",
         "Ask agents cctop starts to keep a plan for the sidebar",
+    ),
+    (
+        "stuck_detect",
+        "true",
+        "Flag an agent going round in circles, and ring once",
+    ),
+    (
+        "stuck_repeat",
+        "3",
+        "Same failing call this many times in a row is a loop",
+    ),
+    (
+        "stuck_burn",
+        "\"$2 / 10m\"",
+        "Spending this with no edit or passing test is a loop",
     ),
     (
         "idle_after",
@@ -391,6 +406,13 @@ pub struct Settings {
     /// when it judges the work big enough, which is not when a person
     /// watching would want one.
     pub plan_nudge: Option<bool>,
+    /// Whether looping agents are flagged — see [`crate::stuck`].
+    pub stuck_detect: Option<bool>,
+    /// Identical failing calls in a row before an agent counts as looping.
+    pub stuck_repeat: Option<f64>,
+    /// `"$2 / 10m"`: dollars spent within minutes, with no edit and no
+    /// passing test, before an agent counts as looping.
+    pub stuck_burn: Option<String>,
     /// Hours without activity before a live session is idle — see
     /// [`Settings::idle_after_ms`].
     pub idle_after: Option<f64>,
@@ -479,6 +501,17 @@ impl Settings {
                     "mcp_drive" => item.as_bool().map(|v| out.mcp_drive = Some(v)).is_none(),
                     "mcp_launch" => item.as_bool().map(|v| out.mcp_launch = Some(v)).is_none(),
                     "plan_nudge" => item.as_bool().map(|v| out.plan_nudge = Some(v)).is_none(),
+                    "stuck_detect" => item.as_bool().map(|v| out.stuck_detect = Some(v)).is_none(),
+                    // Two is the least that is a repeat at all.
+                    "stuck_repeat" => amount(item)
+                        .filter(|n| *n >= 2.0)
+                        .map(|v| out.stuck_repeat = Some(v))
+                        .is_none(),
+                    "stuck_burn" => item
+                        .as_str()
+                        .filter(|v| crate::stuck::parse_burn(v).is_some())
+                        .map(|v| out.stuck_burn = Some(v.into()))
+                        .is_none(),
                     "read_screen" => item.as_bool().map(|v| out.read_screen = Some(v)).is_none(),
                     "compact_threshold" => item
                         .as_float()
@@ -593,6 +626,9 @@ impl Settings {
             "mcp_drive" => self.mcp_drive.map(|v| v.to_string()),
             "mcp_launch" => self.mcp_launch.map(|v| v.to_string()),
             "plan_nudge" => self.plan_nudge.map(|v| v.to_string()),
+            "stuck_detect" => self.stuck_detect.map(|v| v.to_string()),
+            "stuck_repeat" => self.stuck_repeat.map(|v| v.to_string()),
+            "stuck_burn" => self.stuck_burn.as_ref().map(|v| format!("{v:?}")),
             "read_screen" => self.read_screen.map(|v| v.to_string()),
             "compact_threshold" => self.compact_threshold.map(|v| format!("{}", v * 100.0)),
             "hide_columns" => self.hide_columns.as_ref().map(|v| format!("{v:?}")),
@@ -661,6 +697,22 @@ impl Settings {
     }
 
     /// How long a live session has to have been quiet to count as idle.
+    /// The looping thresholds — see [`crate::stuck::Config`].
+    pub fn stuck(&self) -> crate::stuck::Config {
+        let default = crate::stuck::Config::default();
+        let (burn_dollars, burn_minutes) = self
+            .stuck_burn
+            .as_deref()
+            .and_then(crate::stuck::parse_burn)
+            .unwrap_or((default.burn_dollars, default.burn_minutes));
+        crate::stuck::Config {
+            enabled: self.stuck_detect != Some(false),
+            repeat: self.stuck_repeat.map_or(default.repeat, |n| n as u32),
+            burn_dollars,
+            burn_minutes,
+        }
+    }
+
     pub fn idle_after_ms(&self) -> i64 {
         (self.idle_after.unwrap_or(IDLE_AFTER_HOURS) * 3_600_000.0) as i64
     }

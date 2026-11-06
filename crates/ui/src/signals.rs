@@ -197,6 +197,21 @@ impl App {
         }
     }
 
+    /// Whether an agent in bar position `index` looks stuck in a loop — see
+    /// [`cctop_core::stuck`]. Every pane, not only the focused one: the mark is
+    /// for a tab you are not looking at.
+    pub(super) fn tab_looping(&self, index: usize) -> bool {
+        let Some(tab) = index.checked_sub(1).and_then(|t| self.tabs.get(t)) else {
+            return false;
+        };
+        tab.panes.iter().any(|pane| {
+            let pid = pane.agent();
+            self.sessions
+                .iter()
+                .any(|s| s.root_pid() == Some(pid) && s.looping().is_some())
+        })
+    }
+
     /// Whether the agent running as `pid` finished a turn you have not looked
     /// at.
     pub(super) fn pid_done(&self, pid: u32) -> bool {

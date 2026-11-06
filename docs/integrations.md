@@ -405,6 +405,9 @@ Seven tools, all read-only — and two more that act, off until you turn them on
   calls again. Unlike the command it does not listen for hooks itself, so it
   hears a finished turn a second or two later, once a transcript or a running
   cctop has it.
+  The answer carries `"looping": {"reason": …}` while the agent looks stuck in
+  a loop ([`⟳`](the-table.md#--an-agent-going-round-in-circles)), so a supervisor
+  that waited out a turn that will never end is told why.
 - **`set_plan`** `{steps: [{text, status}]}` — publishes the calling agent's
   plan to the sidebar of its tab, for harnesses with no to-do tool of their
   own (OpenCode, Devin, …); Claude's task list and Codex's `update_plan` are

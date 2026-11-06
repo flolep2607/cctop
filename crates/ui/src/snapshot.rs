@@ -440,6 +440,25 @@ fn dashboard() {
     snap("dashboard", &mut app);
 }
 
+/// A working agent going round in circles wears `⟳` in the status column
+/// instead of the working dot.
+#[test]
+fn dashboard_looping() {
+    let mut app = fixture();
+    let row = &mut app.sessions[0];
+    assert!(row.is_running(), "the first fixture row is the live one");
+    row.activity_state = cctop_core::session::ActivityState::Working;
+    row.stuck.repeat = Some(cctop_core::stuck::Repeat {
+        tool: "Bash".into(),
+        call: "cargo test".into(),
+        count: 4,
+        first: "2026-11-06T10:00:00Z".into(),
+        last: "2026-11-06T10:04:00Z".into(),
+    });
+    app.refilter();
+    snap("dashboard_looping", &mut app);
+}
+
 /// Colour is most of what the dashboard says — age, cost, context pressure —
 /// so it gets a style snapshot as well. Once, at the large size: the grid is
 /// long, and the small one would repeat it.
