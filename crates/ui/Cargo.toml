@@ -30,6 +30,7 @@ ratatui-image.workspace = true
 rayon.workspace = true
 serde_json.workspace = true
 symphonia.workspace = true
+syntect.workspace = true
 tachyonfx.workspace = true
 tempfile.workspace = true
 termprofile.workspace = true

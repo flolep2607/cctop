@@ -649,7 +649,11 @@ the tree's order, and from 160 columns a list of them runs down the left,
 where a click goes to one. `↑`/`↓`, `PgUp`/`PgDn` and the wheel scroll, `←`/`→`
 scroll long lines, and `Esc` or `q` puts it down; the keys are the view's
 while it is up, not the agent's. A binary file, or a diff too large to draw,
-says so in a line. There is no syntax colouring: cctop carries no highlighter.
+says so in a line. Code is coloured by its language — keywords, strings,
+comments, numbers, function and type names — from syntect's bundled grammars,
+parsed from each version whole so a string or a comment that opened above a
+hunk still colours it; the washes and word marks stay underneath. Not under
+sixteen colours or `NO_COLOR`, and not for a file past a megabyte.
 
 `Alt+g` opens the agent's changes in your own git tool, in a split beside it:
 the first installed of `lazygit`, `tig status`, `git diff` paged through

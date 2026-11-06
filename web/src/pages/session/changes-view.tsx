@@ -6,6 +6,7 @@ import { clock } from "@/lib/format";
 import { Panel, Section } from "@/components/section";
 import type { Report } from "@/lib/types";
 import { diffFiles, type FileDiff } from "./diff-files";
+import { CheckoutView } from "./checkout-view";
 
 function FileRow({ f }: { f: FileDiff }) {
   const [open, setOpen] = useState(false);
@@ -47,9 +48,10 @@ export function ChangesView({ r }: { r: Report }) {
   const total = files.reduce((a, f) => a + f.added + f.removed, 0);
   return (
     <>
+      <CheckoutView id={r.session_id} />
       {files.length > 0 ? (
         <Section
-          title="What it changed"
+          title="What its edit tools applied"
           note={`${files.length} ${files.length === 1 ? "file" : "files"}, ${total} changed lines, from the agent's edit and write tools. Click a file for its diff. It is what the agent applied rather than what the file holds now${shellCount ? " — and not what its shell commands did, which are listed below." : "."}`}
         >
           <Panel pad={false}>

@@ -220,3 +220,21 @@
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; }
 }
+
+/* Syntax colours in the session page's diff (components/github-diff.tsx):
+   GitHub's hues, a light set and a dark one, as text over the add and remove
+   washes. Only the classes highlight.js's registered languages emit. */
+.diff-code .hl-keyword, .diff-code .hl-selector-tag, .diff-code .hl-meta-keyword { color: #cf222e; }
+.diff-code .hl-string, .diff-code .hl-regexp, .diff-code .hl-meta-string { color: #0a3069; }
+.diff-code .hl-comment, .diff-code .hl-quote { color: #6e7781; font-style: italic; }
+.diff-code .hl-number, .diff-code .hl-literal, .diff-code .hl-symbol, .diff-code .hl-attr, .diff-code .hl-variable { color: #0550ae; }
+.diff-code .hl-title, .diff-code .hl-section { color: #8250df; }
+.diff-code .hl-type, .diff-code .hl-built_in, .diff-code .hl-class, .diff-code .hl-name, .diff-code .hl-selector-class { color: #953800; }
+.diff-code .hl-meta, .diff-code .hl-attribute, .diff-code .hl-params { color: #116329; }
+.dark .diff-code .hl-keyword, .dark .diff-code .hl-selector-tag, .dark .diff-code .hl-meta-keyword { color: #ff7b72; }
+.dark .diff-code .hl-string, .dark .diff-code .hl-regexp, .dark .diff-code .hl-meta-string { color: #a5d6ff; }
+.dark .diff-code .hl-comment, .dark .diff-code .hl-quote { color: #8b949e; }
+.dark .diff-code .hl-number, .dark .diff-code .hl-literal, .dark .diff-code .hl-symbol, .dark .diff-code .hl-attr, .dark .diff-code .hl-variable { color: #79c0ff; }
+.dark .diff-code .hl-title, .dark .diff-code .hl-section { color: #d2a8ff; }
+.dark .diff-code .hl-type, .dark .diff-code .hl-built_in, .dark .diff-code .hl-class, .dark .diff-code .hl-name, .dark .diff-code .hl-selector-class { color: #ffa657; }
+.dark .diff-code .hl-meta, .dark .diff-code .hl-attribute, .dark .diff-code .hl-params { color: #7ee787; }

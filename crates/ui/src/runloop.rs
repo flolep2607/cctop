@@ -737,7 +737,11 @@ fn event_loop(
                     }
                 }
                 Ok(Response::Clipboard { pane, text }) => app.got_clipboard(pane, text),
-                Ok(Response::FileDiff { path, result }) => app.got_file_diff(path, result),
+                Ok(Response::FileDiff {
+                    path,
+                    result,
+                    colours,
+                }) => app.got_file_diff(path, result, colours),
                 Ok(Response::Changes { key, result }) => app.got_changes(key, result),
                 Ok(Response::Sidebar { key, answer }) => app.got_sidebar(key, answer),
                 Ok(Response::Schedules { said, rows }) => {

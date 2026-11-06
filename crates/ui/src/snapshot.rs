@@ -1738,7 +1738,9 @@ fn diff_view() {
     ]));
     app.sidebar.checkout = Some(("/nonexistent/web".into(), "0".repeat(40)));
     app.open_diff("src/client.rs");
-    app.got_file_diff("src/client.rs".into(), Ok(super::diffview::sample()));
+    let sample = super::diffview::sample();
+    let colours = super::diffview::colour("src/client.rs", &sample);
+    app.got_file_diff("src/client.rs".into(), Ok(sample), colours);
     for (name, size) in [("diff_split", (160, 40)), ("diff_unified", (100, 30))] {
         let buffer = draw(&mut app, size);
         insta::assert_snapshot!(format!("{name}_{}x{}", size.0, size.1), text(&buffer));
