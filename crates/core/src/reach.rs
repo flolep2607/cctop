@@ -195,8 +195,25 @@ impl Reach {
     ///
     /// Over ssh that is `cctop --data`; from a sibling, `/api/data/<id>`. A
     /// cctop from before either refuses, and the error says which machine.
-    pub fn data(&self, id: &str) -> Result<SessionData, String> {
-        let json = self.ask(&["--data", id], &format!("/api/data/{id}"), "")?;
+    ///
+    /// `agent` reads one subagent's own transcript instead: `--data <id>
+    /// --agent <agent>`, or `/api/data/<id>/<agent>`. A path segment and not
+    /// the `?agent=` the conversation takes, because a serve from before this
+    /// ignores a query it does not know and would answer with the *parent's*
+    /// data, drawn under the subagent as if it were its own; a segment it does
+    /// not know is an id it cannot find, and it says so. A cctop from before
+    /// over ssh refuses `--agent` without `--chat` the same way.
+    pub fn data(&self, id: &str, agent: Option<&str>) -> Result<SessionData, String> {
+        let mut args = vec!["--data", id];
+        let path = match agent {
+            Some(agent) => {
+                args.extend(["--agent", agent]);
+                // Unescaped: [`Peer::send`] escapes the path it signs.
+                format!("/api/data/{id}/{agent}")
+            }
+            None => format!("/api/data/{id}"),
+        };
+        let json = self.ask(&args, &path, "")?;
         serde_json::from_str(&json)
             .map_err(|e| format!("{} returned an unreadable session: {e}", self.machine()))
     }
@@ -330,6 +347,36 @@ mod tests {
             .sidebar("sess-1")
             .unwrap_err();
         assert!(why.starts_with("reach-test-old "), "{why}");
+    }
+
+    /// A subagent's data is asked for under its parent's id, the agent a path
+    /// segment after it; a sibling from before that cannot find the id and
+    /// says so, rather than answering with the parent's.
+    #[test]
+    fn a_siblings_subagent_data_is_asked_for_under_its_parent() {
+        let sent = SessionData {
+            last_model: "claude-sub".into(),
+            ..Default::default()
+        };
+        let (url, seen) = sibling(200, serde_json::to_string(&sent).unwrap().leak());
+        know(Peer::fixed("reach-test-sub", &url, SECRET));
+        let data = reach("reach-test-sub", None)
+            .unwrap()
+            .data("sess-1", Some("agent-x"))
+            .expect("it answered");
+        assert_eq!(data.last_model, "claude-sub");
+        assert_eq!(
+            seen.lock().unwrap().as_slice(),
+            ["/api/data/sess-1/agent-x"]
+        );
+
+        let (url, _) = sibling(404, "no such session");
+        know(Peer::fixed("reach-test-sub-old", &url, SECRET));
+        let why = reach("reach-test-sub-old", None)
+            .unwrap()
+            .data("sess-1", Some("agent-x"))
+            .unwrap_err();
+        assert_eq!(why, "reach-test-sub-old answered no such session");
     }
 
     #[test]

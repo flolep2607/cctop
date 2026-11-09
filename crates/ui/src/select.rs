@@ -143,10 +143,11 @@ impl App {
 
     /// What the bottom panels should describe for a row.
     ///
-    /// A subagent gets a stand-in `Session` pointed at its own transcript. That
-    /// file is the same JSONL a session writes, so the whole extraction path —
-    /// worker, cache, every panel — reads it without knowing the difference, and
-    /// the panels describe the subagent rather than the parent it ran under.
+    /// A subagent gets a stand-in `Session` pointed at its own transcript
+    /// ([`Session::subagent_stand_in`]), so the whole extraction path — worker,
+    /// cache, every panel — reads it without knowing the difference. A remote
+    /// subagent's stand-in carries its parent's `remote`, and is read on that
+    /// machine like the parent is.
     ///
     /// Building this is deliberately the *last* step of [`Self::sync_panel_data`]
     /// and not the first: what it is built from is borrowed, and a row the panels
@@ -156,41 +157,7 @@ impl App {
         let Row::Subagent { index, .. } = row else {
             return Some(session.clone());
         };
-        let sub = session.subagents.get(index)?;
-        // A purged transcript leaves nothing to read; the parent's own data is
-        // the only thing left that describes the run.
-        if sub.ghost {
-            return None;
-        }
-
-        let mut stand_in = Session::new(session.provider, sub.agent_id.clone());
-        stand_in.surface = session.surface;
-        stand_in.model = sub.model.clone();
-        stand_in.label_source = session.label_source.clone();
-        stand_in.harness = session.harness.clone();
-        stand_in.title = Some(sub.description.clone()).filter(|d| !d.is_empty());
-        stand_in.started_at = sub.started_at.clone().unwrap_or_default();
-        // Found among the session's transcripts rather than rebuilt from the
-        // id: a workflow's agents sit a run directory further down.
-        stand_in.data_file = session.data_file.as_ref().and_then(|f| {
-            cctop_core::session::transcript_files(f)
-                .into_iter()
-                .skip(1)
-                .find(|t| t.file_stem().is_some_and(|s| *s == *sub.agent_id))
-        });
-        // Its own mtime, so the panels refresh while the subagent is working and
-        // not merely when its parent writes something.
-        stand_in.touched_at = stand_in
-            .data_file
-            .as_ref()
-            .map(|f| cctop_core::util::ms_to_rfc3339(cctop_core::config::file_mtime_ms(f) as i64))
-            .unwrap_or_default();
-        // And its own last turn as what it shows, as the parent's row does.
-        stand_in.last_active = sub
-            .last_active
-            .clone()
-            .unwrap_or_else(|| stand_in.touched_at.clone());
-        Some(stand_in)
+        session.subagent_stand_in(&session.subagents.get(index)?.agent_id)
     }
 
     /// Whether the panels already hold `row` as it stands.
@@ -239,23 +206,6 @@ impl App {
             self.panel_key.clear();
             return;
         };
-        // A subagent's stand-in names a transcript path on the other machine,
-        // which read here is nothing, and the far side's `--data` takes a
-        // session's id and not an agent's.
-        // ponytail: a remote subagent's own panels are not fetched.
-        if matches!(row, Row::Subagent { .. })
-            && row
-                .session()
-                .and_then(|i| self.sessions.get(i))
-                .is_some_and(|parent| parent.remote.is_some())
-        {
-            self.panel_data = None;
-            self.panel_key = session.key();
-            self.panel_stamp = session.touched().to_string();
-            self.panel_unread =
-                Some("a subagent's own transcript is not read from another machine".into());
-            return;
-        }
         let key = session.key();
         let stamp = session.touched().to_string();
         let switched = key != self.panel_key;
@@ -279,9 +229,19 @@ impl App {
         {
             return;
         }
-        let reach = match session.remote.as_ref().map(|r| self.reach_of(&r.host)) {
+        let far = match session.remote.as_ref().map(|r| self.reach_of(&r.host)) {
             None => None,
-            Some(Ok(reach)) => Some(reach),
+            // The far side is asked by the session it lists, and a subagent's
+            // stand-in is named after the agent: its parent's id goes, and the
+            // agent's with it.
+            Some(Ok(reach)) => Some(Far {
+                reach,
+                id: row
+                    .session()
+                    .and_then(|i| self.sessions.get(i))
+                    .map_or_else(|| session.session_id.clone(), |p| p.session_id.clone()),
+                agent: matches!(row, Row::Subagent { .. }).then(|| session.session_id.clone()),
+            }),
             // Nothing to ask, and nothing that asking again would change
             // until the row does: said in the panel, as a failed read is.
             Some(Err(why)) => {
@@ -314,7 +274,7 @@ impl App {
             self.panel_unread = None;
         }
         self.panel_asked = Some(std::time::Instant::now());
-        let _ = self.tx.send(Request::Data(Box::new(session), reach));
+        let _ = self.tx.send(Request::Data(Box::new(session), far));
     }
 
     pub(super) fn move_selection(&mut self, delta: isize) {

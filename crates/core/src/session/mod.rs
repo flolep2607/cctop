@@ -762,6 +762,67 @@ impl Session {
         }
     }
 
+    /// A session standing in for subagent `agent_id`, pointed at its own
+    /// transcript.
+    ///
+    /// That file is the same JSONL a session writes, so whatever reads a
+    /// session's data — the TUI's panels, `cctop --data`, `/api/data` — reads
+    /// it without knowing the difference, and describes the subagent rather
+    /// than the parent it ran under. Here in core because both ends of a remote
+    /// row build it: the TUI for a local row, and the far cctop for a row it
+    /// is asked about from another machine.
+    ///
+    /// `None` when the session lists no such agent, or its transcript was
+    /// purged: the parent's own data is then all that describes the run. The id
+    /// is only ever matched against the session's own list and the files beside
+    /// its transcript, never turned into a path, so one off a query string or a
+    /// command line is safe to pass.
+    pub fn subagent_stand_in(&self, agent_id: &str) -> Option<Session> {
+        let sub = self.subagents.iter().find(|s| s.agent_id == agent_id)?;
+        if sub.ghost {
+            return None;
+        }
+        let mut stand_in = Session::new(self.provider, sub.agent_id.clone());
+        stand_in.surface = self.surface;
+        stand_in.model = sub.model.clone();
+        stand_in.label_source = self.label_source.clone();
+        stand_in.harness = self.harness.clone();
+        stand_in.title = Some(sub.description.clone()).filter(|d| !d.is_empty());
+        stand_in.started_at = sub.started_at.clone().unwrap_or_default();
+        // It lives where its parent does, so whatever asks a remote row's
+        // machine for its data asks for this one's too.
+        stand_in.remote = self.remote.clone();
+        if self.remote.is_none() {
+            // Found among the session's transcripts rather than rebuilt from
+            // the id: a workflow's agents sit a run directory further down.
+            stand_in.data_file = self.data_file.as_ref().and_then(|f| {
+                transcript_files(f)
+                    .into_iter()
+                    .skip(1)
+                    .find(|t| t.file_stem().is_some_and(|s| *s == *sub.agent_id))
+            });
+        }
+        // Its own mtime, so the panels refresh while the subagent is working
+        // and not merely when its parent writes something. A remote row's file
+        // is on the other machine — the same path read here is some other
+        // file, or none — so its newest turn as the far side reported it
+        // stands in, and the parent's activity past that.
+        stand_in.touched_at = match &stand_in.data_file {
+            Some(f) => util::ms_to_rfc3339(crate::config::file_mtime_ms(f) as i64),
+            None if self.remote.is_some() => sub
+                .last_active
+                .clone()
+                .unwrap_or_else(|| self.touched().to_string()),
+            None => String::new(),
+        };
+        // And its own last turn as what it shows, as the parent's row does.
+        stand_in.last_active = sub
+            .last_active
+            .clone()
+            .unwrap_or_else(|| stand_in.touched_at.clone());
+        Some(stand_in)
+    }
+
     /// Share of this session's tool calls that failed, or `None` when the
     /// harness does not record outcomes and a rate would be an invention.
     ///

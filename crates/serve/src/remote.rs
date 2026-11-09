@@ -31,6 +31,11 @@ pub(crate) fn peer_of(shared: &Shared, path: &str) -> Option<Arc<cctop_core::pee
     .iter()
     .find_map(|prefix| path.strip_prefix(prefix))
     .map(|rest| rest.trim_end_matches("/markdown"))
+    // A subagent's data names its agent a segment after the session.
+    .map(|rest| match path.starts_with("/api/data/") {
+        true => rest.split_once('/').map_or(rest, |(id, _)| id),
+        false => rest,
+    })
     .or_else(|| {
         path.strip_prefix("/api/act/")
             .and_then(|rest| rest.split_once('/'))

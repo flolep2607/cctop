@@ -456,20 +456,49 @@ pub(crate) fn api_report(shared: &Shared, stream: &mut TcpStream, request: &Requ
 /// panels under the table break down this document for a row it shows from
 /// here. A remote row is asked of the machine it came from, like a report.
 pub(crate) fn api_data(shared: &Shared, stream: &mut TcpStream, request: &Request, id: &str) {
+    // `<id>/<agent>` is one subagent's own transcript, asked by a TUI whose
+    // row for it is a remote subagent (see `Reach::data` for why a segment).
+    let (id, agent) = match id.split_once('/') {
+        Some((id, agent)) => (id, Some(agent)),
+        None => (id, None),
+    };
     let snapshot = current(shared);
     let Some(session) = find(&snapshot.sessions, id) else {
         return http::respond_error(stream, Some(request), 404, NO_SUCH_SESSION);
     };
-    if session.remote.is_some() {
-        return remote_json(
-            shared,
-            stream,
-            request,
-            session,
-            &["--data".to_string(), session.session_id.clone()],
-        );
+    // Checked before a remote row forwards it as well, so only an id the
+    // session lists ever reaches the far machine's command line.
+    if let Some(agent) = agent
+        && !session.subagents.iter().any(|s| s.agent_id == agent)
+    {
+        return http::respond_error(stream, Some(request), 404, "no such agent in this session");
     }
-    json(stream, request, &*shared.store.session_data_fresh(session));
+    if session.remote.is_some() {
+        let mut args = vec!["--data".to_string(), session.session_id.clone()];
+        if let Some(agent) = agent {
+            args.extend(["--agent".to_string(), agent.to_string()]);
+        }
+        return remote_json(shared, stream, request, session, &args);
+    }
+    let stand_in;
+    let subject = match agent {
+        None => session,
+        Some(agent) => match session.subagent_stand_in(agent) {
+            Some(found) => {
+                stand_in = found;
+                &stand_in
+            }
+            None => {
+                return http::respond_error(
+                    stream,
+                    Some(request),
+                    404,
+                    "this agent's transcript is gone — only what the main conversation recorded is left",
+                );
+            }
+        },
+    };
+    json(stream, request, &*shared.store.session_data_fresh(subject));
 }
 
 /// Serve what an agent tab's sidebar shows about one session: its plan and

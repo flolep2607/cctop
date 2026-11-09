@@ -12,6 +12,15 @@ use cctop_core::loader::Stats;
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, channel};
 
+/// Where a remote row's panel data is asked for: its machine, and which
+/// session there — with the agent, for a subagent's row, whose stand-in is
+/// named after the agent and not after anything the far side lists.
+pub(super) struct Far {
+    pub reach: cctop_core::reach::Reach,
+    pub id: String,
+    pub agent: Option<String>,
+}
+
 pub(super) enum Request {
     Refresh,
     /// One changed file read whole for the diff view, against `base`.
@@ -30,8 +39,8 @@ pub(super) enum Request {
     /// Update the running sessions without re-walking every provider directory.
     RefreshLive,
     /// Extract full data for one session, to populate the bottom panels.
-    /// `reach` is the machine to ask when the row is remote.
-    Data(Box<Session>, Option<cctop_core::reach::Reach>),
+    /// `Far` is where to ask when the row is remote.
+    Data(Box<Session>, Option<Far>),
     Delete(Box<Session>),
     /// What a session changed in its checkout, for the Changes panel. `started`
     /// is the session's start in seconds, which picks the base commit.
@@ -655,15 +664,16 @@ pub(super) fn spawn_worker(
                         });
                     });
                 }
-                Request::Data(session, Some(reach)) => {
+                Request::Data(session, Some(far)) => {
                     // The transcript is a file on the other machine: the cctop
                     // there parses it, and only the result crosses.
                     let tx = tx.clone();
                     loader.gently_spawn(move || {
-                        let _ = tx.send(match reach.data(&session.session_id) {
+                        let _ = tx.send(match far.reach.data(&far.id, far.agent.as_deref()) {
                             Ok(data) => Response::Data(session.key(), Arc::new(data)),
                             // The likeliest failure is a cctop over there
-                            // from before `--data`, which updating fixes.
+                            // from before `--data` — or, for a subagent, from
+                            // before it took `--agent` — which updating fixes.
                             Err(why) => Response::DataUnread(
                                 session.key(),
                                 format!(

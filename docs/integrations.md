@@ -560,7 +560,9 @@ Three readers reach back across the wire. The panels under the table — Cost,
 Context, Tool Activity and the rest — break down what the cctop on the far side
 parsed out of the transcript (`cctop --data`), sent back over ssh or through
 the machine's tunnel and never parsed at the local path; a session still
-writing is read again every fifteen seconds. Performance and Processes stay
+writing is read again every fifteen seconds. A subagent's row is read the same
+way from its own transcript there (`cctop --data <session> --agent <agent>`, or
+`/api/data/<session>/<agent>`). Performance and Processes stay
 blank, being readings of a process tree that is over there. `i` opens the
 conversation view for a remote row the same way. And a `cctop serve` — whether
 standalone or the one `B` runs inside the TUI — answers `/api/report`,

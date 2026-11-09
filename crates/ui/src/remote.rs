@@ -994,20 +994,102 @@ mod tests {
         app.selected = 0;
         app.sync_panel_data();
 
-        let (session, reach) = std::iter::from_fn(|| rx.try_recv().ok())
+        let (session, far) = std::iter::from_fn(|| rx.try_recv().ok())
             .find_map(|r| match r {
-                Request::Data(session, reach) => Some((session, reach)),
+                Request::Data(session, far) => Some((session, far)),
                 _ => None,
             })
             .expect("the read went to the worker");
-        let data = reach
-            .expect("a remote row is read where it lives")
-            .data(&session.session_id)
-            .expect("the sibling answered");
+        let far = far.expect("a remote row is read where it lives");
+        assert_eq!(far.id, session.session_id);
+        assert_eq!(far.agent, None);
+        let data = far.reach.data(&far.id, None).expect("the sibling answered");
         assert_eq!(data.last_model, "claude-from-there");
         assert_eq!(
             seen.lock().unwrap().as_slice(),
             [format!("/api/data/{}", session.session_id)]
+        );
+    }
+
+    /// A sibling's subagent row is read from the sibling too: asked for under
+    /// its parent's id with the agent's after it, since the stand-in the
+    /// panels describe is named after the agent and the far side lists only
+    /// the parent.
+    #[test]
+    fn a_siblings_subagent_row_fills_the_panels_from_the_sibling() {
+        use cctop_core::peer::{Peer, add_known, fake};
+        let sent = SessionData {
+            last_model: "claude-sub-from-there".into(),
+            ..Default::default()
+        };
+        let body = serde_json::to_string(&sent).unwrap().leak();
+        let (url, seen) = fake::sibling(200, body);
+        add_known(std::sync::Arc::new(Peer::fixed(
+            "ui-test-sub-panels",
+            &url,
+            fake::SECRET,
+        )));
+        let (tx, rx) = channel();
+        let mut app = App::new(Plan::Retail, tx);
+        let mut s = session("away-parent", true, "/home/me/work");
+        s.remote = Some(cctop_core::session::Remote {
+            host: "ui-test-sub-panels".into(),
+            ..Default::default()
+        });
+        // A path that means nothing here: the stand-in must not go looking
+        // for the agent's transcript on this machine.
+        s.data_file = Some("/nonexistent/away-parent.jsonl".into());
+        s.subagents = vec![cctop_core::session::Subagent {
+            agent_id: "agent-far".into(),
+            agent_type: "Explore".into(),
+            description: "look around".into(),
+            model: "claude-opus-5".into(),
+            started_at: None,
+            last_active: Some("2026-11-09T10:00:00Z".into()),
+            duration_ms: 0,
+            status: cctop_core::session::SubagentStatus::Running,
+            cost: 0.0,
+            tool_count: 0,
+            turns: 0,
+            tokens: 0,
+            last_text: None,
+            tool_use_id: None,
+            context: None,
+            ghost: false,
+        }];
+        app.sessions = vec![s];
+        app.expanded.insert(app.sessions[0].key());
+        app.refilter();
+        app.selected = app
+            .visible
+            .iter()
+            .position(|r| matches!(r, Row::Subagent { .. }))
+            .expect("the subagent has a row");
+        app.sync_panel_data();
+
+        assert!(app.panel_unread.is_none(), "{:?}", app.panel_unread);
+        let (session, far) = std::iter::from_fn(|| rx.try_recv().ok())
+            .find_map(|r| match r {
+                Request::Data(session, far) => Some((session, far)),
+                _ => None,
+            })
+            .expect("the read went to the worker");
+        assert_eq!(
+            session.session_id, "agent-far",
+            "the panels describe the agent"
+        );
+        assert!(session.data_file.is_none(), "{:?}", session.data_file);
+        let far = far.expect("a remote subagent is read where it lives");
+        assert_eq!(far.id, "away-parent");
+        assert_eq!(far.agent.as_deref(), Some("agent-far"));
+        let data = far
+            .reach
+            .data(&far.id, far.agent.as_deref())
+            .expect("the sibling answered");
+        assert_eq!(data.last_model, "claude-sub-from-there");
+        assert_eq!(
+            seen.lock().unwrap().as_slice(),
+            ["/api/data/away-parent/agent-far"]
         );
     }
 

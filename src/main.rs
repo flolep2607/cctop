@@ -516,7 +516,7 @@ fn main() -> anyhow::Result<()> {
         } else if let Some(which) = &args.chat {
             cli::run_chat(&sessions, which, args.before, args.agent.as_deref())?;
         } else if let Some(which) = &args.data {
-            cli::run_data(&sessions, which, &loader)?;
+            cli::run_data(&sessions, which, args.agent.as_deref(), &loader)?;
         } else if let Some(which) = &args.sidebar {
             cli::run_sidebar(&sessions, which, &loader)?;
         } else if let Some(which) = &args.diff {
