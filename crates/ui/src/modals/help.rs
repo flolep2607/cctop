@@ -409,8 +409,12 @@ enum HelpRow {
 /// `tabs` is asking for the section called that, not for the entries that
 /// happen to say the word.
 ///
-/// ponytail: the match is not highlighted. The page left is a few lines long,
-/// and the word typed is on the border above it.
+/// Every occurrence of the query on a line that is kept is marked the way the
+/// settings page marks its filter's match — a modifier over the line's own
+/// colours, so a key cap stays a key cap and the mono theme still sees it.
+///
+/// ponytail: a match that runs across the break between two lines of an entry
+/// keeps the entry but marks nothing, since each line is marked on its own.
 fn filter_help(rows: Vec<(HelpRow, Line<'static>)>, query: &str) -> Vec<Line<'static>> {
     if query.is_empty() {
         return rows.into_iter().map(|(_, line)| line).collect();
@@ -472,7 +476,26 @@ fn filter_help(rows: Vec<(HelpRow, Line<'static>)>, query: &str) -> Vec<Line<'st
         out.extend(heading);
         out.extend(kept.into_iter().flatten());
     }
-    out
+    mark_matches(out, query)
+}
+
+/// `lines` with each occurrence of `query` in them marked, case folded the way
+/// the filter folds it.
+fn mark_matches(lines: Vec<Line<'static>>, query: &str) -> Vec<Line<'static>> {
+    use crate::reader::{highlight, lower, matches_in};
+    let needle = lower(query);
+    let mark = Style::default().add_modifier(super::settings_page::MATCHED);
+    lines
+        .into_iter()
+        .map(|line| {
+            let row = lower(&line.to_string());
+            let ranges = matches_in(&row, &needle);
+            match ranges.is_empty() {
+                true => line,
+                false => highlight(&line, &ranges, mark),
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -669,5 +692,46 @@ mod tests {
             vec!["Beta", "   a note with no key", "c  third, more"]
         );
         assert!(filter_help(rows, "nowhere").is_empty());
+    }
+
+    /// What was typed is marked wherever it appears on the rows kept, in any
+    /// case, over the colours the row already had; nothing else is.
+    #[test]
+    fn filter_help_marks_the_query_in_what_it_keeps() {
+        use super::super::settings_page::MATCHED;
+        let red = Style::default().fg(ratatui::style::Color::Red);
+        let rows = vec![
+            (HelpRow::Section, Line::from("Tabs and more")),
+            (
+                HelpRow::Entry,
+                Line::from(vec![Span::styled("Ctrl+T", red), Span::raw("  New TAB")]),
+            ),
+        ];
+        // The marked runs of each line, as (text, colour kept).
+        let marked = |line: &Line| -> Vec<(String, Option<ratatui::style::Color>)> {
+            line.spans
+                .iter()
+                .filter(|s| s.style.add_modifier.contains(MATCHED))
+                .map(|s| (s.content.to_string(), s.style.fg))
+                .collect()
+        };
+
+        let lines = filter_help(rows.clone(), "TaB");
+        assert_eq!(lines[0].to_string(), "Tabs and more");
+        assert_eq!(marked(&lines[0]), vec![("Tab".to_string(), None)]);
+        assert_eq!(lines[1].to_string(), "Ctrl+T  New TAB");
+        assert_eq!(marked(&lines[1]), vec![("TAB".to_string(), None)]);
+
+        // A match inside a styled span keeps that span's colour.
+        let lines = filter_help(rows.clone(), "trl");
+        assert_eq!(lines.len(), 2);
+        assert!(marked(&lines[0]).is_empty());
+        assert_eq!(
+            marked(&lines[1]),
+            vec![("trl".to_string(), Some(ratatui::style::Color::Red))]
+        );
+
+        // No query, no marks.
+        assert!(filter_help(rows, "").iter().all(|l| marked(l).is_empty()));
     }
 }

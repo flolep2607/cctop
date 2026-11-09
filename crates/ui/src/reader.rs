@@ -929,12 +929,12 @@ fn lower_char(c: char) -> char {
     c.to_lowercase().next().unwrap_or(c)
 }
 
-fn lower(s: &str) -> Vec<char> {
+pub(crate) fn lower(s: &str) -> Vec<char> {
     s.chars().map(lower_char).collect()
 }
 
 /// Where `query` occurs in `row`, as character ranges that do not overlap.
-fn matches_in(row: &[char], query: &[char]) -> Vec<std::ops::Range<usize>> {
+pub(crate) fn matches_in(row: &[char], query: &[char]) -> Vec<std::ops::Range<usize>> {
     let mut out = Vec::new();
     if query.is_empty() || query.len() > row.len() {
         return out;
@@ -953,7 +953,7 @@ fn matches_in(row: &[char], query: &[char]) -> Vec<std::ops::Range<usize>> {
 
 /// `line` with the characters in `ranges` drawn in `mark` over their own style
 /// — spans split where a match starts or stops inside one.
-fn highlight(
+pub(crate) fn highlight(
     line: &Line<'static>,
     ranges: &[std::ops::Range<usize>],
     mark: Style,
