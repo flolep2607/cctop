@@ -236,7 +236,7 @@ const VALUE_W: usize = 14;
 /// the palette. Underlined as well as bold because the mono theme already draws
 /// a whole row in bold, and one of two shades of the same weight is not a
 /// distinction.
-const MATCHED: Modifier = Modifier::BOLD.union(Modifier::UNDERLINED);
+pub(super) const MATCHED: Modifier = Modifier::BOLD.union(Modifier::UNDERLINED);
 
 /// What a row's value is, as far as drawing it goes.
 ///
