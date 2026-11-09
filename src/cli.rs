@@ -61,6 +61,9 @@ Commands:
 Each command takes --help for the details.";
 
 #[derive(Parser, Debug)]
+// The documents `--agent` narrows to one subagent. `multiple`, because the two
+// never conflicted before the group and still need not: `main` answers --chat.
+#[command(group(clap::ArgGroup::new("per_session").args(["chat", "data"]).multiple(true)))]
 #[command(
     name = "cctop",
     about = "An htop-like monitor for AI coding agent sessions",
@@ -282,11 +285,13 @@ pub struct Args {
     #[arg(long, requires = "chat", value_name = "SEQ")]
     pub before: Option<usize>,
 
-    /// With --chat, one subagent's own conversation instead of the session's
+    /// With --chat or --data, one subagent's own conversation or data
+    /// instead of the session's
     ///
-    /// The id is the subagent's, as `/api/chat/<id>?agent=` takes it and as
-    /// the session's `Agent` calls name it in their `agent.id`
-    #[arg(long, requires = "chat", value_name = "AGENT")]
+    /// The id is the subagent's, as `/api/chat/<id>?agent=` and
+    /// `/api/data/<id>/<agent>` take it and as the session's `Agent` calls
+    /// name it in their `agent.id`
+    #[arg(long, requires = "per_session", value_name = "AGENT")]
     pub agent: Option<String>,
 
     /// Print everything parsed out of one session's transcript, as JSON, and exit
@@ -980,9 +985,27 @@ pub fn run_chat(
 }
 
 /// Print everything parsed out of one session's transcript as JSON, and exit.
-pub fn run_data(sessions: &[Session], which: &str, loader: &Loader) -> anyhow::Result<()> {
+///
+/// With `agent`, one subagent's own transcript: what a TUI on another machine
+/// asks for a remote subagent's row.
+pub fn run_data(
+    sessions: &[Session],
+    which: &str,
+    agent: Option<&str>,
+    loader: &Loader,
+) -> anyhow::Result<()> {
     let session = find_session(sessions, which)?;
-    let data = loader.store().session_data_fresh(session);
+    let stand_in;
+    let subject = match agent {
+        None => session,
+        Some(agent) => {
+            stand_in = session.subagent_stand_in(agent).ok_or_else(|| {
+                anyhow::anyhow!("no subagent {agent} with a transcript in this session")
+            })?;
+            &stand_in
+        }
+    };
+    let data = loader.store().session_data_fresh(subject);
     println!("{}", serde_json::to_string(&*data)?);
     Ok(())
 }
@@ -1156,6 +1179,20 @@ mod tests {
         assert!(Args::try_parse_from(["cctop", "--convert"]).is_err());
         let both = Args::try_parse_from(["cctop", "--convert", "abc", "codex"]).expect("valid");
         assert_eq!(both.convert, ["abc", "codex"]);
+    }
+
+    /// `--agent` narrows either per-session document, and nothing else: on
+    /// its own it is still refused, which is also how a cctop from before
+    /// `--data --agent` answers a remote subagent's panels.
+    #[test]
+    fn agent_narrows_the_conversation_or_the_data() {
+        let data = Args::try_parse_from(["cctop", "--data", "abc", "--agent", "agent-x"])
+            .expect("--data takes --agent");
+        assert_eq!(data.data.as_deref(), Some("abc"));
+        assert_eq!(data.agent.as_deref(), Some("agent-x"));
+        assert!(Args::try_parse_from(["cctop", "--chat", "abc", "--agent", "agent-x"]).is_ok());
+        assert!(Args::try_parse_from(["cctop", "--agent", "agent-x"]).is_err());
+        assert!(Args::try_parse_from(["cctop", "--report", "abc", "--agent", "x"]).is_err());
     }
 
     /// The line a status bar is handed: live counts in the words the status

@@ -82,7 +82,7 @@ pub use runloop::{choose_palette, run};
 use share::{Opening, ShareQr};
 pub use share::{ServeRequest, Served, StartServer};
 pub use switch::requested as switch_requested;
-use worker::Request;
+use worker::{Far, Request};
 
 use cctop_core::cache::UiPrefs;
 use cctop_core::loader::Stats;

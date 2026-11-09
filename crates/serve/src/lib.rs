@@ -3072,6 +3072,77 @@ mod tests {
         assert!(anonymous.contains(" 403 "), "{anonymous}");
     }
 
+    /// The panels' data for one subagent — what another machine's TUI asks
+    /// for a remote subagent row — is read from the agent's own transcript
+    /// under the parent's id; an agent the session does not list is a 404.
+    #[test]
+    fn the_data_route_reads_one_listed_subagent() {
+        let dir = tempfile::tempdir().unwrap();
+        let main = dir.path().join("sess-dt.jsonl");
+        std::fs::write(
+            &main,
+            r#"{"type":"assistant","timestamp":"2026-10-08T10:00:00Z","message":{"id":"msg_m","model":"claude-dummy-main","usage":{"input_tokens":1,"output_tokens":1},"content":[{"type":"text","text":"main"}]}}"#,
+        )
+        .unwrap();
+        let sub = dir.path().join("sess-dt").join("subagents");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(
+            sub.join("agent-d1.jsonl"),
+            r#"{"type":"assistant","isSidechain":true,"timestamp":"2026-10-08T10:00:02Z","message":{"id":"msg_s","model":"claude-dummy-sub","usage":{"input_tokens":1,"output_tokens":1},"content":[{"type":"text","text":"sub"}]}}"#,
+        )
+        .unwrap();
+        let mut s = Session::new(cctop_core::pricing::Provider::Claude, "sess-dt".into());
+        s.data_file = Some(main);
+        s.subagents = vec![cctop_core::session::Subagent {
+            agent_id: "agent-d1".into(),
+            agent_type: "Explore".into(),
+            description: "dummy".into(),
+            model: "?".into(),
+            started_at: None,
+            last_active: None,
+            duration_ms: 0,
+            status: cctop_core::session::SubagentStatus::Done,
+            cost: 0.0,
+            tool_count: 0,
+            turns: 0,
+            tokens: 0,
+            last_text: None,
+            tool_use_id: None,
+            context: None,
+            ghost: false,
+        }];
+        let guarded = shared("full", "view");
+        *guarded.latest.lock().unwrap() = Arc::new(Snapshot {
+            version: 1,
+            doc: Doc::ready("[]".to_string(), Vec::new()),
+            sessions: vec![s],
+            host_errors: Vec::new(),
+        });
+        let bearer = "Authorization: Bearer view\r\n";
+
+        let parent = response_of(&guarded, "GET", "/api/data/sess-dt", bearer);
+        assert!(parent.starts_with("HTTP/1.1 200 "), "{parent}");
+        assert!(parent.contains("claude-dummy-main"), "{parent}");
+        let agent = response_of(&guarded, "GET", "/api/data/sess-dt/agent-d1", bearer);
+        assert!(agent.starts_with("HTTP/1.1 200 "), "{agent}");
+        assert!(agent.contains("claude-dummy-sub"), "{agent}");
+        assert!(!agent.contains("claude-dummy-main"), "{agent}");
+
+        for refused in ["agent-nope", "..%2Fsess-dt", "subagents/agent-d1"] {
+            let status = status_of(
+                &guarded,
+                "GET",
+                &format!("/api/data/sess-dt/{refused}"),
+                bearer,
+            );
+            // A `..` is turned away before any route sees it, which is a 400.
+            assert!(
+                status.contains(" 404 ") || status.contains(" 400 "),
+                "{refused}: {status}"
+            );
+        }
+    }
+
     #[test]
     fn a_bearer_header_is_the_same_check_as_the_query() {
         let guarded = shared("full", "view");
