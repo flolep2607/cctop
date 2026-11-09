@@ -40,5 +40,5 @@ expression: screen
 │  stuck_burn        "$2 / 10m"       Spending this with no edit or passing test is a loop                             │
 │  idle_after        6                Hours quiet before a live session counts as idle (I)                             │
 │  read_screen       [ ]              Read each agent's screen in a tab for its state, over hooks                      │
-╰ 104   ↑↓ scroll   / filter   Esc back ───────────────────────────────────────────────────────────────────────────────╯
+╰ 105   ↑↓ scroll   / filter   Esc back ───────────────────────────────────────────────────────────────────────────────╯
 / Filter ↵ Change ⌫ Reset e Edit file , Back Alt+←→ Tabs F1 Help F10 Quit                                       ⧉ share

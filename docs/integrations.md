@@ -380,7 +380,7 @@ Seven tools, all read-only — and two more that act, off until you turn them on
   fetched), with the two rankings fused by rank, at most two passages from one
   session, each with its session id, agent, directory and date. The caller's own
   session is left out, since its conversation contains the question. The same
-  thing is `cctop recall` on the command line.
+  thing is `cctop recall` on the command line, and `H` on the dashboard.
 - **`read_passage`** — one passage from a `recall` answer with its neighbours,
   to read a hit in context.
 

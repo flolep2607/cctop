@@ -52,6 +52,7 @@ mod pull_request;
 mod qr;
 mod rave;
 mod reader;
+mod recall;
 mod remote;
 pub mod render;
 mod runloop;
@@ -169,6 +170,9 @@ pub enum Mode {
     /// The selected session's conversation, read-only — what the report page
     /// shows in a browser, over the table. `i` on a row, or Enter's menu.
     Conversation,
+    /// Passages from every past session that answer a query — `H`. See
+    /// [`recall`].
+    Recall,
     /// Naming or painting a workspace tab, opened by right-clicking it or
     /// with `Alt+r`.
     RenameTab,
@@ -952,6 +956,9 @@ pub struct App {
     /// The open conversation view. `None` while no overlay is up; the
     /// `Conversation` inside it is `None` while the worker is still reading.
     pub chat: Option<ChatView>,
+    /// The recall view (`H`), kept while the reader is open from it so `Esc`
+    /// there comes back to the same list. `None` once it is closed.
+    pub recall: Option<recall::RecallView>,
     /// The remote machines this run is reading, kept beside `remotes` because
     /// the rows say only *where* a session lives — reaching it for a
     /// conversation or a served report wants the `Host`, command and all.
@@ -1156,6 +1163,7 @@ impl App {
             insight_kind: "optimize",
             recap: wrapped::Recap::default(),
             chat: None,
+            recall: None,
             remote_hosts: Vec::new(),
             host_auto_hidden: false,
             loaded: false,
@@ -1598,6 +1606,11 @@ impl App {
                 }
             },
             Err(why) => view.error = Some(why),
+        }
+        // Opened on a recall passage older than the window: read back for it
+        // before the jump is spent on the wrong part of the conversation.
+        if let Some(before) = self.chat.as_mut().and_then(ChatView::seek_older) {
+            self.fetch_chat(Some(before));
         }
         self.needs_redraw = true;
     }

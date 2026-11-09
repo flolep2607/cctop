@@ -263,6 +263,7 @@ impl App {
             Mode::Insight => self.on_key_insight(key),
             Mode::Wrapped => self.on_key_wrapped(key),
             Mode::Conversation => self.on_key_conversation(key),
+            Mode::Recall => self.on_key_recall(key),
             Mode::Help => self.on_key_help(key),
             Mode::DeleteBlocked | Mode::KillBlocked => self.mode = Mode::List,
             // Any key, like the other panels that only have something to say;
@@ -428,6 +429,15 @@ impl App {
             }
             Mode::SendKeys => {
                 paste_into(&mut self.send_input, text, SEND_MAX);
+            }
+            // An error message copied from somewhere is the likeliest thing
+            // to ask about.
+            Mode::Recall => {
+                if let Some(view) = self.recall.as_mut()
+                    && paste_into(&mut view.query, text, super::recall::QUERY_MAX)
+                {
+                    view.typed();
+                }
             }
             Mode::NewWorktree => {
                 paste_into(&mut self.worktree_input, text, BRANCH_MAX);
@@ -687,6 +697,7 @@ impl App {
             | Mode::RenameAddress
             | Mode::SwitchTab
             | Mode::Note
+            | Mode::Recall
             | Mode::LaunchCwd => true,
             Mode::LaunchOptions => self.launch_opt_edit.is_some(),
             Mode::AddAccount => {
@@ -2037,6 +2048,10 @@ impl App {
             // the one reader that works on a remote row, over the ssh channel
             // the row arrived by.
             KeyCode::Char('i') => self.open_conversation(),
+            // `H` for history: what was said in every session at once, where
+            // `i` reads one. Capital because every nearer letter is taken,
+            // and free since sorting moved behind `S`.
+            KeyCode::Char('H') => self.open_recall(),
             // Alt+n does this too and works from inside a pane; here on the
             // dashboard, where nothing is competing for the keyboard, a plain
             // letter is what anyone will try first.
@@ -2248,6 +2263,16 @@ impl App {
             match ev.kind {
                 MouseEventKind::ScrollUp => self.on_wheel_conversation(true),
                 MouseEventKind::ScrollDown => self.on_wheel_conversation(false),
+                _ => {}
+            }
+            return;
+        }
+        // The recall view covers nearly all of it, and a click must not
+        // reach the table rows underneath.
+        if self.mode == Mode::Recall {
+            match ev.kind {
+                MouseEventKind::ScrollUp => self.on_wheel_recall(true),
+                MouseEventKind::ScrollDown => self.on_wheel_recall(false),
                 _ => {}
             }
             return;

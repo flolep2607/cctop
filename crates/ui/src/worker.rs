@@ -158,6 +158,12 @@ pub(super) enum Request {
         query: String,
         targets: Vec<cctop_core::session::search::Target>,
     },
+    /// The passages that answer `query`, for the recall view: the same
+    /// [`cctop_core::recall`] the MCP tool answers with, over this machine's
+    /// rows as the last walk found them.
+    Recall {
+        query: String,
+    },
     /// The git repositories under the home directory, for the launcher's
     /// directory field.
     ///
@@ -282,6 +288,9 @@ pub(super) enum Response {
         query: String,
         hits: HashMap<String, String>,
     },
+    /// What [`Request::Recall`] found. The answer carries its query, so one
+    /// that lands after the person has typed on is recognised as stale.
+    Recalled(Box<cctop_core::recall::Recall>),
     /// A finished report, already laid out as text.
     Insight(String),
     /// A year's recap.
@@ -373,6 +382,49 @@ struct Topics {
     absent: bool,
 }
 
+impl Topics {
+    /// The model and an index brought up to date for `targets`, loading both
+    /// the first time they are asked for — or `None` on a machine without the
+    /// model, which every caller treats as "words alone".
+    fn ready(
+        &mut self,
+        targets: &[cctop_core::session::search::Target],
+    ) -> Option<(&cctop_core::embed::Model, &cctop_core::embed::index::Index)> {
+        if self.absent {
+            return None;
+        }
+        if self.model.is_none() {
+            if !cctop_core::embed::fetch::present() {
+                self.absent = true;
+                return None;
+            }
+            match cctop_core::embed::Model::load(&cctop_core::embed::fetch::model_dir()) {
+                Ok(m) => self.model = Some(m),
+                Err(_) => {
+                    // A model that will not load is the same as no model here:
+                    // the search must keep working, and `--fetch-search-model`
+                    // verifies the load, so this is the unusual case of a
+                    // damaged cache.
+                    self.absent = true;
+                    return None;
+                }
+            }
+        }
+        let model = self.model.as_ref()?;
+        let index = self.index.get_or_insert_with(|| {
+            cctop_core::embed::index::Index::load(&cctop_core::config::EMBEDDING_INDEX_FILE)
+                .unwrap_or_default()
+        });
+        if index.refresh(model, targets) > 0 {
+            // Best effort: an index that cannot be written is rebuilt next
+            // time, which costs a second, and is not worth failing a search
+            // over.
+            let _ = index.save(&cctop_core::config::EMBEDDING_INDEX_FILE);
+        }
+        Some((model, index))
+    }
+}
+
 /// Widen `hits` with sessions that are *about* the query rather than containing
 /// it.
 ///
@@ -395,39 +447,9 @@ fn topical(
     if !worth_widening(hits.is_empty(), needle) {
         return;
     }
-    if topics.absent {
-        return;
-    }
-    if topics.model.is_none() {
-        if !cctop_core::embed::fetch::present() {
-            topics.absent = true;
-            return;
-        }
-        match cctop_core::embed::Model::load(&cctop_core::embed::fetch::model_dir()) {
-            Ok(m) => topics.model = Some(m),
-            Err(_) => {
-                // A model that will not load is the same as no model here: the
-                // search must keep working, and `--fetch-search-model` verifies
-                // the load, so this is the unusual case of a damaged cache.
-                topics.absent = true;
-                return;
-            }
-        }
-    }
-    let Some(model) = topics.model.as_ref() else {
+    let Some((model, index)) = topics.ready(targets) else {
         return;
     };
-
-    let index = topics.index.get_or_insert_with(|| {
-        cctop_core::embed::index::Index::load(&cctop_core::config::EMBEDDING_INDEX_FILE)
-            .unwrap_or_default()
-    });
-    if index.refresh(model, targets) > 0 {
-        // Best effort: an index that cannot be written is rebuilt next time,
-        // which costs a second, and is not worth failing a search over.
-        let _ = index.save(&cctop_core::config::EMBEDDING_INDEX_FILE);
-    }
-
     let query = model.embed(&cctop_core::embed::topic_of(needle));
     for (key, snippet, score) in index.search(&query, TOPICAL_FLOOR, TOPICAL_LIMIT) {
         // A session the literal search already found keeps the snippet that
@@ -1072,6 +1094,31 @@ pub(super) fn spawn_worker(
                     let mut hits = loader.gently(|| scan(&mut scans, &targets, &needle));
                     loader.gently(|| topical(&mut topics, &needle, &targets, &mut hits));
                     if tx.send(Response::Scanned { query, hits }).is_err() {
+                        break;
+                    }
+                }
+                // Inline and gentle, like `Scan`: the model and index stay
+                // loaded in `topics` between queries, which is what makes
+                // asking again on every pause in the typing affordable. Over
+                // `live_rows` rather than rows sent with the request — the
+                // passages are read from local transcripts, and the worker
+                // already holds exactly those.
+                Request::Recall { query } => {
+                    let answer = loader.gently(|| {
+                        let targets: Vec<cctop_core::session::search::Target> = live_rows
+                            .iter()
+                            .map(cctop_core::session::search::Target::of)
+                            .collect();
+                        let topics = topics.ready(&targets);
+                        cctop_core::recall::recall_with(
+                            &live_rows,
+                            &query,
+                            super::recall::LIMIT,
+                            None,
+                            topics,
+                        )
+                    });
+                    if tx.send(Response::Recalled(Box::new(answer))).is_err() {
                         break;
                     }
                 }

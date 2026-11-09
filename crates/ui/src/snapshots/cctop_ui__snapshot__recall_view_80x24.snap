@@ -1,0 +1,28 @@
+---
+source: crates/ui/src/snapshot.rs
+expression: screen
+---
+ 1:Dashboard │ + Tab (t) ───────────────────────────────────────────── Settings
+╭ Overview ────────────────────────────────────────────────────────────────────╮
+│L╭ Recall — what your agents said ──────────────────────────────────────────╮ │
+│T│ > sharded cache█                                                         │ │
+│T│ ● 3 passages from 3 sessions · by words only                             │ │
+│A│   Matching by meaning needs the search model: cctop --fetch-search-model │ │
+╰─│                                                                          │─╯
+╭ │   claude · /nonexistent/web · 2026-10-01 · Cache layout                  │─╮
+│ │     We chose a sharded cache because the single file grew past 120 MB    │ │
+│●│     and every refresh rewrote all of it. The shard key is the provider.  │…┃
+│●│ ▸ codex · /nonexistent/api · 2026-09-14 · Why is startup slow            │ │
+╰─│     …profiling showed the cache load at 400 ms. Sharding it would let a  │─╯
+╭ │     refresh touch one file; the cache is read whole today.               │t╮
+│R│   claude · /nonexistent/web · 2026-08-30 · Refactor loader               │ │
+│ │     No mention of the words, found by what it is about.                  │ │
+│ │                                                                          │ │
+│ │                                                                          │ │
+│ │                                                                          │ │
+│ │                                                                          │ │
+╰─│                                                                          │─╯
+╭ │                                                                          │ ╮
+│C│ Enter read it there   Ctrl+R resume in a tab   ↑↓ pick   Esc close       │ │
+╰─╰──────────────────────────────────────────────────────────────────────────╯─╯
+↑↓ Move ↵ Actions / Filter Space Mark a Attach R Resume ? Help          ⧉ share
