@@ -65,6 +65,11 @@ pub(super) enum Request {
     Schedules {
         path: std::path::PathBuf,
     },
+    /// The scheduled runs view's sessions: read each one's transcript for the
+    /// files it edited and what it last said.
+    AwayDetails {
+        sessions: Vec<Session>,
+    },
     /// Check a checkout's branch for `p`. `title` is the session's own, for
     /// the title box to start from.
     PullRequestCheck {
@@ -225,6 +230,8 @@ pub(super) enum Response {
         said: Option<String>,
         rows: Vec<super::schedules::ScheduleRow>,
     },
+    /// [`Request::AwayDetails`]: by session key, files edited and last words.
+    AwayDetails(Vec<(String, Option<usize>, Option<String>)>),
     /// A step of `p`, or how it ended.
     PullRequest(super::pull_request::Event),
     /// A step of `X`, or how it ended.
@@ -769,6 +776,24 @@ pub(super) fn spawn_worker(
                         let said = cctop_core::schedule::sync_if_changed();
                         let rows = super::schedules::rows(&path);
                         let _ = tx.send(Response::Schedules { said, rows });
+                    });
+                }
+                // The gentle pool, as for a panel's extraction: each is a
+                // transcript parse, and the store keeps what it reads.
+                Request::AwayDetails { sessions } => {
+                    let store = loader.store_shared();
+                    let tx = tx.clone();
+                    loader.gently_spawn(move || {
+                        let details = sessions
+                            .iter()
+                            .map(|session| {
+                                let data = store.session_data(session);
+                                let (files, said) =
+                                    cctop_core::schedule_log::details(session, Some(&data));
+                                (session.key(), files, said)
+                            })
+                            .collect();
+                        let _ = tx.send(Response::AwayDetails(details));
                     });
                 }
                 // A thread each, not the gentle pool: a push can take its whole

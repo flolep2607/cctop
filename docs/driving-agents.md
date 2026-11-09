@@ -594,6 +594,32 @@ cctop schedule run deps --now    # run one now, even if it is switched off
 The Settings tab (`,`) lists them under `[[schedule]]`: Enter switches one on
 or off, `n` runs it now.
 
+**What they did while you were away.** Every run is recorded, whether it
+started, was skipped, or could not start, in `~/.local/share/cctop/schedule-runs.jsonl`
+(the last 200 runs, readable only by you). When there are runs you have not
+looked at, the dashboard's footer says so — `3 scheduled runs while you were
+away · J` — and `J` lists them, newest first, the new ones on top and older ones
+dimmed below. Each says where its agent is now: working, held on a permission
+prompt or a question, finished (and whether it is still idle in its tab),
+failed to start and why, or skipped. Beside that are its cost, how long it ran,
+how many files it edited, the last thing it said, and `⟳` if it looks stuck in
+a loop. Enter opens it: its tab while the agent is running, its conversation in
+the reader when it has ended. Closing the list marks those runs seen. `J` moves
+like any other key, with `away = "…"` under `[keys]`.
+
+A run is matched to its session by the agent's pid while it runs, and otherwise
+by the first session of its harness to start in its directory within a quarter
+of an hour of the run. The same summary, for a script or a page:
+
+```bash
+cctop schedule log               # every recorded run and what came of it, newest first
+cctop schedule log --json        # the same as JSON
+```
+
+`cctop schedule log` reads transcripts only, without the hooks the dashboard
+hears, so an agent waiting on a permission prompt there reads as working; the
+`J` view knows the difference.
+
 The unit files go in `~/.config/systemd/user/`, each starting with a comment
 saying cctop wrote it. cctop only ever changes or removes files that start with
 that line, so a unit of your own with a similar name is left alone.

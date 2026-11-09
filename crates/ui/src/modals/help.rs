@@ -273,6 +273,11 @@ pub(crate) fn draw_help(frame: &mut Frame, area: Rect, app: &mut App) {
             "{provider_status}",
             "Provider status: does an outage explain the errors",
         ),
+        item(
+            "{away}",
+            "What the scheduled agents did while you were away",
+        ),
+        item("  ↵", "In it: open that run's tab, or its conversation"),
         item("{refresh}  F5", "Refresh now"),
         gap(),
         section("Environment"),

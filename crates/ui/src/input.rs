@@ -260,6 +260,7 @@ impl App {
             Mode::LaunchCwd => self.on_key_launch_cwd(key),
             Mode::Hooks => self.on_key_hooks(key),
             Mode::ProviderStatus => self.on_key_provider_status(key),
+            Mode::Away => self.on_key_away(key),
             Mode::Insight => self.on_key_insight(key),
             Mode::Wrapped => self.on_key_wrapped(key),
             Mode::Conversation => self.on_key_conversation(key),
@@ -1957,6 +1958,10 @@ impl App {
             // right connotation. No function key: F9, the next free one when
             // this was first written, is the image paste now.
             KeyCode::Char('!') => self.open_provider_status(),
+            // `J` for the journal of what the scheduled agents did: one of
+            // the few capitals left once `H` went to recall and `W` to share.
+            // The footer names it when there are runs to see.
+            KeyCode::Char('J') => self.open_away(),
             KeyCode::Char('/') | KeyCode::F(3) => self.mode = Mode::Search,
             KeyCode::Char('?') | KeyCode::F(1) => self.mode = Mode::Help,
             KeyCode::Char(',') => self.goto_settings(),

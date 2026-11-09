@@ -1,0 +1,44 @@
+---
+source: crates/ui/src/snapshot.rs
+expression: screen
+---
+ 1:Dashboard │ + Tab (t) ───────────────────────────────────────────────────────────────────────────────────── Settings
+╭ Overview ────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│Live rate         $0.04                               ⡀  Models    █████████ claude-opus-4-1 68% claude-sonnet-4-5 32%│
+│Today             $8.97                               ⡀  Sessions  4 · 2 live · 3 in 24h                              │
+│This month        $0.00                               ⡀  Agent CPU   3.2%                    ⡀                        │
+│All time         $28.51 $0.00/day this month             Agent mem 592 MB · 2.5M in / 72.3K out                       │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭ Sessions (4) ────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│   LAST▲    DUR         $    CTX%  CPU% MODEL          HARNESS    PERM   ! HOST       PROFILE   BRANCH       PROJECT  │
+│●    now     1h    $18.42   ▓▓90%  12.5 opus-4-1       ─          ─        local                ─            Fix the …│
+│●     7m     2h     $2.87   ▓░29%   0.4 sonnet-4-5     ─          ─        local                ─            api      │
+│○     3h     1h     $0.19       ─     ─ haiku-4-5      ─          ─        local                ─            docs     │
+│○     2d    12h     $7.03       ─     ─ gpt-5-codex    ─          ─        local                ─            infra    │
+│             ╭ Scheduled runs · 3 new ──────────────────────────────────────────────────────────────────╮             │
+│             │ Since you last looked                                                                    │             │
+│             │ triage               30m ago  failed to start                                            │             │
+│             │   ~/src/triage is not a directory on this machine                                        │             │
+│             │ deps                  1h ago  working · $18.42 · 1h34m · 3 files                         │             │
+│             │   Bumped serde and tokio; running the test suite now.                                    │             │
+│             │ nightly-tests         2h ago  finished · idle in its tab · $2.87 · 2h22m                 │             │
+│             │                                                                                          │             │
+│             │ Earlier                                                                                  │             │
+╰─────────────│ lint                  1d ago  skipped                                                    │─────────────╯
+╭ Info  Perfor│   lint's previous run is still going (tab cctop-schedule-lint)                           │─────────────╮
+│Root /usr/bin│                                                                                          │             │
+│    PID    CP│ ↵ open its tab or conversation   ↑↓ move   Esc close, marking these seen                 │             │
+│   4101    9.╰──────────────────────────────────────────────────────────────────────────────────────────╯             │
+│   4188    2.4%     44.0M  node mcp-server.js                                                                         │
+│   4290    0.3%      8.0M  bash -c npm test                                                                           │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭ Limits ─────────────────────────────────────────────────────────────────────────────────────────────────── + account ╮
+│Claude checking…                                            Codex checking…                                           │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+↑↓ Move ↵ Actions / Filter Space Mark a Attach R Resume ? Help  3 scheduled runs while you were away · J        ⧉ share

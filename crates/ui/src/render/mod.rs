@@ -718,6 +718,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) -> Layout {
         Mode::RowMenu => modals::draw_row_menu(frame, area, app, &mut layout),
         Mode::Hooks => modals::draw_hooks(frame, area, app),
         Mode::ProviderStatus => super::outage::draw(frame, area, app),
+        Mode::Away => super::away::draw(frame, area, app),
         Mode::Insight => modals::draw_insight(frame, area, app),
         Mode::Wrapped => super::wrapped::draw(frame, area, app),
         Mode::Conversation => super::reader::draw(frame, area, app),

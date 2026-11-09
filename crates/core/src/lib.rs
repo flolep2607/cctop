@@ -88,6 +88,7 @@ pub mod repos;
 pub mod rmux;
 pub mod sandbox;
 pub mod schedule;
+pub mod schedule_log;
 pub mod screen;
 pub mod secrets;
 pub mod session;

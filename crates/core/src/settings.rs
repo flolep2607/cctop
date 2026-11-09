@@ -247,7 +247,7 @@ pub const PASTE_DEBOUNCE_MS: u64 = 250;
 /// pane's belong to the agent.
 ///
 // ponytail: dashboard keys only; extend to modals if someone asks to rebind one.
-pub const BINDINGS: [(&str, &str, &str); 58] = [
+pub const BINDINGS: [(&str, &str, &str); 59] = [
     ("quit", "q", "Quit"),
     ("help", "?", "Help"),
     ("settings", ",", "The settings tab, at the end of the bar"),
@@ -331,6 +331,11 @@ pub const BINDINGS: [(&str, &str, &str); 58] = [
         "provider_status",
         "!",
         "Provider status: does an outage explain the errors",
+    ),
+    (
+        "away",
+        "J",
+        "What the scheduled agents did while you were away",
     ),
     ("refresh", "r", "Refresh now"),
     (
@@ -1083,6 +1088,23 @@ mod tests {
             map.remap.is_empty(),
             "a default rebound onto itself is no change"
         );
+    }
+
+    /// No two dashboard actions are on the same key by default. Nothing else
+    /// catches it: the handler's first matching arm wins, so the second action
+    /// silently never runs — which is how `H` was nearly both recall and the
+    /// scheduled runs.
+    #[test]
+    fn no_two_default_bindings_share_a_key() {
+        let mut seen: Vec<(Key, &str)> = Vec::new();
+        for (action, default, _) in BINDINGS {
+            let (code, mods) = parse_key(default).expect("every default key parses");
+            let key = normal(code, mods);
+            if let Some((_, other)) = seen.iter().find(|(k, _)| *k == key) {
+                panic!("{action} and {other} are both on {default:?}");
+            }
+            seen.push((key, action));
+        }
     }
 
     /// Both windows default to the calendar spelling, so an upgrade does not
