@@ -332,6 +332,11 @@ pub const BINDINGS: [(&str, &str, &str); 58] = [
         "!",
         "Provider status: does an outage explain the errors",
     ),
+    (
+        "away",
+        "H",
+        "What the scheduled agents did while you were away",
+    ),
     ("refresh", "r", "Refresh now"),
     (
         "tool_filter_prev",

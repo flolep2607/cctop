@@ -17,10 +17,10 @@ expression: screen
 │  triage            [ ]            * daily · codex in ~/src/app · off                                                 │
 │  add               ↵ edit file      an agent that starts on its own: [[schedule]] in config.toml                     │
 │                                                                                                                      │
+│config.toml · [keys], on the session table                                                                            │
+│  away              H                What the scheduled agents did while you were away                                │
+│                                                                                                                      │
 │  ↵ on/off   n run now   e open the file in an editor   Esc back to the table                                         │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │

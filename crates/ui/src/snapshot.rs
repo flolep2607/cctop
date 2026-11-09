@@ -1278,6 +1278,66 @@ fn idle_view_and_reclaim() {
     snap("idle_reclaim", &mut app);
 }
 
+/// The scheduled runs view, and the footer line that leads to it: three runs
+/// since the last look — one still working, one done and idle in its tab, one
+/// that could not start — and an older skipped one, dimmed below them. The
+/// runs are joined to the fixture's rows the way the real view joins them.
+#[test]
+fn away_view_and_hint() {
+    use cctop_core::schedule_log::{Run, Start, summarize};
+    let mut app = fixture();
+    let run = |name: &str, at: Age, start: Start, dir: &str| Run {
+        at: ago(at),
+        schedule: name.into(),
+        start,
+        why: None,
+        dir: format!("/nonexistent/{dir}"),
+        harness: "claude".into(),
+        account: None,
+        model: None,
+        tab: format!("cctop-schedule-{name}"),
+        by_hand: false,
+        pid: None,
+    };
+    let mut failed = run("triage", Age::minutes(30), Start::Failed, "triage");
+    failed.why = Some("~/src/triage is not a directory on this machine".into());
+    let mut skipped = run("lint", Age::hours(26), Start::Skipped, "web");
+    skipped.why = Some("lint's previous run is still going (tab cctop-schedule-lint)".into());
+    let runs = vec![
+        skipped,
+        run(
+            "nightly-tests",
+            Age::minutes(150) + Age::seconds(5),
+            Start::Started,
+            "api",
+        ),
+        run(
+            "deps",
+            Age::minutes(95) + Age::seconds(5),
+            Start::Started,
+            "web",
+        ),
+        failed,
+    ];
+    let seen = ago(Age::hours(5));
+    let mut rows = summarize(&runs, &app.sessions, Some(&seen), Utc::now());
+    let deps = rows
+        .iter_mut()
+        .find(|r| r.run.schedule == "deps")
+        .expect("deps");
+    assert_eq!(
+        deps.session_id.as_deref(),
+        Some(app.sessions[0].session_id.as_str())
+    );
+    deps.files_changed = Some(3);
+    deps.last_message = Some("Bumped serde and tokio; running the test suite now.".into());
+
+    app.away.unseen = 3;
+    snap("away_hint", &mut app);
+    app.show_away(rows);
+    snap("away_view", &mut app);
+}
+
 /// `P` over three marked rows: `web` and `api` are live and named on the
 /// title with their count, `docs` has ended and is named inside with why.
 #[test]

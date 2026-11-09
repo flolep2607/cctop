@@ -751,6 +751,7 @@ fn event_loop(
                     }
                     app.needs_redraw = true;
                 }
+                Ok(Response::AwayDetails(details)) => app.got_away_details(details),
                 Ok(Response::PullRequest(event)) => app.got_pull_request(event),
                 Ok(Response::Move(event)) => app.got_move(event),
                 Ok(Response::Checkpoints { key, result }) => app.got_checkpoints(key, result),

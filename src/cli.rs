@@ -29,7 +29,7 @@ Commands:
                           browser. Loopback and read-only by default; `serve
                           --help` for the flags. Handy on a phone.
   cctop schedule          Agents that start on their own at times you set:
-                          [[schedule]] in config.toml; list, sync, run.
+                          [[schedule]] in config.toml; list, sync, run, log.
   cctop wait <session>    Block until a session stops working — by id prefix,
                           tab name or pid. For one agent to wait on another.
   cctop doctor            Check this installation and say what is wrong with
@@ -82,7 +82,7 @@ Each command takes --help for the details.";
                       cctop yolo log [--session ID] [--since WHEN] [-n N] [--json] [-f]\n       \
                       cctop recall <query> [--read SESSION PASSAGE]\n       \
                       cctop wait <session> [--until …] [--timeout …]\n       \
-                      cctop schedule [list | sync | run NAME [--now]]\n       \
+                      cctop schedule [list | sync | run NAME [--now] | log [--json]]\n       \
                       cctop why [session]\n       \
                       cctop doctor",
     // The one-line summary is the whole of `-h`; the command list is the part

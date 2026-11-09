@@ -264,6 +264,17 @@ fn footer_badges(app: &App) -> Vec<Span<'static>> {
             Span::styled(" FOLLOW ", Style::default().fg(theme::colors().cost_mid)),
         ));
     }
+    // Scheduled agents ran while nobody was here. A line rather than a popup:
+    // it is news, not a question, and it goes when the view has been looked at.
+    if let Some(hint) = crate::away::hint(app.away.unseen, &app.away_key()) {
+        badges.push((
+            "away",
+            Span::styled(
+                format!(" {hint} "),
+                Style::default().fg(theme::colors().accent),
+            ),
+        ));
+    }
     // The user's own line, next to what cctop is doing to the table.
     if let Some(note) = app.footer_extra.text() {
         let note: String = note.chars().take(48).collect();

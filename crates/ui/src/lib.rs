@@ -14,6 +14,7 @@
 /// Choosing an agent's share address, or the dashboard's.
 mod address;
 mod ansi;
+mod away;
 mod batch;
 mod changes;
 mod codes;
@@ -167,6 +168,9 @@ pub enum Mode {
     /// Provider status: what each vendor's status page says is broken, set
     /// against which of the user's sessions are failing. See [`outage`].
     ProviderStatus,
+    /// What the scheduled agents did, newest first, the runs since the last
+    /// look on top. See [`away`].
+    Away,
     /// The selected session's conversation, read-only — what the report page
     /// shows in a browser, over the table. `i` on a row, or Enter's menu.
     Conversation,
@@ -663,6 +667,8 @@ pub struct App {
     pub settings_stamp: u64,
     /// The `[[schedule]]` entries of that file, with when each fires next.
     pub schedules: Vec<schedules::ScheduleRow>,
+    /// The scheduled runs view, and how many runs it has not shown yet.
+    pub away: away::Away,
     /// Whether the settings page is the body on screen.
     ///
     /// Its own field rather than an index, which is the correction this needed:
@@ -1116,6 +1122,8 @@ impl App {
         }
         let mut app = Self::with_prefs(plan, tx, prefs);
         app.burn = cctop_core::burn::Log::load();
+        // Here and not in `with_prefs`, which reads nothing off the disk.
+        app.away.unseen = cctop_core::schedule_log::Log::default().unseen();
         app.reports = cctop_core::hook::Reports::new();
         app.quota = Quota::default();
         app.launch_root = std::env::current_dir().ok();
@@ -1264,6 +1272,7 @@ impl App {
             settings_file: None,
             settings_stamp: 0,
             schedules: Vec::new(),
+            away: away::Away::default(),
             settings_scroll: 0,
             settings_max_scroll: 0,
             settings_open: false,

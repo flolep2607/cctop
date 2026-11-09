@@ -307,10 +307,38 @@ pub fn run(name: &str, by_hand: bool) -> Result<String, String> {
             .find(|p| p.contains(&format!("{name:?}")))
             .cloned()
             .unwrap_or_else(|| format!("no [[schedule]] named {name:?} in config.toml"));
+        // Recorded too: a timer still firing for a schedule taken out of the
+        // file is a run that did nothing, every day, until someone notices.
+        crate::schedule_log::record(&crate::schedule_log::Run {
+            at: crate::schedule_log::now(),
+            schedule: name.to_string(),
+            start: crate::schedule_log::Start::Failed,
+            why: Some(why.clone()),
+            dir: String::new(),
+            harness: String::new(),
+            account: None,
+            model: None,
+            tab: format!("{UNIT_PREFIX}{name}"),
+            by_hand,
+            pid: None,
+        });
         return Err(why);
     };
     let tab = schedule.unit();
     let before = previous(&tab);
+    let mut record = crate::schedule_log::Run {
+        at: crate::schedule_log::now(),
+        schedule: schedule.name.clone(),
+        start: crate::schedule_log::Start::Started,
+        why: None,
+        dir: schedule.dir.clone(),
+        harness: schedule.harness.clone(),
+        account: schedule.account.clone(),
+        model: schedule.model.clone(),
+        tab: tab.clone(),
+        by_hand,
+        pid: None,
+    };
     let result = match skip_reason(schedule, before, by_hand) {
         Some(why) => {
             // Told, not only logged: a run that did not happen is otherwise
@@ -319,6 +347,8 @@ pub fn run(name: &str, by_hand: bool) -> Result<String, String> {
                 &format!("Skipped: {}", schedule.name),
                 &format!("Its previous run is still at work in tab {tab}"),
             );
+            record.start = crate::schedule_log::Start::Skipped;
+            record.why = Some(why.clone());
             Ok(format!("skipped: {why}"))
         }
         None => {
@@ -327,9 +357,21 @@ pub fn run(name: &str, by_hand: bool) -> Result<String, String> {
                 // is the next run's to use.
                 let _ = crate::rmux::kill(&tab);
             }
-            start(schedule, &tab)
+            match start(schedule, &tab) {
+                Ok(started) => {
+                    record.dir = started.dir.to_string_lossy().into_owned();
+                    record.pid = started.pid;
+                    Ok(started.said)
+                }
+                Err(why) => {
+                    record.start = crate::schedule_log::Start::Failed;
+                    record.why = Some(why.clone());
+                    Err(why)
+                }
+            }
         }
     };
+    crate::schedule_log::record(&record);
     crate::elog::event(
         "schedule",
         "run",
@@ -342,7 +384,16 @@ pub fn run(name: &str, by_hand: bool) -> Result<String, String> {
     result
 }
 
-fn start(schedule: &Schedule, tab: &str) -> Result<String, String> {
+/// A run's agent, once started.
+struct Started {
+    said: String,
+    dir: PathBuf,
+    /// The pane's process, which is the agent: an account's `env` prefix
+    /// execs into it. What [`crate::schedule_log`] finds the run's session by.
+    pid: Option<u32>,
+}
+
+fn start(schedule: &Schedule, tab: &str) -> Result<Started, String> {
     let plan = plan(schedule)?;
     if !crate::actions::agents().contains(&plan.harness) {
         return Err(format!("{} is not installed on this machine", plan.harness));
@@ -356,11 +407,16 @@ fn start(schedule: &Schedule, tab: &str) -> Result<String, String> {
         .map_err(|why| format!("could not start {}: {why}", plan.harness))?;
     crate::rmux::set_label(tab, &schedule.name);
     announce(schedule, &plan.dir);
-    Ok(format!(
-        "started {} in {} as tab {tab}",
-        schedule.harness,
-        crate::util::tildify(&plan.dir.to_string_lossy())
-    ))
+    let pid = crate::mux::display(tab, "#{pane_pid}").and_then(|p| p.trim().parse().ok());
+    Ok(Started {
+        said: format!(
+            "started {} in {} as tab {tab}",
+            schedule.harness,
+            crate::util::tildify(&plan.dir.to_string_lossy())
+        ),
+        dir: plan.dir,
+        pid,
+    })
 }
 
 /// Tell the person's phone a scheduled agent started.
@@ -958,6 +1014,8 @@ pub fn run_cli(argv: &[String]) -> i32 {
                 }
             }
         }
+        ["log"] => log_cli(false),
+        ["log", "--json"] => log_cli(true),
         ["help" | "--help" | "-h"] => {
             println!("{USAGE}");
             0
@@ -969,7 +1027,75 @@ pub fn run_cli(argv: &[String]) -> i32 {
     }
 }
 
-const USAGE: &str = "usage: cctop schedule [list | sync | run NAME [--now]]
+/// `cctop schedule log [--json]`: every recorded run and what came of it,
+/// newest first — see [`crate::schedule_log`]. Read-only: it does not mark
+/// the runs seen, which is the dashboard's to do when the person has looked.
+///
+/// ponytail: the sessions here are read from their transcripts alone, without
+/// the hooks a running dashboard hears, so an agent held on a permission
+/// prompt reads as working. The dashboard's view has the hooks.
+fn log_cli(json: bool) -> i32 {
+    crate::pricing::refresh_pricing_blocking();
+    let mut loader = crate::loader::Loader::new();
+    let sessions = loader.load(crate::pricing::Plan::Retail);
+    let store = loader.store();
+    let summaries =
+        crate::schedule_log::report(&crate::schedule_log::Log::default(), &sessions, &|s| {
+            Some(store.session_data(s))
+        });
+    store.save();
+    if json {
+        return match serde_json::to_string_pretty(&summaries) {
+            Ok(text) => {
+                println!("{text}");
+                0
+            }
+            Err(e) => {
+                eprintln!("{e}");
+                1
+            }
+        };
+    }
+    if summaries.is_empty() {
+        println!("No scheduled runs recorded yet.");
+        return 0;
+    }
+    for s in &summaries {
+        let when = crate::util::parse_ts(&s.run.at).map_or_else(
+            || s.run.at.clone(),
+            |t| {
+                t.with_timezone(&chrono::Local)
+                    .format("%a %m-%d %H:%M")
+                    .to_string()
+            },
+        );
+        let mut facts = vec![s.state.label().to_string()];
+        if let Some(cost) = s.cost {
+            facts.push(format!("${cost:.2}"));
+        }
+        if let Some(ms) = s.duration_ms {
+            facts.push(crate::util::compact_duration(ms));
+        }
+        if let Some(n) = s.files_changed {
+            facts.push(format!("{n} files"));
+        }
+        if let Some(stuck) = &s.stuck {
+            facts.push(format!("looping: {stuck}"));
+        }
+        let mark = if s.unseen { "*" } else { " " };
+        println!(
+            "{mark} {when}  {:<20} {}",
+            s.run.schedule,
+            facts.join(" · ")
+        );
+        if let Some(said) = s.last_message.as_ref().or(s.run.why.as_ref()) {
+            println!("  {:<17}  {}", "", crate::util::truncate(said, 100));
+        }
+    }
+    0
+}
+
+const USAGE: &str = "usage: cctop schedule [list | sync | run NAME [--now] | log [--json]]
 
 A schedule is a [[schedule]] in cctop's config.toml:
 
@@ -983,7 +1109,9 @@ prompt = \"Bump outdated dependencies and run the tests\"
 
 list   each schedule, its next and last run
 sync   install the systemd timers for what config.toml says now
-run    start one now, as its timer would; --now runs it even when switched off";
+run    start one now, as its timer would; --now runs it even when switched off
+log    what each run did: finished, waiting on you, failed — cost, time, files,
+       its last message (* = since you last looked in the dashboard's H view)";
 
 #[cfg(test)]
 mod tests {
