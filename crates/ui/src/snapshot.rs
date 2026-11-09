@@ -867,6 +867,66 @@ fn search_typing() {
     snap("search_typing", &mut app);
 }
 
+/// The recall view over the table, answered on words alone — so the line
+/// saying the meaning half is missing, and how to get it, is in the frame —
+/// with the second passage selected.
+#[test]
+fn recall_view() {
+    use cctop_core::recall::{Passage, Recall};
+    let passage =
+        |id: &str, harness: &str, dir: &str, day: &str, title: &str, text: &str| Passage {
+            session_id: id.into(),
+            harness: harness.into(),
+            provider: harness.into(),
+            directory: format!("/nonexistent/{dir}"),
+            title: Some(title.into()),
+            last_active: format!("{day}T10:00:00Z"),
+            passage: Some(3),
+            text: text.into(),
+            matched: "words",
+        };
+    let mut app = fixture();
+    app.mode = Mode::Recall;
+    let mut view = super::recall::RecallView::default();
+    view.query = "sharded cache".into();
+    view.answer = Some(Recall {
+        query: "sharded cache".into(),
+        passages: vec![
+            passage(
+                "11111111-aaaa-4000-8000-000000000001",
+                "claude",
+                "web",
+                "2026-10-01",
+                "Cache layout",
+                "We chose a sharded cache because the single file grew past 120 MB and every \
+                 refresh rewrote all of it.\nThe shard key is the provider.",
+            ),
+            passage(
+                "22222222-bbbb-4000-8000-000000000002",
+                "codex",
+                "api",
+                "2026-09-14",
+                "Why is startup slow",
+                "…profiling showed the cache load at 400 ms. Sharding it would let a refresh \
+                 touch one file; the cache is read whole today.",
+            ),
+            passage(
+                "33333333-cccc-4000-8000-000000000003",
+                "claude",
+                "web",
+                "2026-08-30",
+                "Refactor loader",
+                "No mention of the words, found by what it is about.",
+            ),
+        ],
+        topical: false,
+        sessions_matched: 3,
+    });
+    view.selected = 1;
+    app.recall = Some(view);
+    snap("recall_view", &mut app);
+}
+
 #[test]
 fn sort_modal() {
     let mut app = fixture();

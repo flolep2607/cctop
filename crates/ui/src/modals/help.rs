@@ -108,6 +108,14 @@ pub(crate) fn draw_help(frame: &mut Frame, area: Rect, app: &mut App) {
         ),
         item("  Tab", "Search inside the transcripts as well"),
         item("  ↑ / ↓", "Bring back an earlier search"),
+        item(
+            "{recall}",
+            "Recall: what any session said, by words or meaning",
+        ),
+        item(
+            "  ↵  Ctrl+R",
+            "In it: read it at that passage / resume it in a tab",
+        ),
         item("{sort}  F6  >  <", "Sort by any column"),
         item("F7", "Filter by age (1d / 1w / 1mo)"),
         item("{cost_floor}", "Cost floor: only sessions costing ≥ $X"),

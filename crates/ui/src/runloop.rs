@@ -872,6 +872,7 @@ fn event_loop(
                 }
                 Ok(Response::RemoteUpdated { host, result }) => app.remote_updated(host, result),
                 Ok(Response::Scanned { query, hits }) => app.scanned(query, hits),
+                Ok(Response::Recalled(answer)) => app.recalled(*answer),
                 Ok(Response::Insight(text)) => {
                     app.insight = Some(text);
                     app.insight_scroll = 0;
@@ -934,6 +935,7 @@ fn event_loop(
         app.sync_changes();
         app.sync_sidebar();
         app.tick_scan();
+        app.tick_recall();
 
         // Every tab, not just the visible one: an agent whose output nobody
         // reads eventually blocks on writing it.
@@ -1031,7 +1033,8 @@ fn event_loop(
         // The insight report's spinner turns on the same terms, and so do
         // the conversation view's and the empty table's during the first scan.
         let scanning = !app.loaded && app.tab == 0;
-        app.needs_redraw |= app.insight_loading() || app.chat_loading() || scanning;
+        app.needs_redraw |=
+            app.insight_loading() || app.chat_loading() || app.recall_loading() || scanning;
         // The recap's spinner, and its headline numbers counting up.
         app.needs_redraw |= app.wrapped_animating();
 
@@ -1110,6 +1113,7 @@ fn event_loop(
         let idle_wait = match app.share_opening.is_some()
             || app.insight_loading()
             || app.chat_loading()
+            || app.recall_loading()
             || scanning
         {
             true => idle_wait.min(Duration::from_millis(100)),

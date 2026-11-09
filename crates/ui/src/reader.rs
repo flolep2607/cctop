@@ -94,6 +94,12 @@ pub struct Search {
     /// wrong place. Cleared as soon as it has been honoured, so a later fold
     /// does not drag the view back to it.
     jump: bool,
+    /// A phrase of the turn to land in, for a reader opened on a recall
+    /// passage: the jump goes to the first hit inside that turn, or to the
+    /// turn when there is none. Folded as [`super::recall::fold`] folds.
+    anchor: Option<String>,
+    /// Older pages already asked for while looking for `anchor`.
+    paged: usize,
     /// Rows the query is on, top to bottom.
     hits: Vec<usize>,
     /// Which of `hits` `n` and `N` last landed on.
@@ -117,10 +123,62 @@ impl Search {
         }
     }
 
+    /// A search made from a recall passage: `word` to highlight, and the turn
+    /// `anchor` is from to land in. See [`super::recall::landing`].
+    pub fn for_passage(word: &str, anchor: &str) -> Search {
+        Search {
+            anchor: (!anchor.is_empty()).then(|| anchor.to_string()),
+            ..Search::for_match(word)
+        }
+    }
+
     /// Take the pending jump, if one is owed.
     fn take_jump(&mut self) -> bool {
         std::mem::take(&mut self.jump)
     }
+
+    /// Whether the jump is still looking for a turn that is not in the window
+    /// read so far.
+    fn seeking(&self, conv: &Conversation) -> bool {
+        self.jump
+            && self
+                .anchor
+                .as_deref()
+                .is_some_and(|a| anchor_turn(conv, a).is_none())
+    }
+}
+
+/// Pages older than the first a reader opened on a passage reads back through
+/// looking for it: two hundred turns each, so a thousand turns back. Further
+/// than that it lands on the word's first hit in what it has, and `u` reads on.
+const SEEK_PAGES: usize = 5;
+
+impl ChatView {
+    /// The page to read next when a recall passage's turn is not in what has
+    /// been read yet: the one before the oldest turn here, as `u` would ask
+    /// for. `None` once it is found, there is nothing older, or
+    /// [`SEEK_PAGES`] have been read.
+    pub(super) fn seek_older(&mut self) -> Option<usize> {
+        let conv = self.conversation.as_ref()?;
+        if self.fetching
+            || conv.earlier == 0
+            || self.search.paged >= SEEK_PAGES
+            || !self.search.seeking(conv)
+        {
+            return None;
+        }
+        let before = conv.turns.first()?.seq;
+        self.search.paged += 1;
+        Some(before)
+    }
+}
+
+/// The turn whose text holds `anchor`, by sequence number.
+fn anchor_turn(conv: &Conversation, anchor: &str) -> Option<usize> {
+    conv.turns
+        .iter()
+        .find(|t| super::recall::fold(&t.text).contains(anchor))
+        .map(|t| t.seq)
 }
 
 impl Laid {
@@ -394,7 +452,12 @@ impl App {
     }
 
     fn close_conversation(&mut self) {
-        self.mode = Mode::List;
+        // Back to the recall list when that is where it was opened from: the
+        // next passage is usually the next thing to read.
+        self.mode = match self.recall {
+            Some(_) => Mode::Recall,
+            None => Mode::List,
+        };
         self.chat = None;
     }
 
@@ -598,17 +661,42 @@ fn lay_out(view: &mut ChatView, width: usize) {
             .map(|l| l.find(&query))
             .unwrap_or_default();
         view.search.current = view.search.current.filter(|&i| i < view.search.hits.len());
-        // An armed search is waiting to be shown the term it was opened for,
-        // which it could not be until now: the conversation arrives after the
-        // reader is already on screen. Taken here rather than at open so a
-        // layout that turns out to hold no hit leaves the view alone instead of
-        // jumping nowhere.
-        if view.search.take_jump() {
-            view.search.current = None;
-            if let Some(&row) = view.search.hits.first() {
-                view.search.current = Some(0);
-                view.show_row(row);
+    }
+    // An armed search is waiting to be shown the term it was opened for,
+    // which it could not be until now: the conversation arrives after the
+    // reader is already on screen. Taken here rather than at open so a layout
+    // that turns out to hold no hit leaves the view alone instead of jumping
+    // nowhere — and not while older pages are still being read for the turn a
+    // recall passage is in.
+    let seeking = view.fetching
+        && view
+            .conversation
+            .as_ref()
+            .is_some_and(|c| view.search.seeking(c));
+    if !seeking && view.search.take_jump() {
+        view.search.current = None;
+        // The rows of the turn a recall passage is in, when there is one.
+        let turn = view
+            .search
+            .anchor
+            .take()
+            .and_then(|a| anchor_turn(view.conversation.as_ref()?, &a))
+            .and_then(|seq| {
+                let laid = view.laid.as_ref()?;
+                let b = laid.blocks.iter().position(|b| b.seq == Some(seq))?;
+                Some(laid.starts[b]..laid.starts[b] + laid.blocks[b].lines.len())
+            });
+        let hit = match &turn {
+            Some(rows) => view.search.hits.iter().position(|r| rows.contains(r)),
+            None => (!view.search.hits.is_empty()).then_some(0),
+        };
+        match (hit, turn) {
+            (Some(i), _) => {
+                view.search.current = Some(i);
+                view.show_row(view.search.hits[i]);
             }
+            (None, Some(rows)) => view.show_row(rows.start),
+            (None, None) => {}
         }
     }
 }
@@ -1186,6 +1274,139 @@ mod tests {
             agent: None,
             html: None,
         }
+    }
+
+    /// The table with one session, and the recall view open on one passage
+    /// of it — what Enter in that view reads.
+    fn recall_on(query: &str, text: &str) -> App {
+        use cctop_core::recall::{Passage, Recall};
+        let mut app = crate::tests::test_app();
+        app.sessions = vec![crate::tests::session("a", false, "/repo")];
+        app.refilter();
+        let s = &app.sessions[0];
+        let mut recall = crate::recall::RecallView::default();
+        recall.answer = Some(Recall {
+            query: query.into(),
+            passages: vec![Passage {
+                session_id: s.session_id.clone(),
+                harness: s.harness.clone(),
+                provider: s.provider.as_str().into(),
+                directory: s.label_source.clone(),
+                title: None,
+                last_active: s.last_active.clone(),
+                passage: Some(0),
+                text: text.into(),
+                matched: "words",
+            }],
+            topical: false,
+            sessions_matched: 1,
+        });
+        app.recall = Some(recall);
+        app.mode = Mode::Recall;
+        app
+    }
+
+    fn filler(turns: &mut Vec<Turn>, seqs: std::ops::Range<usize>) {
+        for i in seqs {
+            turns.push(turn(i, "assistant", &format!("filler line {i}")));
+        }
+    }
+
+    /// The row the current hit is on, as drawn.
+    fn current_row_text(view: &ChatView) -> String {
+        let row = view.search.hits[view.search.current.expect("landed on a hit")];
+        let top = view.top();
+        assert!(
+            row >= top && row < top + view.visible,
+            "the hit is on screen"
+        );
+        let (block, at) = view.laid.as_ref().expect("laid").row(row).expect("row");
+        block.plain[at].iter().collect()
+    }
+
+    /// Enter on a recall passage lands on the word inside that passage's turn
+    /// — not on its first mention, a hundred lines earlier — and Esc out of
+    /// the reader goes back to the list it came from.
+    #[test]
+    fn a_recall_passage_opens_at_its_own_turn() {
+        let passage = "We chose a sharded cache because the file grew past 120 MB";
+        let mut app = recall_on("why is the cache sharded", passage);
+        app.on_key(crate::tests::key(KeyCode::Enter));
+        assert_eq!(app.mode, Mode::Conversation);
+
+        let mut turns = vec![turn(0, "user", "the cache came up early on")];
+        filler(&mut turns, 1..40);
+        turns.push(turn(40, "user", passage));
+        filler(&mut turns, 41..80);
+        let key = view(&app).session.key();
+        app.got_chat(
+            key,
+            None,
+            None,
+            Ok(Box::new(Conversation {
+                supported: true,
+                turns,
+                ..Default::default()
+            })),
+        );
+        draw_chat(&mut app, 80, 20);
+        let v = view(&app);
+        assert_eq!(v.search.query, "cache", "the query's word, highlighted");
+        assert_ne!(v.search.current, Some(0), "not the first mention");
+        assert!(current_row_text(v).contains("sharded cache"));
+
+        press(&mut app, KeyCode::Esc); // the search
+        press(&mut app, KeyCode::Esc); // the reader
+        assert_eq!(app.mode, Mode::Recall, "back to the list");
+        assert!(app.chat.is_none());
+    }
+
+    /// A passage older than the window the reader opens on is read back for,
+    /// a page at a time, before the jump is spent.
+    #[test]
+    fn a_recall_passage_older_than_the_window_is_paged_back_to() {
+        let passage = "We chose a sharded cache because the file grew past 120 MB";
+        let mut app = recall_on("sharded cache", passage);
+        app.on_key(crate::tests::key(KeyCode::Enter));
+        let key = view(&app).session.key();
+
+        let mut latest = Vec::new();
+        filler(&mut latest, 100..140);
+        app.got_chat(
+            key.clone(),
+            None,
+            None,
+            Ok(Box::new(Conversation {
+                supported: true,
+                turns: latest,
+                earlier: 100,
+                ..Default::default()
+            })),
+        );
+        assert!(view(&app).fetching, "asked for the page before");
+        draw_chat(&mut app, 80, 20);
+        assert!(view(&app).search.jump, "the jump waits for it");
+
+        let mut older = Vec::new();
+        filler(&mut older, 60..70);
+        older.push(turn(70, "user", passage));
+        filler(&mut older, 71..100);
+        app.got_chat(
+            key,
+            None,
+            Some(100),
+            Ok(Box::new(Conversation {
+                supported: true,
+                turns: older,
+                earlier: 60,
+                ..Default::default()
+            })),
+        );
+        assert!(!view(&app).fetching, "found: nothing more is read");
+        draw_chat(&mut app, 80, 20);
+        let v = view(&app);
+        assert!(!v.search.jump);
+        assert!(current_row_text(v).contains("sharded cache"));
     }
 
     fn open_with(turns: Vec<Turn>) -> App {

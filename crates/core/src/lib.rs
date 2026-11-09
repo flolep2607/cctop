@@ -78,6 +78,7 @@ pub mod pull_request;
 pub mod quota;
 /// How to reach the machine a remote row came from: ssh or a sibling.
 pub mod reach;
+pub mod recall;
 pub mod remote_fs;
 pub mod remote_launch;
 pub mod remote_open;

@@ -721,6 +721,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) -> Layout {
         Mode::Insight => modals::draw_insight(frame, area, app),
         Mode::Wrapped => super::wrapped::draw(frame, area, app),
         Mode::Conversation => super::reader::draw(frame, area, app),
+        Mode::Recall => super::recall::draw(frame, area, app),
         Mode::AddAccount => modals::draw_add_account(frame, area, app, &mut layout),
         // Typed in the sidebar itself, which is only drawn in a tab; and the
         // diff view, drawn over a tab's panes in the tab's own branch.

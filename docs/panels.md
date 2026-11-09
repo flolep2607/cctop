@@ -98,6 +98,20 @@ out once for the terminal's width, and scrolling it lays nothing out again.
 | `Esc` | Clear the search; with none, back out of a subagent's turns, or close |
 | `q` | Close |
 
+### Recall: what any session said
+
+`/` with `Tab` finds *which rows* mention something. `H` answers the other
+question — *what was said* — across every session on this machine at once: type
+a name, an error or a question, and once you pause it lists the passages that
+answer it, each under its agent, directory, date and title, with the query's
+words marked. They are ranked exactly as the agents' MCP `recall` tool ranks
+them — by the words, and by meaning when the search model is fetched (`cctop
+--fetch-search-model`); without it the view matches words alone and says so.
+
+`↑` `↓` pick a passage. `Enter` opens its conversation in the reader, landed on
+the passage — read back a few pages for an old one — and `Esc` there comes back
+to the list. `Ctrl+R` resumes the session in a tab, as `R` does on its row.
+
 ## Context breakdown
 
 ![The Context panel: a stacked bar of the window with a legend naming each category](assets/context.png)

@@ -247,7 +247,7 @@ pub const PASTE_DEBOUNCE_MS: u64 = 250;
 /// pane's belong to the agent.
 ///
 // ponytail: dashboard keys only; extend to modals if someone asks to rebind one.
-pub const BINDINGS: [(&str, &str, &str); 57] = [
+pub const BINDINGS: [(&str, &str, &str); 58] = [
     ("quit", "q", "Quit"),
     ("help", "?", "Help"),
     ("settings", ",", "The settings tab, at the end of the bar"),
@@ -277,6 +277,11 @@ pub const BINDINGS: [(&str, &str, &str); 57] = [
         "Hand its context to another agent or account",
     ),
     ("conversation", "i", "Read its conversation"),
+    (
+        "recall",
+        "H",
+        "Search what every session said, by words or meaning",
+    ),
     ("copy", "y", "Copy resume command or transcript path"),
     ("expand", "e", "Show its subagents"),
     ("expand_all", "E", "Show all subagents"),
