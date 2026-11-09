@@ -1,5 +1,6 @@
-//! Syntax colours for the diff view: which stretches of a file's lines are a
-//! keyword, a string, a comment, a number, a function's or a type's name.
+//! Syntax colours for the diff view and for the fenced code in a rendered
+//! reply: which stretches of a file's lines are a keyword, a string, a
+//! comment, a number, a function's or a type's name.
 //!
 //! The grammars are syntect's bundled ones, and only its parser is used: a
 //! line is parsed into scopes (`keyword.control.rust`, `string.quoted.double`)
@@ -12,11 +13,20 @@
 //! frame, and never on a hunk's lines alone, since a line out of context is a
 //! line whose string or comment may have started above it.
 //!
+//! A fenced block in a reply ([`highlight_fence`]) is found by its info
+//! string rather than a path, and is parsed on the UI thread, since that is
+//! where the reader lays its turns out. The reader keeps a laid-out turn until
+//! the width or a fold changes, and the blocks parsed are kept here as well, by
+//! their text — so dragging the window wider re-wraps code without parsing it
+//! again for every column it passes through.
+//!
 //! ponytail: sixteen colours and `NO_COLOR` get none. Sixteen shades already
 //! carry the washes and the word marks, and a keyword in the same green as an
 //! added line's ground is a keyword nobody can see.
 
-use std::sync::OnceLock;
+use std::collections::HashMap;
+use std::hash::{DefaultHasher, Hash, Hasher};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use ratatui::style::Color;
 use syntect::parsing::{ParseState, Scope, ScopeStack, ScopeStackOp, SyntaxReference, SyntaxSet};
@@ -98,6 +108,11 @@ pub(super) fn highlight(path: &str, lines: &[String]) -> Option<Lines> {
     }
     let set = set();
     let syntax = syntax_for(set, path, lines.first().map(String::as_str))?;
+    Some(parse(set, syntax, lines))
+}
+
+/// `lines` parsed by `syntax`, line by line in one state.
+fn parse(set: &SyntaxSet, syntax: &SyntaxReference, lines: &[String]) -> Lines {
     let mut state = ParseState::new(syntax);
     let mut stack = ScopeStack::new();
     let mut out = Vec::with_capacity(lines.len());
@@ -111,11 +126,93 @@ pub(super) fn highlight(path: &str, lines: &[String]) -> Option<Lines> {
         let Ok(ops) = state.parse_line(&text, set) else {
             // A grammar that failed partway colours nothing past it.
             out.resize(lines.len(), Vec::new());
-            return Some(out);
+            return out;
         };
         out.push(spans(line, &ops, &mut stack));
     }
-    Some(out)
+    out
+}
+
+/// Whether the theme draws syntax at all — what [`color`] answers, asked
+/// before any parsing, so a sixteen-colour or colourless terminal never loads
+/// the grammars for a reply.
+pub(super) fn colours_code() -> bool {
+    let palette = theme::colors();
+    palette.depth == Depth::Indexed && palette.variant != Variant::Mono
+}
+
+/// What a fence's language is called among syntect's grammars, for the names
+/// people write that are neither a grammar's name nor its extension. `None`
+/// for a fence that says it is not code.
+///
+/// TypeScript and JSX go to JavaScript, the nearest grammar bundled: its
+/// keywords, strings and comments are theirs, and only a type annotation goes
+/// uncoloured.
+fn fence_alias(lang: &str) -> Option<&str> {
+    Some(match lang {
+        "" | "text" | "txt" | "plain" | "plaintext" | "output" => return None,
+        "shell" | "bash" | "zsh" | "console" | "shell-session" => "sh",
+        "python" | "python3" | "py3" => "py",
+        "javascript" | "node" | "mjs" | "cjs" | "jsx" | "ts" | "typescript" | "tsx" => "js",
+        "golang" => "go",
+        "c++" | "cxx" | "hpp" => "cpp",
+        "yml" => "yaml",
+        "objc" | "objective-c" => "m",
+        "patch" => "diff",
+        _ => lang,
+    })
+}
+
+/// The grammar a fenced block's info string names: its first word (`rust` of
+/// `rust,ignore`, `py` of `{.py}`), as an alias, an extension or a grammar's
+/// name, whatever its case.
+fn syntax_for_fence<'a>(set: &'a SyntaxSet, info: &str) -> Option<&'a SyntaxReference> {
+    let word = info
+        .split(|c: char| c.is_whitespace() || c == ',')
+        .next()?
+        .trim_start_matches('{')
+        .trim_start_matches('.')
+        .trim_end_matches('}')
+        .to_ascii_lowercase();
+    set.find_syntax_by_token(fence_alias(&word)?)
+        .filter(|s| s.name != "Plain Text")
+}
+
+/// How many fenced blocks' colours are kept. Past it the lot is dropped and
+/// built again as the reader asks for them; one conversation rarely shows as
+/// many.
+const FENCES_KEPT: usize = 512;
+
+/// A fenced block's `lines`, coloured by the language its info string names.
+/// `None` where the theme draws no syntax, the language is none cctop knows,
+/// or the block is too big to parse — and the block is drawn in one colour.
+///
+/// Kept by the block's info string and text, so a turn laid out again at a
+/// new width does not parse its code again. What is kept is kinds, not
+/// colours, so a theme switched meanwhile still applies.
+pub(super) fn highlight_fence(info: &str, lines: &[String]) -> Option<Arc<Lines>> {
+    if !colours_code() || lines.iter().map(|l| l.len() + 1).sum::<usize>() > MAX_BYTES {
+        return None;
+    }
+    static KEPT: OnceLock<Mutex<HashMap<u64, Option<Arc<Lines>>>>> = OnceLock::new();
+    let key = {
+        let mut h = DefaultHasher::new();
+        (info, lines).hash(&mut h);
+        h.finish()
+    };
+    let kept = KEPT.get_or_init(Mutex::default);
+    if let Some(hit) = kept.lock().ok().and_then(|k| k.get(&key).cloned()) {
+        return hit;
+    }
+    let set = set();
+    let out = syntax_for_fence(set, info).map(|syntax| Arc::new(parse(set, syntax, lines)));
+    if let Ok(mut kept) = kept.lock() {
+        if kept.len() >= FENCES_KEPT {
+            kept.clear();
+        }
+        kept.insert(key, out.clone());
+    }
+    out
 }
 
 /// One line's ops, as char ranges of the kinds the scope stack names.
@@ -254,6 +351,22 @@ mod tests {
         assert!(highlight("notes.unknownext", &lines("plain words")).is_none());
         let huge = vec!["x".repeat(1000); 2_000];
         assert!(highlight("big.rs", &huge).is_none());
+    }
+
+    /// A fenced block is parsed once: asked again for the same text, as a
+    /// relayout at a new width does, it is the same colours, not a new parse.
+    /// A theme that draws no syntax parses nothing.
+    #[test]
+    fn a_fence_is_parsed_once_and_not_at_all_without_colours() {
+        theme::set_theme(Some("dark"));
+        let code = lines("fn kept_once() {}");
+        let first = highlight_fence("rust", &code).expect("rust has a grammar");
+        let again = highlight_fence("rust", &code).unwrap();
+        assert!(Arc::ptr_eq(&first, &again));
+        assert!(highlight_fence("notalanguage", &code).is_none());
+        theme::set_theme(Some("mono"));
+        assert!(highlight_fence("rust", &code).is_none());
+        theme::set_theme(Some("dark"));
     }
 
     /// The palette's sixteen-colour and colourless themes draw no syntax.

@@ -157,6 +157,8 @@ pulldown-cmark = { version = "0.13.4", default-features = false }
 # Measured in a release build of nothing else: 2.6 MB stripped, the 75 bundled
 # grammars most of it — the multi-megabyte dump the note above turned down for
 # markdown, taken here because a diff is the one place code is read as code.
+# Once paid for, the reader's fenced blocks are coloured by it too
+# (`ui::markdown`), at no further size.
 syntect = { version = "5.3.0", default-features = false, features = ["default-syntaxes", "regex-fancy", "parsing"] }
 ratatui = "0.30.2"
 # The web UI's TypeScript types are generated from the serde structs the API

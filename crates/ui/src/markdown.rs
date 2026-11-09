@@ -10,14 +10,21 @@
 //! The parser is `pulldown-cmark`; the layout is here. See the note beside the
 //! dependency in `Cargo.toml` for why not `tui-markdown`.
 //!
-//! ponytail: fenced code is one colour, not highlighted. The pure-Rust
-//! highlighter is syntect, whose bundled syntaxes and themes are several
-//! megabytes of binary for a view that shows a few snippets — and whose
-//! colours would be 24-bit, to be folded down to cctop's palette anyway.
+//! A fenced block whose info string names a language (```` ```rust ````,
+//! ```` ```py ````, ```` ```sh ````) is syntax-coloured by the diff view's
+//! highlighter, [`syntax::highlight_fence`]: the same grammars, the same
+//! palette in each theme, and the same nothing on a sixteen-colour or
+//! colourless terminal. The grammars were already in the binary for the diff
+//! view, so the reader pays no size for them.
+//!
+//! ponytail: a block with no language, or one no bundled grammar knows
+//! (TOML, Kotlin, PowerShell, an indented block), stays one colour. Guessing
+//! a language from the code is a guess that colours prose as code when wrong.
 //!
 //! [`hyperlink::link`]: super::hyperlink::link
 
 use super::styled::{self, Piece};
+use super::syntax;
 use super::theme;
 use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use ratatui::buffer::CellWidth;
@@ -66,6 +73,7 @@ fn render_with(text: &str, width: usize, base: Style, osc8: bool) -> Rendered {
         urls: Vec::new(),
         link: None,
         code: None,
+        lang: None,
         table: None,
     };
     for event in Parser::new_ext(text, options) {
@@ -115,6 +123,8 @@ struct Renderer {
     /// label starts — to tell a bare URL from a labelled one at its end.
     link: Option<(usize, usize)>,
     code: Option<String>,
+    /// The open fenced block's language, as its info string's first word.
+    lang: Option<String>,
     table: Option<Table>,
 }
 
@@ -197,13 +207,16 @@ impl Renderer {
             Tag::CodeBlock(kind) => {
                 self.flush();
                 self.gap();
-                // The fence's language, dim above the block, is the only
-                // highlighting there is; see the module note.
+                // The fence's language, dim above the block: it says what the
+                // code is where the theme draws no syntax colours, and what
+                // they were picked by where it does.
+                self.lang = None;
                 if let CodeBlockKind::Fenced(lang) = kind
                     && let Some(lang) = lang.split_whitespace().next()
                 {
                     self.push(lang.to_string(), theme::dim());
                     self.flush();
+                    self.lang = Some(lang.to_string());
                 }
                 self.code = Some(String::new());
             }
@@ -294,8 +307,23 @@ impl Renderer {
             TagEnd::CodeBlock => {
                 let code = self.code.take().unwrap_or_default();
                 let from = self.out.lines.len();
-                for line in code.trim_end_matches('\n').split('\n') {
-                    self.push(line.replace('\t', "    "), code_style());
+                // Tabs expanded before colouring, so the colours' char ranges
+                // are ranges of what is drawn.
+                let lines: Vec<String> = code
+                    .trim_end_matches('\n')
+                    .split('\n')
+                    .map(|line| line.replace('\t', "    "))
+                    .collect();
+                let colours = self
+                    .lang
+                    .take()
+                    .and_then(|lang| syntax::highlight_fence(&lang, &lines));
+                for (i, line) in lines.iter().enumerate() {
+                    let spans = colours
+                        .as_ref()
+                        .and_then(|c| c.get(i))
+                        .map_or(&[][..], Vec::as_slice);
+                    self.push_code(line, spans);
                     self.flush_with(Some(Span::styled("│ ", theme::dim())));
                 }
                 self.shade(from);
@@ -360,6 +388,31 @@ impl Renderer {
             style,
             link: self.link.map(|(i, _)| i),
         });
+    }
+
+    /// One line of a code block, cut at its colours' edges: each stretch in
+    /// its kind's colour, the rest in the code colour a block without a
+    /// language is drawn in throughout.
+    fn push_code(&mut self, line: &str, spans: &[(usize, usize, syntax::Kind)]) {
+        let chars: Vec<char> = line.chars().collect();
+        let mut at = 0;
+        let piece = |r: &mut Self, a: usize, b: usize, style: Style| {
+            if a < b {
+                r.push(chars[a..b].iter().collect(), style);
+            }
+        };
+        for &(a, b, kind) in spans {
+            let (a, b) = (a.min(chars.len()), b.min(chars.len()));
+            piece(self, at, a, code_style());
+            let style = syntax::color(kind).map_or_else(code_style, |c| Style::default().fg(c));
+            piece(self, a.max(at), b, style);
+            at = at.max(b);
+        }
+        piece(self, at, chars.len(), code_style());
+        // An empty line is still a row of the block.
+        if chars.is_empty() {
+            self.push(String::new(), code_style());
+        }
     }
 
     /// Set the next block apart from the last with one empty row — carrying
@@ -602,6 +655,114 @@ mod tests {
             trimmed(&r),
             ["rust", "│ fn main() {", "│     run();", "│ }"]
         );
+    }
+
+    /// The foreground of the span that is `needle`, spaces aside.
+    fn fg_of(r: &Rendered, needle: &str) -> Option<ratatui::style::Color> {
+        r.lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .find(|s| s.content.trim() == needle)
+            .unwrap_or_else(|| panic!("{needle:?} was not drawn as its own span"))
+            .style
+            .fg
+    }
+
+    /// A fence naming its language is coloured by what each word is, in the
+    /// diff view's palette, and the text and gutter are what they always were.
+    #[test]
+    fn a_fence_with_a_language_is_syntax_coloured() {
+        theme::set_theme(Some("dark"));
+        let r = draw(
+            "```rust\nfn main() {\n    let s = \"hi\"; // note\n}\n```",
+            60,
+        );
+        assert_eq!(
+            trimmed(&r),
+            [
+                "rust",
+                "│ fn main() {",
+                "│     let s = \"hi\"; // note",
+                "│ }"
+            ]
+        );
+        assert_eq!(fg_of(&r, "fn"), syntax::color(syntax::Kind::Keyword));
+        assert_eq!(fg_of(&r, "main"), syntax::color(syntax::Kind::Function));
+        assert_eq!(fg_of(&r, "\"hi\""), syntax::color(syntax::Kind::String));
+        assert_eq!(fg_of(&r, "// note"), syntax::color(syntax::Kind::Comment));
+        // What no grammar scope claims keeps the plain code colour.
+        assert_eq!(fg_of(&r, "s ="), code_style().fg);
+    }
+
+    /// The names people write for a language find its grammar: an alias, an
+    /// extension, the grammar's name, any case, with attributes after it.
+    #[test]
+    fn a_fence_language_is_found_by_its_common_names() {
+        theme::set_theme(Some("dark"));
+        let keyword = syntax::color(syntax::Kind::Keyword);
+        for (fence, word) in [
+            ("py", "def"),
+            ("Python", "def"),
+            ("bash", "if"),
+            ("shell", "if"),
+            ("sh", "if"),
+            ("ts", "const"),
+            ("typescript", "const"),
+            ("js", "const"),
+            ("golang", "func"),
+            ("rust,ignore", "fn"),
+            ("{.rs}", "fn"),
+        ] {
+            let code = match word {
+                "def" => "def f():\n    pass",
+                "if" => "if true; then echo; fi",
+                "const" => "const x = 1;",
+                "func" => "func f() {}",
+                _ => "fn f() {}",
+            };
+            let r = draw(&format!("```{fence}\n{code}\n```"), 60);
+            assert_eq!(fg_of(&r, word), keyword, "```{fence}");
+        }
+    }
+
+    /// No language, one no grammar knows, or one that says it is not code:
+    /// the whole block in the one code colour, as before.
+    #[test]
+    fn a_fence_without_a_known_language_is_one_colour() {
+        theme::set_theme(Some("dark"));
+        for fence in ["", "text", "notalanguage"] {
+            let r = draw(&format!("```{fence}\nfn main() {{}}\n```"), 40);
+            let code: Vec<_> = r.lines.iter().filter(|l| l.width() > 0).collect();
+            let fgs: Vec<_> = code
+                .iter()
+                .flat_map(|l| l.spans.iter())
+                .filter(|s| !s.content.trim().is_empty() && s.content.as_ref() != "│ ")
+                .filter(|s| s.content.as_ref() != fence)
+                .map(|s| s.style.fg)
+                .collect();
+            assert_eq!(fgs, [code_style().fg], "```{fence}");
+        }
+    }
+
+    /// A theme that draws no syntax — colourless here — draws a known
+    /// language in the one code colour too.
+    #[test]
+    fn a_theme_without_syntax_colours_keeps_fences_one_colour() {
+        theme::set_theme(Some("mono"));
+        let r = draw("```rust\nfn main() {}\n```", 40);
+        assert_eq!(span_of(&r, "fn main").style.fg, code_style().fg);
+        theme::set_theme(Some("dark"));
+    }
+
+    /// The light theme colours code from its own palette, not the dark one's.
+    #[test]
+    fn the_light_theme_colours_fences_from_its_own_palette() {
+        theme::set_theme(Some("light"));
+        let light = fg_of(&draw("```rust\nfn f() {}\n```", 40), "fn");
+        theme::set_theme(Some("dark"));
+        let dark = fg_of(&draw("```rust\nfn f() {}\n```", 40), "fn");
+        assert!(light.is_some() && dark.is_some());
+        assert_ne!(light, dark);
     }
 
     fn trimmed(r: &Rendered) -> Vec<String> {
