@@ -1111,7 +1111,7 @@ list   each schedule, its next and last run
 sync   install the systemd timers for what config.toml says now
 run    start one now, as its timer would; --now runs it even when switched off
 log    what each run did: finished, waiting on you, failed — cost, time, files,
-       its last message (* = since you last looked in the dashboard's H view)";
+       its last message (* = since you last looked in the dashboard's J view)";
 
 #[cfg(test)]
 mod tests {

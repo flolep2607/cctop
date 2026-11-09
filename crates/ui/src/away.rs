@@ -1,4 +1,4 @@
-//! What the scheduled agents did while nobody was looking: the `H` view, and
+//! What the scheduled agents did while nobody was looking: the `J` view, and
 //! the footer's word that there is something in it.
 //!
 //! The runs and what came of each are [`cctop_core::schedule_log`]'s; this is
@@ -50,7 +50,7 @@ impl App {
         self.keymap
             .key_of("away")
             .map(cctop_core::settings::key_label)
-            .unwrap_or_else(|| "H".into())
+            .unwrap_or_else(|| "J".into())
     }
 
     /// Open the view: every recorded run, joined to the table as it stands,
@@ -126,7 +126,7 @@ impl App {
     pub(super) fn on_key_away(&mut self, key: KeyEvent) {
         let last = self.away.rows.len().saturating_sub(1);
         match key.code {
-            KeyCode::Esc | KeyCode::Char('q' | 'H') => self.close_away(),
+            KeyCode::Esc | KeyCode::Char('q' | 'J') => self.close_away(),
             KeyCode::Down | KeyCode::Char('j') => {
                 self.away.selected = (self.away.selected + 1).min(last);
             }
@@ -342,14 +342,14 @@ mod tests {
 
     #[test]
     fn the_hint_counts_the_runs_and_names_the_key() {
-        assert_eq!(hint(0, "H"), None);
+        assert_eq!(hint(0, "J"), None);
         assert_eq!(
-            hint(1, "H").as_deref(),
-            Some("1 scheduled run while you were away · H")
+            hint(1, "J").as_deref(),
+            Some("1 scheduled run while you were away · J")
         );
         assert_eq!(
-            hint(3, "J").as_deref(),
-            Some("3 scheduled runs while you were away · J")
+            hint(3, "K").as_deref(),
+            Some("3 scheduled runs while you were away · K")
         );
     }
 

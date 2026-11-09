@@ -1958,10 +1958,10 @@ impl App {
             // right connotation. No function key: F9, the next free one when
             // this was first written, is the image paste now.
             KeyCode::Char('!') => self.open_provider_status(),
-            // `H` for history: what the scheduled agents did. Free since the
-            // sort keys went into `S`'s modal, and the footer names it when
-            // there are runs to see.
-            KeyCode::Char('H') => self.open_away(),
+            // `J` for the journal of what the scheduled agents did: one of
+            // the few capitals left once `H` went to recall and `W` to share.
+            // The footer names it when there are runs to see.
+            KeyCode::Char('J') => self.open_away(),
             KeyCode::Char('/') | KeyCode::F(3) => self.mode = Mode::Search,
             KeyCode::Char('?') | KeyCode::F(1) => self.mode = Mode::Help,
             KeyCode::Char(',') => self.goto_settings(),
