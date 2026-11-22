@@ -619,6 +619,7 @@ fn read_tail(s: &Session, want_context: bool) -> TailRead {
             Provider::OpenCode => session::opencode::extract_last_tool(s),
             Provider::Pi => session::pi::extract_last_tool(s),
             Provider::Vibe => session::vibe::extract_last_tool(s),
+            Provider::Antigravity => session::antigravity::extract_last_tool(s),
         },
     };
     let context = want_context
@@ -634,6 +635,7 @@ fn read_tail(s: &Session, want_context: bool) -> TailRead {
                 Provider::Vibe => session::vibe::extract_context(s),
                 Provider::Cursor => session::cursor::extract_context(s),
                 Provider::Windsurf => None,
+                Provider::Antigravity => session::antigravity::extract_context(s),
             }
         })
         .flatten();
@@ -767,6 +769,7 @@ fn default_harness(session: &Session) -> &'static str {
             Provider::Pi => "Pi",
             Provider::Vibe => "Vibe",
             Provider::Windsurf => "Windsurf",
+            Provider::Antigravity => "Antigravity",
         },
     }
 }
@@ -787,6 +790,7 @@ pub struct Stats {
     pub total_pi: usize,
     pub total_vibe: usize,
     pub total_windsurf: usize,
+    pub total_antigravity: usize,
     pub active_1h: usize,
     pub active_24h: usize,
     pub active_7d: usize,
@@ -814,6 +818,7 @@ pub struct Stats {
     /// per-provider breakdown stays exhaustive rather than silently skipping a
     /// provider that might start reporting cost later.
     pub spend_windsurf: f64,
+    pub spend_antigravity: f64,
     /// Spend in the last 60 minutes, rolling: the sum of the rows' `cost_hour`.
     pub spend_hour: f64,
     pub spend_today: f64,
@@ -982,6 +987,7 @@ pub fn compute_stats(sessions: &[Session]) -> Stats {
             Provider::Pi => st.total_pi += 1,
             Provider::Vibe => st.total_vibe += 1,
             Provider::Windsurf => st.total_windsurf += 1,
+            Provider::Antigravity => st.total_antigravity += 1,
         }
         if let Some(la) = util::parse_ts(&s.last_active) {
             let age = now_ms - la.timestamp_millis();
@@ -1017,6 +1023,7 @@ pub fn compute_stats(sessions: &[Session]) -> Stats {
                 Provider::Pi => st.spend_pi += cost,
                 Provider::Vibe => st.spend_vibe += cost,
                 Provider::Windsurf => st.spend_windsurf += cost,
+                Provider::Antigravity => st.spend_antigravity += cost,
             }
             st.spend_per_min += s.cost_per_min;
             // The rows' rolling hour rather than the clock-hour bucket, so the
@@ -1090,7 +1097,8 @@ pub fn compute_stats(sessions: &[Session]) -> Stats {
         + st.spend_opencode
         + st.spend_pi
         + st.spend_vibe
-        + st.spend_windsurf;
+        + st.spend_windsurf
+        + st.spend_antigravity;
     st.spend_calendar_month = st.monthly_daily.iter().sum();
     st.spend_last_24h = st.rolling_hourly.iter().sum();
     st.top_today = descending(today_by_project);

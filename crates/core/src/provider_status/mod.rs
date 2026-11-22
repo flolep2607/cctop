@@ -401,7 +401,8 @@ pub fn page_for(provider: Provider, model: &str) -> Option<Page> {
         | Provider::OpenCode
         | Provider::Pi
         | Provider::Vibe
-        | Provider::Windsurf => None,
+        | Provider::Windsurf
+        | Provider::Antigravity => None,
     }
 }
 

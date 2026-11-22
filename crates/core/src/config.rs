@@ -720,6 +720,14 @@ pub static GEMINI_HOME: LazyLock<PathBuf> =
 /// something disposable, but it is where the transcripts actually live.
 pub static GEMINI_CHATS_ROOT: LazyLock<PathBuf> = LazyLock::new(|| GEMINI_HOME.join("tmp"));
 
+/// Antigravity CLI (`agy`) keeps everything under its own directory inside
+/// `~/.gemini`: a `brain/<conversation>/` per conversation beside the
+/// `conversation_summaries.db` that indexes them. `$ANTIGRAVITY_DIR` overrides
+/// the whole directory.
+pub static ANTIGRAVITY_DIR: LazyLock<PathBuf> = LazyLock::new(|| {
+    env_dir("ANTIGRAVITY_DIR").unwrap_or_else(|| GEMINI_HOME.join("antigravity-cli"))
+});
+
 /// Windsurf keeps per-workspace editor state where its VS Code base does.
 ///
 /// `$WINDSURF_USER_DIR` overrides the whole `User` directory, which is what a
@@ -1270,6 +1278,21 @@ pub fn pi_sessions_roots() -> Vec<PathBuf> {
 
 pub fn gemini_chats_roots() -> Vec<PathBuf> {
     roots_across_homes(&GEMINI_CHATS_ROOT, |h| h.join(".gemini").join("tmp"))
+}
+
+/// Antigravity CLI's data directories across homes.
+pub fn antigravity_dirs() -> Vec<PathBuf> {
+    roots_across_homes(&ANTIGRAVITY_DIR, |h| {
+        h.join(".gemini").join("antigravity-cli")
+    })
+}
+
+/// The `brain/` directory of each, which holds every conversation's transcript.
+pub fn antigravity_brains() -> Vec<PathBuf> {
+    antigravity_dirs()
+        .into_iter()
+        .map(|d| d.join("brain"))
+        .collect()
 }
 
 /// Devin's CLI directories — `sessions.db` beside `transcripts/` — across

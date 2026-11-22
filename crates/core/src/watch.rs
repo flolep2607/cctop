@@ -224,6 +224,9 @@ fn provider_roots(provider: Provider) -> Vec<PathBuf> {
         Provider::Pi => config::pi_sessions_roots(),
         Provider::Vibe => config::vibe_sessions_roots(),
         Provider::Windsurf => Vec::new(),
+        // `brain/` alone: a new conversation arrives there as a directory,
+        // while the summaries database beside it churns as Windsurf's does.
+        Provider::Antigravity => config::antigravity_brains(),
     }
 }
 

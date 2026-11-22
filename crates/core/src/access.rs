@@ -316,6 +316,18 @@ fn layout(session: &Session, root: &Path) -> Layout {
             configs.push((crate::config::GEMINI_HOME.join("settings.json"), "user"));
             skills = vec![crate::config::GEMINI_HOME.join("skills")];
         }
+        // `agy` reads Gemini CLI's instruction files and global skills, and
+        // keeps its own settings and skills in its own directory.
+        Provider::Antigravity => {
+            instructions.push((crate::config::GEMINI_HOME.join("GEMINI.md"), "user"));
+            instructions.extend(project("GEMINI.md"));
+            instructions.extend(project("AGENTS.md"));
+            configs.push((crate::config::ANTIGRAVITY_DIR.join("settings.json"), "user"));
+            skills = vec![
+                crate::config::GEMINI_HOME.join("skills"),
+                crate::config::ANTIGRAVITY_DIR.join("skills"),
+            ];
+        }
         Provider::Devin => {
             let files = devin_layout(&session.label_source);
             instructions = files.instructions;
@@ -546,6 +558,20 @@ fn mcp_servers(session: &Session, root: &Path) -> Vec<McpServer> {
                 "user",
             ));
         }
+        Provider::Antigravity => {
+            out.extend(mcp_from_json(
+                &crate::config::GEMINI_HOME
+                    .join("config")
+                    .join("mcp_config.json"),
+                "user",
+            ));
+            if !session.label_source.is_empty() {
+                out.extend(mcp_from_json(
+                    &cwd.join(".agents").join("mcp_config.json"),
+                    "project",
+                ));
+            }
+        }
         Provider::Pi => {
             out.extend(mcp_from_config(
                 &crate::config::PI_AGENT_DIR.join("settings.json"),
@@ -726,7 +752,13 @@ fn harness_for(provider: Provider) -> Option<hook::Harness> {
         // Devin has its own hooks.v1.json, but `cctop hook` does not speak its
         // event dialect yet — registering it would install hooks that decode
         // nothing, which is worse than installing none.
-        Provider::Devin | Provider::Pi | Provider::Vibe | Provider::Windsurf => None,
+        // `agy` has hooks, but reads a hook's stdout as a decision and names
+        // the session `conversationId`; `cctop hook` speaks neither yet.
+        Provider::Devin
+        | Provider::Pi
+        | Provider::Vibe
+        | Provider::Windsurf
+        | Provider::Antigravity => None,
     }
 }
 

@@ -3580,7 +3580,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let repo = dir.path();
         let git = |args: &[&str]| {
-            let out = std::process::Command::new("git")
+            // `git_in`, not a bare `git`: under a pre-commit hook git exports
+            // `GIT_INDEX_FILE`, and a bare call would stage into the real checkout.
+            let out = cctop_core::worktree::git_in(repo)
                 .args([
                     "-c",
                     "user.name=t",
