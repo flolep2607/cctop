@@ -61,6 +61,8 @@ impl Provider {
     /// here rather than at the loop that opens the span, which is the only way
     /// the extraction and tail labels can be sure to name a harness the same
     /// way — they were two copies of this table and had begun to differ.
+    // cctop's own tracing labels, not part of what other programs use.
+    #[doc(hidden)]
     pub fn extract_trace_name(self) -> &'static str {
         match self {
             Provider::Claude => "extract.claude",
@@ -78,6 +80,8 @@ impl Provider {
 
     /// The `trace` label for reading this provider's transcript tails — the
     /// [`Self::extract_trace_name`] of the other loop that dominates a walk.
+    // cctop's own tracing labels, not part of what other programs use.
+    #[doc(hidden)]
     pub fn tails_trace_name(self) -> &'static str {
         match self {
             Provider::Claude => "tails.claude",
@@ -158,6 +162,20 @@ impl Provider {
             Provider::Vibe => "vibe",
             Provider::Windsurf => "windsurf",
             Provider::Antigravity => "antigravity",
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `parse` is how a name from a session file, a flag or `--json` comes
+    /// back, so every provider's own key has to make the trip.
+    #[test]
+    fn every_provider_parses_back_from_its_key() {
+        for p in Provider::ALL {
+            assert_eq!(Provider::parse(p.as_str()), Some(p), "{p:?}");
         }
     }
 }

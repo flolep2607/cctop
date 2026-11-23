@@ -71,11 +71,11 @@ homepage = "https://github.com/flolep2607/cctop"
 #
 # Every crate is published, because `cargo install cctop` builds from
 # crates.io and a crates.io package can only depend on others that are there
-# too. The internal ones are not meant to be used on their own, but they keep
-# semver with each other: the requirements below are carets on the version's
-# compatible part (`"0.28"`, meaning >=0.28.0, <0.29), so a cctop-ui published
-# against core 0.28.6 still builds beside core 0.28.7, and core can be
-# released alone.
+# too. The internal ones, cctop-discovery aside, are not meant to be used on
+# their own, but they keep semver with each other: the requirements below
+# are carets on the version's compatible part (`"0.28"`, meaning >=0.28.0,
+# <0.29), so a cctop-ui published against core 0.28.6 still builds beside
+# core 0.28.7, and core can be released alone.
 #
 # What makes that a promise rather than a hope is `cargo-semver-checks`, which
 # release-plz runs on every crate that changed against its copy on crates.io:
@@ -83,7 +83,8 @@ homepage = "https://github.com/flolep2607/cctop"
 # and that moves its requirement here, which in turn bumps every crate that
 # names it. Every requirement stays one caret within the dependency's current
 # minor, so the workspace never resolves two cores. `pub` here exists for use
-# between these crates rather than as a designed API, so expect more 0.x minors
+# between these crates rather than as a designed API (cctop-discovery's is
+# meant for other programs, but is 0.x all the same), so expect more 0.x minors
 # than a library would take; that is the price of not republishing serve and
 # ui for every core fix.
 #

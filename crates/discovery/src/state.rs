@@ -116,3 +116,22 @@ impl Permission {
         matches!(self, Permission::Bypass)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A remote machine's rows arrive through `--json`, which carries the label:
+    /// each mode has to read back as itself, not as "unknown".
+    #[test]
+    fn every_permission_parses_back_from_its_label() {
+        for p in [
+            Permission::Ask,
+            Permission::AcceptEdits,
+            Permission::Plan,
+            Permission::Bypass,
+        ] {
+            assert_eq!(Permission::parse(p.label()), Some(p), "{p:?}");
+        }
+    }
+}

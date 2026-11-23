@@ -12,9 +12,11 @@
 //! This is 0.x and is being moved out of `cctop-core` in steps (issue #430).
 //! So far it holds the vocabulary — [`Provider`], [`Surface`],
 //! [`ActivityState`], [`Permission`] — and not yet the parsers or the process
-//! match. The names here are expected to stay; variants may be added to any
-//! enum, so match them with a wildcard arm. A breaking change takes the next
-//! 0.x minor, checked by `cargo-semver-checks` on every release.
+//! match. The names here are expected to stay. The enums are exhaustive, so
+//! cctop's own matches stay checked, which makes a new variant — a new agent,
+//! a new state — a breaking change: it takes the next 0.x minor, as does any
+//! other break `cargo-semver-checks` finds on release. Pin the minor you
+//! built against.
 
 mod provider;
 mod state;
