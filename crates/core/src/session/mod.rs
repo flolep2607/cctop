@@ -73,69 +73,8 @@ pub(crate) fn temp_path(tag: &str) -> PathBuf {
     ))
 }
 
-/// Where a session is being driven from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Surface {
-    /// A coding agent in a terminal.
-    Cli,
-    /// An agent hosted by an editor rather than a dedicated CLI process.
-    Editor,
-    /// Claude for Mac, running Claude Code locally.
-    DesktopCode,
-    /// Claude for Mac, running in a cloud VM.
-    DesktopCowork,
-}
-
-/// What a live agent is doing, inferred from the newest transcript event — or,
-/// for [`ActivityState::Asking`], reported by the agent's own hooks.
-///
-/// This deliberately captures only states that have a clear user-facing
-/// meaning.  A missing or unrecognised event remains normal work rather than
-/// guessing that the agent is stalled.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum ActivityState {
-    #[default]
-    Working,
-    /// The turn is over and the prompt is the user's. Nobody is blocked: the
-    /// agent has said what it had to say and will sit there indefinitely.
-    WaitingForInput,
-    /// The agent is blocked on a question — a permission prompt, or an MCP
-    /// elicitation — and cannot proceed until it is answered.
-    ///
-    /// Told apart from [`ActivityState::WaitingForInput`] because the two are
-    /// worth different amounts of your attention, and a transcript cannot tell
-    /// them apart at all: a held permission prompt leaves no record, so the
-    /// newest thing written is a tool call in flight, which reads exactly like
-    /// an agent still working. Only the agent's own hooks say this outright —
-    /// see [`Signal::NeedsInput`](crate::hook::Signal::NeedsInput) and
-    /// [`App::apply_reports`](cctop_ui::App::apply_reports).
-    Asking,
-    ApiError,
-}
-
-impl Surface {
-    pub fn is_desktop(&self) -> bool {
-        matches!(self, Surface::DesktopCode | Surface::DesktopCowork)
-    }
-
-    pub fn label(&self, provider: Provider) -> &'static str {
-        match (self, provider) {
-            (Surface::Editor, Provider::Cursor) => "Cursor",
-            (Surface::DesktopCowork, _) => "Claude Cowork",
-            (Surface::DesktopCode, _) => "Claude Code",
-            (_, Provider::Claude) => "Claude",
-            (_, Provider::Codex) => "Codex",
-            (_, Provider::Cursor) => "Cursor",
-            (_, Provider::Devin) => "Devin",
-            (_, Provider::Gemini) => "Gemini",
-            (_, Provider::OpenCode) => "OpenCode",
-            (_, Provider::Pi) => "Pi",
-            (_, Provider::Vibe) => "Vibe",
-            (_, Provider::Windsurf) => "Windsurf",
-            (_, Provider::Antigravity) => "Antigravity",
-        }
-    }
-}
+// Moved to `cctop-discovery` with the provider they are told apart by.
+pub use cctop_discovery::{ActivityState, Surface};
 
 /// Paths backing a Claude for Mac session, needed to delete it cleanly.
 #[derive(Debug, Clone)]
