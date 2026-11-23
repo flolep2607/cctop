@@ -283,37 +283,18 @@ pub fn extract(path: &Path) -> SessionData {
         return data;
     }
 
-    let mut breakdown: HashMap<String, (Tokens, Costs)> = HashMap::new();
+    let mut breakdown = Breakdown::new();
     for turn in turns {
         if let Some(tokens) = &turn.tokens {
             data.last_model = turn.model.clone();
-            let costs = turn_costs(tokens, &pricing::resolve_codex(&turn.model));
-            data.tokens.add(tokens);
-            add_costs(&mut data.costs, &costs);
-            let (model_tokens, model_costs) = breakdown.entry(turn.model.clone()).or_default();
-            model_tokens.add(tokens);
-            add_costs(model_costs, &costs);
-
-            if let Some(dt) = util::parse_ts(&turn.ts) {
-                data.record_cost(&dt, &turn.model, costs.total);
-                // All input kinds plus output — and thinking, which Gemini
-                // bills as output. `total` is not reused because it folds in
-                // the unbilled `tool` bucket.
-                let billed =
-                    tokens.input + tokens.cached_input + tokens.output + tokens.reasoning_output;
-                *data
-                    .tokens_by_day
-                    .entry(util::local_date_key(&dt))
-                    .or_default()
-                    .entry(turn.model.clone())
-                    .or_insert(0) += billed;
-                *data
-                    .tokens_by_hour
-                    .entry(util::local_hour_key(&dt))
-                    .or_default()
-                    .entry(turn.model.clone())
-                    .or_insert(0) += billed;
-            }
+            account_turn(
+                &mut data,
+                &mut breakdown,
+                &turn.model,
+                &turn.model,
+                &turn.ts,
+                tokens,
+            );
         }
 
         for call in turn.calls {
@@ -356,6 +337,57 @@ pub fn extract(path: &Path) -> SessionData {
         }
     }
 
+    finish_breakdown(&mut data, breakdown);
+    data
+}
+
+/// Tokens and estimated cost per model, gathered turn by turn.
+pub(super) type Breakdown = HashMap<String, (Tokens, Costs)>;
+
+/// Add one priced turn to the session's totals, its per-model breakdown and
+/// its day and hour buckets.
+///
+/// Shared with Antigravity CLI, which reports the same flat input, cached
+/// input and output and prices through the same resolver — under `price_as`,
+/// the API name its own model id stands for.
+pub(super) fn account_turn(
+    data: &mut SessionData,
+    breakdown: &mut Breakdown,
+    model: &str,
+    price_as: &str,
+    ts: &str,
+    tokens: &Tokens,
+) {
+    let costs = turn_costs(tokens, &pricing::resolve_codex(price_as));
+    data.tokens.add(tokens);
+    add_costs(&mut data.costs, &costs);
+    let (model_tokens, model_costs) = breakdown.entry(model.to_string()).or_default();
+    model_tokens.add(tokens);
+    add_costs(model_costs, &costs);
+
+    if let Some(dt) = util::parse_ts(ts) {
+        data.record_cost(&dt, model, costs.total);
+        // All input kinds plus output — and thinking, which Gemini bills as
+        // output. `total` is not reused because it folds in the unbilled
+        // `tool` bucket.
+        let billed = tokens.input + tokens.cached_input + tokens.output + tokens.reasoning_output;
+        *data
+            .tokens_by_day
+            .entry(util::local_date_key(&dt))
+            .or_default()
+            .entry(model.to_string())
+            .or_insert(0) += billed;
+        *data
+            .tokens_by_hour
+            .entry(util::local_hour_key(&dt))
+            .or_default()
+            .entry(model.to_string())
+            .or_insert(0) += billed;
+    }
+}
+
+/// Write the per-model breakdown onto the session, in model order.
+pub(super) fn finish_breakdown(data: &mut SessionData, breakdown: Breakdown) {
     let mut models: Vec<_> = breakdown.into_iter().collect();
     models.sort_by(|a, b| a.0.cmp(&b.0));
     data.models = models.iter().map(|(model, _)| model.clone()).collect();
@@ -368,13 +400,12 @@ pub fn extract(path: &Path) -> SessionData {
             costs,
         })
         .collect();
-    data
 }
 
 /// Every Gemini model the CLI runs — 2.5 Pro and Flash, 3 Pro and Flash — takes
 /// a million-token prompt, so a model LiteLLM has not listed yet is still
 /// measured against the window it almost certainly has rather than none.
-const GEMINI_DEFAULT_CTX: u64 = 1_048_576;
+pub(super) const GEMINI_DEFAULT_CTX: u64 = 1_048_576;
 
 /// The newest `gemini` message in the chat's tail that `f` answers for.
 ///

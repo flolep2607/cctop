@@ -172,9 +172,9 @@ mod tests {
     use super::*;
 
     fn git(dir: &std::path::Path, args: &[&str]) {
-        let ok = std::process::Command::new("git")
-            .arg("-C")
-            .arg(dir)
+        // `git_in`, not a bare `git`: under a pre-commit hook git exports
+        // `GIT_INDEX_FILE`, and a bare call would stage into the real checkout.
+        let ok = crate::worktree::git_in(dir)
             .args(["-c", "user.name=t", "-c", "user.email=t@t"])
             .args(args)
             .output()

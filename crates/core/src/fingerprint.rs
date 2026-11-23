@@ -227,6 +227,7 @@ fn provider_roots(provider: Provider) -> Vec<PathBuf> {
         Provider::Pi => config::pi_sessions_roots(),
         Provider::Vibe => config::vibe_sessions_roots(),
         Provider::Windsurf => config::windsurf_workspace_roots(),
+        Provider::Antigravity => config::antigravity_brains(),
     }
 }
 

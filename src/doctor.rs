@@ -283,6 +283,7 @@ fn environment() -> Section {
         "PI_CODING_AGENT_SESSION_DIR",
         "VIBE_HOME",
         "WINDSURF_USER_DIR",
+        "ANTIGRAVITY_DIR",
         "CCTOP_ALL_USERS",
         "CCTOP_HOMES",
         "CCTOP_HOSTS",
@@ -330,6 +331,7 @@ pub(crate) fn sessions_root(provider: Provider) -> std::path::PathBuf {
         Provider::Pi => config::PI_SESSIONS_ROOT.clone(),
         Provider::Vibe => config::VIBE_SESSIONS_ROOT.clone(),
         Provider::Windsurf => config::WINDSURF_USER_DIR.clone(),
+        Provider::Antigravity => config::ANTIGRAVITY_DIR.clone(),
     }
 }
 

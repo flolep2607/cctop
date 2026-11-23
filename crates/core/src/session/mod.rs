@@ -14,6 +14,7 @@ pub(crate) mod gemini_line;
 // Here rather than at the top of the crate because the session cache's version
 // is derived from this directory's sources (see build.rs), and what a parser
 // reads as absent is part of what it extracts.
+pub mod antigravity;
 pub(crate) mod lenient;
 pub mod lookup;
 pub mod opencode;
@@ -131,6 +132,7 @@ impl Surface {
             (_, Provider::Pi) => "Pi",
             (_, Provider::Vibe) => "Vibe",
             (_, Provider::Windsurf) => "Windsurf",
+            (_, Provider::Antigravity) => "Antigravity",
         }
     }
 }
@@ -572,6 +574,8 @@ pub const EDIT_TOOLS: &[&str] = &[
     // Gemini CLI's.
     "replace",
     "write_file",
+    // Antigravity CLI's, beside the `write_file` it shares with Gemini.
+    "edit_file",
 ];
 
 /// How many written paths a row carries.
@@ -873,6 +877,7 @@ impl Session {
             Provider::OpenCode => vec!["opencode", "--session", &self.session_id],
             Provider::Pi => vec!["pi", "--session", &self.session_id],
             Provider::Vibe => vec!["vibe", "--resume", &self.session_id],
+            Provider::Antigravity => vec!["agy", "--conversation", &self.session_id],
             Provider::Cursor | Provider::Gemini | Provider::Windsurf => {
                 return None;
             }
@@ -1232,10 +1237,13 @@ fn is_waiting_for_input_event(
         // neither has a "newest event" this walk could read. Devin never gets
         // here — live_state hands it to its own database read first, as it
         // does Vibe to its journal.
+        // ponytail: no `agy` tool asking the person a question has been seen
+        // in a transcript yet, so there is nothing to match.
         crate::pricing::Provider::OpenCode
         | crate::pricing::Provider::Devin
         | crate::pricing::Provider::Vibe
-        | crate::pricing::Provider::Windsurf => false,
+        | crate::pricing::Provider::Windsurf
+        | crate::pricing::Provider::Antigravity => false,
     }
 }
 
@@ -1493,6 +1501,10 @@ mod tests {
         assert_eq!(
             argv(Provider::Vibe),
             Some(vec!["vibe".into(), "--resume".into(), "sid".into()])
+        );
+        assert_eq!(
+            argv(Provider::Antigravity),
+            Some(vec!["agy".into(), "--conversation".into(), "sid".into()])
         );
         for provider in [Provider::Cursor, Provider::Gemini, Provider::Windsurf] {
             assert_eq!(argv(provider), None, "{provider:?} has no resume command");
@@ -2736,24 +2748,28 @@ impl SessionData {
 /// All sessions from every known provider and surface, newest first.
 pub fn list_all() -> Vec<Session> {
     let _span = crate::trace::span("discover");
-    let ((mut codex, claude), ((opencode, pi), (cursor, (gemini, (windsurf, (devin, vibe)))))) =
-        rayon::join(
-            || rayon::join(codex::list_sessions, claude::list_sessions),
-            || {
-                rayon::join(
-                    || rayon::join(opencode::list_sessions, pi::list_sessions),
-                    || {
-                        rayon::join(cursor::list_sessions, || {
-                            rayon::join(gemini::list_sessions, || {
-                                rayon::join(windsurf::list_sessions, || {
-                                    rayon::join(devin::list_sessions, vibe::list_sessions)
+    let (
+        (mut codex, claude),
+        ((opencode, pi), (cursor, (gemini, (windsurf, (devin, (vibe, antigravity)))))),
+    ) = rayon::join(
+        || rayon::join(codex::list_sessions, claude::list_sessions),
+        || {
+            rayon::join(
+                || rayon::join(opencode::list_sessions, pi::list_sessions),
+                || {
+                    rayon::join(cursor::list_sessions, || {
+                        rayon::join(gemini::list_sessions, || {
+                            rayon::join(windsurf::list_sessions, || {
+                                rayon::join(devin::list_sessions, || {
+                                    rayon::join(vibe::list_sessions, antigravity::list_sessions)
                                 })
                             })
                         })
-                    },
-                )
-            },
-        );
+                    })
+                },
+            )
+        },
+    );
     codex.extend(claude);
     codex.extend(opencode);
     codex.extend(pi);
@@ -2762,6 +2778,7 @@ pub fn list_all() -> Vec<Session> {
     codex.extend(windsurf);
     codex.extend(devin);
     codex.extend(vibe);
+    codex.extend(antigravity);
     let mut sessions = codex;
     // Whose row this is, decided once here rather than in seven discovery
     // functions: the transcript's path already says it, and every provider
@@ -2951,8 +2968,12 @@ pub fn effective_mtime_ms(session: &Session) -> u64 {
         // whenever one message lands; the per-session timestamp is the right
         // key. Windsurf has no such timestamp of its own, so its rows fall back
         // to the file and re-extract together — cheap, since the blob is small.
-        Provider::OpenCode | Provider::Windsurf => util::parse_ts(&session.last_active)
-            .map(|d| d.timestamp_millis().max(0) as u64)
-            .unwrap_or_else(|| crate::config::file_mtime_ms(f)),
+        // An Antigravity row's `last_active` is the newest of its own and its
+        // subagents' transcripts, which its figures fold in.
+        Provider::OpenCode | Provider::Windsurf | Provider::Antigravity => {
+            util::parse_ts(&session.last_active)
+                .map(|d| d.timestamp_millis().max(0) as u64)
+                .unwrap_or_else(|| crate::config::file_mtime_ms(f))
+        }
     }
 }

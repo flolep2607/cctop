@@ -922,6 +922,8 @@ pub(super) fn spawn_worker(
                             .map_err(|error| error.to_string()),
                         Provider::Windsurf => cctop_core::session::windsurf::delete(&session)
                             .map_err(|error| error.to_string()),
+                        Provider::Antigravity => cctop_core::session::antigravity::delete(&session)
+                            .map_err(|error| error.to_string()),
                     };
                     if result.is_ok() {
                         loader.store().evict(&session);

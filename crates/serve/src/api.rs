@@ -754,9 +754,9 @@ mod tests {
     fn the_sidebar_and_its_diffs_answer_only_for_what_the_session_changed() {
         let dir = tempfile::tempdir().unwrap();
         let git = |args: &[&str]| {
-            let ok = std::process::Command::new("git")
-                .arg("-C")
-                .arg(dir.path())
+            // `git_in`, not a bare `git`: under a pre-commit hook git exports
+            // `GIT_INDEX_FILE`, and a bare call would stage into the real checkout.
+            let ok = cctop_core::worktree::git_in(dir.path())
                 .args(["-c", "user.name=t", "-c", "user.email=t@t"])
                 .args(args)
                 .output()

@@ -474,7 +474,15 @@ pub fn find_query(session: &Target, query: &Query) -> Option<Hit> {
                 }
             }
         }
-        Provider::Codex | Provider::Cursor | Provider::Devin | Provider::Gemini | Provider::Pi => {
+        // ponytail: an Antigravity row's subagents keep transcripts of their
+        // own that this does not scan; their work is searched from their own
+        // conversation, not their parent's.
+        Provider::Codex
+        | Provider::Cursor
+        | Provider::Devin
+        | Provider::Gemini
+        | Provider::Pi
+        | Provider::Antigravity => {
             scan_file(file, &mut progress);
         }
         // `meta.json` is the session's title and stats; the conversation is

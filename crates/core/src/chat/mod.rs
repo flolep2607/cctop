@@ -542,6 +542,12 @@ fn read_main(session: &Session, before: Option<usize>, limits: Limits) -> Conver
         Provider::Cursor => extract::for_each_jsonl(path, |item| sink.cursor(item)),
         Provider::Gemini => gemini::for_each_record(path, |item| sink.gemini(item)),
         Provider::Pi => extract::for_each_jsonl(path, |item| sink.pi(item)),
+        // The same steps with `content` untruncated, where `agy` wrote them.
+        Provider::Antigravity => {
+            let full = path.with_file_name("transcript_full.jsonl");
+            let path = if full.is_file() { &full } else { path };
+            extract::for_each_jsonl(path, |item| sink.antigravity(item))
+        }
         Provider::Vibe => {
             for message in crate::session::vibe::messages(path) {
                 sink.vibe(&message);

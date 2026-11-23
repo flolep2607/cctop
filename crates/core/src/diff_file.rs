@@ -155,9 +155,9 @@ mod tests {
     fn repo() -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
         let git = |args: &[&str]| {
-            let ok = std::process::Command::new("git")
-                .arg("-C")
-                .arg(dir.path())
+            // `git_in`, not a bare `git`: under a pre-commit hook git exports
+            // `GIT_INDEX_FILE`, and a bare call would stage into the real checkout.
+            let ok = crate::worktree::git_in(dir.path())
                 .args(["-c", "user.name=t", "-c", "user.email=t@t"])
                 .args(args)
                 .output()
@@ -174,9 +174,7 @@ mod tests {
     }
 
     fn head(dir: &Path) -> String {
-        let out = std::process::Command::new("git")
-            .arg("-C")
-            .arg(dir)
+        let out = crate::worktree::git_in(dir)
             .args(["rev-parse", "HEAD"])
             .output()
             .unwrap();

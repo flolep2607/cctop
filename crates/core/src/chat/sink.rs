@@ -51,6 +51,10 @@ pub(super) struct Sink {
     /// Read sidechain records rather than skip them: set when the file being
     /// read is a subagent's own, where every record is one.
     pub(super) sidechains: bool,
+    /// Antigravity's calls still waiting for the step that answers them, by
+    /// the ids minted for them here: `agy` answers calls in the order they
+    /// were made and names none of them.
+    pub(super) unanswered: VecDeque<String>,
 }
 
 impl Sink {
@@ -809,6 +813,77 @@ impl Sink {
                 None => Outcome::Running,
             };
             self.add_tool(seq, None, call_tool(name, &args, outcome));
+        }
+    }
+
+    // --- Antigravity CLI ---
+
+    /// One `agy` step. A `PLANNER_RESPONSE` is a model turn with its thinking,
+    /// its text and its calls; each call is answered, in order, by a `GENERIC`
+    /// step. `SYSTEM_MESSAGE` steps are the harness prompting the model, not
+    /// anything said in the conversation, and are skipped.
+    pub(super) fn antigravity(&mut self, step: &Value) {
+        use crate::session::antigravity::{plain_args, reader_name, str_of};
+        let ts = str_of(step, "created_at");
+        match str_of(step, "type") {
+            "USER_INPUT" => {
+                let text = str_of(step, "content");
+                let text = text
+                    .trim()
+                    .strip_prefix("<USER_REQUEST>")
+                    .and_then(|t| t.trim_end().strip_suffix("</USER_REQUEST>"))
+                    .unwrap_or(text);
+                let mut turn = Turn::new("user", "message", ts);
+                turn.set_text(text.trim(), self.limits.text);
+                self.push(turn);
+            }
+            "PLANNER_RESPONSE" => {
+                let thinking = str_of(step, "thinking");
+                if !thinking.trim().is_empty() {
+                    let mut turn = Turn::new("assistant", "reasoning", ts);
+                    turn.set_text(thinking, self.limits.text);
+                    self.push(turn);
+                }
+                let mut turn = Turn::new("assistant", "message", ts);
+                turn.set_text(
+                    &tidy_harness_text(str_of(step, "content")),
+                    self.limits.text,
+                );
+                let seq = self.push(turn);
+                let index = step.get("step_index").and_then(Value::as_u64).unwrap_or(0);
+                for (k, call) in step
+                    .get("tool_calls")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .enumerate()
+                {
+                    let name = str_of(call, "name");
+                    let args = plain_args(call.get("args"));
+                    let mut tool = call_tool(reader_name(name), &args, Outcome::Running);
+                    tool.name = name.to_string();
+                    let id = format!("{index}.{k}");
+                    self.add_tool(seq, Some(&id), tool);
+                    self.unanswered.push_back(id);
+                }
+            }
+            "GENERIC" => {
+                let Some(id) = self.unanswered.pop_front() else {
+                    return;
+                };
+                let failed = matches!(str_of(step, "status"), "ERROR" | "INVALID");
+                let body = match str_of(step, "error") {
+                    "" => str_of(step, "content"),
+                    error => error,
+                };
+                self.resolve(&id, Some(body.to_string()), failed, None);
+            }
+            "ERROR_MESSAGE" => {
+                let mut turn = Turn::new("system", "message", ts);
+                turn.set_text(str_of(step, "content"), self.limits.text);
+                self.push(turn);
+            }
+            _ => {}
         }
     }
 
@@ -1695,6 +1770,39 @@ mod tests {
         );
         // No result recorded: Gemini keeps them, so this one is still running.
         assert!(chat.turns[1].tools[0].result.is_none());
+    }
+
+    /// An `agy` exchange: the request unwrapped from its tags, thinking as
+    /// reasoning, and each `GENERIC` step answering the oldest open call.
+    #[test]
+    fn an_antigravity_exchange_reads_the_same_way() {
+        let mut sink = Sink::default();
+        for line in [
+            r#"{"step_index":0,"type":"USER_INPUT","created_at":"t","content":"<USER_REQUEST>\nfix it\n</USER_REQUEST>"}"#,
+            r#"{"step_index":1,"type":"PLANNER_RESPONSE","created_at":"t","thinking":"look first","tool_calls":[{"name":"run_command","args":{"CommandLine":"\"git status\""}},{"name":"edit_file","args":{"Path":"\"a.rs\"","Target":"\"a\"","Replacement":"\"b\""}}]}"#,
+            r#"{"step_index":2,"type":"GENERIC","status":"DONE","created_at":"t","content":"clean"}"#,
+            r#"{"step_index":3,"type":"GENERIC","status":"ERROR","created_at":"t","error":"target content not found"}"#,
+            r#"{"step_index":4,"type":"SYSTEM_MESSAGE","created_at":"t","content":"harness prompt"}"#,
+            r#"{"step_index":5,"type":"PLANNER_RESPONSE","created_at":"t","content":"done","tool_calls":[{"name":"read_file","args":{"Path":"\"b.rs\""}}]}"#,
+        ] {
+            sink.antigravity(&serde_json::from_str(line).unwrap());
+        }
+        let chat = sink.finish();
+        assert_eq!(chat.turns.len(), 4, "the system prompt is not a turn");
+        assert_eq!(chat.turns[0].role, "user");
+        assert_eq!(chat.turns[0].text, "fix it");
+        assert_eq!(chat.turns[1].kind, "reasoning");
+        let calls = &chat.turns[2].tools;
+        assert_eq!(calls[0].name, "run_command");
+        assert_eq!(calls[0].detail, "git status");
+        assert_eq!(calls[0].result.as_deref(), Some("clean"));
+        assert!(!calls[0].failed);
+        assert_eq!(calls[1].name, "edit_file");
+        assert!(calls[1].failed);
+        assert_eq!(calls[1].result.as_deref(), Some("target content not found"));
+        assert_eq!((calls[1].added, calls[1].removed), (1, 1));
+        // Nothing has answered the last call yet.
+        assert!(chat.turns[3].tools[0].result.is_none());
     }
 
     /// A Pi exchange: a person's turn is a bare string, an agent's is blocks,

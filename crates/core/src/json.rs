@@ -319,7 +319,8 @@ pub fn sessions(sessions: &[Session], plan: Plan, store: &crate::cache::Store) -
                 | Provider::OpenCode
                 | Provider::Pi
                 | Provider::Vibe
-                | Provider::Windsurf => None,
+                | Provider::Windsurf
+                | Provider::Antigravity => None,
             }
             .map(|a| JsonAccount {
                 email: a.email.clone(),

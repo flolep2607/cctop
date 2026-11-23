@@ -401,6 +401,7 @@ pub fn info(
         Provider::Pi => format!("pi --session {}", session.session_id),
         Provider::Vibe => format!("vibe --resume {}", session.session_id),
         Provider::Windsurf => "Open from Windsurf history".to_string(),
+        Provider::Antigravity => format!("agy --conversation {}", session.session_id),
     };
     lines.push(field("Cmd", cmd));
     lines.push(field("Plan", plan.as_str()));
@@ -672,7 +673,8 @@ pub(super) fn provider_color(session: &Session) -> ratatui::style::Color {
             Provider::Codex => theme::colors().openai,
             Provider::Cursor => theme::colors().cursor,
             Provider::Devin => theme::colors().claude,
-            Provider::Gemini => theme::colors().gemini,
+            // Both Google's; a colour of its own can come when it is asked for.
+            Provider::Gemini | Provider::Antigravity => theme::colors().gemini,
             Provider::OpenCode => theme::colors().opencode,
             Provider::Pi => theme::colors().pi,
             Provider::Vibe => theme::colors().vibe,
@@ -2062,6 +2064,57 @@ pub fn config(session: &Session) -> Vec<Line<'static>> {
                 theme::title(),
             )));
             lines.extend(mcp_from_config(&settings, "mcpServers", "user"));
+        }
+        Provider::Antigravity => {
+            let gemini = &cctop_core::config::GEMINI_HOME;
+            let own = &cctop_core::config::ANTIGRAVITY_DIR;
+            lines.push(Line::from(Span::styled(
+                "── Instructions ──".to_string(),
+                theme::title(),
+            )));
+            let global = gemini.join("GEMINI.md");
+            match file_section(&global, &util::tildify(&global.to_string_lossy()), 30) {
+                Some(block) => lines.extend(block),
+                None => lines.push(missing(format!("{} not found", global.display()))),
+            }
+            if !session.label_source.is_empty() {
+                for name in ["GEMINI.md", "AGENTS.md"] {
+                    let display = format!("./{name}");
+                    match file_section(&cwd.join(name), &display, 40) {
+                        Some(block) => lines.extend(block),
+                        None => lines.push(missing(format!("{display} not found"))),
+                    }
+                }
+            }
+            lines.push(Line::from(Span::styled(
+                "── Config ──".to_string(),
+                theme::title(),
+            )));
+            let settings = own.join("settings.json");
+            match file_section(&settings, &util::tildify(&settings.to_string_lossy()), 30) {
+                Some(block) => lines.extend(block),
+                None => lines.push(missing(format!("{} not found", settings.display()))),
+            }
+            lines.push(Line::from(Span::styled(
+                "── Skills ──".to_string(),
+                theme::title(),
+            )));
+            lines.extend(skill_list(&gemini.join("skills")));
+            lines.extend(skill_list(&own.join("skills")));
+            lines.push(Line::from(Span::styled(
+                "── MCP ──".to_string(),
+                theme::title(),
+            )));
+            lines.extend(mcp_from_json(
+                &gemini.join("config").join("mcp_config.json"),
+                "user",
+            ));
+            if !session.label_source.is_empty() {
+                lines.extend(mcp_from_json(
+                    &cwd.join(".agents").join("mcp_config.json"),
+                    "project",
+                ));
+            }
         }
         Provider::Devin => {
             let files = cctop_core::access::devin_layout(&session.label_source);

@@ -609,9 +609,18 @@ pub enum Listing {
 /// LiteLLM table loaded, everything outside the built-ins is `Unlisted`, which
 /// is true of this process and is the caller's to qualify.
 pub fn listing(provider: Provider, model: &str) -> Listing {
+    let api;
+    let model = if provider == Provider::Antigravity {
+        api = antigravity_api_model(model);
+        api.as_str()
+    } else {
+        model
+    };
     let built_in = match provider {
         Provider::Claude => CLAUDE_TABLE.contains_key(model),
-        Provider::Codex | Provider::Gemini => CODEX_TABLE.contains_key(model),
+        Provider::Codex | Provider::Gemini | Provider::Antigravity => {
+            CODEX_TABLE.contains_key(model)
+        }
         Provider::Vibe => MISTRAL_TABLE.contains_key(model),
         _ => false,
     };
@@ -622,6 +631,41 @@ pub fn listing(provider: Provider, model: &str) -> Listing {
         Some(e) if priced(&e) => Listing::Priced,
         Some(_) => Listing::Free,
         None => Listing::Unlisted,
+    }
+}
+
+/// The API model an Antigravity CLI (`agy`) model id is billed as.
+///
+/// `agy models` lists its ids as an API model with an effort level on the end
+/// — `gemini-4-neon-medium` is "Gemini 4 Neon (Medium)", `claude-opus-5-5-high`
+/// Opus 5.5 at high effort — and effort changes how many tokens a turn takes,
+/// not what each costs. So the level comes off, and a Gemini model is named
+/// the way LiteLLM lists Google's own API (`gemini/…`), not a reseller's.
+///
+/// Three ids carry no API name to strip down to. Two are agy's orchestrators,
+/// which `agy models` labels with the model they run: "Orchestrator (Neon)"
+/// and "Orchestrator (Argon)". ponytail: the third, `gemini-flash-worker-agy`
+/// (the swarm workers' model, absent from `agy models`), is priced as the
+/// current Flash on the strength of its name alone; correct it here if Google
+/// ever says what it is.
+pub fn antigravity_api_model(model: &str) -> String {
+    let base = match model {
+        "gemini-pro-orchestrator-neon" => "gemini-4-neon",
+        "gemini-pro-orchestrator-g1-pro" => "gemini-4-argon",
+        "gemini-flash-worker-agy" => "gemini-3.8-flash",
+        _ => {
+            // `-xhigh` before `-high`, which it ends with.
+            let bare = ["-xhigh", "-high", "-medium", "-low"]
+                .iter()
+                .find_map(|level| model.strip_suffix(level))
+                .unwrap_or(model);
+            bare.strip_suffix("-tiered").unwrap_or(bare)
+        }
+    };
+    if base.starts_with("gemini-") {
+        format!("gemini/{base}")
+    } else {
+        base.to_string()
     }
 }
 
@@ -709,6 +753,7 @@ pub enum Provider {
     Pi,
     Vibe,
     Windsurf,
+    Antigravity,
 }
 
 impl Provider {
@@ -719,7 +764,7 @@ impl Provider {
     /// sessions were already priced into every figure `optimize` printed,
     /// because the names accepted there were a copy nobody had to keep in step.
     /// Everything that wants all of them iterates this instead.
-    pub const ALL: [Provider; 9] = [
+    pub const ALL: [Provider; 10] = [
         Provider::Claude,
         Provider::Codex,
         Provider::Cursor,
@@ -729,6 +774,7 @@ impl Provider {
         Provider::Pi,
         Provider::Vibe,
         Provider::Windsurf,
+        Provider::Antigravity,
     ];
 
     /// The harness's own name, as its vendor writes it.
@@ -748,6 +794,7 @@ impl Provider {
             Provider::Pi => "Pi",
             Provider::Vibe => "Mistral Vibe",
             Provider::Windsurf => "Windsurf",
+            Provider::Antigravity => "Antigravity CLI",
         }
     }
 
@@ -769,6 +816,7 @@ impl Provider {
             Provider::Pi => "extract.pi",
             Provider::Vibe => "extract.vibe",
             Provider::Windsurf => "extract.windsurf",
+            Provider::Antigravity => "extract.antigravity",
         }
     }
 
@@ -785,6 +833,7 @@ impl Provider {
             Provider::Pi => "tails.pi",
             Provider::Vibe => "tails.vibe",
             Provider::Windsurf => "tails.windsurf",
+            Provider::Antigravity => "tails.antigravity",
         }
     }
 
@@ -803,7 +852,8 @@ impl Provider {
             | Provider::Gemini
             | Provider::OpenCode
             | Provider::Pi
-            | Provider::Vibe => true,
+            | Provider::Vibe
+            | Provider::Antigravity => true,
             Provider::Cursor | Provider::Windsurf => false,
         }
     }
@@ -835,6 +885,7 @@ impl Provider {
             "pi" => Provider::Pi,
             "vibe" => Provider::Vibe,
             "windsurf" => Provider::Windsurf,
+            "antigravity" => Provider::Antigravity,
             _ => return None,
         })
     }
@@ -850,6 +901,7 @@ impl Provider {
             Provider::Pi => "pi",
             Provider::Vibe => "vibe",
             Provider::Windsurf => "windsurf",
+            Provider::Antigravity => "antigravity",
         }
     }
 }
@@ -925,6 +977,7 @@ mod provider_lists {
             Provider::Pi => 6,
             Provider::Vibe => 7,
             Provider::Windsurf => 8,
+            Provider::Antigravity => 9,
         }
     }
 
@@ -1139,6 +1192,22 @@ mod tests {
         assert_eq!(p.input, 5.0);
         assert_eq!(p.output, 25.0);
         assert_eq!(p.cache_write_1h, 10.0);
+    }
+
+    #[test]
+    fn an_antigravity_model_is_billed_as_the_api_model_it_names() {
+        for (agy, api) in [
+            ("gemini-4-neon-medium", "gemini/gemini-4-neon"),
+            ("gemini-4-neon-xhigh", "gemini/gemini-4-neon"),
+            ("gemini-4-hydrogen-tiered-xhigh", "gemini/gemini-4-hydrogen"),
+            ("gemini-3.8-flash-low", "gemini/gemini-3.8-flash"),
+            ("gemini-pro-orchestrator-g1-pro", "gemini/gemini-4-argon"),
+            ("gemini-flash-worker-agy", "gemini/gemini-3.8-flash"),
+            ("claude-opus-5-5-high", "claude-opus-5-5"),
+            ("gpt-oss-120b-medium", "gpt-oss-120b"),
+        ] {
+            assert_eq!(antigravity_api_model(agy), api, "{agy}");
+        }
     }
 
     #[test]

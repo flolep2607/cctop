@@ -54,6 +54,7 @@ fn provider_root(provider: Provider) -> &'static std::path::Path {
         Provider::Pi => &config::PI_SESSIONS_ROOT,
         Provider::Vibe => &config::VIBE_SESSIONS_ROOT,
         Provider::Windsurf => &config::WINDSURF_USER_DIR,
+        Provider::Antigravity => &config::ANTIGRAVITY_DIR,
     }
 }
 

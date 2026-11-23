@@ -1253,9 +1253,9 @@ It is a heuristic. A squash or rebase merge leaves the original commits off
 the default branch, so that work reads as unmerged.
 
 OPTIONS:
-  --provider NAME  Only this harness: claude, codex, cursor, gemini, opencode,
-                   pi, windsurf. Every session still competes for commits; only
-                   the report is narrowed.
+  --provider NAME  Only this harness: claude, codex, cursor, gemini,
+                   antigravity, opencode, pi, windsurf. Every session still
+                   competes for commits; only the report is narrowed.
   --since SPAN     Only sessions active in the last SPAN — 24h, 7d, 2w — or
                    since a date, 2026-09-01.
   --json           Machine-readable, for scripting: every session with its
