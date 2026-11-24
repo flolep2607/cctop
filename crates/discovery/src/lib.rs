@@ -19,6 +19,10 @@
 //! other break `cargo-semver-checks` finds on release. Pin the minor you
 //! built against.
 
+// Where each agent's files are. Public for cctop-core; hidden because its
+// shape is cctop's, not the interface this crate offers.
+#[doc(hidden)]
+pub mod paths;
 mod provider;
 pub mod session;
 mod state;
