@@ -21,7 +21,7 @@ use std::path::Path;
 /// carries.
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
-pub(crate) struct Entry<'a> {
+pub struct Entry<'a> {
     #[serde(rename = "type", borrow)]
     pub kind: Str<'a>,
     /// `session`: the session's own id. Every other entry's `id` is the
@@ -48,13 +48,13 @@ pub(crate) struct Entry<'a> {
 /// result.
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
-pub(crate) struct Message<'a> {
+pub struct Message<'a> {
     #[serde(borrow)]
     pub role: Str<'a>,
     #[serde(borrow)]
     pub model: Str<'a>,
     /// Milliseconds, stamped as the message was sealed. See
-    /// [`super::pi::message_ts`].
+    /// cctop-core's `session::pi::message_ts`.
     pub timestamp: Lenient<i64>,
     pub usage: Object<Usage>,
     /// The blocks of a model's turn. A person's is a bare string, which reads
@@ -72,7 +72,7 @@ pub(crate) struct Message<'a> {
 /// skipped by not having fields here.
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
-pub(crate) struct Block<'a> {
+pub struct Block<'a> {
     #[serde(rename = "type", borrow)]
     pub kind: Str<'a>,
     #[serde(borrow)]
@@ -86,7 +86,7 @@ pub(crate) struct Block<'a> {
 /// One request's tokens, and what Pi priced them at.
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
-pub(crate) struct Usage {
+pub struct Usage {
     pub input: Lenient<u64>,
     pub output: Lenient<u64>,
     #[serde(rename = "cacheRead")]
@@ -103,7 +103,7 @@ pub(crate) struct Usage {
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
-pub(crate) struct Cost {
+pub struct Cost {
     pub input: Lenient<f64>,
     pub output: Lenient<f64>,
     #[serde(rename = "cacheRead")]
@@ -119,7 +119,7 @@ impl Usage {
     /// Saturating: these are numbers out of a file any process on the
     /// machine can write, and a plain sum of them overflows a debug build
     /// and wraps to a nonsense window in a release one.
-    pub(crate) fn window(&self) -> u64 {
+    pub fn window(&self) -> u64 {
         [&self.input, &self.cache_read, &self.cache_write]
             .iter()
             .filter_map(|n| n.value())
@@ -129,7 +129,7 @@ impl Usage {
 
 impl<'a> Message<'a> {
     /// The tool calls in a model's turn, in the order it made them.
-    pub(crate) fn calls(&self) -> impl Iterator<Item = &Block<'a>> {
+    pub fn calls(&self) -> impl Iterator<Item = &Block<'a>> {
         self.content
             .list()
             .unwrap_or_default()
@@ -143,7 +143,7 @@ impl<'a> Entry<'a> {
     /// Read one line, or `None` when it is not JSON. A line that is JSON but
     /// not an object reads as an empty entry, as in
     /// [`super::claude_line::Line::parse`].
-    pub(crate) fn parse(bytes: &'a [u8]) -> Option<Entry<'a>> {
+    pub fn parse(bytes: &'a [u8]) -> Option<Entry<'a>> {
         if bytes.trim_ascii_start().first() != Some(&b'{') {
             serde_json::from_slice::<IgnoredAny>(bytes).ok()?;
             return Some(Entry::default());
@@ -152,7 +152,7 @@ impl<'a> Entry<'a> {
     }
 
     /// The message, when this is a `message` entry that has one.
-    pub(crate) fn message(&self) -> Option<&Message<'a>> {
+    pub fn message(&self) -> Option<&Message<'a>> {
         self.kind
             .is("message")
             .then(|| self.message.get())
@@ -161,12 +161,12 @@ impl<'a> Entry<'a> {
 
     /// When the entry was written: the message's own millisecond stamp when it
     /// has one, the entry's ISO string otherwise. The same rule as
-    /// [`super::pi::message_ts`], which reads it off a `Value`.
-    pub(crate) fn ts(&self) -> String {
+    /// cctop-core's `session::pi::message_ts`, which reads it off a `Value`.
+    pub fn ts(&self) -> String {
         self.message
             .get()
             .and_then(|m| m.timestamp.value())
-            .map(crate::util::ms_to_rfc3339)
+            .map(crate::time::ms_to_rfc3339)
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| self.timestamp.or_empty().to_string())
     }
@@ -174,8 +174,8 @@ impl<'a> Entry<'a> {
 
 /// Stream a session file one [`Entry`] at a time, oversized lines included —
 /// nothing an entry is read into can be large.
-pub(crate) fn for_each(path: &Path, mut f: impl FnMut(&Entry)) -> std::io::Result<()> {
-    super::extract::for_each_line(path, |bytes, _oversized| {
+pub fn for_each(path: &Path, mut f: impl FnMut(&Entry)) -> std::io::Result<()> {
+    super::for_each_line(path, |bytes, _oversized| {
         if let Some(entry) = Entry::parse(bytes) {
             f(&entry);
         }

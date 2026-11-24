@@ -8,7 +8,7 @@
 //! format once — a whole-file JSON object, then a JSONL log with `$set`
 //! patches — so tolerance is the point, not a nicety.
 //!
-//! The conversation view still walks [`super::gemini::for_each_record`]'s
+//! The conversation view still walks cctop-core's `session::gemini::for_each_record`'s
 //! `Value`s: it renders every field a message has, which is the opposite of
 //! what a typed reader buys. This is what the table's figures are read from.
 
@@ -22,12 +22,12 @@ use std::path::Path;
 /// carried.
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
-pub(crate) struct Record<'a> {
+pub struct Record<'a> {
     /// `user`, `gemini`, `info`, `error`, `warning`.
     #[serde(rename = "type", borrow)]
     pub kind: Str<'a>,
     /// The message's id. A message rewritten later under the same id is the
-    /// same message, not a second one — see [`super::gemini::extract`].
+    /// same message, not a second one — see cctop-core's `session::gemini::extract`.
     #[serde(borrow)]
     pub id: Str<'a>,
     #[serde(borrow)]
@@ -48,11 +48,11 @@ pub(crate) struct Record<'a> {
     pub messages: Lenient<Vec<Object<Record<'a>>>>,
 }
 
-/// A `gemini` message's token counts. See [`super::gemini`]'s `turn_tokens`
+/// A `gemini` message's token counts. See cctop-core's `session::gemini`'s `turn_tokens`
 /// for how they add up.
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
-pub(crate) struct TokenCounts {
+pub struct TokenCounts {
     pub input: Lenient<u64>,
     pub output: Lenient<u64>,
     pub cached: Lenient<u64>,
@@ -64,7 +64,7 @@ pub(crate) struct TokenCounts {
 /// One call a `gemini` message made, with its outcome recorded on it.
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
-pub(crate) struct ToolCall<'a> {
+pub struct ToolCall<'a> {
     #[serde(borrow)]
     pub id: Str<'a>,
     #[serde(borrow)]
@@ -96,7 +96,7 @@ struct PathArgs<'a> {
 impl<'a> ToolCall<'a> {
     /// The call's arguments built: whole, or only their path fields when the
     /// line was too large to build them whole.
-    pub(crate) fn args(&self) -> serde_json::Value {
+    pub fn args(&self) -> serde_json::Value {
         match &self.kept_args {
             Some(kept) => kept.clone(),
             None => self.args.value(),
@@ -122,7 +122,7 @@ impl<'a> Record<'a> {
     /// Read one record, or `None` when it is not JSON. A record that is JSON
     /// but not an object reads as empty, as [`super::claude_line::Line::parse`]
     /// explains.
-    pub(crate) fn parse(bytes: &'a [u8]) -> Option<Record<'a>> {
+    pub fn parse(bytes: &'a [u8]) -> Option<Record<'a>> {
         if bytes.trim_ascii_start().first() != Some(&b'{') {
             serde_json::from_slice::<IgnoredAny>(bytes).ok()?;
             return Some(Record::default());
@@ -131,7 +131,7 @@ impl<'a> Record<'a> {
     }
 
     /// The calls this message made, skipping any entry that is not an object.
-    pub(crate) fn calls(&self) -> impl Iterator<Item = &ToolCall<'a>> {
+    pub fn calls(&self) -> impl Iterator<Item = &ToolCall<'a>> {
         self.tool_calls
             .get()
             .into_iter()
@@ -141,17 +141,17 @@ impl<'a> Record<'a> {
 }
 
 impl TokenCounts {
-    pub(crate) fn count(field: &Lenient<u64>) -> u64 {
+    pub fn count(field: &Lenient<u64>) -> u64 {
         field.value().unwrap_or(0)
     }
 }
 
 /// Walk a chat file's records in order, whichever shape it is written in —
-/// the typed twin of [`super::gemini::for_each_record`], and unwrapping `$set`
+/// the typed twin of cctop-core's `session::gemini::for_each_record`, and unwrapping `$set`
 /// patches the same way.
-pub(crate) fn for_each(path: &Path, mut f: impl FnMut(&Record)) -> std::io::Result<()> {
+pub fn for_each(path: &Path, mut f: impl FnMut(&Record)) -> std::io::Result<()> {
     if path.extension().is_some_and(|ext| ext == "jsonl") {
-        return super::extract::for_each_line(path, |bytes, oversized| {
+        return super::for_each_line(path, |bytes, oversized| {
             // An oversized line is a message whose tool output alone passes the
             // cap. The output is a field this reader skips without building, so
             // the turn's tokens and calls are kept — the `Value` reader lost

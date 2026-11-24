@@ -4,23 +4,13 @@ use chrono::{DateTime, Datelike, Local, TimeZone, Timelike, Utc};
 use std::path::Path;
 use unicode_segmentation::UnicodeSegmentation;
 
-/// Parse an ISO-8601 timestamp into a UTC instant.
-pub fn parse_ts(value: &str) -> Option<DateTime<Utc>> {
-    if value.is_empty() {
-        return None;
-    }
-    DateTime::parse_from_rfc3339(value)
-        .ok()
-        .map(|d| d.with_timezone(&Utc))
-}
-
 /// Milliseconds since the Unix epoch.
 pub fn now_ms() -> i64 {
     Utc::now().timestamp_millis()
 }
 
 // Moved to `cctop-discovery`, whose listers stamp times with it.
-pub use cctop_discovery::time::ms_to_rfc3339;
+pub use cctop_discovery::time::{ms_to_rfc3339, parse_ts};
 
 /// Why "today" and "this hour" may not be the viewer's, when that is likely.
 ///
