@@ -20,6 +20,8 @@ pub mod codex_line;
 #[doc(hidden)]
 pub mod cursor_line;
 #[doc(hidden)]
+pub mod devin;
+#[doc(hidden)]
 pub mod devin_atif;
 #[doc(hidden)]
 pub mod gemini;
