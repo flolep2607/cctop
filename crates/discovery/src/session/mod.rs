@@ -24,6 +24,10 @@ pub mod lenient;
 #[doc(hidden)]
 pub mod opencode_line;
 #[doc(hidden)]
+pub mod pi;
+#[doc(hidden)]
+pub mod pi_line;
+#[doc(hidden)]
 pub mod windsurf;
 
 /// Lines above this size are almost always base64 image payloads carrying no

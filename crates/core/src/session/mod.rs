@@ -20,7 +20,7 @@ pub mod lookup;
 pub mod opencode;
 pub(crate) use cctop_discovery::session::opencode_line;
 pub mod pi;
-pub(crate) mod pi_line;
+pub(crate) use cctop_discovery::session::pi_line;
 pub mod search;
 pub mod vibe;
 pub mod windsurf;
