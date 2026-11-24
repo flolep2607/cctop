@@ -107,7 +107,7 @@ impl App {
                 .sessions
                 .iter()
                 .filter(|s| !s.subagents.is_empty())
-                .map(Session::key)
+                .map(|s| s.key())
                 .collect();
         } else {
             self.expanded.clear();

@@ -190,22 +190,8 @@ impl Agent {
     }
 }
 
-/// When `pid` started, in clock ticks since boot.
-///
-/// Read from `/proc` directly, as [`crate::hook`]'s ancestry walk is: the hook
-/// asks this on the agent's time.
-pub(crate) fn start_time(pid: u32) -> Option<u64> {
-    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    // `comm` is parenthesised and may hold spaces and parens of its own, so
-    // fields are counted from the last `)`: state is the first after it, and
-    // starttime (field 22 of the whole line) the twentieth.
-    stat.rsplit_once(')')?
-        .1
-        .split_whitespace()
-        .nth(19)?
-        .parse()
-        .ok()
-}
+// Moved to `cctop-discovery`, whose process match dates a process by it.
+pub(crate) use cctop_discovery::process::start_time;
 
 /// One session with YOLO on.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

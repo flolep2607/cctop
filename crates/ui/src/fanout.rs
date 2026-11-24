@@ -224,7 +224,7 @@ mod tests {
         let mut app = test_app();
         let (tx, rx) = channel();
         app.tx = tx;
-        app.marked = sessions.iter().map(Session::key).collect();
+        app.marked = sessions.iter().map(|s| s.key()).collect();
         app.sessions = sessions;
         app.refilter();
         (app, rx)
