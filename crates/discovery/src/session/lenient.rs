@@ -48,7 +48,7 @@ use std::marker::PhantomData;
 /// derive also takes a struct positionally from a JSON array, which would read
 /// `["a", "b"]` as a record whose first two fields are set.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct Lenient<T>(pub Option<T>);
+pub struct Lenient<T>(pub Option<T>);
 
 impl<T> Default for Lenient<T> {
     fn default() -> Self {
@@ -57,13 +57,13 @@ impl<T> Default for Lenient<T> {
 }
 
 impl<T> Lenient<T> {
-    pub(crate) fn get(&self) -> Option<&T> {
+    pub fn get(&self) -> Option<&T> {
         self.0.as_ref()
     }
 }
 
 impl<T: Copy> Lenient<T> {
-    pub(crate) fn value(&self) -> Option<T> {
+    pub fn value(&self) -> Option<T> {
         self.0
     }
 }
@@ -166,21 +166,21 @@ fn drain_map<'de, A: MapAccess<'de>>(mut map: A) -> Result<(), A::Error> {
 /// since then the text has to be rebuilt. Anything that is not a string is
 /// `None`.
 #[derive(Debug, Clone, Default, PartialEq)]
-pub(crate) struct Str<'a>(pub Option<Cow<'a, str>>);
+pub struct Str<'a>(pub Option<Cow<'a, str>>);
 
 impl<'a> Str<'a> {
-    pub(crate) fn get(&self) -> Option<&str> {
+    pub fn get(&self) -> Option<&str> {
         self.0.as_deref()
     }
 
     /// The string, or `""` when there is none — the `unwrap_or("")` every
     /// reader of an optional field writes.
-    pub(crate) fn or_empty(&self) -> &str {
+    pub fn or_empty(&self) -> &str {
         self.get().unwrap_or("")
     }
 
     /// Whether the field is this string, exactly.
-    pub(crate) fn is(&self, want: &str) -> bool {
+    pub fn is(&self, want: &str) -> bool {
         self.get() == Some(want)
     }
 }
@@ -249,7 +249,7 @@ impl<'de: 'a, 'a> Visitor<'de> for StrVisitor<'a> {
 /// cannot fail on a type. If it does fail anyway the object is skipped and the
 /// field is `None`, rather than the record around it being lost.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct Object<T>(pub Option<T>);
+pub struct Object<T>(pub Option<T>);
 
 impl<T> Default for Object<T> {
     fn default() -> Self {
@@ -258,7 +258,7 @@ impl<T> Default for Object<T> {
 }
 
 impl<T> Object<T> {
-    pub(crate) fn get(&self) -> Option<&T> {
+    pub fn get(&self) -> Option<&T> {
         self.0.as_ref()
     }
 }
@@ -321,7 +321,7 @@ impl<'de, T: Deserialize<'de>> Visitor<'de> for ObjectVisitor<T> {
 /// can go on meaning what it meant. A bare object at the top is `Object`, which
 /// most readers ignore, as they ignored it before.
 #[derive(Debug, Clone, Default, PartialEq)]
-pub(crate) enum Shape<'a, T> {
+pub enum Shape<'a, T> {
     Text(Cow<'a, str>),
     Object(T),
     List(Vec<Shape<'a, T>>),
@@ -333,21 +333,21 @@ pub(crate) enum Shape<'a, T> {
 
 impl<'a, T> Shape<'a, T> {
     /// The elements, when this is a list.
-    pub(crate) fn list(&self) -> Option<&[Shape<'a, T>]> {
+    pub fn list(&self) -> Option<&[Shape<'a, T>]> {
         match self {
             Shape::List(items) => Some(items),
             _ => None,
         }
     }
 
-    pub(crate) fn text(&self) -> Option<&str> {
+    pub fn text(&self) -> Option<&str> {
         match self {
             Shape::Text(s) => Some(s),
             _ => None,
         }
     }
 
-    pub(crate) fn object(&self) -> Option<&T> {
+    pub fn object(&self) -> Option<&T> {
         match self {
             Shape::Object(t) => Some(t),
             _ => None,
@@ -431,7 +431,7 @@ impl<'de: 'a, 'a, T: Deserialize<'de>> Visitor<'de> for ShapeVisitor<'a, T> {
 /// Only from a reader that borrows — `serde_json::from_slice` or `from_str`
 /// — since the text is the input's own.
 #[derive(Debug, Clone, Copy, Default)]
-pub(crate) struct Raw<'a>(pub Option<&'a RawValue>);
+pub struct Raw<'a>(pub Option<&'a RawValue>);
 
 impl<'de: 'a, 'a> Deserialize<'de> for Raw<'a> {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
@@ -441,25 +441,25 @@ impl<'de: 'a, 'a> Deserialize<'de> for Raw<'a> {
 
 impl<'a> Raw<'a> {
     /// The value built, or `None` when the field is missing.
-    pub(crate) fn to_value(self) -> Option<serde_json::Value> {
+    pub fn to_value(self) -> Option<serde_json::Value> {
         self.0.and_then(|raw| serde_json::from_str(raw.get()).ok())
     }
 
     /// The value built, with `Null` for a missing field: what
     /// `get(..).cloned().unwrap_or(Value::Null)` gave.
-    pub(crate) fn value(self) -> serde_json::Value {
+    pub fn value(self) -> serde_json::Value {
         self.to_value().unwrap_or(serde_json::Value::Null)
     }
 
     /// Read the value as a `T`, if it is one.
-    pub(crate) fn read<T: Deserialize<'a>>(self) -> Option<T> {
+    pub fn read<T: Deserialize<'a>>(self) -> Option<T> {
         serde_json::from_str(self.0?.get()).ok()
     }
 
     /// The value's size as a share of the context window: a string's own
     /// length, nothing for `null` or a missing field, and the compact JSON of
     /// anything structured, which is what the API is handed.
-    pub(crate) fn content_chars(self) -> u64 {
+    pub fn content_chars(self) -> u64 {
         let Some(raw) = self.0 else {
             return 0;
         };
@@ -478,12 +478,12 @@ impl<'a> Raw<'a> {
 /// that size a piece of content as the JSON the API is handed. The source text
 /// is not the same number: it may carry whitespace or escapes the serialiser
 /// would not write.
-pub(crate) fn compact_len(raw: &serde_json::value::RawValue) -> u64 {
+pub fn compact_len(raw: &serde_json::value::RawValue) -> u64 {
     serde_json::from_str::<CompactLen>(raw.get()).map_or(0, |n| n.0)
 }
 
 /// See [`compact_len`].
-pub(crate) struct CompactLen(pub u64);
+pub struct CompactLen(pub u64);
 
 impl<'de> Deserialize<'de> for CompactLen {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
@@ -573,7 +573,7 @@ impl<'de> Visitor<'de> for CompactLenVisitor {
 
 /// A JSON string's length once its escapes are undone, without building it:
 /// what `str::len` of the decoded text is.
-pub(crate) struct TextLen(pub u64);
+pub struct TextLen(pub u64);
 
 impl<'de> Deserialize<'de> for TextLen {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {

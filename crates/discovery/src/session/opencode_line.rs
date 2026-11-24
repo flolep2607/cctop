@@ -16,7 +16,7 @@ use serde::Deserialize;
 /// A `message` row's `data`.
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
-pub(crate) struct Message<'a> {
+pub struct Message<'a> {
     #[serde(borrow)]
     pub role: Str<'a>,
     #[serde(rename = "modelID", borrow)]
@@ -48,7 +48,7 @@ pub(crate) struct Message<'a> {
 /// OpenCode 2's nested `model` object: the id priced against, and the effort.
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
-pub(crate) struct ModelRef<'a> {
+pub struct ModelRef<'a> {
     #[serde(borrow)]
     pub id: Str<'a>,
     #[serde(borrow)]
@@ -57,7 +57,7 @@ pub(crate) struct ModelRef<'a> {
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
-pub(crate) struct Tokens {
+pub struct Tokens {
     pub input: Lenient<u64>,
     pub output: Lenient<u64>,
     pub reasoning: Lenient<u64>,
@@ -66,7 +66,7 @@ pub(crate) struct Tokens {
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
-pub(crate) struct Cache {
+pub struct Cache {
     pub read: Lenient<u64>,
     pub write: Lenient<u64>,
 }
@@ -75,7 +75,7 @@ pub(crate) struct Cache {
 /// is `start` and `end`.
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
-pub(crate) struct Time {
+pub struct Time {
     pub created: Lenient<i64>,
     pub completed: Lenient<i64>,
     pub start: Lenient<i64>,
@@ -86,7 +86,7 @@ pub(crate) struct Time {
 /// the provider's words under `data.message` or, in older rows, `message`.
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
-pub(crate) struct Error<'a> {
+pub struct Error<'a> {
     #[serde(borrow)]
     pub name: Str<'a>,
     /// OpenCode 2 names the failure by a `type` — `provider.rate-limit`,
@@ -101,7 +101,7 @@ pub(crate) struct Error<'a> {
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
-pub(crate) struct ErrorData<'a> {
+pub struct ErrorData<'a> {
     #[serde(borrow)]
     pub message: Str<'a>,
 }
@@ -110,7 +110,7 @@ pub(crate) struct ErrorData<'a> {
 /// `tool` call, and a `compaction`. Text and reasoning are skipped.
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
-pub(crate) struct Part<'a> {
+pub struct Part<'a> {
     #[serde(rename = "type", borrow)]
     pub kind: Str<'a>,
     #[serde(borrow)]
@@ -125,7 +125,7 @@ pub(crate) struct Part<'a> {
 /// input it was handed, and when it ran.
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
-pub(crate) struct ToolState<'a> {
+pub struct ToolState<'a> {
     #[serde(borrow)]
     pub status: Str<'a>,
     #[serde(borrow)]
@@ -134,7 +134,7 @@ pub(crate) struct ToolState<'a> {
 }
 
 impl Message<'_> {
-    pub(crate) fn tokens(&self) -> super::Tokens {
+    pub fn tokens(&self) -> super::Tokens {
         let no_tokens = Tokens::default();
         let t = self.tokens.get().unwrap_or(&no_tokens);
         let n = |v: &Lenient<u64>| v.value().unwrap_or(0);
@@ -158,44 +158,44 @@ impl Message<'_> {
     /// billed like any turn, but its input is the whole old window handed to
     /// the summariser and it carries no `variant`, so it says nothing about
     /// the window or the effort the conversation goes on with.
-    pub(crate) fn is_summary(&self) -> bool {
+    pub fn is_summary(&self) -> bool {
         self.summary.value() == Some(true) || self.mode.is("compaction")
     }
 
     /// What the next turn has to resend: everything the model was given,
     /// cached or not. Output is excluded — the next input count includes it.
-    pub(crate) fn window(&self) -> u64 {
+    pub fn window(&self) -> u64 {
         let t = self.tokens();
         t.input + t.cache_read + t.cache_write_5m
     }
 
-    pub(crate) fn created_ms(&self) -> Option<i64> {
+    pub fn created_ms(&self) -> Option<i64> {
         self.time.get().and_then(|t| t.created.value())
     }
 
     /// How long the model took over the turn, when it finished one.
-    pub(crate) fn duration_ms(&self) -> Option<u64> {
+    pub fn duration_ms(&self) -> Option<u64> {
         let time = self.time.get()?;
         let (start, end) = (time.created.value()?, time.completed.value()?);
         u64::try_from(end - start).ok()
     }
 
     /// The model id, flat (`modelID`, 1.x) or nested (`model.id`, 2.x).
-    pub(crate) fn model_name(&self) -> Option<&str> {
+    pub fn model_name(&self) -> Option<&str> {
         self.model_id
             .get()
             .or_else(|| self.model.get().and_then(|m| m.id.get()))
     }
 
     /// The reasoning effort, flat (`variant`, 1.x) or nested (`model.variant`).
-    pub(crate) fn variant_name(&self) -> Option<&str> {
+    pub fn variant_name(&self) -> Option<&str> {
         self.variant
             .get()
             .or_else(|| self.model.get().and_then(|m| m.variant.get()))
     }
 
     /// The error's name and words, lowercased into one string to match on.
-    pub(crate) fn error_text(&self) -> Option<String> {
+    pub fn error_text(&self) -> Option<String> {
         let error = self.error.get()?;
         let text = [
             error.name.get(),
@@ -212,14 +212,14 @@ impl Message<'_> {
 }
 
 impl ToolState<'_> {
-    pub(crate) fn duration_ms(&self) -> Option<i64> {
+    pub fn duration_ms(&self) -> Option<i64> {
         let time = self.time.get()?;
         Some((time.end.value()? - time.start.value()?).max(0))
     }
 }
 
 /// Read a row's `data`, or `None` when it is not a JSON object.
-pub(crate) fn parse<'a, T: Deserialize<'a> + Default>(raw: &'a str) -> Option<T> {
+pub fn parse<'a, T: Deserialize<'a> + Default>(raw: &'a str) -> Option<T> {
     serde_json::from_str::<Object<T>>(raw).ok()?.0
 }
 

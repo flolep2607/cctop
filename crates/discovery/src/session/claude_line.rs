@@ -28,7 +28,7 @@ use std::path::Path;
 /// One line of a Claude Code transcript.
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
-pub(crate) struct Line<'a> {
+pub struct Line<'a> {
     #[serde(rename = "type", borrow)]
     pub kind: Str<'a>,
     #[serde(borrow)]
@@ -66,10 +66,10 @@ pub(crate) struct Line<'a> {
     pub attachment: Raw<'a>,
 }
 
-/// Who wrote a prompt-shaped record. See [`crate::chat`]'s `author`.
+/// Who wrote a prompt-shaped record. See cctop-core's `chat::author`.
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
-pub(crate) struct Origin<'a> {
+pub struct Origin<'a> {
     #[serde(borrow)]
     pub kind: Str<'a>,
     #[serde(borrow)]
@@ -80,7 +80,7 @@ pub(crate) struct Origin<'a> {
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
-pub(crate) struct Message<'a> {
+pub struct Message<'a> {
     #[serde(borrow)]
     pub id: Str<'a>,
     #[serde(borrow)]
@@ -95,7 +95,7 @@ pub(crate) struct Message<'a> {
 /// absent on the kinds that do not carry it.
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
-pub(crate) struct Block<'a> {
+pub struct Block<'a> {
     #[serde(rename = "type", borrow)]
     pub kind: Str<'a>,
     #[serde(borrow)]
@@ -121,7 +121,7 @@ pub(crate) struct Block<'a> {
 /// number reads as zero, as `as_u64` did.
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
-pub(crate) struct Usage {
+pub struct Usage {
     pub input_tokens: Lenient<u64>,
     pub cache_read_input_tokens: Lenient<u64>,
     pub output_tokens: Lenient<u64>,
@@ -131,7 +131,7 @@ pub(crate) struct Usage {
 
 impl Usage {
     /// Everything the request held in its window, which is how full it was.
-    pub(crate) fn window(&self) -> u64 {
+    pub fn window(&self) -> u64 {
         let n = |v: &Lenient<u64>| v.value().unwrap_or(0);
         n(&self.input_tokens)
             .saturating_add(n(&self.cache_read_input_tokens))
@@ -141,7 +141,7 @@ impl Usage {
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
-pub(crate) struct CacheCreation {
+pub struct CacheCreation {
     pub ephemeral_5m_input_tokens: Lenient<u64>,
     pub ephemeral_1h_input_tokens: Lenient<u64>,
 }
@@ -149,7 +149,7 @@ pub(crate) struct CacheCreation {
 /// What an edit or a write reported back, beside its `tool_result`.
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
-pub(crate) struct ToolUseResult<'a> {
+pub struct ToolUseResult<'a> {
     #[serde(rename = "type", borrow)]
     pub kind: Str<'a>,
     /// The whole file a `create` wrote. Kept unread until it is known to be
@@ -162,7 +162,7 @@ pub(crate) struct ToolUseResult<'a> {
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
-pub(crate) struct Hunk<'a> {
+pub struct Hunk<'a> {
     #[serde(borrow)]
     pub lines: Lenient<Vec<Str<'a>>>,
 }
@@ -172,7 +172,7 @@ impl<'a> ToolUseResult<'a> {
     ///
     /// `None` when there is no patch, which is not the same as an empty one:
     /// a reader falls back to the `create` case only for the first.
-    pub(crate) fn patch_lines(&self) -> Option<impl Iterator<Item = &str>> {
+    pub fn patch_lines(&self) -> Option<impl Iterator<Item = &str>> {
         let hunks = self.structured_patch.get()?;
         Some(
             hunks
@@ -185,7 +185,7 @@ impl<'a> ToolUseResult<'a> {
     }
 
     /// The file a `create` wrote, when this is one.
-    pub(crate) fn created(&self) -> Option<Str<'a>> {
+    pub fn created(&self) -> Option<Str<'a>> {
         if !self.kind.is("create") {
             return None;
         }
@@ -196,7 +196,7 @@ impl<'a> ToolUseResult<'a> {
 /// An `attachment` entry's own record: what the harness spliced in.
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
-pub(crate) struct Attachment<'a> {
+pub struct Attachment<'a> {
     #[serde(rename = "type", borrow)]
     pub kind: Str<'a>,
     /// A `queued_command`'s message: a string, or blocks when an image came
@@ -231,7 +231,7 @@ impl<'a> Line<'a> {
     /// JSON that is not an object is a line with nothing in it, as it was to
     /// the `Value` walk, and is checked for here: serde's derive would take a
     /// struct positionally from an array.
-    pub(crate) fn parse(bytes: &'a [u8]) -> Option<Line<'a>> {
+    pub fn parse(bytes: &'a [u8]) -> Option<Line<'a>> {
         if is_request_record(bytes) {
             return Some(Line::default());
         }
@@ -248,7 +248,7 @@ impl<'a> Line<'a> {
     /// Everything else — the base64 image, the file body — is skipped as
     /// [`IgnoredAny`], which walks the JSON without allocating it. Dropping
     /// the line whole silently loses its tokens and their cost.
-    pub(crate) fn slim(bytes: &'a [u8]) -> Option<Line<'a>> {
+    pub fn slim(bytes: &'a [u8]) -> Option<Line<'a>> {
         if is_request_record(bytes) {
             return None;
         }
@@ -296,26 +296,26 @@ impl<'a> Line<'a> {
     }
 
     /// Whether the entry was flagged as this, `true` and nothing else.
-    pub(crate) fn sidechain(&self) -> bool {
+    pub fn sidechain(&self) -> bool {
         self.is_sidechain.value() == Some(true)
     }
 
-    pub(crate) fn meta(&self) -> bool {
+    pub fn meta(&self) -> bool {
         self.is_meta.value() == Some(true)
     }
 
-    pub(crate) fn compact_summary(&self) -> bool {
+    pub fn compact_summary(&self) -> bool {
         self.is_compact_summary.value() == Some(true)
     }
 
     /// The message's content, `Other` when there is no message.
-    pub(crate) fn content(&self) -> &Shape<'a, Block<'a>> {
+    pub fn content(&self) -> &Shape<'a, Block<'a>> {
         static NONE: Shape<'static, Block<'static>> = Shape::Other;
         self.message.get().map_or(&NONE, |m| &m.content)
     }
 
     /// The `attachment`, read as one.
-    pub(crate) fn attachment(&self) -> Option<Attachment<'a>> {
+    pub fn attachment(&self) -> Option<Attachment<'a>> {
         self.attachment.read::<Object<Attachment<'a>>>()?.0
     }
 }
@@ -324,9 +324,9 @@ impl<'a> Line<'a> {
 ///
 /// Lines over the size cap are read as [`Line::slim`], and lines that are not
 /// JSON — a truncated tail from a crashed writer — are skipped. See
-/// [`super::extract::for_each_line`].
-pub(crate) fn for_each(path: &Path, mut f: impl FnMut(&Line)) -> std::io::Result<()> {
-    super::extract::for_each_line(path, |bytes, oversized| {
+/// [`super::for_each_line`].
+pub fn for_each(path: &Path, mut f: impl FnMut(&Line)) -> std::io::Result<()> {
+    super::for_each_line(path, |bytes, oversized| {
         let line = match oversized {
             true => Line::slim(bytes),
             false => Line::parse(bytes),

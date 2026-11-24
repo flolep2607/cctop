@@ -13,6 +13,11 @@ readme = "README.md"
 keywords = ["claude-code", "codex", "agents", "sessions", "cctop"]
 categories = ["development-tools"]
 
+[features]
+# TypeScript bindings for the types cctop's web page reads; cctop-core's `ts`
+# turns it on.
+ts = ["dep:ts-rs"]
+
 [lib]
 # As in the other crates: no doc comment here is an example meant to run.
 doctest = false
@@ -23,3 +28,5 @@ doctest = false
 # added here is added to every one of them.
 [dependencies]
 serde.workspace = true
+serde_json.workspace = true
+ts-rs = { workspace = true, optional = true }

@@ -31,7 +31,7 @@ test-support = []
 # Derives the TypeScript declarations of the types the web API answers with.
 # Turned on only by cctop-serve's dev-dependencies, whose `ts_types` test
 # writes and checks `web/src/lib/gen/`.
-ts = ["dep:ts-rs"]
+ts = ["dep:ts-rs", "cctop-discovery/ts"]
 
 [dependencies]
 cctop-discovery.workspace = true
