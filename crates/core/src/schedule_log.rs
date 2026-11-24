@@ -404,7 +404,7 @@ pub fn summarize(
             run: run.clone(),
             state,
             unseen: is_unseen(run, seen),
-            session: session.map(Session::key),
+            session: session.map(|s| s.key()),
             session_id: session.map(|s| s.session_id.clone()),
             live: session.is_some_and(Session::is_running),
             cost: session.and_then(|s| s.total_cost),

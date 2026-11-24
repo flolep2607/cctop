@@ -381,15 +381,6 @@ pub struct Session {
     /// place every provider's rows meet.
     pub profile: Option<String>,
 
-    /// Login name of the user whose home this session was read out of, when
-    /// that is not the user running cctop.
-    ///
-    /// Only ever set when cctop is sweeping other homes — running as root, or
-    /// told to by `$CCTOP_ALL_USERS` — so `None` on an ordinary run means
-    /// "mine" rather than "unknown". Stamped from the transcript's path in
-    /// [`list_all`], which is the one place every provider's rows meet.
-    pub owner: Option<String>,
-
     /// Whether the agent is in a cctop tab on the machine the session is on:
     /// its root process is held by that machine's cctop rmux, which every
     /// cctop there shares.
@@ -491,6 +482,12 @@ fn distil_recent_writes(details: &HashMap<String, Vec<ToolDetail>>) -> Vec<Strin
         .collect()
 }
 
+impl AsRef<Discovered> for Session {
+    fn as_ref(&self) -> &Discovered {
+        &self.found
+    }
+}
+
 impl std::ops::Deref for Session {
     type Target = Discovered;
     fn deref(&self) -> &Discovered {
@@ -590,55 +587,9 @@ impl Session {
             remote: None,
             sandbox: None,
             profile: None,
-            owner: None,
             in_tab: false,
             tokens_per_min: 0.0,
             cost_per_min: 0.0,
-        }
-    }
-
-    /// Stable identity used as a map key across refreshes.
-    pub fn key(&self) -> String {
-        format!("{}:{}", self.provider.as_str(), self.session_id)
-    }
-
-    /// [`Self::key`] written into a buffer the caller owns and reused, for the
-    /// passes that match every session against a map keyed by it.
-    ///
-    /// `key` itself is right almost everywhere and stays: it hands back
-    /// something the caller can keep. What it cannot do is a *lookup*, and the
-    /// sweeps that need one — the process attribution, the rate table, the tail
-    /// cache — run over every session on every refresh, so a fresh `String` per
-    /// row is a per-row allocation for a key that is thrown away a line later.
-    /// One buffer per pass turns that into one allocation however many rows
-    /// there are.
-    ///
-    /// What is left still costs: a pass that *writes* to one of those maps has
-    /// to own the key it writes. That is the minority of the calls, and for the
-    /// rate table — the only one retained across walks — it is the first
-    /// sighting of a session and never again.
-    pub fn key_into<'a>(&self, buf: &'a mut String) -> &'a str {
-        use std::fmt::Write as _;
-        buf.clear();
-        let _ = write!(buf, "{}:{}", self.provider.as_str(), self.session_id);
-        buf
-    }
-
-    /// When anything was last written for this session: [`Self::touched_at`],
-    /// or [`Self::last_active`] for a provider that only has the one.
-    pub fn touched(&self) -> &str {
-        match self.touched_at.is_empty() {
-            true => &self.last_active,
-            false => &self.touched_at,
-        }
-    }
-
-    /// The id a running process would name to mean this session: the one it was
-    /// launched with, or its own when it was never resumed from anything.
-    pub fn launched_as(&self) -> &str {
-        match self.launch_id.is_empty() {
-            true => &self.session_id,
-            false => &self.launch_id,
         }
     }
 

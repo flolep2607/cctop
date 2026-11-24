@@ -228,7 +228,7 @@ impl App {
     /// One `String`, where the walk below used to build one per live session.
     fn viewed_session(&self) -> Option<String> {
         let pid = match self.tab {
-            0 => return self.selected_session().map(Session::key),
+            0 => return self.selected_session().map(|s| s.key()),
             tab => {
                 let tab = self.tabs.get(tab - 1)?;
                 tab.panes.get(tab.focus)?.agent()
@@ -237,7 +237,7 @@ impl App {
         self.sessions
             .iter()
             .find(|session| session.root_pid() == Some(pid))
-            .map(Session::key)
+            .map(|s| s.key())
     }
 
     /// Bring the unseen marks up to date with what the rows say and where you
@@ -1775,7 +1775,7 @@ mod tests {
 
         app.selected = 0;
         app.jump_to_bell();
-        assert_eq!(app.selected_session().map(Session::key), Some(target));
+        assert_eq!(app.selected_session().map(|s| s.key()), Some(target));
 
         // Filtered out of the table, the bell has nowhere to land — and says so
         // rather than moving the cursor to an unrelated row.

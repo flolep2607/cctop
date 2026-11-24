@@ -36,6 +36,8 @@ percent-encoding.workspace = true
 rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+# The process table: which agent runs where, and as whom.
+sysinfo.workspace = true
 ts-rs = { workspace = true, optional = true }
 
 [dev-dependencies]
