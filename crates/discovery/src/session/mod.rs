@@ -22,6 +22,8 @@ pub mod codex;
 #[doc(hidden)]
 pub mod codex_line;
 #[doc(hidden)]
+pub mod cursor;
+#[doc(hidden)]
 pub mod cursor_line;
 #[doc(hidden)]
 pub mod devin;
