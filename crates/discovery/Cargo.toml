@@ -20,7 +20,7 @@ ts = ["dep:ts-rs"]
 
 [lib]
 # As in the other crates: no doc comment here is an example meant to run.
-doctest = false
+doctest = true
 
 # Kept to what reading session files and the process table needs. The point of
 # the crate is that a status bar can link it without the terminal, the web

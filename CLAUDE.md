@@ -97,8 +97,11 @@ cctop, so its `Provider` interface can take tunnels other than Cloudflare's.
 `cctop-discovery` also sits below core: it is the part other programs link
 to find running agents (issue #430), so it takes no terminal, web, TLS,
 tokenizer or multiplexer dependency — check with `cargo tree -p
-cctop-discovery -e normal`. It is being moved out of core in steps; core
-re-exports what has moved, so old paths keep working. The
+cctop-discovery -e normal`. It holds every agent's session lister, the
+process match and the transcript state; core re-exports them from their old
+paths and adds what only cctop knows (cost, hooks, the connection pool, the
+thread pool). Its public interface is `agents()` and `Agent`; everything else
+in it is `#[doc(hidden)] pub` for core. The
 root `Cargo.toml` draws the graph and says why each boundary is where it is.
 The point is the rebuild: an edit to the UI recompiles the UI and the binary,
 not the server and not the parsers.

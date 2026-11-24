@@ -1,12 +1,27 @@
 # cctop-discovery
 
-The coding agents running on this machine — Claude Code, Codex, OpenCode,
-Gemini and others — as [cctop](https://github.com/flolep2607/cctop) finds them.
+The coding agents on this machine — Claude Code, Codex, Cursor, Devin, Gemini
+CLI, OpenCode, Pi, Mistral Vibe, Windsurf and the Antigravity CLI — as
+[cctop](https://github.com/flolep2607/cctop) finds them: every session, the
+process running it, its working directory, its title and what it is doing.
 
-This crate is being split out of `cctop-core` in steps, so that panel applets,
-status bars and notifiers can reuse cctop's agent detection without its
-terminal, web, TLS and multiplexer dependencies. So far it holds the shared
-types (`Provider`, `Surface`, `ActivityState`, `Permission`); the session
-parsers and the process match follow.
+It is the part of cctop that a panel applet, a status bar or a notifier needs,
+without cctop's terminal, web server, TLS or multiplexer.
 
-It is 0.x: expect breaking changes as minor bumps.
+```rust
+for agent in cctop_discovery::agents() {
+    let Some(pid) = agent.pid else { continue }; // running ones only
+    println!("{} {pid} {:?} {:?}", agent.provider.display_name(), agent.state, agent.cwd);
+}
+```
+
+`cargo run -p cctop-discovery --example agents` prints the running ones.
+
+Linux only. It reads the agents' own files and `/proc`, and never writes. The
+crate docs say which agents can be matched to a process and why the *asking*
+state is mostly not visible from files alone.
+
+It is 0.x: `agents`, `Agent` and the enums are the interface. A new agent or
+state is a new enum variant, so it is a breaking change and comes as a minor
+bump. Pin the minor you built against. Modules hidden from the docs are
+cctop-core's and change without notice.
