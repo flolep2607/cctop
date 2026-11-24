@@ -16,6 +16,8 @@ pub mod antigravity;
 #[doc(hidden)]
 pub mod claude_line;
 #[doc(hidden)]
+pub mod codex;
+#[doc(hidden)]
 pub mod codex_line;
 #[doc(hidden)]
 pub mod cursor_line;
@@ -224,6 +226,28 @@ pub fn readonly(path: &Path) -> rusqlite::Result<rusqlite::Connection> {
         path,
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )
+}
+
+/// Hand lines from the head of a file to `f`, which says whether it could
+/// read each one, until `max_lines` of them have been read.
+pub fn scan_first_lines<F: FnMut(&[u8]) -> bool>(path: &Path, max_lines: usize, mut f: F) {
+    let Ok(file) = std::fs::File::open(path) else {
+        return;
+    };
+    let reader = BufReader::with_capacity(64 * 1024, file);
+    let mut read = 0;
+    for line in reader.lines().map_while(Result::ok) {
+        if read >= max_lines {
+            break;
+        }
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if f(line.as_bytes()) {
+            read += 1;
+        }
+    }
 }
 
 /// Hand lines from the tail of a file to `f`, newest first, until it has
