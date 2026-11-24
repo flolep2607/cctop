@@ -6,22 +6,16 @@ use super::lenient::{Lenient, Object, Str};
 use super::{
     CodexRates, ContextUsage, Costs, Metrics, ModelBreakdown, Session, SessionData, Tokens,
 };
-use crate::config::{self, CODEX_DEFAULT_CTX};
-use crate::pricing::{self, Provider};
+use crate::config::CODEX_DEFAULT_CTX;
+use crate::pricing;
 use crate::util;
+// Finding the rollouts is cctop-discovery's; reading their turns is here.
+use cctop_discovery::session::codex as found;
 use rayon::prelude::*;
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::path::{Path, PathBuf};
-use std::sync::{Arc, LazyLock, Mutex};
-
-#[derive(Debug, Clone, Default)]
-struct StaticParts {
-    session_id: String,
-    started_at: String,
-    model: String,
-    cwd: String,
-}
+use std::path::Path;
+use std::sync::Arc;
 
 /// A Codex `exec` wrapper delegates to a concrete nested tool.  The rollout
 /// records the wrapper as the call name, but showing that in the activity pane
@@ -340,136 +334,21 @@ fn normalise_exec_tool(name: String, mut args: Value) -> (String, Value) {
     }
 }
 
-static STATIC_CACHE: LazyLock<Mutex<HashMap<PathBuf, StaticParts>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
-
-fn collect_static(path: &Path) -> StaticParts {
-    if let Ok(cache) = STATIC_CACHE.lock()
-        && let Some(hit) = cache.get(path)
-    {
-        return hit.clone();
-    }
-
-    let mut parts = StaticParts::default();
-    if let Some(stem) = path.file_stem().map(|s| s.to_string_lossy().to_string())
-        && let Some(uuid) = config::trailing_uuid(&stem)
-    {
-        parts.session_id = uuid.to_string();
-    }
-
-    let mut done = false;
-    extract::scan_first_lines(path, 50, |bytes| {
-        if done {
-            return true;
-        }
-        let Some(item) = Line::parse(bytes) else {
-            return false;
-        };
-        let payload = item.payload.get();
-        match item.kind.get() {
-            Some("session_meta") => {
-                if let Some(p) = payload {
-                    // A forked rollout carries a second session_meta naming the
-                    // original session it was forked from. The filename UUID (or
-                    // the first session_meta) is this file's own identity; later
-                    // session_meta entries must not overwrite it.
-                    if parts.session_id.is_empty()
-                        && let Some(id) = p.id.get()
-                    {
-                        parts.session_id = id.to_string();
-                    }
-                    if parts.started_at.is_empty()
-                        && let Some(ts) = p.timestamp.get().or_else(|| item.timestamp.get())
-                    {
-                        parts.started_at = ts.to_string();
-                    }
-                    if parts.cwd.is_empty()
-                        && let Some(cwd) = p.cwd.get()
-                    {
-                        parts.cwd = cwd.to_string();
-                    }
-                }
-            }
-            Some("turn_context") => {
-                if let Some(m) = payload.and_then(|p| p.model.get()) {
-                    parts.model = m.to_string();
-                }
-            }
-            _ => {}
-        }
-        done = !parts.session_id.is_empty()
-            && !parts.started_at.is_empty()
-            && !parts.model.is_empty()
-            && !parts.cwd.is_empty();
-        true
-    });
-
-    if !parts.session_id.is_empty()
-        && let Ok(mut cache) = STATIC_CACHE.lock()
-    {
-        cache.insert(path.to_path_buf(), parts.clone());
-    }
-    parts
-}
-
-/// When a rollout line is a turn — a message, a tool call or its output, the
-/// model's reasoning — its time in Unix milliseconds.
-///
-/// The event stream beside it (`token_count`, `turn_context`, the
-/// `session_meta` a resume repeats) is bookkeeping, and so is a `developer`
-/// or `system` message: Codex writes its own instructions in that shape.
-fn turn_ms(bytes: &[u8]) -> Option<i64> {
-    let item = Line::parse(bytes)?;
-    if !item.kind.is("response_item") {
-        return None;
-    }
-    let payload = item.payload.get()?;
-    if payload.kind.is("message") && !(payload.role.is("user") || payload.role.is("assistant")) {
-        return None;
-    }
-    util::parse_ts(item.timestamp.get()?).map(|d| d.timestamp_millis())
-}
-
 /// All Codex rollout sessions, newest file first.
 pub fn list_sessions() -> Vec<Session> {
-    let mut files: Vec<_> = config::codex_sessions_roots()
-        .iter()
-        .filter(|root| config::dir_exists(root))
-        .flat_map(|root| config::rglob(root, ".jsonl"))
-        .collect();
-    if files.is_empty() {
-        return Vec::new();
-    }
-    // By filename, not full path: the rollout name carries the timestamp, and
-    // sorting by path would order by whose home the file sits in first.
-    files.sort_by(|a, b| a.file_name().cmp(&b.file_name()).then_with(|| a.cmp(b)));
-    files.reverse();
-
-    files
+    // In parallel, which is why core asks per file rather than calling
+    // `found::list`: discovery itself carries no thread pool.
+    found::rollouts()
         .into_par_iter()
         .map(|path| {
-            let statics = collect_static(&path);
-            let mtime = config::file_mtime_ms(&path) as i64;
-            let touched_at = chrono::DateTime::from_timestamp_millis(mtime)
-                .map(|d| d.to_rfc3339())
-                .unwrap_or_else(|| statics.started_at.clone());
-            let last_active = extract::last_entry_ms(&path, turn_ms)
-                .and_then(chrono::DateTime::from_timestamp_millis)
-                .map(|d| d.to_rfc3339())
-                .unwrap_or_else(|| touched_at.clone());
-
-            let mut s = Session::new(Provider::Codex, statics.session_id);
-            s.started_at = statics.started_at;
-            s.last_active = last_active;
-            s.touched_at = touched_at;
-            s.model = statics.model;
-            s.label_source = statics.cwd;
+            let mut s = Session::from_found(found::discover(path));
             // A session cctop wrote as a handoff into Codex says where it came
             // from. Codex has no room for a record type of its own — an
             // unrecognised one is dropped on read — so the marker rides inside
             // the session metadata, which is the first line either way.
-            s.converted_from = crate::convert::provenance_of_codex(&path);
-            s.data_file = Some(path);
+            if let Some(path) = &s.found.data_file {
+                s.converted_from = crate::convert::provenance_of_codex(path);
+            }
             s
         })
         .collect()
@@ -908,6 +787,8 @@ pub use super::delete_transcript as delete;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pricing::Provider;
+    use cctop_discovery::session::codex::turn_ms;
     use serde_json::json;
 
     /// "Last" is the newest message, tool call or reasoning in the rollout. The

@@ -21,6 +21,9 @@
 
 // Where each agent's files are. Public for cctop-core; hidden because its
 // shape is cctop's, not the interface this crate offers.
+// The mount table: cctop-core's sandbox reads it too.
+#[doc(hidden)]
+pub mod mounts;
 #[doc(hidden)]
 pub mod paths;
 mod provider;

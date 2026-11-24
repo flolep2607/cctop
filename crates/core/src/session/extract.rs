@@ -2,7 +2,6 @@
 
 use regex::Regex;
 use serde_json::Value;
-use std::io::{BufRead, BufReader};
 use std::path::Path;
 use std::sync::LazyLock;
 
@@ -94,28 +93,6 @@ pub fn read_first_lines(path: &Path, max_lines: usize) -> Vec<Value> {
     out
 }
 
-/// Hand lines from the head of a file to `f`, which says whether it could
-/// read each one, until `max_lines` of them have been read.
-pub fn scan_first_lines<F: FnMut(&[u8]) -> bool>(path: &Path, max_lines: usize, mut f: F) {
-    let Ok(file) = std::fs::File::open(path) else {
-        return;
-    };
-    let reader = BufReader::with_capacity(64 * 1024, file);
-    let mut read = 0;
-    for line in reader.lines().map_while(Result::ok) {
-        if read >= max_lines {
-            break;
-        }
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        if f(line.as_bytes()) {
-            read += 1;
-        }
-    }
-}
-
 /// Parse up to `max_lines` objects from the tail of a file, newest first.
 ///
 /// Reads backwards in chunks so this stays cheap on multi-hundred-megabyte
@@ -131,7 +108,7 @@ pub fn read_last_lines(path: &Path, max_lines: usize) -> Vec<Value> {
 }
 
 // Moved to `cctop-discovery`, whose listers read a transcript's tail.
-pub use cctop_discovery::session::{last_entry_ms, scan_last_lines};
+pub use cctop_discovery::session::{last_entry_ms, scan_first_lines, scan_last_lines};
 
 // ---------------------------------------------------------------------------
 // Tool argument summarising
