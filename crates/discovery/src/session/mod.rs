@@ -10,6 +10,8 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
 #[doc(hidden)]
+pub mod antigravity;
+#[doc(hidden)]
 pub mod claude_line;
 #[doc(hidden)]
 pub mod codex_line;
