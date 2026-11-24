@@ -133,7 +133,7 @@ the full suite once, at the end, on its own.
 
 ## Layout
 
-cctop is one binary built from five crates, so that an edit recompiles only
+cctop is one binary built from six crates, so that an edit recompiles only
 what sits above it:
 
 | Crate | Where | What |
@@ -142,6 +142,7 @@ what sits above it:
 | `cctop-ui` | `crates/ui/` | the terminal dashboard |
 | `cctop-serve` | `crates/serve/` | the web server |
 | `cctop-core` | `crates/core/` | sessions and their parsers, the cache, pricing, config, processes, hooks, rmux, the shim, and what both faces read and do to a session (the conversation, report, export, handoff, actions) |
+| `cctop-discovery` | `crates/discovery/` | the running agents — provider, session, process, state — for other programs to link without the rest of core; moving out of core in steps (#430), the shared types first |
 | `cctop-tunnel` | `crates/tunnel/` | local ports on public URLs, behind a provider-agnostic `Provider` trait; Cloudflare's quick and named tunnels are the two implementations, speaking the edge's protocol natively |
 
 The dashboard and the server each depend on core and not on each other, and
@@ -308,8 +309,9 @@ Before merging:
 
 ### What gets bumped
 
-The four internal crates, `cctop-tunnel`, `cctop-core`, `cctop-serve` and
-`cctop-ui`, each have their own `version` in `crates/*/Cargo.toml`. The root
+The five internal crates, `cctop-tunnel`, `cctop-discovery`, `cctop-core`,
+`cctop-serve` and `cctop-ui`, each have their own `version` in
+`crates/*/Cargo.toml`. The root
 requires each with a caret on the compatible part of its version under
 `[workspace.dependencies]` — `"0.28"`, meaning at least 0.28.0 and below 0.29
 — so a published `cctop-ui` keeps building beside a newer `cctop-core` of the

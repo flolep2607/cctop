@@ -1,0 +1,25 @@
+[package]
+name = "cctop-discovery"
+# Its own version, not the release's: bumped only in a release that changes
+# this crate. release-plz bumps it; the rules are in release-plz.toml.
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+description = "The coding agents running on this machine — Claude Code, Codex, OpenCode, Gemini and others — as cctop finds them: provider, session, process and state. 0.x: the API may still change."
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+keywords = ["claude-code", "codex", "agents", "sessions", "cctop"]
+categories = ["development-tools"]
+
+[lib]
+# As in the other crates: no doc comment here is an example meant to run.
+doctest = false
+
+# Kept to what reading session files and the process table needs. The point of
+# the crate is that a status bar can link it without the terminal, the web
+# server, TLS, the tokenizer or the multiplexer cctop-core carries; anything
+# added here is added to every one of them.
+[dependencies]
+serde.workspace = true

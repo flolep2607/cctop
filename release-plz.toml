@@ -89,4 +89,4 @@ To make it a minor of `cctop` (behaviour changed in existing installs), see "Rel
 # from.
 [[package]]
 name = "cctop"
-changelog_include = ["cctop-core", "cctop-serve", "cctop-tunnel", "cctop-ui"]
+changelog_include = ["cctop-core", "cctop-discovery", "cctop-serve", "cctop-tunnel", "cctop-ui"]
