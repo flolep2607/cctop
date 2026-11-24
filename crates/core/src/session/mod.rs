@@ -10,7 +10,7 @@ pub mod devin;
 pub(crate) use cctop_discovery::session::devin_atif;
 pub mod extract;
 pub mod gemini;
-pub(crate) mod gemini_line;
+pub(crate) use cctop_discovery::session::gemini_line;
 // Here rather than at the top of the crate because the session cache's version
 // is derived from this directory's sources (see build.rs), and what a parser
 // reads as absent is part of what it extracts.
