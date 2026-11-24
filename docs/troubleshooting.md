@@ -98,7 +98,7 @@ the time.
 
 The usual causes, in order of how often they turn out to be it:
 
-- **An environment override.** `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `CURSOR_HOME`,
+- **An environment override.** `ANTIGRAVITY_DIR`, `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `CURSOR_HOME`,
   `GEMINI_DIR`, `OPENCODE_DATA_DIR`, `PI_CODING_AGENT_DIR`,
   `PI_CODING_AGENT_SESSION_DIR`, `VIBE_HOME`, `WINDSURF_USER_DIR` and
   `CHISEL_SESSION_DB` all move where cctop looks. `doctor` lists the ones it knows about that are set —

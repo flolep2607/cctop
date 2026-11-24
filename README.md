@@ -5,9 +5,9 @@
 [![Linux](https://img.shields.io/badge/platform-Linux-blue?style=flat-square)](#install)
 [![license](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](LICENSE)
 
-**htop for your AI coding agents.** One terminal screen listing every Claude
-Code, Codex, Cursor, Devin, Gemini CLI, Mistral Vibe, OpenCode, Pi and Windsurf
-session on your machine, and on your other machines: what each is doing, what it has cost,
+**htop for your AI coding agents.** One terminal screen listing every Antigravity
+CLI, Claude Code, Codex, Cursor, Devin, Gemini CLI, Mistral Vibe, OpenCode, Pi and
+Windsurf session on your machine, and on your other machines: what each is doing, what it has cost,
 and which one is waiting on you. You can open any of them in a tab and type
 into it.
 
@@ -246,6 +246,7 @@ package is left to whatever installed it.
 | OpenCode | reported | ✓ | ✓ | ✓ | ✓ |
 | Pi | reported | ✓ | ─ | ✓ | ✓ |
 | Gemini CLI | estimated | ✓ | ─ | ✓ | ─ |
+| Antigravity CLI | estimated | ✓ | ✓ | ✓ | ─ |
 | Devin | ─ | ✓ | ✓ | ✓ | ✓ |
 | Mistral Vibe | estimated | ✓ | ✓ | ✓ | ✓ |
 | Cursor | ─ | ─ | ✓ | ✓ | inferred |

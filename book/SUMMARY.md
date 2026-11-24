@@ -22,6 +22,7 @@
 # Harnesses
 
 - [What cctop reads, per harness](docs/providers/README.md)
+  - [Antigravity CLI](docs/providers/antigravity.md)
   - [Claude Code](docs/providers/claude.md)
   - [Codex](docs/providers/codex.md)
   - [Cursor](docs/providers/cursor.md)

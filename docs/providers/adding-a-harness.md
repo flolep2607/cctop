@@ -105,7 +105,9 @@ It will fail until you add yours, which is the intended reminder.
   list.
 - [`docs/troubleshooting.md`](../troubleshooting.md) — the same override list,
   under "My sessions are missing".
-- A page in this directory, and a row in its index. Say what you could not
+- A page in this directory, a row in both of its index's tables, and a line in
+  [`book/SUMMARY.md`](../../book/SUMMARY.md): the published site lists only
+  the pages named there. Say what you could not
   extract and why; that is the half a future reader cannot reconstruct from the
   code, because absent code leaves no trace.
 

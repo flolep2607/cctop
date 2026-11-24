@@ -2,7 +2,7 @@
 
 [← back to the README](../../README.md)
 
-Nine harnesses, nine pages. Each one says where that harness's sessions live,
+Ten harnesses, ten pages. Each one says where that harness's sessions live,
 what shape they are in, which columns cctop can fill from them, and — the part
 worth writing down — where the format says something other than what it appears
 to say.
@@ -14,6 +14,7 @@ should be traceable to a function you can open.
 
 | | Parser | Where its data lives |
 |---|---|---|
+| [Antigravity CLI](antigravity.md) | `crates/core/src/session/antigravity.rs` | `~/.gemini/antigravity-cli/brain/<uuid>/.system_generated/logs/transcript.jsonl` |
 | [Claude Code](claude.md) | `crates/core/src/session/claude.rs` | `~/.claude/projects/<slug>/<uuid>.jsonl` |
 | [Codex](codex.md) | `crates/core/src/session/codex.rs` | `~/.codex/sessions/**/rollout-*.jsonl` |
 | [Cursor](cursor.md) | `crates/core/src/session/cursor.rs` | `~/.cursor/projects/*/agent-transcripts/<id>/<id>.jsonl` |
@@ -25,12 +26,12 @@ should be traceable to a function you can open.
 | [Windsurf](windsurf.md) | `crates/core/src/session/windsurf.rs` | `<Windsurf User>/workspaceStorage/*/state.vscdb` |
 
 And [adding a harness](adding-a-harness.md), which is the list of places a
-tenth one has to be registered before it works — derived from what the nine
+eleventh one has to be registered before it works — derived from what the ten
 already touch, not from a design.
 
 ## Why this is not `docs/harnesses/`
 
-[`docs/harnesses/`](../harnesses/) is a **mirror**: seven of these nine
+[`docs/harnesses/`](../harnesses/) is a **mirror**: seven of these ten
 projects' own documentation, pulled wholesale by `pull.sh` and overwritten
 wholesale on the next pull. Nothing in it is edited by hand, because the next
 refresh would delete the edit — and its value is precisely that it does not
@@ -54,7 +55,9 @@ record. That table is deliberately terse; the reason lives here.
 | OpenCode | reported | ✓ | ✓ | ✓ | ✓ |
 | Pi | reported | ✓ | ─ | ✓ | ✓ |
 | Gemini CLI | estimated | ✓ | ─ | ✓ | ─ |
+| Antigravity CLI | estimated | ✓ | ✓ | ✓ | ─ |
 | Devin | ─ | ✓ | ✓ | ✓ | ✓ |
+| Mistral Vibe | estimated | ✓ | ✓ | ✓ | ✓ |
 | Cursor | ─ | ─ | ✓ | ✓ | inferred |
 | Windsurf | ─ | ─ | ─ | ✓ | ─ |
 

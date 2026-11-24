@@ -82,13 +82,14 @@ percentages.
 | Codex | `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` |
 | Cursor | `~/.cursor/projects/*/agent-transcripts/*/*.jsonl` |
 | Gemini CLI | `~/.gemini/tmp/<project>/chats/session-*.json{,l}` |
+| Antigravity CLI | `~/.gemini/antigravity-cli/brain/<uuid>/.system_generated/logs/transcript.jsonl`, with `conversation_summaries.db` beside `brain/` |
 | Devin | `~/.local/share/devin/cli/sessions.db` (platform data directory), with `transcripts/<id>.json` beside it |
 | OpenCode | `~/.local/share/opencode/opencode*.db` (platform data directory) |
 | Pi | `~/.pi/agent/sessions/**/*.jsonl` |
 | Mistral Vibe | `~/.vibe/logs/session/{session_*,unified/*}/meta.json` |
 | Windsurf | `<Windsurf User dir>/workspaceStorage/*/state.vscdb` |
 
-`CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `CURSOR_HOME`, `GEMINI_DIR`,
+`ANTIGRAVITY_DIR`, `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `CURSOR_HOME`, `GEMINI_DIR`,
 `OPENCODE_DATA_DIR`, `PI_CODING_AGENT_DIR`, `PI_CODING_AGENT_SESSION_DIR`,
 `VIBE_HOME` and `WINDSURF_USER_DIR` are honoured, along with `OPENCODE_CONFIG_DIR` for the
 plugin `--install-hooks` writes. `CHISEL_SESSION_DB` moves Devin's, and is the
