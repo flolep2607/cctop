@@ -21,6 +21,8 @@ pub mod devin_atif;
 pub mod lenient;
 #[doc(hidden)]
 pub mod opencode_line;
+#[doc(hidden)]
+pub mod windsurf;
 
 /// Lines above this size are almost always base64 image payloads carrying no
 /// token, cost, or tool data. Skipping them keeps large transcripts cheap.
@@ -166,4 +168,42 @@ pub struct Discovered {
     pub data_file: Option<PathBuf>,
     pub title: Option<String>,
     pub mac_meta: Option<MacMeta>,
+}
+
+impl Discovered {
+    /// A session known by its provider and id alone, everything else blank:
+    /// the start every lister fills in from what the agent's files say.
+    pub fn new(provider: Provider, session_id: String) -> Self {
+        Discovered {
+            provider,
+            surface: Surface::Cli,
+            session_id,
+            started_at: String::new(),
+            last_active: String::new(),
+            touched_at: String::new(),
+            model: String::new(),
+            harness: String::new(),
+            label_source: String::new(),
+            data_file: None,
+            title: None,
+            mac_meta: None,
+        }
+    }
+}
+
+#[doc(hidden)]
+/// Open another harness's SQLite database for reading, and only reading.
+///
+/// Read-only because the database belongs to an agent that may be writing it
+/// right now, and cctop is a monitor: it has no business taking a write lock
+/// on somebody else's state. No-mutex because each connection is used by one
+/// thread — OpenCode's are kept per thread for that reason — so SQLite's own
+/// serialisation would be a lock taken and released for nothing on every
+/// call.
+pub fn readonly(path: &Path) -> rusqlite::Result<rusqlite::Connection> {
+    use rusqlite::OpenFlags;
+    rusqlite::Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
 }

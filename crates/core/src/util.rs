@@ -19,12 +19,8 @@ pub fn now_ms() -> i64 {
     Utc::now().timestamp_millis()
 }
 
-/// Format epoch milliseconds as RFC-3339; empty string if out of range.
-pub fn ms_to_rfc3339(ms: i64) -> String {
-    DateTime::<Utc>::from_timestamp_millis(ms)
-        .map(|d| d.to_rfc3339())
-        .unwrap_or_default()
-}
+// Moved to `cctop-discovery`, whose listers stamp times with it.
+pub use cctop_discovery::time::ms_to_rfc3339;
 
 /// Why "today" and "this hour" may not be the viewer's, when that is likely.
 ///
