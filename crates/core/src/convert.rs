@@ -1718,7 +1718,7 @@ mod tests {
         let candidates: Vec<_> = sessions
             .into_iter()
             .filter(crate::convert::convertible_session)
-            .filter_map(|s| s.data_file)
+            .filter_map(|s| s.found.data_file)
             .collect();
         assert!(
             !candidates.is_empty(),

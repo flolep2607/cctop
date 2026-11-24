@@ -262,9 +262,12 @@ pub fn latest(held: &mut Option<String>, ts: &str) {
     }
 }
 
-/// A discovered session plus everything annotated onto it for display.
+/// A session as its agent's files describe it: who, where, since when, and
+/// which file. What every provider's `list_sessions` fills in before anything
+/// is extracted or annotated, and the part `cctop-discovery` is being cut
+/// along (#430).
 #[derive(Debug, Clone)]
-pub struct Session {
+pub struct Discovered {
     pub provider: Provider,
     pub surface: Surface,
     pub session_id: String,
@@ -289,6 +292,17 @@ pub struct Session {
     pub data_file: Option<PathBuf>,
     pub title: Option<String>,
     pub mac_meta: Option<MacMeta>,
+}
+
+/// A discovered session plus everything annotated onto it for display.
+///
+/// It derefs to its [`Discovered`] record, so `session.title` still reads as
+/// it did when the two were one struct. ponytail: Deref as field inheritance —
+/// two disjoint `&mut` borrows across the base and the overlay need
+/// `session.found.x` spelled out; flatten the readers if that grows.
+#[derive(Debug, Clone)]
+pub struct Session {
+    pub found: Discovered,
 
     // --- Annotated after extraction ---
     pub abbrev_label: String,
@@ -561,6 +575,19 @@ fn distil_recent_writes(details: &HashMap<String, Vec<ToolDetail>>) -> Vec<Strin
         .collect()
 }
 
+impl std::ops::Deref for Session {
+    type Target = Discovered;
+    fn deref(&self) -> &Discovered {
+        &self.found
+    }
+}
+
+impl std::ops::DerefMut for Session {
+    fn deref_mut(&mut self) -> &mut Discovered {
+        &mut self.found
+    }
+}
+
 impl Session {
     /// Why this session looks stuck in a loop, if it does — see
     /// [`crate::stuck`]. Asked of the row as it is now: only a working local
@@ -606,18 +633,20 @@ impl Session {
 
     pub fn new(provider: Provider, session_id: String) -> Self {
         Session {
-            provider,
-            surface: Surface::Cli,
-            session_id,
-            started_at: String::new(),
-            last_active: String::new(),
-            touched_at: String::new(),
-            model: String::new(),
-            harness: String::new(),
-            label_source: String::new(),
-            data_file: None,
-            title: None,
-            mac_meta: None,
+            found: Discovered {
+                provider,
+                surface: Surface::Cli,
+                session_id,
+                started_at: String::new(),
+                last_active: String::new(),
+                touched_at: String::new(),
+                model: String::new(),
+                harness: String::new(),
+                label_source: String::new(),
+                data_file: None,
+                title: None,
+                mac_meta: None,
+            },
             abbrev_label: String::new(),
             input_tokens: 0,
             output_tokens: 0,
