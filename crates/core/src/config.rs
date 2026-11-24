@@ -857,9 +857,8 @@ pub static COMPACT_THRESHOLD: LazyLock<f64> = LazyLock::new(|| {
         .unwrap_or(0.835)
 });
 
-/// Lines above this size are almost always base64 image payloads carrying no
-/// token, cost, or tool data. Skipping them keeps large transcripts cheap.
-pub const MAX_JSONL_LINE_BYTES: usize = 512 * 1024;
+// The line parsers in `cctop-discovery` skip by it, so it lives there.
+pub use cctop_discovery::session::MAX_JSONL_LINE_BYTES;
 
 /// Cap on retained per-tool invocation details, keeping the newest.
 pub const MAX_TOOL_DETAILS: usize = 200;

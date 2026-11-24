@@ -18,7 +18,7 @@ use serde::Deserialize;
 /// The transcript: who ran it, every step, and the session's own totals.
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
-pub(crate) struct Transcript<'a> {
+pub struct Transcript<'a> {
     #[serde(borrow)]
     pub session_id: Str<'a>,
     #[serde(borrow)]
@@ -30,7 +30,7 @@ pub(crate) struct Transcript<'a> {
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
-pub(crate) struct Agent<'a> {
+pub struct Agent<'a> {
     /// The model's display name ("SWE-2 High"), where steps carry its slug.
     #[serde(borrow)]
     pub model_name: Str<'a>,
@@ -40,7 +40,7 @@ pub(crate) struct Agent<'a> {
 /// `user` steps are the prompt and what the person typed.
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
-pub(crate) struct Step<'a> {
+pub struct Step<'a> {
     #[serde(borrow)]
     pub source: Str<'a>,
     #[serde(borrow)]
@@ -60,7 +60,7 @@ pub(crate) struct Step<'a> {
 /// so far, read back from cache.
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
-pub(crate) struct StepMetrics {
+pub struct StepMetrics {
     pub prompt_tokens: Lenient<u64>,
     pub completion_tokens: Lenient<u64>,
     pub cached_tokens: Lenient<u64>,
@@ -69,7 +69,7 @@ pub(crate) struct StepMetrics {
 /// The session's totals, in the same three counts as a step's.
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
-pub(crate) struct FinalMetrics {
+pub struct FinalMetrics {
     pub total_prompt_tokens: Lenient<u64>,
     pub total_completion_tokens: Lenient<u64>,
     pub total_cached_tokens: Lenient<u64>,
@@ -77,7 +77,7 @@ pub(crate) struct FinalMetrics {
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
-pub(crate) struct ToolCall<'a> {
+pub struct ToolCall<'a> {
     #[serde(borrow)]
     pub tool_call_id: Str<'a>,
     #[serde(borrow)]
@@ -87,12 +87,12 @@ pub(crate) struct ToolCall<'a> {
 }
 
 impl<'a> Transcript<'a> {
-    pub(crate) fn parse(text: &'a str) -> serde_json::Result<Transcript<'a>> {
+    pub fn parse(text: &'a str) -> serde_json::Result<Transcript<'a>> {
         serde_json::from_str(text)
     }
 
     /// Every step that is an object, in order.
-    pub(crate) fn steps(&self) -> impl Iterator<Item = &Step<'a>> {
+    pub fn steps(&self) -> impl Iterator<Item = &Step<'a>> {
         self.steps
             .get()
             .into_iter()
@@ -102,7 +102,7 @@ impl<'a> Transcript<'a> {
 }
 
 impl<'a> Step<'a> {
-    pub(crate) fn calls(&self) -> impl Iterator<Item = &ToolCall<'a>> {
+    pub fn calls(&self) -> impl Iterator<Item = &ToolCall<'a>> {
         self.tool_calls
             .get()
             .into_iter()
@@ -127,7 +127,7 @@ impl StepMetrics {
     /// The step's tokens, or `None` when it carries neither a prompt nor a
     /// completion count: a `metrics` object with nothing usable in it is no
     /// count, and must not stand in front of `final_metrics` as a zero.
-    pub(crate) fn tokens(&self) -> Option<super::Tokens> {
+    pub fn tokens(&self) -> Option<super::Tokens> {
         let prompt = self.prompt_tokens.value();
         let completion = self.completion_tokens.value();
         if prompt.is_none() && completion.is_none() {
@@ -142,7 +142,7 @@ impl StepMetrics {
 }
 
 impl FinalMetrics {
-    pub(crate) fn tokens(&self) -> super::Tokens {
+    pub fn tokens(&self) -> super::Tokens {
         tokens(
             self.total_prompt_tokens.value().unwrap_or(0),
             self.total_completion_tokens.value().unwrap_or(0),

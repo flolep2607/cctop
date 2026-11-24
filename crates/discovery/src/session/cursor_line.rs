@@ -15,7 +15,7 @@ use std::path::Path;
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
-pub(crate) struct Line<'a> {
+pub struct Line<'a> {
     #[serde(borrow)]
     pub role: Str<'a>,
     #[serde(borrow)]
@@ -24,7 +24,7 @@ pub(crate) struct Line<'a> {
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
-pub(crate) struct Message<'a> {
+pub struct Message<'a> {
     #[serde(borrow)]
     pub content: Shape<'a, Block<'a>>,
 }
@@ -33,7 +33,7 @@ pub(crate) struct Message<'a> {
 /// having a field here.
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
-pub(crate) struct Block<'a> {
+pub struct Block<'a> {
     #[serde(rename = "type", borrow)]
     pub kind: Str<'a>,
     #[serde(borrow)]
@@ -45,7 +45,7 @@ pub(crate) struct Block<'a> {
 impl<'a> Line<'a> {
     /// Read one line, or `None` when it is not JSON. See
     /// [`super::claude_line::Line::parse`].
-    pub(crate) fn parse(bytes: &'a [u8]) -> Option<Line<'a>> {
+    pub fn parse(bytes: &'a [u8]) -> Option<Line<'a>> {
         if bytes.trim_ascii_start().first() != Some(&b'{') {
             serde_json::from_slice::<IgnoredAny>(bytes).ok()?;
             return Some(Line::default());
@@ -54,7 +54,7 @@ impl<'a> Line<'a> {
     }
 
     /// The tool calls on this line, in the order they were made.
-    pub(crate) fn calls(&self) -> impl Iterator<Item = &Block<'a>> {
+    pub fn calls(&self) -> impl Iterator<Item = &Block<'a>> {
         self.message
             .get()
             .and_then(|m| m.content.list())
@@ -67,8 +67,8 @@ impl<'a> Line<'a> {
 
 /// Stream a transcript one [`Line`] at a time, oversized lines included —
 /// nothing a line is read into can be large.
-pub(crate) fn for_each(path: &Path, mut f: impl FnMut(&Line)) -> std::io::Result<()> {
-    super::extract::for_each_line(path, |bytes, _oversized| {
+pub fn for_each(path: &Path, mut f: impl FnMut(&Line)) -> std::io::Result<()> {
+    super::for_each_line(path, |bytes, _oversized| {
         if let Some(line) = Line::parse(bytes) {
             f(&line);
         }

@@ -1,6 +1,5 @@
 //! Shared JSONL reading and tool-argument summarising.
 
-use crate::config::MAX_JSONL_LINE_BYTES;
 use regex::Regex;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -28,37 +27,8 @@ pub fn for_each_jsonl<F: FnMut(&Value)>(path: &Path, mut f: F) -> std::io::Resul
     })
 }
 
-/// Stream a `.jsonl` file's non-blank lines, trimmed, to a reader that parses
-/// them into its own type.
-///
-/// The second argument says the line is over [`MAX_JSONL_LINE_BYTES`]: a
-/// reader should take only what it cannot do without from such a line, as
-/// [`for_each_jsonl`] does, rather than all of it.
-pub fn for_each_line<F: FnMut(&[u8], bool)>(path: &Path, mut f: F) -> std::io::Result<()> {
-    let file = std::fs::File::open(path)?;
-    let mut reader = BufReader::with_capacity(256 * 1024, file);
-    let mut buf = Vec::with_capacity(8 * 1024);
-
-    loop {
-        buf.clear();
-        let n = reader.read_until(b'\n', &mut buf)?;
-        if n == 0 {
-            break;
-        }
-        let line = buf.trim_ascii();
-        if line.is_empty() {
-            continue;
-        }
-        if line.len() > MAX_JSONL_LINE_BYTES {
-            f(line, true);
-            // Don't let one giant line keep its buffer for the rest of the file.
-            buf = Vec::with_capacity(8 * 1024);
-            continue;
-        }
-        f(line, false);
-    }
-    Ok(())
-}
+// Moved to `cctop-discovery`, where the line parsers that call it live.
+pub use cctop_discovery::session::for_each_line;
 
 /// The billing-relevant fields of an entry too large to parse in full.
 ///
@@ -711,6 +681,7 @@ pub fn push_tool_detail(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::MAX_JSONL_LINE_BYTES;
     use serde_json::json;
 
     #[test]

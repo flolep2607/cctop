@@ -1,13 +1,13 @@
 //! Session discovery and the extracted-data model.
 
 pub mod claude;
-pub(crate) mod claude_line;
+pub(crate) use cctop_discovery::session::claude_line;
 pub mod codex;
-pub(crate) mod codex_line;
+pub(crate) use cctop_discovery::session::codex_line;
 pub mod cursor;
-pub(crate) mod cursor_line;
+pub(crate) use cctop_discovery::session::cursor_line;
 pub mod devin;
-pub(crate) mod devin_atif;
+pub(crate) use cctop_discovery::session::devin_atif;
 pub mod extract;
 pub mod gemini;
 pub(crate) mod gemini_line;
@@ -15,10 +15,10 @@ pub(crate) mod gemini_line;
 // is derived from this directory's sources (see build.rs), and what a parser
 // reads as absent is part of what it extracts.
 pub mod antigravity;
-pub(crate) mod lenient;
+pub(crate) use cctop_discovery::session::lenient;
 pub mod lookup;
 pub mod opencode;
-pub(crate) mod opencode_line;
+pub(crate) use cctop_discovery::session::opencode_line;
 pub mod pi;
 pub(crate) mod pi_line;
 pub mod search;
@@ -1770,71 +1770,8 @@ mod tests {
 // Extracted transcript data
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
-pub struct Tokens {
-    #[serde(default)]
-    pub input: u64,
-    #[serde(default)]
-    pub output: u64,
-    #[serde(default)]
-    pub cache_read: u64,
-    #[serde(default)]
-    pub cache_write_5m: u64,
-    #[serde(default)]
-    pub cache_write_1h: u64,
-    // Codex-only
-    #[serde(default)]
-    pub input_total: u64,
-    #[serde(default)]
-    pub cached_input: u64,
-    #[serde(default)]
-    pub reasoning_output: u64,
-    #[serde(default)]
-    pub total: u64,
-}
-
-impl Tokens {
-    /// Everything billed as input, across both providers' shapes.
-    pub fn all_input(&self) -> u64 {
-        self.input + self.cached_input + self.cache_read + self.cache_write_5m + self.cache_write_1h
-    }
-
-    /// A prompt whose cached part is counted inside it, not beside it — the
-    /// shape Gemini and Devin both report, as Codex does — split into the
-    /// uncached remainder and the cached part, so `all_input` rebuilds the
-    /// prompt. A cached count above the prompt is clamped, not underflowed.
-    pub fn from_prompt(prompt: u64, cached: u64, output: u64) -> Tokens {
-        let cached = cached.min(prompt);
-        Tokens {
-            input: prompt - cached,
-            input_total: prompt,
-            cached_input: cached,
-            output,
-            ..Default::default()
-        }
-    }
-
-    /// Add `other` into this, every field: one sum shared by every reader, so
-    /// a field one provider fills is never summed by one copy and dropped by
-    /// another.
-    ///
-    /// Saturating, for the reason the Claude parser gives at its own sums:
-    /// these are numbers read out of a file any process on the machine can
-    /// write, and one transcript claiming `u64::MAX` tokens would overflow
-    /// every debug build and wrap to a nonsense cost in a release one.
-    pub fn add(&mut self, other: &Tokens) {
-        self.input = self.input.saturating_add(other.input);
-        self.output = self.output.saturating_add(other.output);
-        self.cache_read = self.cache_read.saturating_add(other.cache_read);
-        self.cache_write_5m = self.cache_write_5m.saturating_add(other.cache_write_5m);
-        self.cache_write_1h = self.cache_write_1h.saturating_add(other.cache_write_1h);
-        self.input_total = self.input_total.saturating_add(other.input_total);
-        self.cached_input = self.cached_input.saturating_add(other.cached_input);
-        self.reasoning_output = self.reasoning_output.saturating_add(other.reasoning_output);
-        self.total = self.total.saturating_add(other.total);
-    }
-}
+// Moved to `cctop-discovery` with the line parsers that fill it in.
+pub use cctop_discovery::session::Tokens;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]

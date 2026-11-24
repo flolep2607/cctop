@@ -18,7 +18,7 @@ use std::path::Path;
 /// fields depend on the type.
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
-pub(crate) struct Line<'a> {
+pub struct Line<'a> {
     #[serde(rename = "type", borrow)]
     pub kind: Str<'a>,
     #[serde(borrow)]
@@ -31,7 +31,7 @@ pub(crate) struct Line<'a> {
 /// it.
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
-pub(crate) struct Payload<'a> {
+pub struct Payload<'a> {
     #[serde(rename = "type", borrow)]
     pub kind: Str<'a>,
     /// `session_meta`: the session's id, start and directory.
@@ -83,14 +83,14 @@ pub(crate) struct Payload<'a> {
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
-pub(crate) struct TextBlock<'a> {
+pub struct TextBlock<'a> {
     #[serde(borrow)]
     pub text: Str<'a>,
 }
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
-pub(crate) struct Action<'a> {
+pub struct Action<'a> {
     #[serde(borrow)]
     pub query: Str<'a>,
 }
@@ -102,7 +102,7 @@ pub(crate) struct Action<'a> {
 /// whole rather than read.
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
-pub(crate) struct Info<'a> {
+pub struct Info<'a> {
     #[serde(borrow)]
     pub last_token_usage: Raw<'a>,
     #[serde(borrow)]
@@ -113,7 +113,7 @@ pub(crate) struct Info<'a> {
 /// One request's token counts.
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
-pub(crate) struct TokenUsage {
+pub struct TokenUsage {
     pub input_tokens: Lenient<u64>,
     pub cached_input_tokens: Lenient<u64>,
     pub output_tokens: Lenient<u64>,
@@ -123,7 +123,7 @@ pub(crate) struct TokenUsage {
 
 impl<'a> Payload<'a> {
     /// The call's arguments field, whichever of its two names it came under.
-    pub(crate) fn args_field(&self) -> Raw<'a> {
+    pub fn args_field(&self) -> Raw<'a> {
         match self.arguments.0 {
             Some(_) => self.arguments,
             None => self.input,
@@ -134,7 +134,7 @@ impl<'a> Payload<'a> {
     /// one, and their value — parsed from that string when it is JSON, `Null`
     /// when it is not (a raw patch), and the field itself when it was never a
     /// string.
-    pub(crate) fn call_args(&self) -> (Option<Str<'a>>, Value) {
+    pub fn call_args(&self) -> (Option<Str<'a>>, Value) {
         let field = self.args_field();
         match field.read::<Str<'a>>().filter(|s| s.get().is_some()) {
             Some(text) => {
@@ -146,7 +146,7 @@ impl<'a> Payload<'a> {
     }
 
     /// The text of the payload's content blocks, the person's or the model's.
-    pub(crate) fn texts(&self) -> impl Iterator<Item = &str> {
+    pub fn texts(&self) -> impl Iterator<Item = &str> {
         self.content
             .list()
             .unwrap_or_default()
@@ -160,7 +160,7 @@ impl<'a> Line<'a> {
     /// Read one line, or `None` when it is not JSON. See
     /// [`super::claude_line::Line::parse`] for why a line that is JSON but not
     /// an object reads as empty rather than through the derive.
-    pub(crate) fn parse(bytes: &'a [u8]) -> Option<Line<'a>> {
+    pub fn parse(bytes: &'a [u8]) -> Option<Line<'a>> {
         if bytes.trim_ascii_start().first() != Some(&b'{') {
             serde_json::from_slice::<IgnoredAny>(bytes).ok()?;
             return Some(Line::default());
@@ -170,7 +170,7 @@ impl<'a> Line<'a> {
 
     /// The kind that decides what a payload is: its own `type` when the line
     /// is a `response_item` wrapping it, and the line's otherwise.
-    pub(crate) fn effective_kind(&self) -> &str {
+    pub fn effective_kind(&self) -> &str {
         match self.kind.get() {
             Some("response_item") => self.payload.get().map_or("", |p| p.kind.or_empty()),
             other => other.unwrap_or(""),
@@ -182,8 +182,8 @@ impl<'a> Line<'a> {
 ///
 /// A line over the size cap is skipped, as the `Value` reader skipped it: a
 /// Codex line carries no `message.usage` for the slim form to salvage.
-pub(crate) fn for_each(path: &Path, mut f: impl FnMut(&Line)) -> std::io::Result<()> {
-    super::extract::for_each_line(path, |bytes, oversized| {
+pub fn for_each(path: &Path, mut f: impl FnMut(&Line)) -> std::io::Result<()> {
+    super::for_each_line(path, |bytes, oversized| {
         if oversized {
             return;
         }
