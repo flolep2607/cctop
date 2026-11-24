@@ -76,13 +76,6 @@ pub(crate) fn temp_path(tag: &str) -> PathBuf {
 // Moved to `cctop-discovery` with the provider they are told apart by.
 pub use cctop_discovery::{ActivityState, Surface};
 
-/// Paths backing a Claude for Mac session, needed to delete it cleanly.
-#[derive(Debug, Clone)]
-pub struct MacMeta {
-    pub meta_path: PathBuf,
-    pub session_dir: PathBuf,
-}
-
 /// Context-window consumption for a session or subagent.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
@@ -262,37 +255,8 @@ pub fn latest(held: &mut Option<String>, ts: &str) {
     }
 }
 
-/// A session as its agent's files describe it: who, where, since when, and
-/// which file. What every provider's `list_sessions` fills in before anything
-/// is extracted or annotated, and the part `cctop-discovery` is being cut
-/// along (#430).
-#[derive(Debug, Clone)]
-pub struct Discovered {
-    pub provider: Provider,
-    pub surface: Surface,
-    pub session_id: String,
-    pub started_at: String,
-    /// When the session last said or did something: the timestamp of the
-    /// newest message or tool call in its transcript, which is what the table's
-    /// "last" column shows and sorts by. A transcript is also written to
-    /// without anything happening — a title, a summary, a file-history snapshot
-    /// on resume — and that is not activity a person would recognise.
-    pub last_active: String,
-    /// When the transcript was last written to, by whatever: its file's mtime,
-    /// newest across subagent transcripts too. Empty for a provider that has no
-    /// file of its own to stat. What liveness and cache stamps want, where any
-    /// write counts — read it through [`Session::touched`].
-    pub touched_at: String,
-    pub model: String,
-    /// Where the agent is hosted, when it can be inferred (for example Cursor
-    /// versus a terminal CLI). This is intentionally distinct from `model`.
-    pub harness: String,
-    /// Working directory the session was launched from.
-    pub label_source: String,
-    pub data_file: Option<PathBuf>,
-    pub title: Option<String>,
-    pub mac_meta: Option<MacMeta>,
-}
+// Moved to `cctop-discovery`, the crate it is the record of.
+pub use cctop_discovery::session::{Discovered, MacMeta};
 
 /// A discovered session plus everything annotated onto it for display.
 ///
