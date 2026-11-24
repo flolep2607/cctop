@@ -76,13 +76,6 @@ pub(crate) fn temp_path(tag: &str) -> PathBuf {
 // Moved to `cctop-discovery` with the provider they are told apart by.
 pub use cctop_discovery::{ActivityState, Surface};
 
-/// Paths backing a Claude for Mac session, needed to delete it cleanly.
-#[derive(Debug, Clone)]
-pub struct MacMeta {
-    pub meta_path: PathBuf,
-    pub session_dir: PathBuf,
-}
-
 /// Context-window consumption for a session or subagent.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
@@ -262,33 +255,18 @@ pub fn latest(held: &mut Option<String>, ts: &str) {
     }
 }
 
+// Moved to `cctop-discovery`, the crate it is the record of.
+pub use cctop_discovery::session::{Discovered, MacMeta};
+
 /// A discovered session plus everything annotated onto it for display.
+///
+/// It derefs to its [`Discovered`] record, so `session.title` still reads as
+/// it did when the two were one struct. ponytail: Deref as field inheritance —
+/// two disjoint `&mut` borrows across the base and the overlay need
+/// `session.found.x` spelled out; flatten the readers if that grows.
 #[derive(Debug, Clone)]
 pub struct Session {
-    pub provider: Provider,
-    pub surface: Surface,
-    pub session_id: String,
-    pub started_at: String,
-    /// When the session last said or did something: the timestamp of the
-    /// newest message or tool call in its transcript, which is what the table's
-    /// "last" column shows and sorts by. A transcript is also written to
-    /// without anything happening — a title, a summary, a file-history snapshot
-    /// on resume — and that is not activity a person would recognise.
-    pub last_active: String,
-    /// When the transcript was last written to, by whatever: its file's mtime,
-    /// newest across subagent transcripts too. Empty for a provider that has no
-    /// file of its own to stat. What liveness and cache stamps want, where any
-    /// write counts — read it through [`Session::touched`].
-    pub touched_at: String,
-    pub model: String,
-    /// Where the agent is hosted, when it can be inferred (for example Cursor
-    /// versus a terminal CLI). This is intentionally distinct from `model`.
-    pub harness: String,
-    /// Working directory the session was launched from.
-    pub label_source: String,
-    pub data_file: Option<PathBuf>,
-    pub title: Option<String>,
-    pub mac_meta: Option<MacMeta>,
+    pub found: Discovered,
 
     // --- Annotated after extraction ---
     pub abbrev_label: String,
@@ -561,6 +539,19 @@ fn distil_recent_writes(details: &HashMap<String, Vec<ToolDetail>>) -> Vec<Strin
         .collect()
 }
 
+impl std::ops::Deref for Session {
+    type Target = Discovered;
+    fn deref(&self) -> &Discovered {
+        &self.found
+    }
+}
+
+impl std::ops::DerefMut for Session {
+    fn deref_mut(&mut self) -> &mut Discovered {
+        &mut self.found
+    }
+}
+
 impl Session {
     /// Why this session looks stuck in a loop, if it does — see
     /// [`crate::stuck`]. Asked of the row as it is now: only a working local
@@ -606,18 +597,20 @@ impl Session {
 
     pub fn new(provider: Provider, session_id: String) -> Self {
         Session {
-            provider,
-            surface: Surface::Cli,
-            session_id,
-            started_at: String::new(),
-            last_active: String::new(),
-            touched_at: String::new(),
-            model: String::new(),
-            harness: String::new(),
-            label_source: String::new(),
-            data_file: None,
-            title: None,
-            mac_meta: None,
+            found: Discovered {
+                provider,
+                surface: Surface::Cli,
+                session_id,
+                started_at: String::new(),
+                last_active: String::new(),
+                touched_at: String::new(),
+                model: String::new(),
+                harness: String::new(),
+                label_source: String::new(),
+                data_file: None,
+                title: None,
+                mac_meta: None,
+            },
             abbrev_label: String::new(),
             input_tokens: 0,
             output_tokens: 0,

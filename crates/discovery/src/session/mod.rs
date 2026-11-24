@@ -4,9 +4,10 @@
 //! are internals, not the interface this crate offers: hidden from the docs,
 //! and outside what `cargo-semver-checks` holds to a version.
 
+use crate::{Provider, Surface};
 use serde::{Deserialize, Serialize};
 use std::io::{BufRead, BufReader};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[doc(hidden)]
 pub mod claude_line;
@@ -121,4 +122,48 @@ impl Tokens {
         self.reasoning_output = self.reasoning_output.saturating_add(other.reasoning_output);
         self.total = self.total.saturating_add(other.total);
     }
+}
+
+/// Paths backing a Claude for Mac session, needed to delete it cleanly.
+#[doc(hidden)]
+#[derive(Debug, Clone)]
+pub struct MacMeta {
+    pub meta_path: PathBuf,
+    pub session_dir: PathBuf,
+}
+
+/// A session as its agent's files describe it: who, where, since when, and
+/// which file. What every provider's `list_sessions` fills in before anything
+/// is extracted or annotated. cctop-core's `Session` holds one and adds what
+/// it annotates.
+///
+/// Hidden: its fields follow cctop's needs, and the record other programs
+/// read is a smaller one built from it.
+#[doc(hidden)]
+#[derive(Debug, Clone)]
+pub struct Discovered {
+    pub provider: Provider,
+    pub surface: Surface,
+    pub session_id: String,
+    pub started_at: String,
+    /// When the session last said or did something: the timestamp of the
+    /// newest message or tool call in its transcript, which is what the table's
+    /// "last" column shows and sorts by. A transcript is also written to
+    /// without anything happening — a title, a summary, a file-history snapshot
+    /// on resume — and that is not activity a person would recognise.
+    pub last_active: String,
+    /// When the transcript was last written to, by whatever: its file's mtime,
+    /// newest across subagent transcripts too. Empty for a provider that has no
+    /// file of its own to stat. What liveness and cache stamps want, where any
+    /// write counts — read it through cctop-core's `Session::touched`.
+    pub touched_at: String,
+    pub model: String,
+    /// Where the agent is hosted, when it can be inferred (for example Cursor
+    /// versus a terminal CLI). This is intentionally distinct from `model`.
+    pub harness: String,
+    /// Working directory the session was launched from.
+    pub label_source: String,
+    pub data_file: Option<PathBuf>,
+    pub title: Option<String>,
+    pub mac_meta: Option<MacMeta>,
 }

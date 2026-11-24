@@ -791,7 +791,7 @@ mod tests {
     /// just now, the way a background process finishing hours later writes them.
     #[test]
     fn last_active_is_the_last_turn_not_the_last_write() {
-        let last = |meta: &Path| session(meta).last_active;
+        let last = |meta: &Path| session(meta).found.last_active;
 
         // The newest segment is empty: the turn is over.
         let (_tmp, meta) = unified(&[]);

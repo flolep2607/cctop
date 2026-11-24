@@ -615,7 +615,7 @@ mod tests {
 
         session.data_file = Some(scratch("ctx-none", "{\"type\":\"session\"}\n"));
         assert!(extract_context(&session).is_none());
-        std::fs::remove_file(session.data_file.unwrap()).unwrap();
+        std::fs::remove_file(session.found.data_file.unwrap()).unwrap();
         std::fs::remove_file(path).unwrap();
     }
 }
