@@ -30,6 +30,8 @@ pub mod gemini_line;
 #[doc(hidden)]
 pub mod lenient;
 #[doc(hidden)]
+pub mod opencode;
+#[doc(hidden)]
 pub mod opencode_line;
 #[doc(hidden)]
 pub mod pi;

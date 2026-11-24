@@ -7,9 +7,9 @@ use super::{
     ActivityState, ContextUsage, Costs, FallbackRates, ModelBreakdown, Session, SessionData,
     Subagent, SubagentStatus, Tokens,
 };
-use crate::config;
-use crate::pricing::Provider;
 use crate::util;
+// Finding the sessions is cctop-discovery's; reading them is here.
+use cctop_discovery::session::opencode::{self as found, Schema, schema, session_table};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::Value;
 use std::cell::RefCell;
@@ -94,46 +94,6 @@ fn with_db<T>(path: &Path, query: impl FnOnce(&Connection) -> T) -> Option<T> {
         }
         cache.get(path).map(query)
     })
-}
-
-/// Which storage layout a database holds.
-///
-/// OpenCode 2 replaced the `session`/`message`/`part` tables with
-/// `session_v2`/`session_message` and migrated every old row forward, so a 2.x
-/// database holds all its sessions in `session_v2` and leaves the legacy tables
-/// frozen. Reading the old tables there would show only the sessions that
-/// predate the migration and none written since — the bug this detection fixes.
-/// The two layouts also differ in shape: a 2.x message carries its parts inline
-/// under `data.content[]` rather than in a `part` table, and nests the model
-/// under `data.model`.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Schema {
-    V1,
-    V2,
-}
-
-/// `V2` when the database has a `session_v2` table, else `V1`. One indexed
-/// probe, dwarfed by the per-session reads it routes.
-fn schema(db: &Connection) -> Schema {
-    let has_v2 = db
-        .query_row(
-            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'session_v2'",
-            [],
-            |_| Ok(()),
-        )
-        .optional()
-        .ok()
-        .flatten()
-        .is_some();
-    if has_v2 { Schema::V2 } else { Schema::V1 }
-}
-
-/// The session table for this schema.
-fn session_table(schema: Schema) -> &'static str {
-    match schema {
-        Schema::V1 => "session",
-        Schema::V2 => "session_v2",
-    }
 }
 
 /// Reshape one OpenCode 2 `content[]` tool item into the flat `part` shape the
@@ -372,19 +332,6 @@ fn is_api_failure(message: &opencode_line::Message) -> bool {
     .any(|needle| text.contains(needle))
 }
 
-/// Stable releases use `opencode.db`; nonstandard channels suffix the filename.
-fn database_paths() -> Vec<PathBuf> {
-    config::opencode_data_roots()
-        .into_iter()
-        .flat_map(|root| {
-            config::list_dir(&root)
-                .into_iter()
-                .filter(|name| name.starts_with("opencode") && name.ends_with(".db"))
-                .map(move |name| root.join(name))
-        })
-        .collect()
-}
-
 /// Every message one session recorded, oldest first, with its own parts.
 ///
 /// `message` holds the envelope and `part` the words and the calls, so the two
@@ -593,114 +540,21 @@ pub fn message_time(message: &Value, column: i64) -> String {
 /// recently updated copy if the same session was migrated between channels.
 pub fn list_sessions() -> Vec<Session> {
     let mut sessions = Vec::new();
-    for path in database_paths() {
+    for path in found::database_paths() {
         // Pooled per database rather than opened per walk: this is the walk's
         // first and broadest read, and it opens one connection per channel
         // either way — the table below is then reused by every extract that
-        // follows on the same thread.
-        let Some(found) = with_db(&path, |db| sessions_in(db, &path)) else {
+        // follows on the same thread. Which is why core asks per database
+        // rather than calling `found::list`, which opens its own.
+        let Some(listed) = with_db(&path, |db| found::sessions_in(db, &path)) else {
             continue;
         };
-        sessions.extend(found);
+        sessions.extend(listed.into_iter().map(Session::from_found));
     }
 
     sessions.sort_by(|a, b| b.last_active.cmp(&a.last_active));
     let mut seen = HashSet::new();
     sessions.retain(|s| seen.insert(s.session_id.clone()));
-    sessions
-}
-
-/// When a session last did something: the newest message's own update stamp,
-/// or one of its parts' if later — a tool call finishing, a reply streaming in.
-///
-/// Not the session row's `time_updated`, which keeps a different clock.
-/// OpenCode moves it for a rename, a share or an archive, and not for every
-/// message: on a real database it trailed the newest message by anything from
-/// a tenth of a second to fifteen hours. It is also the key a cached extraction
-/// is checked against (see [`super::effective_mtime_ms`]), so a stamp that
-/// missed a message kept that message's spend off the row until something else
-/// moved it.
-///
-/// Read through the two indexes OpenCode keeps — a session's messages by time,
-/// a message's parts — so it is two index probes per session, not a scan.
-///
-/// Not the newest message alone: a prompt queued while a reply is still
-/// streaming is created at once, so it is the newest row while the reply
-/// before it keeps writing. The newest few are read, and the latest stamp
-/// among them wins.
-///
-/// ponytail: a subagent is a session of its own, so its work moves the
-/// parent's stamp only when the `task` call that started it returns. And a
-/// reply still streaming behind three or more queued prompts is not seen
-/// until one of them starts.
-const LAST_ENTRY: &str = "(SELECT max(x) FROM (SELECT max(m.time_updated, coalesce(\
-     (SELECT max(p.time_updated) FROM part p WHERE p.message_id = m.id), 0)) AS x \
-     FROM message m WHERE m.session_id = session.id \
-     ORDER BY m.time_created DESC, m.id DESC LIMIT 3))";
-
-/// [`LAST_ENTRY`] for OpenCode 2, where a message's parts are inline and the
-/// `session_message` row's own `time_updated` is the newest stamp there is.
-const LAST_ENTRY_V2: &str = "(SELECT max(time_updated) FROM (SELECT time_updated \
-     FROM session_message WHERE session_id = session_v2.id ORDER BY seq DESC LIMIT 3))";
-
-fn sessions_in(db: &Connection, path: &Path) -> Vec<Session> {
-    let mut sessions = Vec::new();
-    let schema = schema(db);
-    let table = session_table(schema);
-    let last_entry = match schema {
-        Schema::V1 => LAST_ENTRY,
-        Schema::V2 => LAST_ENTRY_V2,
-    };
-    // A subagent is a session of its own, with `parent_id` naming the one that
-    // spawned it; listed, each stands alone as a conversation. They are hidden
-    // here and folded into their parent by `extract`, the way Claude's subagents
-    // are. A database from before the column existed has no subagents to hide,
-    // so it falls back to the unfiltered query.
-    //
-    // A database without the columns the last entry is read from falls back
-    // the same way, to the row's own stamp.
-    const COLUMNS: &str = "SELECT id, directory, title, model, time_created, time_updated";
-    let candidates = [
-        format!("{COLUMNS}, {last_entry} FROM {table} WHERE parent_id IS NULL"),
-        format!("{COLUMNS}, {last_entry} FROM {table}"),
-        format!("{COLUMNS}, NULL FROM {table} WHERE parent_id IS NULL"),
-        format!("{COLUMNS}, NULL FROM {table}"),
-    ];
-    let Some(mut stmt) = candidates.iter().find_map(|sql| db.prepare(sql).ok()) else {
-        return sessions;
-    };
-    // 2.x lets `title` be NULL; read it as optional so a row without one is
-    // kept rather than dropped by a failed `String` conversion.
-    let Ok(rows) = stmt.query_map([], |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, String>(1)?,
-            row.get::<_, Option<String>>(2)?,
-            row.get::<_, Option<String>>(3)?,
-            row.get::<_, i64>(4)?,
-            row.get::<_, i64>(5)?,
-            row.get::<_, Option<i64>>(6)?,
-        ))
-    }) else {
-        return sessions;
-    };
-    for row in rows.flatten() {
-        let (id, directory, title, model_json, created, updated, last_entry) = row;
-        let title = title.unwrap_or_default();
-        let model = model_json
-            .as_deref()
-            .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
-            .and_then(|v| v.get("id").and_then(Value::as_str).map(str::to_string))
-            .unwrap_or_default();
-        let mut session = Session::new(Provider::OpenCode, id);
-        session.started_at = util::ms_to_rfc3339(created);
-        session.last_active = util::ms_to_rfc3339(last_entry.unwrap_or(updated));
-        session.label_source = directory;
-        session.title = (!title.is_empty()).then_some(title);
-        session.model = model;
-        session.data_file = Some(path.to_path_buf());
-        sessions.push(session);
-    }
     sessions
 }
 
@@ -1302,6 +1156,8 @@ fn last_tool(db: &Connection, session_id: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pricing::Provider;
+    use cctop_discovery::session::opencode::sessions_in;
 
     fn temp_db(tag: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
@@ -1494,7 +1350,11 @@ mod tests {
         assert_eq!((delta.added, delta.removed), (3, 2));
 
         // Listed from `session_v2`, with its last-activity stamp.
-        let listed = with_db(&path, |db| sessions_in(db, &path)).unwrap();
+        let listed: Vec<Session> = with_db(&path, |db| sessions_in(db, &path))
+            .unwrap()
+            .into_iter()
+            .map(Session::from_found)
+            .collect();
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].session_id, "ses_2");
         assert_eq!(listed[0].last_active, util::ms_to_rfc3339(1950));
