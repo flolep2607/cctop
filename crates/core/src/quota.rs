@@ -43,16 +43,35 @@ impl<'de> Deserialize<'de> for Window {
         let w = StoredWindow::deserialize(d)?;
         Ok(Window {
             // Back to the `&'static str` the fetchers would have produced.
-            label: match w.label.as_str() {
-                "5h" => "5h",
-                "7d" => "7d",
-                "cr" => "cr",
-                _ => "?",
-            },
+            label: intern(&w.label),
             pct: w.pct,
             duration: w.duration,
             resets_at: w.resets_at,
         })
+    }
+}
+
+/// `label` as a `&'static str`, leaked once per distinct label.
+///
+/// A label is mostly "5h" or "7d", but the server names its scoped meters
+/// ("7d Fable"), and every poll and cache read would otherwise build one.
+/// ponytail: leaks one string per distinct meter name the server ever sends,
+/// a handful; make `Window::label` a `Cow` if that stops being true.
+fn intern(label: &str) -> &'static str {
+    static SEEN: std::sync::Mutex<Vec<&'static str>> = std::sync::Mutex::new(Vec::new());
+    match label {
+        "5h" => "5h",
+        "7d" => "7d",
+        "cr" => "cr",
+        _ => {
+            let mut seen = SEEN.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(s) = seen.iter().find(|s| **s == label) {
+                return s;
+            }
+            let s: &'static str = Box::leak(label.to_owned().into_boxed_str());
+            seen.push(s);
+            s
+        }
     }
 }
 
@@ -1192,7 +1211,20 @@ fn claude_usage(token: &str) -> ProviderStatus {
         Fetched::Body(v) => v,
         Fetched::Failed(status) => return status,
     };
+    claude_quota(&data)
+}
 
+const FIVE_HOURS: Duration = Duration::from_secs(5 * 60 * 60);
+const SEVEN_DAYS: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+
+/// Claude's usage body, read into windows.
+///
+/// `limits[]` first: it is the server's own list of meters, and it carries
+/// the ones the fixed fields do not — a weekly limit scoped to one model or
+/// one surface, which is the limit that runs out first when someone lives on
+/// that model. A body without it (a server that predates it) still has
+/// `five_hour` and `seven_day`.
+fn claude_quota(data: &Value) -> ProviderStatus {
     let mut q = ProviderQuota {
         plan: data
             .get("rate_limit_tier")
@@ -1200,9 +1232,55 @@ fn claude_usage(token: &str) -> ProviderStatus {
             .map(str::to_string),
         ..Default::default()
     };
+    for row in data
+        .get("limits")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let (Some(kind), Some(pct)) = (
+            row.get("kind").and_then(Value::as_str),
+            row.get("percent").and_then(Value::as_f64),
+        ) else {
+            continue;
+        };
+        let scope = row.get("scope").and_then(|s| {
+            ["model", "surface"]
+                .iter()
+                .find_map(|k| s.get(k)?.get("display_name")?.as_str())
+        });
+        let weekly = row.get("group").and_then(Value::as_str) == Some("weekly");
+        let (label, duration) = match (kind, scope) {
+            ("session", _) => ("5h", Some(FIVE_HOURS)),
+            ("weekly_all", _) => ("7d", Some(SEVEN_DAYS)),
+            // A meter this build has no name for still shows, under the
+            // server's own words, rather than vanishing until a release.
+            (_, Some(name)) if weekly => (intern(&format!("7d {name}")), Some(SEVEN_DAYS)),
+            (kind, Some(name)) => (intern(&format!("{kind} {name}")), None),
+            (kind, None) => (intern(kind), weekly.then_some(SEVEN_DAYS)),
+        };
+        q.windows.push(Window {
+            label,
+            pct: pct.round() as u32,
+            duration,
+            resets_at: as_epoch_secs(row.get("resets_at")),
+        });
+    }
+    // A scoped weekly meter is shown only while it is ahead of the weekly
+    // total, which is when it is the limit that runs out first. Below that it
+    // says nothing the 7d bar does not, and the panel gives an account about
+    // 37 columns: a third bar at 0% pushes the other two's resets off it.
+    let all_week = q.windows.iter().find(|w| w.label == "7d").map(|w| w.pct);
+    q.windows.retain(|w| {
+        !(w.duration == Some(SEVEN_DAYS) && w.label != "7d")
+            || all_week.is_none_or(|all| w.pct > all)
+    });
+    if !q.windows.is_empty() {
+        return ProviderStatus::Ok(q);
+    }
     for (key, label, duration) in [
-        ("five_hour", "5h", Duration::from_secs(5 * 60 * 60)),
-        ("seven_day", "7d", Duration::from_secs(7 * 24 * 60 * 60)),
+        ("five_hour", "5h", FIVE_HOURS),
+        ("seven_day", "7d", SEVEN_DAYS),
     ] {
         if let Some(w) = data.get(key)
             && let Some(util) = w.get("utilization").and_then(Value::as_f64)
@@ -1861,5 +1939,56 @@ mod tests {
             let enc = util::b64_encode(case.as_bytes());
             assert_eq!(util::b64_decode(&enc).unwrap(), case.as_bytes());
         }
+    }
+
+    /// The server's `limits[]` is read over the fixed fields, so a weekly
+    /// limit scoped to one model shows — and survives the cache under its
+    /// name. Trimmed from a real reply of 2026-11-24.
+    #[test]
+    fn a_model_scoped_weekly_limit_is_read_from_limits() {
+        let body: Value = serde_json::from_str(
+            r#"{
+              "five_hour": {"utilization": 2.0, "resets_at": "2026-11-24T06:50:00.299426+00:00"},
+              "seven_day": {"utilization": 17.0, "resets_at": "2026-11-28T17:00:00.299446+00:00"},
+              "limits": [
+                {"kind": "session", "group": "session", "percent": 2,
+                 "resets_at": "2026-11-24T06:50:00.299426+00:00", "scope": null},
+                {"kind": "weekly_all", "group": "weekly", "percent": 17,
+                 "resets_at": "2026-11-28T17:00:00.299446+00:00", "scope": null},
+                {"kind": "weekly_scoped", "group": "weekly", "percent": 40,
+                 "resets_at": "2026-11-28T17:00:00+00:00",
+                 "scope": {"model": {"id": null, "display_name": "Fable"}, "surface": null}}
+              ]
+            }"#,
+        )
+        .unwrap();
+        let ProviderStatus::Ok(q) = claude_quota(&body) else {
+            panic!("not read");
+        };
+        let got: Vec<_> = q.windows.iter().map(|w| (w.label, w.pct)).collect();
+        assert_eq!(got, [("5h", 2), ("7d", 17), ("7d Fable", 40)]);
+        assert_eq!(q.windows[2].duration, Some(SEVEN_DAYS));
+
+        let stored = serde_json::to_string(&q.windows[2]).unwrap();
+        let back: Window = serde_json::from_str(&stored).unwrap();
+        assert_eq!(back.label, "7d Fable");
+
+        // Behind the weekly total it is not the binding limit, and is left
+        // out of a panel that has no room for it.
+        let mut behind = body.clone();
+        behind["limits"][2]["percent"] = 0.into();
+        let ProviderStatus::Ok(q) = claude_quota(&behind) else {
+            panic!("not read");
+        };
+        assert_eq!(q.windows.len(), 2);
+
+        // A server that predates `limits[]` still gives its two windows.
+        let mut old = body;
+        old.as_object_mut().unwrap().remove("limits");
+        let ProviderStatus::Ok(q) = claude_quota(&old) else {
+            panic!("not read");
+        };
+        let got: Vec<_> = q.windows.iter().map(|w| (w.label, w.pct)).collect();
+        assert_eq!(got, [("5h", 2), ("7d", 17)]);
     }
 }
