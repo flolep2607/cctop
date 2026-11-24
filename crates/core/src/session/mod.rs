@@ -32,21 +32,8 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-/// Open another harness's SQLite database for reading, and only reading.
-///
-/// Read-only because the database belongs to an agent that may be writing it
-/// right now, and cctop is a monitor: it has no business taking a write lock
-/// on somebody else's state. No-mutex because each connection is used by one
-/// thread — OpenCode's are kept per thread for that reason — so SQLite's own
-/// serialisation would be a lock taken and released for nothing on every
-/// call.
-pub(crate) fn readonly(path: &Path) -> rusqlite::Result<rusqlite::Connection> {
-    use rusqlite::OpenFlags;
-    rusqlite::Connection::open_with_flags(
-        path,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-}
+// Moved to `cctop-discovery`, whose listers open the agents' databases too.
+pub(crate) use cctop_discovery::session::readonly;
 
 /// Delete a session whose whole record is its one transcript file — Codex's
 /// rollout, Gemini's and Pi's JSONL. A session with no file has nothing to
@@ -596,21 +583,14 @@ impl Session {
     }
 
     pub fn new(provider: Provider, session_id: String) -> Self {
+        Self::from_found(Discovered::new(provider, session_id))
+    }
+
+    /// A row for a session a lister in `cctop-discovery` found, with nothing
+    /// annotated onto it yet.
+    pub fn from_found(found: Discovered) -> Self {
         Session {
-            found: Discovered {
-                provider,
-                surface: Surface::Cli,
-                session_id,
-                started_at: String::new(),
-                last_active: String::new(),
-                touched_at: String::new(),
-                model: String::new(),
-                harness: String::new(),
-                label_source: String::new(),
-                data_file: None,
-                title: None,
-                mac_meta: None,
-            },
+            found,
             abbrev_label: String::new(),
             input_tokens: 0,
             output_tokens: 0,

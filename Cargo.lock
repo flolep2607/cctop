@@ -507,8 +507,11 @@ dependencies = [
 name = "cctop-discovery"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "dirs",
  "libc",
+ "percent-encoding",
+ "rusqlite",
  "serde",
  "serde_json",
  "tempfile",

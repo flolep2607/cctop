@@ -26,6 +26,8 @@ pub mod paths;
 mod provider;
 pub mod session;
 mod state;
+#[doc(hidden)]
+pub mod time;
 
 pub use provider::Provider;
 pub use state::{ActivityState, Permission, Surface};

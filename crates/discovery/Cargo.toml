@@ -27,8 +27,13 @@ doctest = false
 # server, TLS, the tokenizer or the multiplexer cctop-core carries; anything
 # added here is added to every one of them.
 [dependencies]
+chrono.workspace = true
 dirs.workspace = true
 libc.workspace = true
+percent-encoding.workspace = true
+# The agents that keep sessions in SQLite (Windsurf, Cursor, OpenCode, Devin,
+# Antigravity). Bundled, as in core: no system library to match.
+rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 ts-rs = { workspace = true, optional = true }
