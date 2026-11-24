@@ -14,6 +14,8 @@ use std::sync::{LazyLock, Mutex};
 #[doc(hidden)]
 pub mod antigravity;
 #[doc(hidden)]
+pub mod claude;
+#[doc(hidden)]
 pub mod claude_line;
 #[doc(hidden)]
 pub mod codex;
@@ -188,6 +190,22 @@ pub struct Discovered {
     pub data_file: Option<PathBuf>,
     pub title: Option<String>,
     pub mac_meta: Option<MacMeta>,
+    /// The session id this session's process was *started* with, which stops
+    /// being its own id the moment it is resumed.
+    ///
+    /// `claude --resume X` does not reopen X's transcript. It forks: a new file
+    /// under a new id, which records X as the id it was launched from. So the
+    /// only thing on the running process's command line is the id of a
+    /// transcript that is now finished, and matching a PID to the session whose
+    /// *name* it carries attributes the live agent to the dead conversation —
+    /// the running one then shows as stopped while a session nobody is in shows
+    /// as working. Matching on this instead follows the fork forward.
+    ///
+    /// Empty when the harness does not record one, which includes every
+    /// provider but Claude and Claude transcripts old enough to predate the
+    /// field. Callers fall back to `session_id`, which is
+    /// what this holds for a session that was never resumed.
+    pub launch_id: String,
 }
 
 impl Discovered {
@@ -207,6 +225,7 @@ impl Discovered {
             data_file: None,
             title: None,
             mac_meta: None,
+            launch_id: String::new(),
         }
     }
 }
@@ -346,4 +365,80 @@ pub fn last_entry_ms(path: &Path, entry_ms: impl Fn(&[u8]) -> Option<i64>) -> Op
         cache.insert(path.to_path_buf(), (stamp.0, stamp.1, newest));
     }
     newest
+}
+
+/// Whether a line is Claude Code reporting an `/effort` switch, and if so
+/// whether the switch was into ultracode.
+///
+/// The command's own output, which Claude Code writes into the transcript in
+/// the person's role:
+///
+/// ```text
+/// <local-command-stdout>Set effort level to ultracode (this session only): …
+/// ```
+///
+/// Anchored at the start of the line, so the same words pasted into a prompt
+/// (a screenshot of a terminal, say) are not read as a switch.
+pub fn effort_switch(text: &str) -> Option<bool> {
+    let level = text
+        .trim_start()
+        .strip_prefix("<local-command-stdout>")?
+        .trim_start()
+        .strip_prefix("Set effort level to ")?;
+    let level: String = level.chars().take_while(|c| c.is_alphanumeric()).collect();
+    (!level.is_empty()).then(|| level.eq_ignore_ascii_case("ultracode"))
+}
+
+/// The main transcript plus any subagent sidechain transcripts — including the
+/// agents a workflow ran, which are one level further down.
+///
+/// A workflow writes each of its agents to
+/// `subagents/workflows/<run>/agent-<id>.jsonl`, beside a `journal.jsonl` that
+/// records the run's own progress and is not an agent's transcript at all. So
+/// inside a run directory only `agent-` files count, while at the top level
+/// every `.jsonl` still does, as it always has. A workflow can run hundreds of
+/// agents, and before this every one of them was missing from the session's
+/// spend, its subagent list, and the mtime that says it is still working.
+pub fn transcript_files(main: &Path) -> Vec<PathBuf> {
+    let mut files = vec![main.to_path_buf()];
+    let subagents_dir = subagents_dir(main);
+    for entry in crate::paths::list_dir(&subagents_dir) {
+        if entry.ends_with(".jsonl") {
+            files.push(subagents_dir.join(entry));
+        }
+    }
+    for run in workflow_run_dirs(&subagents_dir) {
+        for entry in crate::paths::list_dir(&run) {
+            if entry.starts_with("agent-") && entry.ends_with(".jsonl") {
+                files.push(run.join(entry));
+            }
+        }
+    }
+    files
+}
+
+/// Where a session's subagents keep their transcripts.
+///
+/// Claude Code puts them in a directory named after the transcript,
+/// `<id>.jsonl` beside `<id>/subagents/`. Cursor already keeps each transcript
+/// in a directory of its own, `<id>/<id>.jsonl`, and its subagents in
+/// `<id>/subagents/` beside it. A Claude Code transcript's directory is its
+/// project, never its own id, so the two cannot be mistaken for each other.
+pub fn subagents_dir(main: &Path) -> PathBuf {
+    match main.parent() {
+        Some(dir) if dir.file_name().is_some() && dir.file_name() == main.file_stem() => {
+            dir.join("subagents")
+        }
+        _ => main.with_extension("").join("subagents"),
+    }
+}
+
+/// Each workflow run's directory under a session's `subagents/`.
+pub fn workflow_run_dirs(subagents_dir: &Path) -> Vec<PathBuf> {
+    let workflows = subagents_dir.join("workflows");
+    crate::paths::list_dir(&workflows)
+        .into_iter()
+        .map(|run| workflows.join(run))
+        .filter(|run| run.is_dir())
+        .collect()
 }
