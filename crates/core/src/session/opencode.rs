@@ -9,7 +9,9 @@ use super::{
 };
 use crate::util;
 // Finding the sessions is cctop-discovery's; reading them is here.
-use cctop_discovery::session::opencode::{self as found, Schema, schema, session_table};
+use cctop_discovery::session::opencode::{
+    self as found, Schema, activity_state, content_items, schema, session_table,
+};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::Value;
 use std::cell::RefCell;
@@ -200,14 +202,6 @@ fn v2_tool_items(db: &Connection, session_id: &str) -> Vec<Value> {
     out
 }
 
-/// The `content[]` array of a 2.x message's `data`, or empty.
-fn content_items(raw: &str) -> Vec<Value> {
-    serde_json::from_str::<Value>(raw)
-        .ok()
-        .and_then(|v| v.get("content").and_then(Value::as_array).cloned())
-        .unwrap_or_default()
-}
-
 /// How many times this session was compacted.
 fn compaction_count(db: &Connection, schema: Schema, session_id: &str) -> u32 {
     let sql = match schema {
@@ -230,106 +224,6 @@ fn compaction_count(db: &Connection, schema: Schema, session_id: &str) -> u32 {
 /// and provider errors.
 pub fn extract_activity_state(path: &Path, session_id: &str) -> ActivityState {
     with_db(path, |db| activity_state(db, session_id)).unwrap_or(ActivityState::Working)
-}
-
-fn activity_state(db: &Connection, session_id: &str) -> ActivityState {
-    let schema = schema(db);
-    // 1.x needs the message id to find the message's `part` rows; 2.x carries
-    // the parts inline, so the row's own `data` is enough.
-    let newest = match schema {
-        Schema::V1 => db.query_row(
-            "SELECT json_extract(data, '$.role'), id, data FROM message \
-             WHERE session_id = ?1 ORDER BY time_created DESC, id DESC LIMIT 1",
-            params![session_id],
-            |row| {
-                Ok((
-                    row.get::<_, Option<String>>(0)?.unwrap_or_default(),
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                ))
-            },
-        ),
-        Schema::V2 => db.query_row(
-            "SELECT type, '', data FROM session_message \
-             WHERE session_id = ?1 ORDER BY seq DESC LIMIT 1",
-            params![session_id],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                ))
-            },
-        ),
-    }
-    .optional()
-    .ok()
-    .flatten();
-    let Some((role, message_id, raw)) = newest else {
-        return ActivityState::Working;
-    };
-    if role != "assistant" {
-        return ActivityState::Working;
-    }
-    let Some(message) = opencode_line::parse::<opencode_line::Message>(&raw) else {
-        return ActivityState::Working;
-    };
-    let waiting = match schema {
-        Schema::V1 => has_input_request(db, &message_id),
-        Schema::V2 => content_items(&raw).iter().any(|item| {
-            item.get("type").and_then(Value::as_str) == Some("tool")
-                && item
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .is_some_and(super::is_input_request_tool)
-        }),
-    };
-    if is_api_failure(&message) {
-        ActivityState::ApiError
-    } else if waiting {
-        ActivityState::WaitingForInput
-    } else {
-        ActivityState::Working
-    }
-}
-
-fn has_input_request(db: &Connection, message_id: &str) -> bool {
-    let Ok(mut stmt) = db.prepare("SELECT data FROM part WHERE message_id = ?1") else {
-        return false;
-    };
-    let Ok(rows) = stmt.query_map(params![message_id], |row| row.get::<_, String>(0)) else {
-        return false;
-    };
-    rows.flatten().any(|raw| {
-        opencode_line::parse::<opencode_line::Part>(&raw).is_some_and(|part| {
-            part.kind.is("tool") && part.tool.get().is_some_and(super::is_input_request_tool)
-        })
-    })
-}
-
-fn is_api_failure(message: &opencode_line::Message) -> bool {
-    let Some(text) = message.error_text() else {
-        return false;
-    };
-    [
-        "timeout",
-        "timed out",
-        "rate limit",
-        "overloaded",
-        "connection",
-        "network",
-        "api error",
-        "apierror",
-        "internal server",
-        "queue is full",
-        // OpenCode 2 names failures `provider.rate-limit`, `provider.quota`,
-        // `provider.transport` and so on — every provider fault, as against the
-        // `aborted` and `unknown` it leaves out, which are not the model hitting
-        // a wall.
-        "provider.",
-    ]
-    .iter()
-    .any(|needle| text.contains(needle))
 }
 
 /// Every message one session recorded, oldest first, with its own parts.
