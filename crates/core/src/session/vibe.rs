@@ -24,26 +24,21 @@
 //! so taking it would price the same model two ways depending on the layout.
 
 use super::extract::{push_tool_detail, tool_detail};
-use super::{ActivityState, ContextUsage, ModelBreakdown, Session, SessionData, Tokens};
+use super::{ContextUsage, ModelBreakdown, Session, SessionData, Tokens};
 use crate::config;
 use crate::util;
 // Finding the sessions is cctop-discovery's; reading them is here.
-use cctop_discovery::session::vibe::{self as found, last_active_ms, newest_segment, read_json};
+use cctop_discovery::session::vibe::{
+    self as found, envelope, generation, is_unified, last_active_ms, newest_segment, read_journal,
+    read_json,
+};
+// Moved to `cctop-discovery`, which reads a session's state off its journal.
+pub use cctop_discovery::session::vibe::live_state;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 
-/// How much of the newest journal segment is read for live state. A segment
-/// holds one turn, and each model call in it embeds the whole prompt, so a
-/// segment runs to megabytes; the records this module reads are small and come
-/// last.
-const JOURNAL_TAIL: u64 = 262_144;
-
 pub fn list_sessions() -> Vec<Session> {
     found::list().into_iter().map(Session::from_found).collect()
-}
-
-fn is_unified(dir: &Path) -> bool {
-    dir.join("CURRENT").is_file()
 }
 
 /// The newest write anywhere in the session, from its `meta.json`.
@@ -67,15 +62,6 @@ pub fn mtime_ms(meta_path: &Path) -> u64 {
     .map(|p| config::file_mtime_ms(&p))
     .max()
     .unwrap_or(0)
-}
-
-/// The current generation's directory and manifest.
-fn generation(dir: &Path) -> Option<(PathBuf, Value)> {
-    let current = read_json(&dir.join("CURRENT"))?;
-    let generation = current.get("generation").and_then(Value::as_str)?;
-    let gen_dir = dir.join("generations").join(generation);
-    let manifest = read_json(&gen_dir.join("manifest.json"))?;
-    Some((gen_dir, manifest))
 }
 
 /// The items of one snapshot part — `checkpoint` (the model's context) or
@@ -169,107 +155,6 @@ fn configured_model() -> String {
         .and_then(|text| text.parse::<toml_edit::DocumentMut>().ok())
         .and_then(|doc| doc.get("active_model")?.as_str().map(str::to_string))
         .unwrap_or_default()
-}
-
-/// What the newest journal records say about a unified session.
-#[derive(Default)]
-struct JournalTail {
-    /// The newest projection envelope: the session as Vibe's UI last drew it.
-    envelope: Option<Value>,
-    /// The newest tool the history shows being run.
-    last_tool: Option<String>,
-    /// An approval or question registered and not yet answered.
-    asking: bool,
-    /// A model call started after the newest envelope.
-    calling: bool,
-}
-
-/// A journal record's type, read off the end of the line.
-///
-/// Keys are written sorted, so `type` is always last, and that makes it
-/// readable from a line cut off at its start: a model call's record embeds the
-/// whole prompt, and can be larger than the tail that is read.
-fn record_type(line: &str) -> Option<&str> {
-    line.trim_end()
-        .strip_suffix("\"}")?
-        .rsplit_once("\"type\":\"")
-        .map(|(_, t)| t)
-}
-
-fn read_journal(dir: &Path) -> JournalTail {
-    let mut tail = JournalTail::default();
-    let Some(text) = newest_segment(dir).and_then(|s| util::read_tail(&s, JOURNAL_TAIL)) else {
-        return tail;
-    };
-    let mut resolved = std::collections::HashSet::new();
-    let mut decided = false;
-    for line in text.lines().rev() {
-        let parse = || serde_json::from_str::<Value>(line).ok();
-        match record_type(line) {
-            Some("callback_resolved") => {
-                if let Some(id) = parse().and_then(|r| {
-                    r.pointer("/payload/callback_id")
-                        .and_then(Value::as_str)
-                        .map(str::to_string)
-                }) {
-                    resolved.insert(id);
-                }
-            }
-            Some("callback_registered") if !decided => {
-                let id = parse().and_then(|r| {
-                    r.pointer("/payload/callback_id")
-                        .and_then(Value::as_str)
-                        .map(str::to_string)
-                });
-                if id.is_some_and(|id| !resolved.contains(&id)) {
-                    tail.asking = true;
-                }
-            }
-            Some("action_intent") if !decided && tail.envelope.is_none() => {
-                tail.calling = true;
-            }
-            Some("projection_delta") => {
-                let Some(record) = parse() else { continue };
-                for op in record
-                    .pointer("/payload/delta")
-                    .and_then(Value::as_array)
-                    .into_iter()
-                    .flatten()
-                    .rev()
-                {
-                    if tail.last_tool.is_none()
-                        && let Some(tool) =
-                            op.pointer("/entry/detail/toolName").and_then(Value::as_str)
-                    {
-                        tail.last_tool = Some(tool.to_string());
-                    }
-                    if tail.envelope.is_none()
-                        && op.get("op").and_then(Value::as_str) == Some("set_envelope")
-                    {
-                        tail.envelope = op.get("state").cloned();
-                        // A callback older than the envelope was answered or
-                        // abandoned before the session was last drawn.
-                        decided = true;
-                    }
-                }
-            }
-            _ => {}
-        }
-        if tail.envelope.is_some() && tail.last_tool.is_some() {
-            break;
-        }
-    }
-    tail
-}
-
-/// The newest envelope: the journal's, else the snapshot's.
-fn envelope(dir: &Path, tail: &JournalTail) -> Option<Value> {
-    tail.envelope.clone().or_else(|| {
-        let (gen_dir, _) = generation(dir)?;
-        read_json(&gen_dir.join("projection-state.json"))?
-            .get("snapshot")
-            .cloned()
-    })
 }
 
 /// Vibe's token counts: input with its cached part inside it, as Codex reports.
@@ -499,62 +384,6 @@ fn record_tool(data: &mut SessionData, name: &str, input: &Value, id: Option<Str
     data.metrics.tool_count += 1;
 }
 
-/// The session's live state.
-///
-/// For the unified store, the journal says it outright: an approval nobody has
-/// answered is a question, and otherwise the newest envelope's status is
-/// `running` or `idle`. A model call newer than every envelope in the tail is
-/// a turn in flight whatever the last envelope said.
-///
-/// ponytail: no permission mode. Vibe's is the agent a session was started
-/// with (`--agent auto-approve` and kin), which the store does not record.
-pub fn live_state(session: &Session) -> (ActivityState, Option<crate::hook::Permission>) {
-    let Some(dir) = session.data_file.as_deref().and_then(Path::parent) else {
-        return (ActivityState::Working, None);
-    };
-    if !is_unified(dir) {
-        return (legacy_state(dir), None);
-    }
-    let tail = read_journal(dir);
-    if tail.asking {
-        return (ActivityState::Asking, None);
-    }
-    if tail.calling {
-        return (ActivityState::Working, None);
-    }
-    let status = envelope(dir, &tail).and_then(|e| {
-        e.pointer("/session/status/type")
-            .and_then(Value::as_str)
-            .map(str::to_string)
-    });
-    let state = match status.as_deref() {
-        Some("idle") => ActivityState::WaitingForInput,
-        _ => ActivityState::Working,
-    };
-    (state, None)
-}
-
-/// The Python layout's state from its last message: an assistant reply with no
-/// calls in it is the end of the turn.
-fn legacy_state(dir: &Path) -> ActivityState {
-    let last = util::read_tail(&dir.join("messages.jsonl"), 65_536).and_then(|text| {
-        text.lines()
-            .rev()
-            .find_map(|l| serde_json::from_str::<Value>(l).ok())
-    });
-    let Some(last) = last else {
-        return ActivityState::Working;
-    };
-    let calls = last
-        .get("tool_calls")
-        .and_then(Value::as_array)
-        .is_some_and(|c| !c.is_empty());
-    match last.get("role").and_then(Value::as_str) {
-        Some("assistant") if !calls => ActivityState::WaitingForInput,
-        _ => ActivityState::Working,
-    }
-}
-
 /// The newest tool the unified history shows, without its namespace:
 /// `file_system.bash` is the `bash` the checkpoint calls it.
 pub fn extract_last_tool(session: &Session) -> String {
@@ -602,6 +431,7 @@ pub fn delete(session: &Session) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::session::ActivityState;
     use cctop_discovery::session::vibe::session_in;
     use std::fs;
     use tempfile::TempDir;
@@ -863,14 +693,5 @@ mod tests {
         delete(&session(&meta)).unwrap();
         assert!(!meta.parent().unwrap().exists());
         assert!(tmp.path().join("unified").exists());
-    }
-
-    #[test]
-    fn record_type_reads_the_last_key() {
-        assert_eq!(
-            record_type(r#"{"a":{"type":"x"},"type":"core_input"}"#),
-            Some("core_input")
-        );
-        assert_eq!(record_type("truncated"), None);
     }
 }

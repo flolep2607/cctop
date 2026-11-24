@@ -2,9 +2,9 @@
 //! channel — and the top-level sessions in each. Reading a session's messages
 //! stays in cctop-core's `session::opencode`.
 
-use super::{Discovered, readonly};
-use crate::{Provider, paths};
-use rusqlite::{Connection, OptionalExtension};
+use super::{Discovered, opencode_line, readonly};
+use crate::{ActivityState, Provider, paths};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::Value;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -171,4 +171,125 @@ pub fn sessions_in(db: &Connection, path: &Path) -> Vec<Discovered> {
         sessions.push(session);
     }
     sessions
+}
+
+/// The `content[]` array of a 2.x message's `data`, or empty.
+pub fn content_items(raw: &str) -> Vec<Value> {
+    serde_json::from_str::<Value>(raw)
+        .ok()
+        .and_then(|v| v.get("content").and_then(Value::as_array).cloned())
+        .unwrap_or_default()
+}
+
+pub fn activity_state(db: &Connection, session_id: &str) -> ActivityState {
+    let schema = schema(db);
+    // 1.x needs the message id to find the message's `part` rows; 2.x carries
+    // the parts inline, so the row's own `data` is enough.
+    let newest = match schema {
+        Schema::V1 => db.query_row(
+            "SELECT json_extract(data, '$.role'), id, data FROM message \
+             WHERE session_id = ?1 ORDER BY time_created DESC, id DESC LIMIT 1",
+            params![session_id],
+            |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?.unwrap_or_default(),
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        ),
+        Schema::V2 => db.query_row(
+            "SELECT type, '', data FROM session_message \
+             WHERE session_id = ?1 ORDER BY seq DESC LIMIT 1",
+            params![session_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        ),
+    }
+    .optional()
+    .ok()
+    .flatten();
+    let Some((role, message_id, raw)) = newest else {
+        return ActivityState::Working;
+    };
+    if role != "assistant" {
+        return ActivityState::Working;
+    }
+    let Some(message) = opencode_line::parse::<opencode_line::Message>(&raw) else {
+        return ActivityState::Working;
+    };
+    let waiting = match schema {
+        Schema::V1 => has_input_request(db, &message_id),
+        Schema::V2 => content_items(&raw).iter().any(|item| {
+            item.get("type").and_then(Value::as_str) == Some("tool")
+                && item
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .is_some_and(super::state::is_input_request_tool)
+        }),
+    };
+    if is_api_failure(&message) {
+        ActivityState::ApiError
+    } else if waiting {
+        ActivityState::WaitingForInput
+    } else {
+        ActivityState::Working
+    }
+}
+
+fn has_input_request(db: &Connection, message_id: &str) -> bool {
+    let Ok(mut stmt) = db.prepare("SELECT data FROM part WHERE message_id = ?1") else {
+        return false;
+    };
+    let Ok(rows) = stmt.query_map(params![message_id], |row| row.get::<_, String>(0)) else {
+        return false;
+    };
+    rows.flatten().any(|raw| {
+        opencode_line::parse::<opencode_line::Part>(&raw).is_some_and(|part| {
+            part.kind.is("tool")
+                && part
+                    .tool
+                    .get()
+                    .is_some_and(super::state::is_input_request_tool)
+        })
+    })
+}
+
+fn is_api_failure(message: &opencode_line::Message) -> bool {
+    let Some(text) = message.error_text() else {
+        return false;
+    };
+    [
+        "timeout",
+        "timed out",
+        "rate limit",
+        "overloaded",
+        "connection",
+        "network",
+        "api error",
+        "apierror",
+        "internal server",
+        "queue is full",
+        // OpenCode 2 names failures `provider.rate-limit`, `provider.quota`,
+        // `provider.transport` and so on — every provider fault, as against the
+        // `aborted` and `unknown` it leaves out, which are not the model hitting
+        // a wall.
+        "provider.",
+    ]
+    .iter()
+    .any(|needle| text.contains(needle))
+}
+
+/// [`activity_state`] for the session `session_id` in the database at `path`,
+/// opened read-only for this one read. cctop-core asks through its own
+/// connection pool instead.
+pub fn activity_state_at(path: &Path, session_id: &str) -> ActivityState {
+    readonly(path)
+        .map(|db| activity_state(&db, session_id))
+        .unwrap_or(ActivityState::Working)
 }

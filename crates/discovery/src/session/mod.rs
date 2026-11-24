@@ -44,6 +44,8 @@ pub mod pi;
 #[doc(hidden)]
 pub mod pi_line;
 #[doc(hidden)]
+pub mod state;
+#[doc(hidden)]
 pub mod vibe;
 #[doc(hidden)]
 pub mod windsurf;
@@ -503,4 +505,16 @@ pub fn workflow_run_dirs(subagents_dir: &Path) -> Vec<PathBuf> {
         .map(|run| workflows.join(run))
         .filter(|run| run.is_dir())
         .collect()
+}
+
+/// Read the last `max_bytes` of a file as lossy UTF-8.
+pub fn read_tail(path: &Path, max_bytes: u64) -> Option<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = std::fs::File::open(path).ok()?;
+    let size = f.metadata().ok()?.len();
+    let want = max_bytes.min(size);
+    f.seek(SeekFrom::Start(size - want)).ok()?;
+    let mut buf = vec![0u8; want as usize];
+    f.read_exact(&mut buf).ok()?;
+    Some(String::from_utf8_lossy(&buf).into_owned())
 }

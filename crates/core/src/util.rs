@@ -11,6 +11,8 @@ pub fn now_ms() -> i64 {
 
 // Moved to `cctop-discovery`, whose listers stamp times with it.
 pub use cctop_discovery::time::{ms_to_rfc3339, parse_ts};
+// Moved to `cctop-discovery`, whose state walk reads a transcript's tail.
+pub use cctop_discovery::session::read_tail;
 
 /// Why "today" and "this hour" may not be the viewer's, when that is likely.
 ///
@@ -1031,18 +1033,6 @@ pub fn read_head(path: &Path, max_bytes: usize) -> Option<String> {
     let mut buf = vec![0u8; max_bytes];
     let n = f.read(&mut buf).ok()?;
     buf.truncate(n);
-    Some(String::from_utf8_lossy(&buf).into_owned())
-}
-
-/// Read the last `max_bytes` of a file as lossy UTF-8.
-pub fn read_tail(path: &Path, max_bytes: u64) -> Option<String> {
-    use std::io::{Read, Seek, SeekFrom};
-    let mut f = std::fs::File::open(path).ok()?;
-    let size = f.metadata().ok()?.len();
-    let want = max_bytes.min(size);
-    f.seek(SeekFrom::Start(size - want)).ok()?;
-    let mut buf = vec![0u8; want as usize];
-    f.read_exact(&mut buf).ok()?;
     Some(String::from_utf8_lossy(&buf).into_owned())
 }
 
