@@ -1108,7 +1108,7 @@ mod tests {
             reach_of(&argv("/home/x/.opencode/bin/opencode")),
             Reach::Sandbox("opencode".into())
         );
-        for agent in ["codex", "devin", "pi"] {
+        for agent in ["codex", "devin", "pi", "agy"] {
             assert_eq!(
                 reach_of(&argv(agent)),
                 Reach::No(format!("{agent} can't run commands on a remote host yet"))
