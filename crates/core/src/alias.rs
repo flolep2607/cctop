@@ -16,7 +16,11 @@ const END: &str = "# <<< cctop <<<";
 
 /// Agent commands worth routing through the shim. Absent ones are skipped by the
 /// block's own guard, so listing an agent the user doesn't have costs nothing.
-pub const AGENTS: &str = "claude codex devin opencode pi";
+///
+/// Also the list the new-tab launcher and the handoff picker offer, filtered to
+/// what is on `PATH`. `agy` is the Antigravity CLI's command; an agent cctop
+/// knows no flags for is started bare, local only, which is all it needs.
+pub const AGENTS: &str = "claude codex devin opencode pi agy";
 
 /// The managed block, in the bash/zsh syntax both shells share.
 fn block() -> String {
