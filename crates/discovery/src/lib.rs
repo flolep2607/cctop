@@ -22,8 +22,8 @@
 //! }
 //! ```
 //!
-//! `examples/agents.rs` is the same, runnable: `cargo run -p cctop-discovery
-//! --example agents`.
+//! `examples/agents.rs` is the same, runnable, with a line per process and the
+//! errors: `cargo run -p cctop-discovery --example agents`.
 //!
 //! # What it can and cannot say
 //!
@@ -41,14 +41,36 @@
 //!   record, so it reads as work in progress. cctop learns it from the agents'
 //!   hooks, live, which this crate does not listen to.
 //!
+//! # Using it from a long-running program
+//!
+//! - **No runtime, no daemon.** [`agents`] is a plain blocking call: it reads
+//!   files and `/proc` and returns. Run it on a worker thread. Nothing has to be
+//!   installed or running — not cctop, not a hook.
+//! - **When to call it.** [`watch_paths`] lists the directories the agents
+//!   write to, and how deep under each the sessions are, for inotify. A write
+//!   there is a reason to list again. A process starting or exiting writes
+//!   nothing, so keep a slow timer as well, or a pidfd per process.
+//! - **One session, several processes.** The same session can be open in two
+//!   terminals — `claude --resume <id>` twice. It is still one [`Agent`], so
+//!   `session_id` is a key that is unique in a listing; its
+//!   [`processes`](Agent::processes) has one entry per terminal, and
+//!   [`pid`](Agent::pid) is the first of them.
+//! - **Finding the window.** Each [`AgentProcess`] carries its terminal
+//!   (`/dev/pts/N`) and, when it was started in tmux, the pane id and the
+//!   server's socket.
+//! - **One broken agent.** [`scan`] is [`agents`] with the errors kept: an agent
+//!   whose directory cannot be read, or whose files made the reader panic, is
+//!   one [`ScanError`], and every other agent is listed as usual.
+//!
 //! # What may change
 //!
-//! This is 0.x. [`agents`], [`Agent`] and the enums are the interface, and are
-//! meant to stay. [`Agent`] is `#[non_exhaustive]`, so a new field is not a
-//! breaking change. The enums are exhaustive, so cctop's own matches stay
-//! checked, which makes a new variant — a new agent, a new state — a breaking
-//! change: it takes the next 0.x minor, as does any other break
-//! `cargo-semver-checks` finds on release. Pin the minor you built against.
+//! This is 0.x. [`agents`], [`scan`], [`watch_paths`], the structs they return
+//! and the enums are the interface, and are meant to stay. The structs are
+//! `#[non_exhaustive]`, so a new field is not a breaking change. The enums are
+//! exhaustive, so cctop's own matches stay checked, which makes a new variant
+//! — a new agent, a new state — a breaking change: it takes the next 0.x
+//! minor, as does any other break `cargo-semver-checks` finds on release. Pin
+//! the minor you built against.
 //!
 //! The modules hidden from these docs are cctop-core's, public only because
 //! core is another crate. Their shape follows cctop's needs and changes without
@@ -69,7 +91,11 @@ pub mod session;
 mod state;
 #[doc(hidden)]
 pub mod time;
+mod watch;
+mod window;
 
-pub use agents::{Agent, agents};
+pub use agents::{Agent, Scan, ScanError, agents, scan};
 pub use provider::Provider;
 pub use state::{ActivityState, Permission, Surface};
+pub use watch::{WatchPath, watch_paths};
+pub use window::{AgentProcess, TmuxPane};
