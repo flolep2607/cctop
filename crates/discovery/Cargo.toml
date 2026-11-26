@@ -2,7 +2,7 @@
 name = "cctop-discovery"
 # Its own version, not the release's: bumped only in a release that changes
 # this crate. release-plz bumps it; the rules are in release-plz.toml.
-version = "0.2.0"
+version = "0.2.1"
 edition.workspace = true
 rust-version.workspace = true
 description = "The coding agents running on this machine — Claude Code, Codex, OpenCode, Gemini and others — as cctop finds them: provider, session, process and state. 0.x: the API may still change."
